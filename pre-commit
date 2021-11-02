@@ -1,0 +1,10 @@
+# Test clang-format  
+clangformatout=$(git clang-format --diff -q)  
+  
+if [ "$clangformatout" != "" ]  
+then
+    echo "The new code that is added contains differences against clang-format rules."
+    echo "Use git clang-format (-f) to format your code."
+    echo "Use git clang-format --diff -q to check the diff."
+    exit 1
+fi

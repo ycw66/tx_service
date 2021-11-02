@@ -1,0 +1,319 @@
+syntax="proto3";
+package txservice.remote;
+
+option cc_generic_services = true;
+
+message ConnectRequest {
+  string message = 1;
+};
+
+message ConnectResponse {
+  string message = 1;
+};
+
+message TransferRequest {
+  uint32 ng_id = 1;
+}
+
+message TransferResponse {
+  bool error = 1;
+}
+
+service CcService {
+  rpc Connect(ConnectRequest) returns (ConnectResponse);
+  rpc Transfer(TransferRequest) returns (TransferResponse);
+};
+
+message TxId_msg {
+	uint32 core_id = 1;
+	uint32 ident = 2;
+	uint64 vec_idx = 3;
+}
+
+message CceAddr_msg {
+	oneof entry_ptr {
+		uint64 cce_ptr = 1;
+		uint64 insert_ptr = 2;
+	}
+	int64 term = 3;
+}
+
+message AcquireRequest {
+	uint32 src_node_id = 1;
+	string tablename = 2;
+	bytes key = 3;
+	uint32 key_shard_code = 4;
+	uint32 vec_idx = 5;
+	uint64 ts = 6;
+	bool insert = 7;
+}
+
+message AcquireResponse {
+	int32 error_code = 1;
+	uint64 vali_ts = 2;
+	CceAddr_msg cce_addr = 3;
+}
+
+message AcquireTableWriteLockRequest {
+    uint32 src_node_id = 1;
+    string tablename = 2;
+    uint32 vec_idx = 3;
+    uint64 tx_number = 4;
+    uint32 node_group_id = 5;
+}
+
+message AcquireTableWriteLockResponse {
+    int32 error_code = 1;
+    uint32 node_id = 2;
+    int64 term = 3;
+}
+
+message ReleaseTableWriteLockRequest {
+    uint32 src_node_id = 1;
+    string tablename = 2;
+    uint32 vec_idx = 3;
+    uint64 tx_number = 4;
+    uint32 node_group_id = 5;
+}
+
+message ReleaseTableWriteLockResponse {
+    int32 error_code = 1;
+}
+
+message CommitCreateTableRequest {
+    uint32 src_node_id = 1;
+    string tablename = 2;
+    bytes catalog_str = 3;
+    uint64 ts = 4;
+    uint32 node_group_id = 5;
+}
+
+message CommitCreateTableResponse {
+    int32 error_code = 1;
+}
+
+message CommitDropTableRequest {
+    uint32 src_node_id = 1;
+    string tablename = 2;
+    uint64 ts = 3;
+    uint32 node_group_id = 4;
+}
+
+message CommitDropTableResponse {
+    int32 error_code = 1;
+}
+
+message ValidateRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	CceAddr_msg cce_addr = 3;
+	uint64 commit_ts = 4;
+	uint64 key_ts = 5;
+	uint64 gap_ts = 6;
+}
+
+message ValidateResponse {
+	int32 error_code = 1;
+	repeated TxId_msg txs = 2;
+}
+
+message PostprocessResponse {
+	int32 error_code = 1;
+}
+
+message PostReadRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	CceAddr_msg cce_addr = 3;
+}
+
+message ReadRequest {
+	uint32 src_node_id = 1;
+	string tablename = 2;
+	bytes key = 3;
+	uint32 key_shard_code = 4;
+	bytes record = 5;
+	enum ReadType {
+		INSIDE = 0;
+		OUTSIDE_NORMAL = 1;
+		OUTSIDE_DELETED = 2;
+	}
+	ReadType read_type = 6;
+	uint64 ts = 7;
+}
+
+message ReadResponse {
+	int32 error_code = 1;
+	bytes record = 2;
+	enum RecordStatus {
+		NORMAL = 0;
+		UNKNOWN = 1;
+		DELETED = 2;
+	}
+	RecordStatus rec_status = 3;
+	uint64 ts = 4;
+	CceAddr_msg cce_addr = 5;
+}
+
+message ReadOutsideRequest {
+    uint32 node_group_id = 1;
+	bytes record = 2;
+	bool is_deleted = 3;
+	CceAddr_msg cce_addr = 4;
+}
+
+message PostCommitRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	CceAddr_msg cce_addr = 3;
+	uint64 commit_ts = 4;
+	bytes record = 5;
+	bool is_deleted = 6;
+}
+
+message PostDeleteRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	CceAddr_msg cce_addr = 3;
+}
+
+message ScanTuple_msg {
+	bytes key = 1;
+	bytes record = 2;
+	enum RecordStatus {
+		NORMAL = 0;
+		UNKNOWN = 1;
+		DELETED = 2;
+	}
+	RecordStatus rec_status = 3;
+	uint64 key_ts = 4;
+	uint64 gap_ts = 5;
+	CceAddr_msg cce_addr = 6;
+}
+
+message ScanOpenRequest {
+	uint32 src_node_id = 1;
+	uint32 shard_id = 2;
+	string tablename = 3;
+	oneof start_key {
+		bytes key = 4;
+		bool neg_inf = 5;
+		bool pos_inf = 6;
+	}
+	bool inclusive = 7;
+	bool direction = 8;
+	uint64 ts = 9;
+	bool ckpt = 10;
+}
+
+message ScanCache_msg {
+	repeated ScanTuple_msg scan_tuple = 1;
+}
+
+message ScanOpenResponse {
+	int32 error_code = 1;
+	uint32 node_group_id = 2;
+	repeated ScanCache_msg scan_cache = 3;
+}
+
+message ScanNextRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	uint64 prior_cce_ptr = 3;
+	bool direction = 4;
+	uint64 ts = 5;
+	uint64 scan_cache_ptr = 6;
+	bool ckpt = 7;
+}
+
+message ScanNextResponse {
+	int32 error_code = 1;
+	repeated ScanTuple_msg scan_tuple = 2;
+	uint64 scan_cache_ptr = 3;
+}
+
+message CommitSkRequest {
+	uint32 src_node_id = 1;
+	string tablename = 2;
+	bytes sk = 3;
+	bytes pk = 4;
+	uint32 key_shard_code = 5;
+	uint64 ts = 6;
+	bool is_deleted = 7;
+}
+
+message FaultInjectRequest {
+  uint32 src_node_id = 1;
+  string fault_name = 2;
+  string fault_type = 3;
+}
+
+message FaultInjectResponse {
+  int32 error_code = 1;
+}
+
+message CcMessage {
+	enum MessageType {
+		Shutdown = 0;
+		AcquireRequest = 2;
+		AcquireResponse = 3;
+		ReadRequest = 4;
+		ReadResponse = 5;
+		ValidateRequest = 6;
+		ValidateResponse = 7;
+		PostprocessResponse = 8;
+		PostReadRequest = 9;
+		PostCommitRequest = 10;
+		PostDeleteRequest = 11;
+		ScanOpenRequest = 12;
+		ScanOpenResponse = 13;
+		ScanNextRequest = 14;
+		ScanNextResponse = 15;
+		CommitSkRequest = 16;
+		ReadOutsideRequest = 17;
+    AcquireTableWriteLockRequest = 18;
+    AcquireTableWriteLockResponse = 19;
+    CommitCreateTableRequest = 20;
+    CommitCreateTableResponse = 21;
+    ReleaseTableWriteLockRequest = 22;
+    ReleaseTableWriteLockResponse = 23;
+    CommitDropTableRequest = 24;
+    CommitDropTableResponse = 25;
+    FaultInjectRequest = 26;
+    FaultInjectResponse = 27;
+	}
+
+	MessageType type = 1;
+	uint64 tx_number = 2;
+	uint64 handler_addr = 3;
+	int64 tx_term = 4;
+
+	oneof content {
+		AcquireRequest acquire_req = 10;
+		AcquireResponse acquire_resp = 11;
+		ReadRequest read_req = 12;
+		ReadResponse read_resp = 13;
+		ValidateRequest validate_req = 14;
+		ValidateResponse validate_resp = 15;
+		PostprocessResponse post_resp = 16;
+		PostReadRequest postread_req = 17;
+		PostCommitRequest postcommit_req = 18;
+		PostDeleteRequest postdelete_req = 19;
+		ScanOpenRequest scan_open_req = 20;
+		ScanOpenResponse scan_open_resp = 21;
+		ScanNextRequest scan_next_req = 22;
+		ScanNextResponse scan_next_resp = 23;
+		CommitSkRequest commit_sk_req = 24;
+		ReadOutsideRequest read_outside_req = 25;
+    AcquireTableWriteLockRequest acquire_table_req = 26;
+    AcquireTableWriteLockResponse acquire_table_resp = 27;
+    CommitCreateTableRequest commit_create_table_req = 28;
+    CommitCreateTableResponse commit_create_table_resp = 29;
+    ReleaseTableWriteLockRequest release_table_req = 30;
+    ReleaseTableWriteLockResponse release_table_resp = 31;
+    CommitDropTableRequest commit_drop_table_req = 32;
+    CommitDropTableResponse commit_drop_table_resp = 33;
+    FaultInjectRequest fault_inject_req = 34;
+    FaultInjectResponse fault_inject_resp= 35;
+	}
+}
