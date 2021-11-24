@@ -967,7 +967,8 @@ public:
         finish_ = true;
         cv_.notify_one();
 
-        return true;
+        // return false since CkptTsCc is not reused and does not need to call CcRequestBase::Free
+        return false;
     }
 
     void Wait()
@@ -1043,7 +1044,8 @@ public:
         else
         {
             Notify();
-            return true;
+            // return false since CkptScanCc is not reused and does not need to call CcRequestBase::Free
+            return false;
         }
     }
 
@@ -1372,7 +1374,8 @@ public:
         ++finish_cnt_;
         wait_cv_.notify_one();
 
-        return true;
+        // return false since ClearTxCc is not reused and does not need to call CcRequestBase::Free
+        return false;
     }
 
     void Wait()
