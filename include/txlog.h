@@ -41,13 +41,13 @@ public:
                              ::txlog::LogResponse *response,
                              ::google::protobuf::Closure *done) = 0;
 
-    // Invoked by a failing over cc node group to notify all log groups the raft
-    // term of the group's new leader.
-    virtual void UpdateTermInLogGroups(uint32_t cc_node_group_id,
-                                       int64_t term,
-                                       const std::string &source_ip,
-                                       uint16_t source_port,
-                                       std::atomic<bool> &interrupt) = 0;
+    // Invoked by a failing over cc node group to replay log and notify all log
+    // groups the raft term of the group's new leader.
+    virtual void ReplayLog(uint32_t cc_node_group_id,
+                           int64_t term,
+                           const std::string &source_ip,
+                           uint16_t source_port,
+                           std::atomic<bool> &interrupt) = 0;
 
     virtual RecoverTxStatus RecoverTx(uint64_t tx_number,
                                       int64_t tx_term,

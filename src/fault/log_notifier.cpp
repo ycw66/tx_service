@@ -26,8 +26,9 @@ LogNotifier::LogNotifier(NodeGroupId ng_id,
             std::unique_ptr<TxLog> log_agent =
                 Sharder::Instance().GetLogAgent();
 
-            log_agent->UpdateTermInLogGroups(
-                ng_id_, term_, ip_, port_, finish_);
+            // Notify the Log Sevice to send uncheckpointed redo log to the new
+            // CC Node leader to replay redo log.
+            log_agent->ReplayLog(ng_id_, term_, ip_, port_, finish_);
 
             while (!finish_.load(std::memory_order_acquire))
             {
