@@ -967,7 +967,8 @@ public:
         finish_ = true;
         cv_.notify_one();
 
-        // return false since CkptTsCc is not reused and does not need to call CcRequestBase::Free
+        // return false since CkptTsCc is not reused and does not need to call
+        // CcRequestBase::Free
         return false;
     }
 
@@ -1039,14 +1040,15 @@ public:
 
         if (ccm_ != nullptr)
         {
-            return ccm_->Execute(*this);
+            ccm_->Execute(*this);
         }
         else
         {
             Notify();
-            // return false since CkptScanCc is not reused and does not need to call CcRequestBase::Free
-            return false;
         }
+        // return false since CkptScanCc is not re-used and does not need to
+        // call CcRequestBase::Free
+        return false;
     }
 
     void Wait()
@@ -1374,7 +1376,8 @@ public:
         ++finish_cnt_;
         wait_cv_.notify_one();
 
-        // return false since ClearTxCc is not reused and does not need to call CcRequestBase::Free
+        // return false since ClearTxCc is not reused and does not need to call
+        // CcRequestBase::Free
         return false;
     }
 
@@ -1441,11 +1444,11 @@ public:
                 // transfers to another node, and this node has not finished
                 // replaying the log.
                 result_.SetError(-1);
-                return true;
+                return false;
             }
 
             assert(ccm != nullptr);
-            return ccm->Execute(*this);
+            ccm->Execute(*this);
         }
         else if (log_type_ == LogType::CREATE_TABLE ||
                  log_type_ == LogType::DROP_TABLE)
@@ -1482,7 +1485,6 @@ public:
             }
 
             SetFinish();
-            return true;
         }
         return false;
     }
