@@ -13,7 +13,6 @@
 #include "cc_req_base.h"
 #include "moodycamelqueue.h"
 #include "secondary_key.h"
-#include "sharder.h"
 #include "table_lock.h"
 #include "tentry.h"
 
@@ -22,6 +21,7 @@ namespace txservice
 class SingleShardScanner;
 class CcMapScanner;
 class Checkpointer;
+class LocalCcShards;
 
 // store table catalog information in ccshard
 class TableCatalog
@@ -86,6 +86,7 @@ public:
           head_cce_(nullptr),
           tail_cce_(nullptr),
           ckpter_(nullptr),
+          processor_sleep_(false),
           catalog_(catalog)
     {
         tx_vec_.reserve(128);
@@ -106,50 +107,18 @@ public:
         }
     }
 
+    /**
+     * @brief Returns the cc map in this node given the table name and the cc
+     * node group.
+     *
+     * @param table_name The table name.
+     * @param node_group The ID of the cc node group.
+     * @param error_code
+     * @return CcMap* The pointer to the cc map.
+     */
     CcMap *GetCcm(const TableName &table_name,
                   uint32_t node_group,
-                  int8_t &error_code)
-    {
-        if (node_group == node_id_)
-        {
-            auto table_it = native_ccms_.find(table_name);
-            if (table_it == native_ccms_.end())
-            {
-                error_code = 1;
-                return nullptr;
-            }
-            else
-            {
-                error_code = 0;
-                return table_it->second.get();
-            }
-        }
-        else
-        {
-            auto native_table_it = native_ccms_.find(table_name);
-            if (native_table_it == native_ccms_.end())
-            {
-                error_code = 1;
-                return nullptr;
-            }
-
-            auto table_it = failover_ccms_.try_emplace(table_name);
-            std::unordered_map<uint32_t, CcMap::uptr> &ng_ccm =
-                table_it.first->second;
-
-            auto ccm_it = ng_ccm.find(node_group);
-            if (ccm_it != ng_ccm.end())
-            {
-                return ccm_it->second.get();
-            }
-            else
-            {
-                auto new_ccm_it = ng_ccm.try_emplace(
-                    node_group, native_table_it->second->Clone());
-                return new_ccm_it.first->second.get();
-            }
-        }
-    }
+                  int8_t &error_code);
 
     void RemoveCcm(const TableName &table_name)
     {
@@ -162,32 +131,25 @@ public:
         return size_ >= CcShard::capSize;
     }
 
-    void Enqueue(uint32_t thd_id, CcRequestBase *req)
-    {
-        bool is_empty = cc_queue_.is_empty();
+    /**
+     * @brief Puts a cc request into the shard's request queue to be processed.
+     *
+     * @param thd_id The thread ID of the producer sending the cc request.
+     * Providing the thread ID helps reduce contention, as internally the
+     * concurrent queue uses it to dispatch the request to an internal storage
+     * allocated for the thread.
+     * @param req The pointer to the cc request. The request is either owned by
+     * a resource pool or a stack object whose owner thread is blocking on the
+     * request.
+     */
+    void Enqueue(uint32_t thd_id, CcRequestBase *req);
 
-        assert(thd_id < thd_token_.size());
-        bool ret = cc_queue_.enqueue(thd_token_.at(thd_id), req);
-        assert(ret == true);
-
-        if (is_empty)
-        {
-            shard_cv_.notify_one();
-        }
-    }
-
-    void Enqueue(CcRequestBase *req)
-    {
-        bool is_empty = cc_queue_.is_empty();
-
-        bool ret = cc_queue_.enqueue(req);
-        assert(ret == true);
-
-        if (is_empty)
-        {
-            shard_cv_.notify_one();
-        }
-    }
+    /**
+     * @brief Puts a cc request into the shard's request queue to be processed.
+     *
+     * @param req The pointer to the cc request.
+     */
+    void Enqueue(CcRequestBase *req);
 
     bool IsIdle() const
     {
@@ -212,6 +174,15 @@ public:
     TEntry &NewTx(uint64_t start_ts = 0);
 
     TEntry *LocateTx(const TxId &tx_id);
+
+    /**
+     * @brief Given the tx number, returns the tx entry that describes the tx
+     * status.
+     *
+     * @param tx_number
+     * @return TEntry* The pointer to the tx entry.
+     */
+    TEntry *LocateTx(TxNumber tx_number);
 
     size_t Clean();
 
@@ -458,11 +429,34 @@ public:
     const uint16_t core_cnt_;
 
 private:
-    /// <summary>
-    /// Detaches the input cc entry from the double linked list.
-    /// </summary>
-    /// <param name="entry"></param>
+    /**
+     * @brief Detaches the input cc entry from the double linked list. The
+     * operation is invoked when the cc entry is to be kicked out or is newly
+     * accessed and needs to be re-positioned according to the LRU algorithm.
+     *
+     * @param entry The pointer to the cc entry to be detached.
+     */
     static void DetachLru(LruEntry *entry);
+
+    /**
+     * @brief The method invoked by the processing thread to notify the cc shard
+     * that it enters into the sleep mode.
+     *
+     */
+    void SleepNotify()
+    {
+        processor_sleep_.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief The method invoked by the processing thread to notify the cc shard
+     * that it wakes up from the sleep mode and is working.
+     *
+     */
+    void WorkNotify()
+    {
+        processor_sleep_.store(false, std::memory_order_release);
+    }
 
     std::unordered_map<TableName, CcMap::uptr> native_ccms_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
@@ -493,25 +487,39 @@ private:
     uint32_t tx_cnt_;
     std::atomic<uint64_t> ts_base_;
 
-    /// <summary>
-    /// Reserved head and tail for the double-linked list simplify handling
-    /// of empty and one-element lists.
-    /// </summary>
+    /**
+     * @brief Reserved head and tail for the double-linked list of cc entries.
+     * Reservation simplifies handling of empty and one-element lists.
+     *
+     */
     LruEntry head_cce_, tail_cce_;
 
-    /// <summary>
-    /// A collection of active tx's that have acquired write intentions in this
-    /// cc shard and lock/intention information associated with the tx,
-    /// including when the tx acquires the first intention, the term of the tx
-    /// node and a list of pointers to the cc entries containing the tx's
-    /// intentions.
-    /// </summary>
+    /**
+     * @brief A collection of active tx's that have acquired write intentions in
+     * this shard and lock/intention information associated with the tx,
+     * including when the tx acquires the first intention, the term of the tx
+     * node and a list of pointers to the cc entries containing the tx's
+     * intentions.
+     *
+     */
     std::unordered_map<TxNumber, TxLockInfo> lock_holding_txs_;
 
     Checkpointer *ckpter_;
 
+    /**
+     * @brief The condition variable via which the cc shard wakes up the
+     * processing thread dedicated to it from the sleep mode.
+     *
+     */
     std::condition_variable shard_cv_;
     std::mutex shard_mux_;
+
+    /**
+     * @brief The variable via which the dedicated processing thread notifies
+     * the shard that it enters into the sleep mode.
+     *
+     */
+    std::atomic<bool> processor_sleep_;
 
     // Catalog handlers
     Catalog *catalog_;

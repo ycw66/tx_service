@@ -11,6 +11,7 @@
 #include "scan.h"
 #include "tx_container.h"
 #include "tx_key.h"
+#include "tx_operation_result.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -23,15 +24,14 @@ public:
 
     virtual ~CcHandler() = default;
 
-    virtual void AcquireWrite(
-        const TableName &table_name,
-        const TxKey &key,
-        const TxId &txid,
-        int64_t tx_term,
-        uint64_t ts,
-        bool is_insert,
-        CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> &hres,
-        const CcProtocol proto = CcProtocol::OCC) = 0;
+    virtual void AcquireWrite(const TableName &table_name,
+                              const TxKey &key,
+                              const TxId &txid,
+                              int64_t tx_term,
+                              uint64_t ts,
+                              bool is_insert,
+                              CcHandlerResult<AcquireKeyResult> &hres,
+                              const CcProtocol proto = CcProtocol::OCC) = 0;
 
     /// <summary>
     /// Acquire table level write lock.
@@ -164,44 +164,38 @@ public:
     /// <param name="TxId"></param>
     /// <param name="time"></param>
     /// <param name=""></param>
-    virtual void Read(
-        const TableName &table_name,
-        const TxKey &key,
-        TxRecord &rec,
-        ReadType read_type,
-        uint64_t tx_number,
-        int64_t tx_term,
-        const uint64_t ts,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>> &hres,
-        CcProtocol proto = CcProtocol::OCC) = 0;
+    virtual void Read(const TableName &table_name,
+                      const TxKey &key,
+                      TxRecord &rec,
+                      ReadType read_type,
+                      uint64_t tx_number,
+                      int64_t tx_term,
+                      const uint64_t ts,
+                      CcHandlerResult<ReadKeyResult> &hres,
+                      CcProtocol proto = CcProtocol::OCC) = 0;
 
-    virtual void ReadOutside(
-        TxRecord &rec,
-        bool is_deleted,
-        const CcEntryAddr &cce_addr,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>>
-            &hres) = 0;
+    virtual void ReadOutside(TxRecord &rec,
+                             bool is_deleted,
+                             const CcEntryAddr &cce_addr,
+                             CcHandlerResult<ReadKeyResult> &hres) = 0;
 
-    virtual void ScanOpen(
-        const TableName &table_name,
-        ScanIndexType index_type,
-        const TxKey &start_key,
-        bool inclusive,
-        uint64_t tx_number,
-        int64_t tx_term,
-        uint64_t start_ts,
-        CcHandlerResult<std::pair<size_t, std::unique_ptr<CcScanner>>> &hd_res,
-        ScanDirection direction = ScanDirection::Forward,
-        CcProtocol proto = CcProtocol::OCC,
-        bool is_ckpt = false) = 0;
+    virtual void ScanOpen(const TableName &table_name,
+                          ScanIndexType index_type,
+                          const TxKey &start_key,
+                          bool inclusive,
+                          uint64_t tx_number,
+                          int64_t tx_term,
+                          uint64_t start_ts,
+                          CcHandlerResult<ScanOpenResult> &hd_res,
+                          ScanDirection direction = ScanDirection::Forward,
+                          CcProtocol proto = CcProtocol::OCC,
+                          bool is_ckpt = false) = 0;
 
     virtual void ScanNextBatch(uint64_t tx_number,
                                int64_t tx_term,
                                uint64_t start_ts,
                                CcScanner &scanner,
-                               CcHandlerResult<uint32_t> &hd_res,
+                               CcHandlerResult<ScanNextResult> &hd_res,
                                CcProtocol proto = CcProtocol::OCC) = 0;
 
     virtual void ScanClose(size_t alias,
@@ -234,8 +228,7 @@ public:
     /// <param name="local_time"></param>
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
-    virtual void NewTxn(
-        CcHandlerResult<std::tuple<TxId, uint64_t, int64_t>> &) = 0;
+    virtual void NewTxn(CcHandlerResult<InitTxResult> &) = 0;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

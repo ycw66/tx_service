@@ -3,29 +3,17 @@
 #include "cc_handler.h"
 #include "cc_req_pool.h"
 #include "cc_request.h"
+#include "remote/remote_cc_handler.h"
 
 namespace txservice
 {
-namespace remote
-{
-class RemoteCcHandler;
-};
-
-class LocalCcShards;
-
 class LocalCcHandler : public CcHandler
 {
 public:
     LocalCcHandler() = delete;
     LocalCcHandler(const LocalCcHandler &rhs) = delete;
 
-    LocalCcHandler(uint32_t thd_id, LocalCcShards &shards)
-        : thd_id_(thd_id),
-          cc_shards_(shards),
-          remote_hd_(nullptr),
-          scan_alias_cnt_(0)
-    {
-    }
+    LocalCcHandler(uint32_t thd_id, LocalCcShards &shards);
 
     void AcquireWrite(const TableName &table_name,
                       const TxKey &key,
@@ -33,7 +21,7 @@ public:
                       int64_t tx_term,
                       uint64_t ts,
                       bool is_insert,
-                      CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> &hres,
+                      CcHandlerResult<AcquireKeyResult> &hres,
                       const CcProtocol proto = CcProtocol::OCC) override;
 
     void AcquireTableWriteLock(
@@ -132,44 +120,38 @@ public:
     /// <param name="ts"></param>
     /// <param name="hres"></param>
     /// <param name="proto"></param>
-    void Read(
-        const TableName &table_name,
-        const TxKey &key,
-        TxRecord &record,
-        ReadType read_type,
-        uint64_t tx_number,
-        int64_t tx_term,
-        const uint64_t ts,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>> &hres,
-        CcProtocol proto = CcProtocol::OCC) override;
+    void Read(const TableName &table_name,
+              const TxKey &key,
+              TxRecord &record,
+              ReadType read_type,
+              uint64_t tx_number,
+              int64_t tx_term,
+              const uint64_t ts,
+              CcHandlerResult<ReadKeyResult> &hres,
+              CcProtocol proto = CcProtocol::OCC) override;
 
-    void ReadOutside(
-        TxRecord &rec,
-        bool is_deleted,
-        const CcEntryAddr &cce_addr,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>> &hres)
-        override;
+    void ReadOutside(TxRecord &rec,
+                     bool is_deleted,
+                     const CcEntryAddr &cce_addr,
+                     CcHandlerResult<ReadKeyResult> &hres) override;
 
-    void ScanOpen(
-        const TableName &table_name,
-        ScanIndexType index_type,
-        const TxKey &start_key,
-        bool inclusive,
-        uint64_t tx_number,
-        int64_t tx_term,
-        uint64_t ts,
-        CcHandlerResult<std::pair<size_t, std::unique_ptr<CcScanner>>> &hd_res,
-        ScanDirection direction = ScanDirection::Forward,
-        CcProtocol proto = CcProtocol::OCC,
-        bool is_ckpt_delta = false) override;
+    void ScanOpen(const TableName &table_name,
+                  ScanIndexType index_type,
+                  const TxKey &start_key,
+                  bool inclusive,
+                  uint64_t tx_number,
+                  int64_t tx_term,
+                  uint64_t ts,
+                  CcHandlerResult<ScanOpenResult> &hd_res,
+                  ScanDirection direction = ScanDirection::Forward,
+                  CcProtocol proto = CcProtocol::OCC,
+                  bool is_ckpt_delta = false) override;
 
     void ScanNextBatch(uint64_t tx_number,
                        int64_t tx_term,
                        uint64_t start_ts,
                        CcScanner &scanner,
-                       CcHandlerResult<uint32_t> &hd_res,
+                       CcHandlerResult<ScanNextResult> &hd_res,
                        CcProtocol proto = CcProtocol::OCC) override;
 
     void ScanClose(size_t alias,
@@ -208,8 +190,7 @@ public:
     /// <param name="local_time"></param>
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
-    void NewTxn(
-        CcHandlerResult<std::tuple<TxId, uint64_t, int64_t>> &hres) override;
+    void NewTxn(CcHandlerResult<InitTxResult> &hres) override;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.
@@ -276,7 +257,7 @@ private:
     /// </summary>
     uint32_t thd_id_;
     LocalCcShards &cc_shards_;
-    remote::RemoteCcHandler *remote_hd_;
+    remote::RemoteCcHandler remote_hd_;
 
     size_t scan_alias_cnt_;
 

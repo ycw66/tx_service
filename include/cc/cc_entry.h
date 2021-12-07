@@ -181,7 +181,13 @@ public:
     {
     }
 
-    CcEntryAddr(const CcEntryAddr &) = default;
+    CcEntryAddr(const CcEntryAddr &rhs)
+        : cce_ptr_(rhs.cce_ptr_),
+          insert_ptr_(rhs.cce_ptr_),
+          node_group_id_(rhs.node_group_id_),
+          term_(rhs.term_.load(std::memory_order_acquire))
+    {
+    }
 
     bool operator==(const CcEntryAddr &rhs) const
     {
@@ -202,7 +208,8 @@ public:
         cce_ptr_ = rhs.cce_ptr_;
         insert_ptr_ = rhs.insert_ptr_;
         node_group_id_ = rhs.node_group_id_;
-        term_ = rhs.term_;
+        term_.store(rhs.term_.load(std::memory_order_acquire),
+                    std::memory_order_release);
 
         return *this;
     }
@@ -229,37 +236,37 @@ public:
 
     int64_t Term() const
     {
-        return term_;
+        return term_.load(std::memory_order_acquire);
     }
 
     void SetCce(uint64_t addr, int64_t term)
     {
         cce_ptr_ = addr;
         insert_ptr_ = 0;
-        term_ = term;
+        term_.store(term, std::memory_order_release);
     }
 
     void SetCce(uint64_t addr, int64_t term, uint32_t ng)
     {
         cce_ptr_ = addr;
         insert_ptr_ = 0;
-        term_ = term;
         node_group_id_ = ng;
+        term_.store(term, std::memory_order_release);
     }
 
     void SetInsert(uint64_t addr, int64_t term)
     {
         insert_ptr_ = addr;
         cce_ptr_ = 0;
-        term_ = term;
+        term_.store(term, std::memory_order_release);
     }
 
     void SetInsert(uint64_t addr, int64_t term, uint32_t ng)
     {
         insert_ptr_ = addr;
         cce_ptr_ = 0;
-        term_ = term;
         node_group_id_ = ng;
+        term_.store(term, std::memory_order_release);
     }
 
     void SetNodeGroupId(uint32_t ng_id)
@@ -267,16 +274,26 @@ public:
         node_group_id_ = ng_id;
     }
 
-    /*void SetTerm(int64_t term)
+    void SetTerm(int64_t term)
     {
-        term_ = term;
-    }*/
+        term_.store(term, std::memory_order_release);
+    }
 
 private:
     uint64_t cce_ptr_;
     uint64_t insert_ptr_;
     uint32_t node_group_id_;
-    int64_t term_;
+    // The term of the cc node group to which the cc entry belongs. The variable
+    // needs to be std::atomic, because for locking-based protocols the remote
+    // node will send an acknowledge message to notify the tx when the
+    // read/write request is blocked. The acknowledgement message, when arrives,
+    // will set the term and the cc entry's address. We use std::atomic to sync
+    // between the remote cc handler thread and the tx thread, which
+    // periodically checks the term to determine if there is a timeout. Note
+    // that for non-blocking protocols, we rely on the cc handler result to sync
+    // between the remote handler thread and the tx thread, and the term does
+    // not need to be std::atomic.
+    std::atomic<int64_t> term_;
 };
 }  // namespace txservice
 

@@ -3,15 +3,13 @@
 #include <braft/raft.h>  // braft::Node braft::StateMachine
 #include <braft/util.h>  // braft::AsyncClosureGuard
 #include <brpc/channel.h>
-// #include <brpc/controller.h>      // brpc::Controller
 
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
-// #include "../raft_log/include/log_agent.h"
-#include "log_notifier.h"
-#include "log_replay_handler.h"
+#include "cc_node_recovery.h"
 #include "proto/cc_request.pb.h"
 
 namespace txservice::fault
@@ -21,13 +19,16 @@ namespace txservice
 class LocalCcShards;
 }
 
-/// <summary>
-/// A cc node in a cc node group. A cc node group is a replication/raft group in
-/// which the leader holds a partition of the distributed cc map. On failover,
-/// the leader is transferred and the cc entries in the old leader are
-/// invalidated. The new leader recovers the committed, unflushed writes from
-/// all log groups, before starting serving cc requests.
-/// </summary>
+/**
+ * @brief A cc node is a member of a Raft group in which the leader holds a part
+ * of distributed cc maps and the followers are empty. When a cc node becomes
+ * the leader, either because the Raft group starts or because of a failover,
+ * the leader recovers the committed, unflushed writes from all log groups,
+ * before starting serving cc requests. On failover, the cc entries in the old
+ * leader are invalidated. By default, given the port number of the local node,
+ * the Raft group is on port_number+1.
+ *
+ */
 class CcNode : public braft::StateMachine
 {
 public:
@@ -44,7 +45,7 @@ public:
 
     ~CcNode()
     {
-        log_notify_hd_ = nullptr;
+        recovery_hd_ = nullptr;
 
         if (node_ != nullptr)
         {
@@ -118,6 +119,7 @@ private:
     // The addresses of the nodes in the cc node group.
     const std::vector<std::string> ng_ips_;
     const std::vector<uint16_t> ng_ports_;
+    // The local path where the Raft configurations are stored.
     const std::string storage_path_;
 
     braft::Node *volatile node_;
@@ -125,10 +127,8 @@ private:
     int64_t candidate_leader_term_;
 
     LocalCcShards &local_cc_shards_;
-    std::unique_ptr<LogNotifier> log_notify_hd_;
+    std::unique_ptr<CcNodeRecoveryAgent> recovery_hd_;
     std::unordered_set<uint32_t> recovered_log_groups_;
     uint32_t log_group_cnt_;
-
-    friend class LogReplayHandler;
 };
 }  // namespace txservice::fault

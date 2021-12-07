@@ -17,96 +17,38 @@ class SkCcMap;
 
 namespace remote
 {
-class RemoteCcHandler;
+class CcStreamSender;
 
 struct RemoteAcquire : public AcquireCc
 {
 public:
     RemoteAcquire();
-
     RemoteAcquire(const RemoteAcquire &rhs) = delete;
     RemoteAcquire(RemoteAcquire &&rhs) = delete;
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_acquire_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_acquire_resp();
-
-        const AcquireRequest &req = input_msg->acquire_req();
-        txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                        (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                        req.vec_idx());
-
-        AcquireCc::Set(&req.tablename(),
-                       &req.key(),
-                       req.key_shard_code(),
-                       &txid_obj_,
-                       input_msg->tx_term(),
-                       req.ts(),
-                       req.insert(),
-                       &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     TxId txid_obj_;
-    CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> cc_res_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<AcquireKeyResult> cc_res_{nullptr};
 };
 
 struct RemoteValidate : public ValidateCc
 {
 public:
     RemoteValidate();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_validate_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_validate_resp();
-
-        const ValidateRequest &req = input_msg->validate_req();
-        const CceAddr_msg &cce_addr = req.cce_addr();
-
-        cce_addr_.SetCce(
-            cce_addr.cce_ptr(), cce_addr.term(), req.node_group_id());
-
-        ValidateCc::Set(&cce_addr_,
-                        input_msg->tx_number(),
-                        req.commit_ts(),
-                        req.key_ts(),
-                        req.gap_ts(),
-                        &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<std::vector<TxId>> cc_res_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<std::vector<TxId>> cc_res_{nullptr};
 };
 
 /*
@@ -142,47 +84,18 @@ public:
     }
 
     void Set(std::unique_ptr<CcMessage> input_msg,
-             RemoteCcHandler *hd,
              uint32_t core_cnt,
-             int64_t node_term)
-    {
-        assert(input_msg->has_acquire_table_req());
-
-        res_->Reset();
-        res_->SetRefCnt(core_cnt);
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_acquire_table_resp();
-
-        const AcquireTableWriteLockRequest &req =
-            input_msg->acquire_table_req();
-        txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                        (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                        req.vec_idx());
-
-        table_name_ = &req.tablename();
-        tx_number_ = req.tx_number();
-        node_group_id_ = req.node_group_id();
-
-        unfinish_cnt_.store(core_cnt);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-        node_term_ = node_term;
-    }
+             int64_t node_term);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     TxId txid_obj_;
-    int64_t node_term_;
-    CcHandlerResult<Void> cc_res_;
-    std::atomic<uint32_t> unfinish_cnt_;
-
-    friend class RemoteCcHandler;
+    int64_t node_term_{-1};
+    CcHandlerResult<Void> cc_res_{nullptr};
+    std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
 /*
@@ -201,48 +114,17 @@ public:
 
     void Free() override;
 
-    void Set(std::unique_ptr<CcMessage> input_msg,
-             RemoteCcHandler *hd,
-             uint32_t core_cnt)
-    {
-        assert(input_msg->has_release_table_req());
-
-        cc_res_.Reset();
-        cc_res_.SetRefCnt(core_cnt);
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_release_table_resp();
-
-        const ReleaseTableWriteLockRequest &req =
-            input_msg->release_table_req();
-        txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                        (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                        req.vec_idx());
-
-        ReleaseTableWriteLockCC::Set(&req.tablename(),
-                                     &txid_obj_,
-                                     req.tx_number(),
-                                     req.node_group_id(),
-                                     &cc_res_);
-
-        unfinish_cnt_.store(core_cnt);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     TxId txid_obj_;
-    uint32_t node_group_id_;
-    CcHandlerResult<Void> cc_res_;
-    std::atomic<uint32_t> unfinish_cnt_;
-
-    friend class RemoteCcHandler;
+    uint32_t node_group_id_{0};
+    CcHandlerResult<Void> cc_res_{nullptr};
+    std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
 /*
@@ -258,43 +140,15 @@ public:
 
     void Free() override;
 
-    void Set(std::unique_ptr<CcMessage> input_msg,
-             RemoteCcHandler *hd,
-             uint32_t core_cnt)
-    {
-        assert(input_msg->has_commit_create_table_req());
-
-        cc_res_.Reset();
-        cc_res_.SetRefCnt(core_cnt);
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-
-        const CommitCreateTableRequest &req =
-            input_msg->commit_create_table_req();
-
-        bool is_local_req = false;
-        CommitCreateTableCC::Set(&req.tablename(),
-                                 req.catalog_str(),
-                                 req.node_group_id(),
-                                 &cc_res_,
-                                 is_local_req);
-
-        unfinish_cnt_.store(core_cnt);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
-    CcHandlerResult<Void> cc_res_;
-    std::atomic<uint32_t> unfinish_cnt_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<Void> cc_res_{nullptr};
+    std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
 /*
@@ -311,180 +165,50 @@ public:
 
     void Free() override;
 
-    void Set(std::unique_ptr<CcMessage> input_msg,
-             RemoteCcHandler *hd,
-             uint32_t core_cnt)
-    {
-        assert(input_msg->has_commit_drop_table_req());
-
-        cc_res_.Reset();
-        cc_res_.SetRefCnt(core_cnt);
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-
-        const CommitDropTableRequest &req = input_msg->commit_drop_table_req();
-
-        bool is_local_req = false;
-        CommitDropTableCC::Set(
-            &req.tablename(), req.node_group_id(), &cc_res_, is_local_req);
-
-        unfinish_cnt_.store(core_cnt);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
-    CcHandlerResult<Void> cc_res_;
-    std::atomic<uint32_t> unfinish_cnt_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<Void> cc_res_{nullptr};
+    std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
 struct RemotePostRead : public PostReadCc
 {
 public:
     RemotePostRead();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_postread_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_post_resp();
-
-        const PostReadRequest &req = input_msg->postread_req();
-        const CceAddr_msg &cce_addr = req.cce_addr();
-        cce_addr_.SetCce(
-            cce_addr.cce_ptr(), cce_addr.term(), req.node_group_id());
-
-        PostReadCc::Set(&cce_addr_, input_msg->tx_number(), &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<Void> cc_res_{nullptr};
 };
 
 struct RemoteRead : public ReadCc
 {
 public:
     RemoteRead();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_read_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_read_resp();
-
-        const ReadRequest &req = input_msg->read_req();
-        ReadType read_type = ReadType::Inside;
-        switch (req.read_type())
-        {
-        case ReadRequest_ReadType::ReadRequest_ReadType_INSIDE:
-            read_type = ReadType::Inside;
-            break;
-        case ReadRequest_ReadType::ReadRequest_ReadType_OUTSIDE_NORMAL:
-            read_type = ReadType::OutsideNormal;
-            break;
-        case ReadRequest_ReadType::ReadRequest_ReadType_OUTSIDE_DELETED:
-            read_type = ReadType::OutsideDeleted;
-            break;
-        default:
-            break;
-        }
-
-        CcEntryAddr &cce_addr = std::get<2>(cc_res_.Value());
-        cce_addr.SetCce(0, 0, req.key_shard_code() >> 10);
-
-        ReadResponse *resp = output_msg_.mutable_read_resp();
-        resp->clear_record();
-        if (read_type == ReadType::Inside)
-        {
-            ReadCc::Set(&req.tablename(),
-                        &req.key(),
-                        req.key_shard_code(),
-                        resp->mutable_record(),
-                        read_type,
-                        input_msg->tx_number(),
-                        req.ts(),
-                        &cc_res_);
-        }
-        else
-        {
-            // The read brings in an external record (from the data store) for
-            // concurrency control
-
-            std::string *out_record = resp->mutable_record();
-            *out_record = req.record();
-
-            ReadCc::Set(&req.tablename(),
-                        &req.key(),
-                        req.key_shard_code(),
-                        out_record,
-                        read_type,
-                        input_msg->tx_number(),
-                        req.ts(),
-                        &cc_res_);
-        }
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
-
-    CcHandlerResult<std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>>
-        cc_res_;
-
-    friend class RemoteCcHandler;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+    CcHandlerResult<ReadKeyResult> cc_res_{nullptr};
 };
 
 struct RemoteReadOutside : public CcRequestBase
 {
 public:
-    RemoteReadOutside();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_read_outside_req());
-
-        const ReadOutsideRequest &req = input_msg->read_outside_req();
-
-        assert(req.cce_addr().cce_ptr() != 0);
-        cce_addr_.SetCce(req.cce_addr().cce_ptr(),
-                         req.cce_addr().term(),
-                         req.node_group_id());
-        is_deleted_ = req.is_deleted();
-        rec_str_ = &req.record();
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    RemoteReadOutside() = default;
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
     CcMap *Ccm()
     {
@@ -499,15 +223,18 @@ public:
 
     void Finish();
 
+    const CcEntryAddr &CceAddr() const
+    {
+        return cce_addr_;
+    }
+
 private:
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
-    const std::string *rec_str_;
-    bool is_deleted_;
+    const std::string *rec_str_{nullptr};
+    bool is_deleted_{false};
     CcEntryAddr cce_addr_;
-
-    friend class RemoteCcHandler;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -520,54 +247,15 @@ struct RemotePostCommit : public PostCommitCc
 {
 public:
     RemotePostCommit();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_postcommit_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_post_resp();
-
-        const PostCommitRequest &post_commit = input_msg->postcommit_req();
-        const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
-
-        if (cce_addr_msg.entry_ptr_case() ==
-            CceAddr_msg::EntryPtrCase::kInsertPtr)
-        {
-            cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
-                                cce_addr_msg.term(),
-                                post_commit.node_group_id());
-        }
-        else
-        {
-            cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                             cce_addr_msg.term(),
-                             post_commit.node_group_id());
-        }
-
-        PostCommitCc::Set(&cce_addr_,
-                          input_msg->tx_number(),
-                          post_commit.commit_ts(),
-                          &post_commit.record(),
-                          post_commit.is_deleted(),
-                          &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<Void> cc_res_{nullptr};
 };
 
 struct RemotePostDelete : public PostDeleteCc
@@ -577,48 +265,15 @@ public:
 
     RemotePostDelete(const RemotePostDelete &rhs) = delete;
     RemotePostDelete(RemotePostDelete &&rhs) = delete;
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_postdelete_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_post_resp();
-
-        const PostDeleteRequest &post_delete = input_msg->postdelete_req();
-        const CceAddr_msg &cce_addr_msg = post_delete.cce_addr();
-
-        if (cce_addr_msg.entry_ptr_case() ==
-            CceAddr_msg::EntryPtrCase::kInsertPtr)
-        {
-            cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
-                                cce_addr_msg.term(),
-                                post_delete.node_group_id());
-        }
-        else
-        {
-            cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                             cce_addr_msg.term(),
-                             post_delete.node_group_id());
-        }
-        PostDeleteCc::Set(&cce_addr_, input_msg->tx_number(), &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_;
-
-    friend class RemoteCcHandler;
+    CcHandlerResult<Void> cc_res_{nullptr};
 };
 
 struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
@@ -626,9 +281,7 @@ struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
 public:
     RemoteScanOpen();
 
-    void Set(std::unique_ptr<CcMessage> input_msg,
-             RemoteCcHandler *hd,
-             uint32_t core_cnt);
+    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
 
     void Free() override;
 
@@ -650,18 +303,18 @@ public:
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
-    uint32_t node_group_id_;
-    KeyType key_type_;
-    const std::string *start_key_str_;
-    bool inclusive_;
-    ScanDirection direct_;
+    uint32_t node_group_id_{0};
+    KeyType key_type_{KeyType::Normal};
+    const std::string *start_key_str_{nullptr};
+    bool inclusive_{true};
+    ScanDirection direct_{ScanDirection::Forward};
     std::vector<std::vector<ScanTuple_msg *>> scan_caches_;
-    bool is_ckpt_delta_;
-    CcHandlerResult<Void> cc_res_;
-    std::atomic<uint32_t> unfinish_cnt_;
+    bool is_ckpt_delta_{false};
+    CcHandlerResult<Void> cc_res_{nullptr};
+    std::atomic<uint32_t> unfinish_cnt_{0};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -675,71 +328,42 @@ struct RemoteScanNextBatch
 {
 public:
     RemoteScanNextBatch();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd);
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
 
-    uint32_t node_group_id_;
-    uint64_t prior_cce_addr_;
-    ScanDirection direct_;
+    uint32_t node_group_id_{0};
+    uint64_t prior_cce_addr_{0};
+    ScanDirection direct_{ScanDirection::Forward};
     std::vector<ScanTuple_msg *> scan_cache_;
-    bool is_ckpt_delta_;
+    bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
-    CcHandlerResult<Void> cc_res_;
+    CcHandlerResult<Void> cc_res_{nullptr};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
 
     template <typename SkT, typename PkT>
     friend class ::txservice::SkCcMap;
-
-    friend class RemoteCcHandler;
 };
 
 struct RemoteCommitSk : public CommitSkCc
 {
 public:
     RemoteCommitSk();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_commit_sk_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_read_resp();
-
-        const CommitSkRequest &req = input_msg->commit_sk_req();
-
-        CommitSkCc::Set(&req.tablename(),
-                        &req.sk(),
-                        req.key_shard_code(),
-                        &req.pk(),
-                        req.ts(),
-                        req.is_deleted(),
-                        &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
-
-    CcHandlerResult<Void> cc_res_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+    CcHandlerResult<Void> cc_res_{nullptr};
 
     template <typename SkT, typename PkT>
     friend class ::txservice::SkCcMap;
-
-    friend class RemoteCcHandler;
 };
 
 struct RemoteFaultInjectCC : public FaultInjectCC
@@ -750,30 +374,14 @@ public:
     RemoteFaultInjectCC(const RemoteFaultInjectCC &rhs) = delete;
     RemoteFaultInjectCC(RemoteFaultInjectCC &&rhs) = delete;
 
-    void Set(std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
-    {
-        assert(input_msg->has_fault_inject_req());
-
-        cc_res_.Reset();
-
-        output_msg_.clear_tx_number();
-        output_msg_.clear_handler_addr();
-        output_msg_.clear_acquire_resp();
-
-        const FaultInjectRequest &req = input_msg->fault_inject_req();
-
-        FaultInjectCC::Set(&req.fault_name(), &req.fault_type(), &cc_res_);
-
-        input_msg_ = std::move(input_msg);
-        hd_ = hd;
-    }
-
+    void Set(std::unique_ptr<CcMessage> input_msg);
+    
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
-    RemoteCcHandler *hd_;
+    CcStreamSender *hd_{nullptr};
 
-    CcHandlerResult<bool> cc_res_;
+    CcHandlerResult<bool> cc_res_{nullptr};
 
     friend class RemoteCcHandler;
 };

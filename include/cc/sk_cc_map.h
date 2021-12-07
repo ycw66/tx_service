@@ -92,7 +92,7 @@ public:
         // into the cc map for concurrency control, i.e., read outside.
         assert(req.type_ == ReadType::OutsideNormal);
 
-        CcEntryAddr &cce_addr = std::get<2>(hd_res->Value());
+        CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyPair, KeyPtrPair> *cce_ptr = nullptr;
 
         if (req.key_ != nullptr)
@@ -130,8 +130,8 @@ public:
         cce_ptr->payload_status_ = RecordStatus::Normal;
         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr), term);
 
-        std::get<1>(hd_res->Value()) = cce_ptr->commit_ts_;
-        std::get<3>(hd_res->Value()) = cce_ptr->payload_status_;
+        hd_res->Value().ts_ = cce_ptr->commit_ts_;
+        hd_res->Value().rec_status_ = cce_ptr->payload_status_;
 
         hd_res->SetFinished();
         return true;

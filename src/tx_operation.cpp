@@ -25,8 +25,7 @@ public:
     };
 };
 
-ReadOperation::ReadOperation(TransactionExecution *txm)
-    : read_type_(ReadType::Inside), cc_result_(txm)
+ReadOperation::ReadOperation(TransactionExecution *txm) : cc_result_(txm)
 {
 }
 
@@ -37,22 +36,38 @@ void ReadOperation::Reset()
 
 void ReadOperation::Forward(TransactionExecution *txm)
 {
-    if (cc_result_.IsFinished())
+    const CcEntryAddr &cce_addr = cc_result_.Value().cce_addr_;
+
+    if (cce_addr.Term() < 0 && txm->IsTimeOut())
+    {
+        // For non-blocking concurrency control protocols, the read request
+        // is expected to return instantly. For lock-based protocols, if the
+        // read request is blocked, the cc node will send an acknowledgement to
+        // update the key's term. In either case, if the read key's term is not
+        // set, the tx has not received any response or acknowledgement from the
+        // key's cc node group. The read request is forced to be errored upon
+        // timeout.
+        cc_result_.ForceError();
+        txm->PostRead();
+    }
+    else if (cc_result_.IsFinished())
     {
         if (cc_result_.ErrorCode() == -1)
         {
             // The read request was directed to a non-leader node. Updates the
             // leader cache.
-            const CcEntryAddr &cce_addr = std::get<2>(cc_result_.Value());
             Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
         }
 
         txm->PostRead();
     }
+    // TODO: for locking-based protocols, even though the tx may be blocked
+    // arbitrarily long after the read request is acknowledged, we still need
+    // to periodically check liveness of the remote node and force the tx to
+    // cancel if the remote node is unresponsive.
 }
 
 UploadOperation::UploadOperation(TransactionExecution *txm)
-    : upload_entries_(16), upload_cnt_(0), finish_cnt_(0), fail_cnt_(0)
 {
     results_.reserve(16);
 
@@ -60,13 +75,16 @@ UploadOperation::UploadOperation(TransactionExecution *txm)
     {
         auto &res = results_.emplace_back(txm);
 
-        res.post_lambda_ =
-            [this](CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> *hres)
+        res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
         {
             if (hres->IsError())
             {
-                // error_.store(true);
                 fail_cnt_.fetch_add(1);
+            }
+
+            if (hres->Value().remote_ack_cnt_ != nullptr)
+            {
+                hres->Value().remote_ack_cnt_->fetch_sub(1);
             }
 
             finish_cnt_.fetch_add(1);
@@ -78,6 +96,7 @@ void UploadOperation::Reset(size_t upload_cnt)
 {
     finish_cnt_.store(0);
     fail_cnt_.store(0);
+    remote_ack_cnt_.store(0);
     upload_cnt_ = upload_cnt;
     Resize(upload_cnt);
 }
@@ -105,8 +124,7 @@ void UploadOperation::Resize(size_t new_size)
             // machine.
             auto &res = results_.emplace_back(results_.at(0).Txm());
 
-            res.post_lambda_ =
-                [this](CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> *hres)
+            res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
             {
                 if (hres->IsError())
                 {
@@ -124,8 +142,61 @@ void UploadOperation::Resize(size_t new_size)
 
 void UploadOperation::Forward(TransactionExecution *txm)
 {
-    if (finish_cnt_.load() == upload_cnt_)
+    if (remote_ack_cnt_.load(std::memory_order_acquire) > 0)
     {
+        bool time_out = txm->IsTimeOut();
+
+        if (time_out)
+        {
+            // At least one remote acquire request has not received
+            // acknowledgement and the upload phase has timed out. Forces
+            // un-acknowledged requests to finish with an error.
+            for (size_t idx = 0; idx < upload_cnt_; ++idx)
+            {
+                CcHandlerResult<AcquireKeyResult> &hd_result = results_.at(idx);
+                const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+
+                if (cce_addr.Term() < 0)
+                {
+                    bool success = hd_result.ForceError();
+                    if (success)
+                    {
+                        // Up until this point, we consider that the acquire
+                        // request has failed. The tx will proceed to abort
+                        // without trying to release the lock claimed by this
+                        // request. In rare circumstances, it is still possible
+                        // that the acquire request's response arrives after
+                        // this point. We rely on the lock recovery mechanism in
+                        // the remote node to clear such an orphan lock.
+                        continue;
+                    }
+                }
+
+                // The acquire request may have 1) finished successfully, 2)
+                // finished with an error, 3) acknowledged. Only 2) does not
+                // need post-processing to clear the lock or to delete the
+                // acquire request from the blocking queue in the remote node.
+                if (!hd_result.IsError())
+                {
+                    txm->rw_set_.DedupRead(cce_addr);
+                }
+            }
+
+            if (fail_cnt_.load(std::memory_order_acquire) > 0)
+            {
+                txm->Abort();
+            }
+            else
+            {
+                txm->PostUpload();
+            }
+        }
+    }
+    else if (finish_cnt_.load() == upload_cnt_)
+    {
+        // TODO: for locking-based protocols, though the tx may be blocked
+        // arbitrarily long, after all acquire requests are acknowledged, we
+        // still need to periodically check liveness of the remote node.
         std::unordered_set<uint32_t> outdated_node_set;
 
         for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -135,12 +206,12 @@ void UploadOperation::Forward(TransactionExecution *txm)
                 WriteSetEntry &write_entry = *upload_entries_.at(idx);
                 // Assigns to the write entry the cc entry address obtained
                 // in the acquire phase.
-                write_entry.cce_addr_ = results_.at(idx).Value().second;
+                write_entry.cce_addr_ = results_.at(idx).Value().cce_addr_;
                 txm->rw_set_.DedupRead(write_entry.cce_addr_);
             }
             else if (results_.at(idx).ErrorCode() == -1)
             {
-                const CcEntryAddr &addr = results_.at(idx).Value().second;
+                const CcEntryAddr &addr = results_.at(idx).Value().cce_addr_;
                 auto find_it = outdated_node_set.find(addr.NodeGroupId());
                 if (find_it == outdated_node_set.end())
                 {
@@ -255,7 +326,6 @@ void SetCommitTsOperation::Forward(TransactionExecution *txm)
 }
 
 ValidateOperation::ValidateOperation(TransactionExecution *txm)
-    : vali_cnt_(0), finish_cnt_(0), error_(false)
 {
     results_.reserve(16);
 
@@ -318,39 +388,60 @@ void ValidateOperation::Resize(size_t new_size)
 
 void ValidateOperation::Forward(TransactionExecution *txm)
 {
-    if (finish_cnt_.load() == vali_cnt_)
+    size_t finish_cnt = finish_cnt_.load(std::memory_order_acquire);
+
+    if (finish_cnt < vali_cnt_ && txm->IsTimeOut())
     {
-        // Validation has finished. Post-processing skips read-set keys.
+        for (size_t idx = 0; idx < results_.size(); ++idx)
+        {
+            // For every validation request, attempts to force the request
+            // to be errored. If the request has not received response
+            // and is forced to be errored, the corresponding key needs
+            // post-processing. If the request finishes, either successfuly
+            // or with an error code, forcing the request will not succeed and
+            // the request not need post-processing.
+            auto &vali_result = results_.at(idx);
+            bool success = vali_result.ForceError();
+            if (!success)
+            {
+                txm->rw_set_.DedupRead(*vali_cce_addr_.at(idx));
+            }
+        }
+
+        txm->Abort();
+    }
+    else if (finish_cnt == vali_cnt_)
+    {
+        // All validation requests have returned, either successfully or with
+        // error codes. Post-processing skips read-set keys.
         txm->rw_set_.ClearReadSet();
         txm->rw_set_.ClearScanSet();
 
-        txm->PostVali();
+        if (error_.load(std::memory_order_acquire))
+        {
+            txm->Abort();
+        }
+        else
+        {
+            size_t idx = 0;
+            for (; idx < vali_cnt_; ++idx)
+            {
+                if (results_[idx].Value().size() > 0)
+                {
+                    break;
+                }
+            }
 
-        // if (error_)
-        //{
-        //    txm->Abort();
-        //}
-        // else
-        //{
-        //    size_t idx = 0;
-        //    for (; idx < vali_cnt_; ++idx)
-        //    {
-        //        if (results_[idx].Value().size() > 0)
-        //        {
-        //            break;
-        //        }
-        //    }
-
-        //    if (idx == vali_cnt_)
-        //    {
-        //        txm->PostVali();
-        //    }
-        //    else
-        //    {
-        //        // Skips tx negotiations for now.
-        //        txm->Abort();
-        //    }
-        //}
+            if (idx == vali_cnt_)
+            {
+                txm->PostVali();
+            }
+            else
+            {
+                // Skips tx negotiations for now.
+                txm->Abort();
+            }
+        }
     }
 }
 
@@ -366,8 +457,7 @@ void PushConflictTxnCommitTsLowerBound::Reset(TxId txn_id)
     txid_ = txn_id;
 }
 
-WriteToLog::WriteToLog(TransactionExecution *txm)
-    : res_(txm), log_closure_(&res_)
+WriteToLog::WriteToLog(TransactionExecution *txm) : res_(txm)
 {
 }
 
@@ -419,25 +509,22 @@ void UpdateTxnStatus::Forward(TransactionExecution *txm)
     }
 }
 
-InitTxnOperation::InitTxnOperation(TransactionExecution *txm)
-    : result_of_new_txn_(txm)
+InitTxnOperation::InitTxnOperation(TransactionExecution *txm) : result_(txm)
 {
 }
 
-void InitTxnOperation::Reset(uint64_t start_ts)
+void InitTxnOperation::Reset()
 {
-    result_of_new_txn_.Reset();
-    initi_ts_ = start_ts;
+    result_.Reset();
 }
 
 void InitTxnOperation::Forward(TransactionExecution *txm)
 {
-    if (result_of_new_txn_.IsFinished())
+    if (result_.IsFinished())
     {
-        if (result_of_new_txn_.IsError())
+        if (result_.IsError())
         {
-            // Beginning a tx should never fail.
-            txm->PostBegin();
+            txm->Abort();
         }
         else
         {
@@ -447,7 +534,6 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
 }
 
 PostProcessOp::PostProcessOp(TransactionExecution *txm)
-    : upload_cnt_(0), finish_cnt_(0)
 {
     results_.reserve(16);
 
@@ -493,9 +579,17 @@ void PostProcessOp::Resize(size_t new_size)
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
-    if (finish_cnt_.load() == upload_cnt_)
+    if (finish_cnt_.load(std::memory_order_acquire) == upload_cnt_)
     {
         txm->ReleaseAllTableLocks();
+    }
+    else
+    {
+        bool time_out = txm->IsTimeOut();
+        if (time_out)
+        {
+            txm->ReleaseAllTableLocks();
+        }
     }
 }
 
@@ -563,7 +657,21 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
 
 void ScanOpenOperation::Forward(TransactionExecution *txm)
 {
-    if (cc_result_.IsFinished())
+    if (!cc_result_.IsFinished())
+    {
+        bool time_out = txm->IsTimeOut();
+
+        if (time_out)
+        {
+            cc_result_.ForceError();
+            // TODO: So far we do not store scanned keys in the tx's scan set.
+            // In future, we need ScanOpenResult to check which cc nodes have
+            // returned and to release scan locks in these cc nodes in
+            // post-processing.
+            txm->PostScanOpen();
+        }
+    }
+    else
     {
         if (cc_result_.ErrorCode() == -1)
         {
@@ -581,21 +689,23 @@ ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
 {
-    if (cc_result_.IsFinished())
+    if (!cc_result_.IsFinished())
     {
-        if (cc_result_.IsError())
+        bool time_out = txm->IsTimeOut();
+        if (time_out)
         {
-            if (cc_result_.ErrorCode() == -1)
-            {
-                Sharder::Instance().UpdateLeader(cc_result_.Value());
-            }
-
-            txm->Abort();
-        }
-        else
-        {
+            cc_result_.ForceError();
             txm->PostScanNext();
         }
+    }
+    else
+    {
+        if (cc_result_.ErrorCode() == -1)
+        {
+            Sharder::Instance().UpdateLeader(cc_result_.Value().node_group_id_);
+        }
+
+        txm->PostScanNext();
     }
 }
 }  // namespace txservice

@@ -18,6 +18,7 @@
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "scan.h"
+#include "tx_operation_result.h"
 #include "type.h"
 
 namespace txservice
@@ -182,9 +183,8 @@ private:
     const TxId *txid_;
 };
 
-struct AcquireCc
-    : public TemplatedCcRequest<AcquireCc, std::pair<uint64_t, CcEntryAddr>>,
-      Resumable
+struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>,
+                   Resumable
 {
 public:
     AcquireCc()
@@ -210,7 +210,7 @@ public:
              int64_t tx_term,
              uint64_t ts,
              bool is_insert,
-             CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> *res,
+             CcHandlerResult<AcquireKeyResult> *res,
              CcProtocol proto = CcProtocol::OCC)
     {
         table_name_ = tname;
@@ -234,7 +234,7 @@ public:
              int64_t tx_term,
              uint64_t ts,
              bool is_insert,
-             CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> *res,
+             CcHandlerResult<AcquireKeyResult> *res,
              CcProtocol proto = CcProtocol::OCC)
     {
         table_name_ = tname;
@@ -706,11 +706,7 @@ private:
     uint64_t tx_number_;
 };
 
-struct ReadCc
-    : public TemplatedCcRequest<
-          ReadCc,
-          std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>>,
-      Resumable
+struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>, Resumable
 {
 public:
     ReadCc()
@@ -727,17 +723,15 @@ public:
     ReadCc(const ReadCc &rhs) = delete;
     ReadCc(ReadCc &&rhs) = delete;
 
-    void Set(
-        const TableName *tn,
-        const TxKey *key,
-        uint32_t key_shard_code,
-        TxRecord *rec,
-        ReadType read_type,
-        uint64_t tx_number,
-        uint64_t ts,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>> *res,
-        CcProtocol proto = CcProtocol::OCC)
+    void Set(const TableName *tn,
+             const TxKey *key,
+             uint32_t key_shard_code,
+             TxRecord *rec,
+             ReadType read_type,
+             uint64_t tx_number,
+             uint64_t ts,
+             CcHandlerResult<ReadKeyResult> *res,
+             CcProtocol proto = CcProtocol::OCC)
     {
         key_ = key;
         key_str_ = nullptr;
@@ -750,7 +744,7 @@ public:
         ts_ = ts;
         proto_ = proto;
 
-        const CcEntryAddr &cce_addr = std::get<2>(res->Value());
+        const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
         {
             const LruEntry *entry =
@@ -767,17 +761,15 @@ public:
         node_group_id_ = key_shard_code >> 10;
     }
 
-    void Set(
-        const TableName *tn,
-        const std::string *key_str,
-        uint32_t key_shard_code,
-        std::string *rec_str,
-        ReadType read_type,
-        uint64_t tx_number,
-        uint64_t ts,
-        CcHandlerResult<
-            std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>> *res,
-        CcProtocol proto = CcProtocol::OCC)
+    void Set(const TableName *tn,
+             const std::string *key_str,
+             uint32_t key_shard_code,
+             std::string *rec_str,
+             ReadType read_type,
+             uint64_t tx_number,
+             uint64_t ts,
+             CcHandlerResult<ReadKeyResult> *res,
+             CcProtocol proto = CcProtocol::OCC)
     {
         key_ = nullptr;
         key_str_ = key_str;
@@ -790,7 +782,7 @@ public:
         ts_ = ts;
         proto_ = proto;
 
-        const CcEntryAddr &cce_addr = std::get<2>(res->Value());
+        const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
         {
             const LruEntry *entry =
@@ -835,8 +827,7 @@ private:
 };
 
 struct ScanOpenBatchCc
-    : public TemplatedCcRequest<ScanOpenBatchCc,
-                                std::pair<size_t, std::unique_ptr<CcScanner>>>
+    : public TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>
 {
 public:
     ScanOpenBatchCc()
@@ -846,6 +837,7 @@ public:
           direct_(ScanDirection::Forward),
           ts_(0),
           scan_cache_(nullptr),
+          term_(-1),
           is_ckpt_delta_(false)
     {
     }
@@ -859,8 +851,8 @@ public:
              uint64_t tx_number,
              const uint64_t &ts,
              ScanCache *cache,
-             CcHandlerResult<std::pair<size_t, std::unique_ptr<CcScanner>>>
-                 *open_res,
+             int64_t term,
+             CcHandlerResult<ScanOpenResult> *open_res,
              const CcProtocol &proto,
              bool is_delta)
     {
@@ -873,6 +865,7 @@ public:
         tx_number_ = tx_number;
         ts_ = ts;
         scan_cache_ = cache;
+        term_ = term;
         res_ = open_res;
         proto_ = proto;
         ccm_ = nullptr;
@@ -886,6 +879,7 @@ private:
     ScanDirection direct_;
     uint64_t ts_;
     ScanCache *scan_cache_;
+    int64_t term_;
     bool is_ckpt_delta_;
 
     template <typename KeyT, typename ValueT>
@@ -895,7 +889,8 @@ private:
     friend class SkCcMap;
 };
 
-struct ScanNextBatchCc : public TemplatedCcRequest<ScanNextBatchCc, uint32_t>
+struct ScanNextBatchCc
+    : public TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>
 {
 public:
     ScanNextBatchCc() : ts_(0), scan_cache_(nullptr), is_ckpt_delta_(false)
@@ -905,7 +900,7 @@ public:
     void Set(const uint32_t &ng_id,
              const uint64_t &ts,
              ScanCache *cache,
-             CcHandlerResult<uint32_t> *next_res,
+             CcHandlerResult<ScanNextResult> *next_res,
              const CcProtocol &proto,
              bool is_delta)
     {
@@ -1243,6 +1238,70 @@ private:
     const TxId *txid_;
     uint64_t tx_ts_;
     CcHandlerResult<uint64_t> *res_;
+};
+
+struct CheckTxStatusCc : public CcRequestBase
+{
+public:
+    CheckTxStatusCc(const TxNumber &tx_number)
+        : tx_number_(tx_number),
+          tx_status_(TxnStatus::Ongoing),
+          exists_(false),
+          finish_(false),
+          mux_(),
+          cv_()
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        TEntry *tx_entry = ccs.LocateTx(tx_number_);
+        if (tx_entry == nullptr)
+        {
+            exists_ = false;
+        }
+        else
+        {
+            exists_ = true;
+            tx_status_ = tx_entry->status_;
+        }
+
+        finish_ = true;
+        // This notify_one() must be within the lock scope, because the owner of
+        // this cc request is the RPC thread, which blocks on the finish flag
+        // and will exit and return immediately after the flag is set to true,
+        // de-allocating the cc request.
+        cv_.notify_one();
+
+        // This request is a stack object of the calling RPC thread. Returns
+        // false to prevent the tx processor from invoking Free() to recycle.
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this]() { return finish_; });
+    }
+
+    TxnStatus TxStatus() const
+    {
+        return tx_status_;
+    }
+
+    bool Exists() const
+    {
+        return exists_;
+    }
+
+private:
+    TxNumber tx_number_;
+    TxnStatus tx_status_;
+    bool exists_;
+    bool finish_;
+    std::mutex mux_;
+    std::condition_variable cv_;
 };
 
 struct FindCatalogCC : public TemplatedCcRequest<FindCatalogCC, bool>

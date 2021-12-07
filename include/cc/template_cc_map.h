@@ -87,7 +87,7 @@ public:
     bool Execute(AcquireCc &req) override
     {
         auto hd_res = req.Result();
-        CcEntryAddr &cce_addr = std::get<1>(hd_res->Value());
+        CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
 
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         const KeyT *target_key = nullptr;
@@ -191,9 +191,7 @@ public:
                                                    std::move(insert_entry));
             // Cc entry address has been updated. Only reset the result's last
             // validation ts.
-            uint64_t &last_ts = std::get<0>(hd_res->Value());
-            last_ts = cc_entry.gap_last_vali_ts_;
-
+            hd_res->Value().last_vali_ts_ = cc_entry.gap_last_vali_ts_;
             hd_res->SetFinished();
         }
         else
@@ -237,7 +235,7 @@ public:
                 shard_->UpsertLockHoldingTx(
                     tx_number, cc_entry.last_vali_ts_, cce_ptr);
 
-                std::get<0>(hd_res->Value()) = cc_entry.last_vali_ts_;
+                hd_res->Value().last_vali_ts_ = cc_entry.last_vali_ts_;
                 hd_res->SetFinished();
             }
             else
@@ -247,7 +245,9 @@ public:
                     std::chrono::duration_cast<std::chrono::seconds>(5s)
                         .count();
 
-                TxLockInfo *lk_info = shard_->GetActiveTxLockInfo(tx_number);
+                TxNumber lk_holding_tx = cc_entry.write_intention_.TxNumber();
+                TxLockInfo *lk_info =
+                    shard_->GetActiveTxLockInfo(lk_holding_tx);
                 uint64_t now_ts = shard_->Now();
 
                 // If the write intention has been held by a conflicting tx
@@ -260,9 +260,6 @@ public:
                     (now_ts - lk_info->ts_ >= ts_gap &&
                      now_ts - lk_info->last_recover_ts_ >= ts_gap))
                 {
-                    TxNumber lk_holding_tx =
-                        cc_entry.write_intention_.TxNumber();
-
                     // The intention's holding tx may not exist in the cc
                     // shard's active tx set. This is possible when the first
                     // attempt to recover the tx detects that the tx has
@@ -578,8 +575,8 @@ public:
         auto hd_res = req.Result();
 
         SIMPLE_FAULT_INJECTOR("monograph_read_panic_ccnode0");
-        
-        CcEntryAddr &cce_addr = std::get<2>(hd_res->Value());
+
+        CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 
         uint32_t ng_id = req.KeyShardCode() >> 10;
@@ -714,8 +711,8 @@ public:
             }
         }
 
-        std::get<1>(hd_res->Value()) = cce->commit_ts_;
-        std::get<3>(hd_res->Value()) = cce->payload_status_;
+        hd_res->Value().ts_ = cce->commit_ts_;
+        hd_res->Value().rec_status_ = cce->payload_status_;
 
         hd_res->SetFinished();
         return true;
@@ -764,12 +761,10 @@ public:
 
     bool Execute(ScanOpenBatchCc &req) override
     {
-        int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
-        if (term < 0)
-        {
-            req.Result()->SetError(-1);
-            return false;
-        }
+        // Before the scan open request is enqueued, the local node's term is
+        // obtained and kept in the cc request. This is to avoid getting the
+        // node's terms repeatedly in each core, as the scan request is
+        // dispatched to all cores.
 
         const KeyT *look_key = static_cast<const KeyT *>(req.start_key_);
         TemplateScanCache<KeyT, ValueT> *typed_cache =
@@ -793,7 +788,8 @@ public:
                 // The forward scan's starting point is inclusive and matches a
                 // cc entry's key. The scan starts from this cc entry,
                 // including the entry's key and the gap.
-                ScanKey(floor_cce, scan_tuple, true, req.node_group_id_, term);
+                ScanKey(
+                    floor_cce, scan_tuple, true, req.node_group_id_, req.term_);
             }
             else if (!req.is_ckpt_delta_)
             {
@@ -801,7 +797,7 @@ public:
                 // The forward scan's starting point is exclusive or falls into
                 // the gap of a cc entry. The scan starts from the cc entry and
                 // only includes the entry's gap.
-                ScanGap(floor_cce, scan_tuple, req.node_group_id_, term);
+                ScanGap(floor_cce, scan_tuple, req.node_group_id_, req.term_);
             }
 
             CcEntry<KeyT, ValueT> *cce = floor_cce->map_next_;
@@ -822,7 +818,7 @@ public:
                         scan_tuple,
                         true,
                         req.node_group_id_,
-                        term,
+                        req.term_,
                         req.is_ckpt_delta_);
                 cce = cce->map_next_;
             }
@@ -847,7 +843,8 @@ public:
                     TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                         typed_cache->AddScanTuple();
 
-                    ScanKey(cce, scan_tuple, false, req.node_group_id_, term);
+                    ScanKey(
+                        cce, scan_tuple, false, req.node_group_id_, req.term_);
                 }
                 cce = cce->map_prev_;
             }
@@ -859,11 +856,12 @@ public:
 
                 if (cce == &neg_inf_)
                 {
-                    ScanGap(cce, scan_tuple, req.node_group_id_, term);
+                    ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
                 }
                 else
                 {
-                    ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                    ScanKey(
+                        cce, scan_tuple, true, req.node_group_id_, req.term_);
                 }
 
                 cce = cce->map_prev_;
@@ -883,6 +881,7 @@ public:
             return false;
         }
 
+        req.Result()->Value().term_ = term;
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
         assert(typed_cache->Full());

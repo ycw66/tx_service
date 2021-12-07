@@ -3,6 +3,7 @@
 #include "cc_handler.h"
 #include "log_closure.h"
 #include "tx_key.h"
+#include "tx_operation_result.h"
 #include "tx_record.h"
 #include "tx_req_result.h"
 
@@ -24,9 +25,8 @@ public:
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    ReadType read_type_;
-    CcHandlerResult<std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>>
-        cc_result_;
+    ReadType read_type_{ReadType::Inside};
+    CcHandlerResult<ReadKeyResult> cc_result_;
 };
 
 struct SetCommitTsOperation : TransactionOperation
@@ -48,9 +48,10 @@ public:
     void Forward(TransactionExecution *txm) override;
 
     std::vector<CcHandlerResult<std::vector<TxId>>> results_;
-    size_t vali_cnt_;
-    std::atomic<size_t> finish_cnt_;
-    std::atomic<bool> error_;
+    std::vector<const CcEntryAddr *> vali_cce_addr_;
+    size_t vali_cnt_{0};
+    std::atomic<size_t> finish_cnt_{0};
+    std::atomic<bool> error_{false};
 };
 
 struct UploadOperation : TransactionOperation
@@ -61,11 +62,14 @@ public:
     void Reset(size_t upload_cnt);
     void Forward(TransactionExecution *txm) override;
 
-    std::vector<CcHandlerResult<std::pair<uint64_t, CcEntryAddr>>> results_;
-    std::vector<WriteSetEntry *> upload_entries_;
-    size_t upload_cnt_;
-    std::atomic<size_t> finish_cnt_;
-    std::atomic<size_t> fail_cnt_;
+    std::vector<CcHandlerResult<AcquireKeyResult>> results_;
+    std::vector<WriteSetEntry *> upload_entries_{16};
+    uint32_t upload_cnt_{0};
+    std::atomic<uint32_t> finish_cnt_{0};
+    std::atomic<uint32_t> fail_cnt_{0};
+    // Number of remote keys on which the upload operation needs to acquire
+    // write intentions/locks.
+    std::atomic<int32_t> remote_ack_cnt_{0};
 };
 
 struct AcquireTableWriteLockOp : TransactionOperation
@@ -163,7 +167,7 @@ struct PushConflictTxnCommitTsLowerBound : TransactionOperation
 private:
     CcHandlerResult<uint64_t> result_of_update_commit_lower_bound_;
     TxId txid_;
-};  // namespace txservice::transaction
+};
 
 struct WriteToLog : TransactionOperation
 {
@@ -172,7 +176,7 @@ struct WriteToLog : TransactionOperation
     void Reset();
 
     CcHandlerResult<Void> res_;
-    LogClosure log_closure_;
+    LogClosure log_closure_{&res_};
 };
 
 struct UpdateTxnStatus : TransactionOperation
@@ -192,8 +196,8 @@ struct PostProcessOp : TransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     std::vector<CcHandlerResult<Void>> results_;
-    size_t upload_cnt_;
-    std::atomic<size_t> finish_cnt_;
+    size_t upload_cnt_{0};
+    std::atomic<size_t> finish_cnt_{0};
 };
 
 struct PostProcessDDLOp : TransactionOperation
@@ -210,11 +214,10 @@ struct PostProcessDDLOp : TransactionOperation
 struct InitTxnOperation : TransactionOperation
 {
     InitTxnOperation(TransactionExecution *txm);
-    void Reset(uint64_t start_ts = 0);
+    void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcHandlerResult<std::tuple<TxId, uint64_t, int64_t>> result_of_new_txn_;
-    uint64_t initi_ts_ = 0;
+    CcHandlerResult<InitTxResult> result_;
 };
 
 struct ScanOpenOperation : TransactionOperation
@@ -233,12 +236,12 @@ struct ScanOpenOperation : TransactionOperation
         direction_ = direction;
     }
 
-    CcHandlerResult<std::pair<size_t, std::unique_ptr<CcScanner>>> cc_result_;
+    CcHandlerResult<ScanOpenResult> cc_result_;
 
-    const TableName *table_name_;
-    const TxKey *start_key_;
-    bool inclusive_;
-    ScanDirection direction_;
+    const TableName *table_name_{nullptr};
+    const TxKey *start_key_{nullptr};
+    bool inclusive_{true};
+    ScanDirection direction_{ScanDirection::Forward};
 };
 
 struct ScanNextOperation : TransactionOperation
@@ -252,10 +255,9 @@ struct ScanNextOperation : TransactionOperation
         scanner_ = scanner;
     }
 
-    CcHandlerResult<uint32_t> cc_result_;
-
-    size_t alias_;
-    CcScanner *scanner_;
+    CcHandlerResult<ScanNextResult> cc_result_;
+    size_t alias_{0};
+    CcScanner *scanner_{nullptr};
 };
 
 }  // namespace txservice

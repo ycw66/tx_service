@@ -4,7 +4,9 @@
 
 #include <iostream>
 
+#include "local_cc_shards.h"
 #include "sharder.h"
+#include "tx_operation_result.h"
 #include "tx_request.h"
 
 namespace txservice
@@ -19,7 +21,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       tx_term_(-1),
       commit_ts_(UINT64_MAX),
       commit_ts_bound_(0),
-      tx_status_(TxnStatus::Aborted),
+      tx_status_(TxnStatus::Ongoing),
       finish_(false),
       current_op_(nullptr),
       read_cce_addr_(),
@@ -69,13 +71,11 @@ void TransactionExecution::Reset(CcProtocol proto)
     tx_term_ = -1;
     commit_ts_ = UINT64_MAX;
     commit_ts_bound_ = 0;
-    tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
     wset_post_cnt_ = 0;
     rw_set_.Reset();
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();
-    finish_ = false;
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
     bool_resp_ = nullptr;
@@ -89,6 +89,12 @@ void TransactionExecution::Reset(CcProtocol proto)
     next_req_.store(nullptr);
     protocol_ = proto;
     ddl_type_ = DDLType::UNKNOWN;
+}
+
+void TransactionExecution::Restart()
+{
+    tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
+    finish_ = false;
 }
 
 TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
@@ -143,6 +149,8 @@ TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
                   read_.cc_result_,
                   protocol_);
 
+    StartTiming();
+
     return rec_resp_;
 }
 
@@ -158,15 +166,11 @@ void TransactionExecution::PostRead()
     }
     else
     {
-        const std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus> &res =
-            read_.cc_result_.Value();
+        const ReadKeyResult &read_res = read_.cc_result_.Value();
 
-        const RecordStatus status = std::get<3>(res);
-        const CcEntryAddr &cce_addr = std::get<2>(res);
-
-        if (status == RecordStatus::Normal)
+        if (read_res.rec_status_ == RecordStatus::Normal)
         {
-            rw_set_.cache_rec_ = std::get<0>(res)->Clone();
+            rw_set_.cache_rec_ = read_res.rec_->Clone();
         }
 
         // Does not add the record to the read set for now to simulate isolation
@@ -179,19 +183,19 @@ void TransactionExecution::PostRead()
         }*/
 
         if (read_.read_type_ == ReadType::Inside &&
-            status == RecordStatus::Unknown)
+            read_res.rec_status_ == RecordStatus::Unknown)
         {
             // If the read does not retrieve the value, the tx user is likely to
             // read the data store and brings in the value for caching. Cache
             // the cc entry's address in the tx's local variable.
-            read_cce_addr_ = cce_addr;
+            read_cce_addr_ = read_res.cce_addr_;
         }
         else
         {
             read_cce_addr_.SetCce(0, -1, 0);
         }
 
-        rec_resp_->Finish(status);
+        rec_resp_->Finish(read_res.rec_status_);
     }
 }
 
@@ -250,6 +254,8 @@ TxResult<size_t> *TransactionExecution::ScanOpen(const TableName &table_name,
                       protocol_,
                       is_ckpt_delta);
 
+    StartTiming();
+
     return uint64_resp_;
 }
 
@@ -263,6 +269,8 @@ void TransactionExecution::PostScanOpen()
         return;
     }
 
+    ScanOpenResult &open_result = scan_open_.cc_result_.Value();
+
     auto table_iter = rw_set_.WriteSet().find(*scan_open_.table_name_);
     if (table_iter != rw_set_.WriteSet().end())
     {
@@ -273,8 +281,7 @@ void TransactionExecution::PostScanOpen()
                                             scan_open_.inclusive_);
             if (wset_it.first != wset_it.second)
             {
-                wset_iters_.emplace(scan_open_.cc_result_.Value().first,
-                                    wset_it);
+                wset_iters_.emplace(open_result.scan_alias_, wset_it);
             }
         }
         else
@@ -284,19 +291,16 @@ void TransactionExecution::PostScanOpen()
                                                     scan_open_.inclusive_);
             if (wset_rit.first != wset_rit.second)
             {
-                wset_reverse_iters_.emplace(scan_open_.cc_result_.Value().first,
-                                            wset_rit);
+                wset_reverse_iters_.emplace(open_result.scan_alias_, wset_rit);
             }
         }
     }
 
-    std::pair<size_t, std::unique_ptr<CcScanner>> &scanner_res =
-        scan_open_.cc_result_.Value();
-    auto em_it =
-        scans_.emplace(scanner_res.first, std::move(scanner_res.second));
+    auto em_it = scans_.emplace(open_result.scan_alias_,
+                                std::move(open_result.scanner_));
     assert(em_it.second == true);
 
-    uint64_resp_->Finish(scanner_res.first);
+    uint64_resp_->Finish(open_result.scan_alias_);
 }
 
 TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
@@ -331,6 +335,8 @@ TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
         scan_next_.cc_result_.SetFinished();
     }
 
+    StartTiming();
+
     // Scanning next is only blocked when one of the shards' cache is drained.
     // Invokes Forward() to move forward the tx machine.
     scan_next_.Forward(this);
@@ -346,6 +352,13 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 
 void TransactionExecution::PostScanNext()
 {
+    current_op_ = nullptr;
+    if (scan_next_.cc_result_.IsError())
+    {
+        kvp_resp_->FinishError();
+        return;
+    }
+
     const ScanTuple *cc_scan_tuple = scan_next_.scanner_->Current();
     while (cc_scan_tuple != nullptr &&
            (cc_scan_tuple->key_ts_ == 0 ||
@@ -369,8 +382,6 @@ void TransactionExecution::PostScanNext()
 
     assert(cc_scan_tuple != nullptr ||
            scan_next_.scanner_->Status() == ScannerStatus::Closed);
-
-    current_op_ = nullptr;
 
     if (scan_next_.scanner_->Direction() == ScanDirection::Forward)
     {
@@ -726,9 +737,9 @@ void TransactionExecution::Upload()
              key_it != table_it->second.end();
              ++key_it)
         {
-            CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> &hres =
-                upload_.results_[idx];
+            CcHandlerResult<AcquireKeyResult> &hres = upload_.results_[idx];
             hres.Reset();
+            hres.Value().remote_ack_cnt_ = &upload_.remote_ack_cnt_;
             WriteSetEntry &write_entry = key_it->second;
             upload_.upload_entries_.at(idx) = &write_entry;
             handler->AcquireWrite(table_it->first,
@@ -742,6 +753,8 @@ void TransactionExecution::Upload()
             ++idx;
         }
     }
+
+    StartTiming();
 }
 
 void TransactionExecution::AcquireTableWriteLock()
@@ -807,7 +820,7 @@ void TransactionExecution::SetTs()
     uint64_t candidate = commit_ts_bound_;
     for (size_t idx = 0; idx < upload_.upload_cnt_; ++idx)
     {
-        uint64_t upload_ts = upload_.results_[idx].Value().first;
+        uint64_t upload_ts = upload_.results_[idx].Value().last_vali_ts_;
         candidate = std::max(candidate, upload_ts + 1);
     }
 
@@ -862,6 +875,7 @@ void TransactionExecution::Vali()
 {
     current_op_ = &validate_;
     validate_.Reset(rw_set_.ReadSetSize());
+    validate_.vali_cce_addr_.clear();
 
     /*if (rw_set_.ReadSetSize() + sset_post_cnt_ > validate_.results_.size())
     {
@@ -873,6 +887,8 @@ void TransactionExecution::Vali()
 
     for (const auto &[cce_addr, read_ts] : rset)
     {
+        validate_.vali_cce_addr_.emplace_back(&cce_addr);
+
         CcHandlerResult<std::vector<TxId>> &hres = validate_.results_[offset];
         hres.Reset();
 
@@ -1395,6 +1411,8 @@ void TransactionExecution::PostProcess()
             ++offset;
         }
     }
+
+    StartTiming();
 }
 
 void TransactionExecution::ReleaseAllTableLocks()
@@ -1420,6 +1438,8 @@ void TransactionExecution::PostPostProcess()
     {
         bool_resp_->Finish(false);
     }
+
+    Reset();
 }
 
 TxResult<bool> *TransactionExecution::Abort()
@@ -1572,7 +1592,7 @@ TxResult<Void> *TransactionExecution::Begin(uint64_t start_ts)
     commit_ts_bound_ = start_ts;
     tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
 
-    handler->NewTxn(init_txn_.result_of_new_txn_);
+    handler->NewTxn(init_txn_.result_);
     init_txn_.Forward(this);
 
     return void_resp_;
@@ -1580,7 +1600,7 @@ TxResult<Void> *TransactionExecution::Begin(uint64_t start_ts)
 
 void TransactionExecution::PostBegin()
 {
-    auto &[txid, start_ts, tx_term] = init_txn_.result_of_new_txn_.Value();
+    const auto &[txid, start_ts, tx_term] = init_txn_.result_.Value();
     txid_ = txid;
     tx_number_.store(txid_.TxNumber(), std::memory_order_release);
     commit_ts_bound_ = start_ts;
@@ -1594,9 +1614,21 @@ uint64_t TransactionExecution::TxNumber() const
     return tx_number_.load(std::memory_order_acquire);
 }
 
+void TransactionExecution::Forward()
+{
+    if (current_op_ == nullptr)
+    {
+        return;
+    }
+
+    prev_op_ = current_op_;
+    current_op_->Forward(this);
+}
+
 int TransactionExecution::Execute(TxRequest *tx_req)
 {
     TxnStatus status = tx_status_.load(std::memory_order_acquire);
+
     if (status == TxnStatus::Ongoing)
     {
         assert(next_req_.load(std::memory_order_acquire) == nullptr);
@@ -1605,9 +1637,36 @@ int TransactionExecution::Execute(TxRequest *tx_req)
     }
     else
     {
-        // The tx has started committing/aborting. Does not accept new requests.
+        // The tx has started committing/aborting or has committed/aborted. Does
+        // not accept new requests.
         return 1;
     }
+}
+
+bool TransactionExecution::IsTimeOut()
+{
+    ++state_forward_cnt_;
+    if (state_forward_cnt_ == LoopCnt)
+    {
+        state_forward_cnt_ = 0;
+        uint64_t now_ts = LocalCcShards::ClockTs();
+        if (now_ts > state_clock_)
+        {
+            // The local clock is advanced in roughly 2 seconds. So, if the
+            // current time is greater than the prior one, the tx machine has
+            // been stuck in this state for at least 2 seconds.
+            state_clock_ = now_ts;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void TransactionExecution::StartTiming()
+{
+    state_forward_cnt_ = 0;
+    state_clock_ = LocalCcShards::ClockTs();
 }
 
 }  // namespace txservice

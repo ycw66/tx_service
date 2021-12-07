@@ -4,7 +4,81 @@
 #include "cc/ccm_scanner.h"
 #include "checkpointer.h"
 
-txservice::TEntry &txservice::CcShard::NewTx(uint64_t start_ts)
+namespace txservice
+{
+CcMap *CcShard::GetCcm(const TableName &table_name,
+                       uint32_t node_group,
+                       int8_t &error_code)
+{
+    if (node_group == node_id_)
+    {
+        auto table_it = native_ccms_.find(table_name);
+        if (table_it == native_ccms_.end())
+        {
+            error_code = 1;
+            return nullptr;
+        }
+        else
+        {
+            error_code = 0;
+            return table_it->second.get();
+        }
+    }
+    else
+    {
+        auto native_table_it = native_ccms_.find(table_name);
+        if (native_table_it == native_ccms_.end())
+        {
+            error_code = 1;
+            return nullptr;
+        }
+
+        auto table_it = failover_ccms_.try_emplace(table_name);
+        std::unordered_map<uint32_t, CcMap::uptr> &ng_ccm =
+            table_it.first->second;
+
+        auto ccm_it = ng_ccm.find(node_group);
+        if (ccm_it != ng_ccm.end())
+        {
+            return ccm_it->second.get();
+        }
+        else
+        {
+            auto new_ccm_it = ng_ccm.try_emplace(
+                node_group, native_table_it->second->Clone());
+            return new_ccm_it.first->second.get();
+        }
+    }
+}
+
+void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
+{
+    assert(thd_id < thd_token_.size());
+    bool ret = cc_queue_.enqueue(thd_token_.at(thd_id), req);
+    assert(ret == true);
+
+    // Wakes up the thread dedicated to this shard, when it is in the sleep
+    // mode.
+    if (processor_sleep_.load(std::memory_order_acquire))
+    {
+        shard_cv_.notify_one();
+    }
+}
+
+void CcShard::Enqueue(CcRequestBase *req)
+{
+    bool ret = cc_queue_.enqueue(req);
+    assert(ret == true);
+
+    // Wakes up the thread dedicated to this shard, when it is in the sleep
+    // mode.
+    if (processor_sleep_.load(std::memory_order_acquire))
+    {
+        shard_cv_.notify_one();
+    }
+}
+
+TEntry &CcShard::NewTx(uint64_t start_ts)
 {
     start_ts = ts_base_.load(std::memory_order_relaxed);
 
@@ -59,7 +133,7 @@ txservice::TEntry &txservice::CcShard::NewTx(uint64_t start_ts)
     return tentry;
 }
 
-txservice::TEntry *txservice::CcShard::LocateTx(const TxId &tx_id)
+TEntry *CcShard::LocateTx(const TxId &tx_id)
 {
     if (tx_id.Empty())
     {
@@ -70,7 +144,24 @@ txservice::TEntry *txservice::CcShard::LocateTx(const TxId &tx_id)
     return tentry.ident_ == tx_id.ident_ ? &tentry : nullptr;
 }
 
-inline void txservice::CcShard::DetachLru(LruEntry *entry)
+TEntry *CcShard::LocateTx(TxNumber tx_number)
+{
+    // The lower 4 bytes represent the identity on a core, while the higher 4
+    // bytes represent the global core ID.
+    uint32_t identity = tx_number & 0xFFFFFFFF;
+
+    for (TEntry &tx_entry : tx_vec_)
+    {
+        if (tx_entry.ident_ == identity)
+        {
+            return &tx_entry;
+        }
+    }
+
+    return nullptr;
+}
+
+inline void CcShard::DetachLru(LruEntry *entry)
 {
     LruEntry *prev = entry->lru_prev_;
     LruEntry *post = entry->lru_next_;
@@ -80,7 +171,7 @@ inline void txservice::CcShard::DetachLru(LruEntry *entry)
     entry->lru_next_ = nullptr;
 }
 
-void txservice::CcShard::UpdateLruList(LruEntry *entry)
+void CcShard::UpdateLruList(LruEntry *entry)
 {
     // Removes the entry from the list, if it's already in the list. A
     // entry's prev and post are both not-null when the entry is in the
@@ -102,7 +193,7 @@ void txservice::CcShard::UpdateLruList(LruEntry *entry)
     tail_cce_.lru_prev_ = entry;
 }
 
-size_t txservice::CcShard::Clean()
+size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;
     size_t free_cnt = 0;
@@ -135,3 +226,4 @@ size_t txservice::CcShard::Clean()
 
     return free_cnt;
 }
+}  // namespace txservice

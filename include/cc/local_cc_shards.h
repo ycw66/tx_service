@@ -25,30 +25,13 @@ class LocalCcShards
 public:
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
-                  Catalog *catalog = nullptr)
-        : node_id_(node_id), timer_terminate_(false)
-    {
-        using namespace std::chrono_literals;
-        uint64_t ts_base =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
-
-        for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
-        {
-            cc_shards_.emplace_back(std::make_unique<CcShard>(
-                thd_idx, core_cnt, ts_base, node_id, catalog));
-            cc_handlers_.emplace_back(
-                std::make_unique<LocalCcHandler>(thd_idx, *this));
-        }
-
-        timer_thd_ = std::thread([this] { TimerRun(); });
-    }
+                  Catalog *catalog = nullptr);
 
     ~LocalCcShards()
     {
         timer_terminate_.store(true, std::memory_order_release);
         timer_thd_.join();
+        cc_shards_.clear();
     }
 
     LocalCcShards(LocalCcShards const &) = delete;
@@ -80,9 +63,14 @@ public:
         return cc_shards_[thd_id]->IsIdle();
     }
 
-    LocalCcHandler *GetCcHandler(size_t thd_id)
+    void SleepNotify(uint32_t thd_id)
     {
-        return cc_handlers_.at(thd_id).get();
+        cc_shards_[thd_id]->SleepNotify();
+    }
+
+    void WorkNotify(uint32_t thd_id)
+    {
+        cc_shards_[thd_id]->WorkNotify();
     }
 
     size_t Count() const
@@ -239,41 +227,24 @@ public:
         return cc_shards_.at(core_id)->shard_mux_;
     }
 
+    static uint64_t ClockTs();
+
 private:
-    void TimerRun()
-    {
-        while (!timer_terminate_.load(std::memory_order_acquire))
-        {
-            using namespace std::chrono_literals;
-
-            uint64_t clock_ts =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::system_clock::now().time_since_epoch())
-                    .count();
-
-            for (std::unique_ptr<CcShard> &ccs : cc_shards_)
-            {
-                uint64_t tsb = ccs->ts_base_.load(std::memory_order_acquire);
-                // If the CAS fails, since timestamps always roll forward, the
-                // ts base must be greater than the current time or the old ts
-                // base.
-                ccs->ts_base_.compare_exchange_strong(tsb,
-                                                      std::max(tsb, clock_ts));
-            }
-
-            std::this_thread::sleep_for(2s);
-        }
-    }
+    void TimerRun();
 
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
-    std::vector<std::unique_ptr<LocalCcHandler>> cc_handlers_;
-    remote::RemoteCcHandler *remote_hd_;
 
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
     std::thread timer_thd_;
     std::atomic<bool> timer_terminate_;
+    // The static variable storing the local time. It is delayed time and
+    // refreshed in roughly every 2 seconds by the background thread, so as to
+    // reduce the cost of calling system functions to get the wall clock. The
+    // local time is used by transaction state machines to determine if a lock
+    // has been held too long and if so, invoke lock recovery.
+    static std::atomic<uint64_t> local_clock;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

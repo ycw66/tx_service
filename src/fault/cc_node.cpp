@@ -156,7 +156,15 @@ void CcNode::RecoverTx(uint64_t tx_number,
                        uint32_t cc_ng_id,
                        int64_t cc_ng_term)
 {
-    log_notify_hd_->RecoverTx(tx_number, tx_term, cc_ng_id, cc_ng_term);
+    // Only if a cc node is the leader does it have an active recovery handler.
+    // Recovering a tx's locks in a non-leader cc node is meaningless. Failover
+    // of cc nodes assumes all locks in the old leader are permanently lost and
+    // hence will re-install committed records and abort unfinished tx's to
+    // ensure correctness.
+    if (leader_term_.load(std::memory_order_acquire) >= 0)
+    {
+        recovery_hd_->RecoverTx(tx_number, tx_term, cc_ng_id, cc_ng_term);
+    }
 }
 
 void CcNode::on_leader_start(int64_t term)
@@ -169,7 +177,7 @@ void CcNode::on_leader_start(int64_t term)
     // A log notify handler starts a background thread that notifies all log
     // groups the new leader's term. The cc node becomes the real leader, only
     // after it receives log records from all log groups.
-    log_notify_hd_ = std::make_unique<fault::LogNotifier>(
+    recovery_hd_ = std::make_unique<fault::CcNodeRecoveryAgent>(
         ng_id_, term, ip_, port_ + 2, local_cc_shards_);
 }
 
@@ -182,18 +190,13 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
 
     leader_term_.store(-1, std::memory_order_release);
 
-    // Interruptes and de-allocates the log notifier if the cc node just became
-    // the leader and had not notified all log groups.
-    log_notify_hd_ = nullptr;
-
     // when preferred leader is actually a follower, e.g. caused by a
     // failover, it will send the TransferRequest to the current leader
     // through ccmap service.
     if (node_idx_ == 0)
     {
+        // The transfer RPC is on the same port as cc node groups.
         braft::PeerId leader_peer = ctx.leader_id();
-        // port minus 1 direct to ccmap service.
-        leader_peer.addr.port = leader_peer.addr.port - 1;
 
         brpc::Channel channel;
         if (channel.Init(leader_peer.addr, nullptr) != 0)
@@ -203,7 +206,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
             return;
         }
 
-        remote::CcService_Stub stub(&channel);
+        remote::CcRpcService_Stub stub(&channel);
 
         remote::TransferRequest req;
         req.set_ng_id(ng_id_);

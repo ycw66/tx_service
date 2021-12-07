@@ -6,7 +6,6 @@
 #include "braft/route_table.h"
 #include "brpc/server.h"
 #include "fault/cc_node.h"
-#include "fault/log_replay_handler.h"
 #include "txlog.h"
 
 namespace txservice
@@ -122,7 +121,7 @@ public:
         FaultEntry fentry;
         FaultType fault_enum_type;
         uint32_t i;
-        
+
         for (i = 0; i < type_name_to_enum_vec.size(); i++)
         {
             if (fault_type == type_name_to_enum_vec[i])

@@ -13,19 +13,19 @@
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "moodycamelqueue.h"
-#include "remote/remote_cc_handler.h"
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "txlog.h"
 
-#ifdef _MSC_VER
-#include "remote/remote_cc_handler_win.h"
-#else
-#include "remote/remote_cc_handler_brpc.h"
-#endif
-
 namespace txservice
 {
+/**
+ * @brief TxProcessor is a worker processing concurrency control (cc) requests
+ * on one cc shard (identified by the thread/core ID), advances tx state
+ * machines allocated for this shard and dispatches cc requests from the shard's
+ * tx's to other cc shards, either in the same node or remote nodes .
+ *
+ */
 class TxProcessor
 {
 public:
@@ -35,8 +35,8 @@ public:
         : thd_id_(thd_id),
           tx_cnt_(0),
           terminate_(false),
+          in_sleep_(false),
           local_cc_shards_(shards),
-          cc_handler_(local_cc_shards_.GetCcHandler(thd_id)),
           tx_ws_(),
           ws_mutex_(),
           free_tx_(),
@@ -54,12 +54,21 @@ public:
 
         if (!ret)
         {
+            if (cc_hd_ == nullptr)
+            {
+                cc_hd_ =
+                    std::make_unique<LocalCcHandler>(thd_id_, local_cc_shards_);
+            }
+
             tx = std::make_unique<TransactionExecution>(
-                cc_handler_, txlog_hd_ == nullptr ? nullptr : txlog_hd_.get());
+                cc_hd_.get(), txlog_hd_ == nullptr ? nullptr : txlog_hd_.get());
+        }
+        else
+        {
+            tx->Restart();
         }
 
         TransactionExecution *tx_ptr = tx.get();
-        tx->Reset();
 
         {
             const std::lock_guard<std::mutex> lock(ws_mutex_);
@@ -67,7 +76,7 @@ public:
         }
 
         uint32_t prev_tx_cnt = tx_cnt_.fetch_add(1);
-        if (prev_tx_cnt == 0)
+        if (prev_tx_cnt == 0 && in_sleep_.load(std::memory_order_acquire))
         {
             waiting_cv_.notify_one();
         }
@@ -142,8 +151,8 @@ public:
     {
         using namespace std::chrono_literals;
 
-        auto t200ms = std::chrono::milliseconds(1000);
-        auto t5ms = std::chrono::milliseconds(5);
+        auto t1000ms = std::chrono::milliseconds(1000);
+        auto t100ms = std::chrono::milliseconds(100);
         auto tstart = std::chrono::steady_clock::now();
 
         size_t idle_rnd = 0;
@@ -168,9 +177,9 @@ public:
             if ((idle_rnd & 0x3FF) == 0)
             {
                 // For every 1024 busy wait cycles, checks if the busy wait
-                // window exceeds 200ms.
+                // window exceeds 1000ms.
                 auto tnow = std::chrono::steady_clock::now();
-                if (tnow - tstart >= t200ms)
+                if (tnow - tstart >= t1000ms)
                 {
                     idle_rnd = 0;
 
@@ -179,8 +188,27 @@ public:
                            local_cc_shards_.IsIdle(thd_id_) &&
                            !terminate_.load(std::memory_order_acquire))
                     {
-                        waiting_cv_.wait_for(lk, t5ms);
+                        // SleepNotify() notifies the cc shard that its
+                        // processor is going to enter into the sleep mode. When
+                        // the cc shard receives a cc request and detects that
+                        // the sleep flag is set, the cc shard wakes up the
+                        // processor. Since the sleep flag is not sync'ed via
+                        // the mutex, it is possible that the processor notifies
+                        // the cc shard and the cc shard sends the wakeup signal
+                        // via the condition variable BEFORE the processor
+                        // enters wait_for(), causing the processor to miss the
+                        // wakeup signal. Such a situation is rare given that
+                        // the processor only enters the sleep mode after a
+                        // period of busy wait. In the worse case scenario, the
+                        // processor waits for 100ms to restart to process the
+                        // cc request.
+                        local_cc_shards_.SleepNotify(thd_id_);
+                        in_sleep_.store(true, std::memory_order_release);
+                        waiting_cv_.wait_for(lk, t100ms);
                     }
+
+                    local_cc_shards_.WorkNotify(thd_id_);
+                    in_sleep_.store(false, std::memory_order_release);
                 }
             }
         }
@@ -189,13 +217,11 @@ public:
     size_t thd_id_;
     std::atomic<uint32_t> tx_cnt_;
     std::atomic<bool> terminate_;
+    std::atomic<bool> in_sleep_;
 
-    // TxProcessor process requests on one cc_shard of the local_cc_shards_
-    // which is identified by thd_id.
     LocalCcShards &local_cc_shards_;
-    CcHandler *cc_handler_;
+    std::unique_ptr<LocalCcHandler> cc_hd_;
 
-    // std::map<uint64_t, TransactionExecution::uptr> tx_ws_;
     std::list<TransactionExecution::uptr> tx_ws_;
     std::mutex ws_mutex_;
     moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_tx_;
@@ -213,14 +239,15 @@ class TxService
 {
 public:
     TxService(Catalog *catalog,
+              const std::string &local_path,
               uint32_t node_id = 0,
               uint16_t core_cnt = 1,
-              int listen_port = 8000,
+              std::vector<std::string> *ips = nullptr,
+              std::vector<uint16_t> *ports = nullptr,
               store::DataStoreWriteHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr)
         : local_cc_shards_(node_id, core_cnt, catalog),
-          ckpt_(local_cc_shards_, store_hd),
-          log_hd_(std::move(log_hd))
+          ckpt_(local_cc_shards_, store_hd)
     {
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
@@ -230,16 +257,12 @@ public:
             pool_.emplace_back(std::make_unique<TxProcessor>(
                 thd_idx,
                 local_cc_shards_,
-                log_hd_ == nullptr ? nullptr : log_hd_->Clone()));
+                log_hd == nullptr ? nullptr : log_hd->Clone()));
         }
 
-#ifdef _MSC_VER
-        remote_hd_ =
-            std::make_unique<remote::RemoteCcHandler_Win>(&local_cc_shards_);
-#else
-        remote_hd_ = std::make_unique<remote::RemoteCcHandler_Brpc>(
-            &local_cc_shards_, listen_port);
-#endif
+        Sharder::Instance(
+            node_id, ips, ports, &local_cc_shards_, std::move(log_hd));
+        Sharder::Instance().Init(local_path);
     }
 
     void Start()
@@ -254,6 +277,8 @@ public:
     ~TxService()
     {
         ckpt_.Terminate();
+
+        Sharder::Instance().Shutdown();
 
         for (size_t thd_idx = 0; thd_idx < thd_pool_.size(); ++thd_idx)
         {
@@ -320,8 +345,6 @@ public:
     std::vector<std::unique_ptr<TxProcessor>> pool_;
     std::vector<std::thread> thd_pool_;
     LocalCcShards local_cc_shards_;
-    std::unique_ptr<remote::RemoteCcHandler> remote_hd_;
     Checkpointer ckpt_;
-    std::unique_ptr<TxLog> log_hd_;
 };
 }  // namespace txservice

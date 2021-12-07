@@ -36,7 +36,9 @@ public:
 
     // The number of read/write/scan keys when the tx is considered to be
     // "large"
-    static const size_t LargeTxKeySize = 1000;
+    static const uint32_t LargeTxKeySize = 1000;
+
+    static const uint32_t LoopCnt = 10000;
 
     TransactionExecution(CcHandler *handler,
                          TxLog *tx_log,
@@ -44,7 +46,20 @@ public:
 
     TransactionExecution(const TransactionExecution &) = delete;
 
+    /**
+     * @brief Resets the internal states of the tx state machine. Called when
+     * the tx finishes.
+     *
+     * @param proto The concurrency control protocol.
+     */
     void Reset(CcProtocol proto = CcProtocol::OCC);
+
+    /**
+     * @brief Restarts the tx state machine when it is reused for a new
+     * user-level tx, allowing it to receive tx requests.
+     *
+     */
+    void Restart();
 
     TxResult<Void> *Begin(uint64_t start_ts = 0);
 
@@ -110,21 +125,6 @@ public:
         return current_op_ == nullptr;
     }
 
-    // Forward the operation state machine.
-    // A request may consist of several steps, e.g. for commit request,
-    // it includes operations like setts, writelog, postprocess etc.
-    // Forward is used to whether the previous operation is finished,
-    // and move forward to the next operation if finished.
-    // when current_op_ is null, the state machine ends.
-    void Forward()
-    {
-        if (current_op_ == nullptr)
-            return;
-
-        prev_op_ = current_op_;
-        current_op_->Forward(this);
-    }
-
     // Put request into next_req_ and wait to be processed.
     // The hypothesis is that client can only execute one request at a time,
     // and needs to call request.Wait() to wait for finish signal.
@@ -147,6 +147,25 @@ public:
     void Process(FaultInjectRequest &fi_req);
 
 private:
+    /**
+     * @brief Moves forward the tx state machine and transitions the machine to
+     * next state if not blocked on the current state. A user's tx request
+     * causes the tx state machine to transition. A single tx requests may lead
+     * to a chain of transitions to different states. For example, a commit
+     * request consists of acquiring write intentions, setting the commit
+     * timestamp, writing the tx log and installing committed values. Some
+     * transitions may not return immediately, causing the tx state machine to
+     * be blocked on the current state. The tx state machine employs async
+     * programming. Forward() checks if the current transition finishes, and if
+     * so, moves to the next state, until reaching the final state of the
+     * current tx request and notifying the user the tx request's result. When
+     * being blocked, Forward() returns the control to the processing thread,
+     * allowing it to switch to another tx state machine or process concurrency
+     * control requests directed to the binding shard.
+     *
+     */
+    void Forward();
+
     void PostBegin();
     void PostRead();
     void PostScanOpen();
@@ -176,6 +195,9 @@ private:
                                 const std::string &fault_type,
                                 int node_id);
 
+    bool IsTimeOut();
+    void StartTiming();
+
     enum struct DDLType
     {
         UNKNOWN,
@@ -193,14 +215,18 @@ private:
     // by std::atomic so as to allow a remote cc request's response to match
     // against the tx number before setting the cc handler result. Matching tx
     // number is necessary because the tx may abort proactively, after not
-    // receiving the response of the cc request for an extended period of time,
-    // and the tx state machine is re-used for a new tx.
+    // receiving the response of the cc request for an extended period of time.
     std::atomic<uint64_t> tx_number_;
     int64_t tx_term_;
     uint64_t commit_ts_;
     uint64_t commit_ts_bound_;
     std::atomic<TxnStatus> tx_status_;
     bool finish_;
+
+    // The number of calls to Forward() at a given state.
+    uint32_t state_forward_cnt_;
+    // The local time when the tx machine first moves to its current state.
+    uint64_t state_clock_;
 
     TransactionOperation *current_op_, *prev_op_;
     size_t idle_rep_;

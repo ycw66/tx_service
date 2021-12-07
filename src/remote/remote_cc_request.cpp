@@ -2,22 +2,16 @@
 
 #include "cc/ccm_scanner.h"
 #include "remote/remote_cc_handler.h"
+#include "sharder.h"
 
 txservice::remote::RemoteAcquire::RemoteAcquire()
-    : AcquireCc(),
-      output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      txid_obj_(),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_AcquireResponse);
 
-    cc_res_.post_lambda_ =
-        [this](CcHandlerResult<std::pair<uint64_t, CcEntryAddr>> *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *res)
     {
         output_msg_.set_tx_number(txid_obj_.TxNumber());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
@@ -28,8 +22,8 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 
         if (!res->IsError())
         {
-            resp->set_vali_ts(res->Value().first);
-            const CcEntryAddr &addr = res->Value().second;
+            resp->set_vali_ts(res->Value().last_vali_ts_);
+            const CcEntryAddr &addr = res->Value().cce_addr_;
             CceAddr_msg *resp_addr = resp->mutable_cce_addr();
             if (addr.CcePtr() != 0)
             {
@@ -43,20 +37,46 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
         }
 
         const AcquireRequest &req = input_msg_->acquire_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
+void txservice::remote::RemoteAcquire::Set(std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_acquire_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+
+    const AcquireRequest &req = input_msg->acquire_req();
+    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
+                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
+                    req.vec_idx());
+
+    AcquireCc::Set(&req.tablename(),
+                   &req.key(),
+                   req.key_shard_code(),
+                   &txid_obj_,
+                   input_msg->tx_term(),
+                   req.ts(),
+                   req.insert(),
+                   &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteAcquireTableWriteLockCC::
     RemoteAcquireTableWriteLockCC()
-    : output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      txid_obj_(),
-      cc_res_(nullptr),
-      node_term_(0)
 {
     res_ = &cc_res_;
 
@@ -80,10 +100,42 @@ txservice::remote::RemoteAcquireTableWriteLockCC::
 
         const AcquireTableWriteLockRequest &req =
             input_msg_->acquire_table_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
+}
+
+void txservice::remote::RemoteAcquireTableWriteLockCC::Set(
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt, int64_t node_term)
+{
+    assert(input_msg->has_acquire_table_req());
+
+    res_->Reset();
+    res_->SetRefCnt(core_cnt);
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_table_resp();
+
+    const AcquireTableWriteLockRequest &req = input_msg->acquire_table_req();
+    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
+                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
+                    req.vec_idx());
+
+    table_name_ = &req.tablename();
+    tx_number_ = req.tx_number();
+    node_group_id_ = req.node_group_id();
+
+    unfinish_cnt_.store(core_cnt);
+
+    input_msg_ = std::move(input_msg);
+    node_term_ = node_term;
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }
 
 void txservice::remote::RemoteAcquireTableWriteLockCC::Free()
@@ -96,12 +148,6 @@ void txservice::remote::RemoteAcquireTableWriteLockCC::Free()
 }
 
 txservice::remote::RemoteReleaseTableWriteLock::RemoteReleaseTableWriteLock()
-    : ReleaseTableWriteLockCC(),
-      output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      txid_obj_(),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -121,7 +167,7 @@ txservice::remote::RemoteReleaseTableWriteLock::RemoteReleaseTableWriteLock()
 
         const ReleaseTableWriteLockRequest &req =
             input_msg_->release_table_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
@@ -136,12 +182,40 @@ void txservice::remote::RemoteReleaseTableWriteLock::Free()
     }
 }
 
+void txservice::remote::RemoteReleaseTableWriteLock::Set(
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
+{
+    assert(input_msg->has_release_table_req());
+
+    cc_res_.Reset();
+    cc_res_.SetRefCnt(core_cnt);
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_release_table_resp();
+
+    const ReleaseTableWriteLockRequest &req = input_msg->release_table_req();
+    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
+                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
+                    req.vec_idx());
+
+    ReleaseTableWriteLockCC::Set(&req.tablename(),
+                                 &txid_obj_,
+                                 req.tx_number(),
+                                 req.node_group_id(),
+                                 &cc_res_);
+
+    unfinish_cnt_.store(core_cnt);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ = nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteCommitCreateTable::RemoteCommitCreateTable()
-    : CommitCreateTableCC(),
-      output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -160,7 +234,7 @@ txservice::remote::RemoteCommitCreateTable::RemoteCommitCreateTable()
 
         const CommitCreateTableRequest &req =
             input_msg_->commit_create_table_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
@@ -175,12 +249,37 @@ void txservice::remote::RemoteCommitCreateTable::Free()
     }
 }
 
+void txservice::remote::RemoteCommitCreateTable::Set(
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
+{
+    assert(input_msg->has_commit_create_table_req());
+
+    cc_res_.Reset();
+    cc_res_.SetRefCnt(core_cnt);
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+
+    const CommitCreateTableRequest &req = input_msg->commit_create_table_req();
+
+    bool is_local_req = false;
+    CommitCreateTableCC::Set(&req.tablename(),
+                             req.catalog_str(),
+                             req.node_group_id(),
+                             &cc_res_,
+                             is_local_req);
+
+    unfinish_cnt_.store(core_cnt);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteCommitDropTable::RemoteCommitDropTable()
-    : CommitDropTableCC(),
-      output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -198,7 +297,7 @@ txservice::remote::RemoteCommitDropTable::RemoteCommitDropTable()
         resp->set_error_code(cc_res_.ErrorCode());
 
         const CommitDropTableRequest &req = input_msg_->commit_drop_table_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
@@ -213,12 +312,34 @@ void txservice::remote::RemoteCommitDropTable::Free()
     }
 }
 
+void txservice::remote::RemoteCommitDropTable::Set(
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
+{
+    assert(input_msg->has_commit_drop_table_req());
+
+    cc_res_.Reset();
+    cc_res_.SetRefCnt(core_cnt);
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+
+    const CommitDropTableRequest &req = input_msg->commit_drop_table_req();
+
+    bool is_local_req = false;
+    CommitDropTableCC::Set(
+        &req.tablename(), req.node_group_id(), &cc_res_, is_local_req);
+
+    unfinish_cnt_.store(core_cnt);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteValidate::RemoteValidate()
-    : output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cce_addr_(),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -246,17 +367,43 @@ txservice::remote::RemoteValidate::RemoteValidate()
         }
 
         const ValidateRequest &req = input_msg_->validate_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
+void txservice::remote::RemoteValidate::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_validate_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_validate_resp();
+
+    const ValidateRequest &req = input_msg->validate_req();
+    const CceAddr_msg &cce_addr = req.cce_addr();
+
+    cce_addr_.SetCce(cce_addr.cce_ptr(), cce_addr.term(), req.node_group_id());
+
+    ValidateCc::Set(&cce_addr_,
+                    input_msg->tx_number(),
+                    req.commit_ts(),
+                    req.key_ts(),
+                    req.gap_ts(),
+                    &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemotePostRead::RemotePostRead()
-    : output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cce_addr_(),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -273,39 +420,56 @@ txservice::remote::RemotePostRead::RemotePostRead()
         resp->set_error_code(res->ErrorCode());
 
         const PostReadRequest &req = input_msg_->postread_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
+void txservice::remote::RemotePostRead::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_postread_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
+
+    const PostReadRequest &req = input_msg->postread_req();
+    const CceAddr_msg &cce_addr = req.cce_addr();
+    cce_addr_.SetCce(cce_addr.cce_ptr(), cce_addr.term(), req.node_group_id());
+
+    PostReadCc::Set(&cce_addr_, input_msg->tx_number(), &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteRead::RemoteRead()
-    : ReadCc(),
-      output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ReadResponse);
 
-    cc_res_.post_lambda_ =
-        [this](CcHandlerResult<
-               std::tuple<TxRecord *, uint64_t, CcEntryAddr, RecordStatus>>
-                   *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
 
-        auto &res_tuple = res->Value();
+        const ReadKeyResult &read_result = res->Value();
         ReadResponse *resp = output_msg_.mutable_read_resp();
         resp->set_error_code(res->ErrorCode());
 
         if (!res->IsError())
         {
-            switch (std::get<3>(res_tuple))
+            switch (read_result.rec_status_)
             {
             case RecordStatus::Normal:
                 resp->set_rec_status(ReadResponse::RecordStatus::
@@ -323,26 +487,88 @@ txservice::remote::RemoteRead::RemoteRead()
                 break;
             }
 
-            resp->set_ts(std::get<1>(res_tuple));
+            resp->set_ts(read_result.ts_);
 
-            CcEntryAddr &cce_addr = std::get<2>(res_tuple);
             CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
-            cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
-            cce_addr_msg->set_term(cce_addr.Term());
+            cce_addr_msg->set_cce_ptr(read_result.cce_addr_.CcePtr());
+            cce_addr_msg->set_term(read_result.cce_addr_.Term());
         }
 
         const ReadRequest &req = input_msg_->read_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
+void txservice::remote::RemoteRead::Set(std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_read_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_read_resp();
+
+    const ReadRequest &req = input_msg->read_req();
+    ReadType read_type = ReadType::Inside;
+    switch (req.read_type())
+    {
+    case ReadRequest_ReadType::ReadRequest_ReadType_INSIDE:
+        read_type = ReadType::Inside;
+        break;
+    case ReadRequest_ReadType::ReadRequest_ReadType_OUTSIDE_NORMAL:
+        read_type = ReadType::OutsideNormal;
+        break;
+    case ReadRequest_ReadType::ReadRequest_ReadType_OUTSIDE_DELETED:
+        read_type = ReadType::OutsideDeleted;
+        break;
+    default:
+        break;
+    }
+
+    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10);
+
+    ReadResponse *resp = output_msg_.mutable_read_resp();
+    resp->clear_record();
+    if (read_type == ReadType::Inside)
+    {
+        ReadCc::Set(&req.tablename(),
+                    &req.key(),
+                    req.key_shard_code(),
+                    resp->mutable_record(),
+                    read_type,
+                    input_msg->tx_number(),
+                    req.ts(),
+                    &cc_res_);
+    }
+    else
+    {
+        // The read brings in an external record (from the data store) for
+        // concurrency control
+
+        std::string *out_record = resp->mutable_record();
+        *out_record = req.record();
+
+        ReadCc::Set(&req.tablename(),
+                    &req.key(),
+                    req.key_shard_code(),
+                    out_record,
+                    read_type,
+                    input_msg->tx_number(),
+                    req.ts(),
+                    &cc_res_);
+    }
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemotePostCommit::RemotePostCommit()
-    : output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      cce_addr_(),
-      cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -359,12 +585,54 @@ txservice::remote::RemotePostCommit::RemotePostCommit()
         resp->set_error_code(res->ErrorCode());
 
         const PostCommitRequest &req = input_msg_->postcommit_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
-txservice::remote::RemotePostDelete::RemotePostDelete() : cc_res_(nullptr)
+void txservice::remote::RemotePostCommit::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_postcommit_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
+
+    const PostCommitRequest &post_commit = input_msg->postcommit_req();
+    const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
+
+    if (cce_addr_msg.entry_ptr_case() == CceAddr_msg::EntryPtrCase::kInsertPtr)
+    {
+        cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
+                            cce_addr_msg.term(),
+                            post_commit.node_group_id());
+    }
+    else
+    {
+        cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                         cce_addr_msg.term(),
+                         post_commit.node_group_id());
+    }
+
+    PostCommitCc::Set(&cce_addr_,
+                      input_msg->tx_number(),
+                      post_commit.commit_ts(),
+                      &post_commit.record(),
+                      post_commit.is_deleted(),
+                      &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+txservice::remote::RemotePostDelete::RemotePostDelete()
 {
     res_ = &cc_res_;
 
@@ -381,24 +649,48 @@ txservice::remote::RemotePostDelete::RemotePostDelete() : cc_res_(nullptr)
         resp->set_error_code(res->ErrorCode());
 
         const PostDeleteRequest &req = input_msg_->postdelete_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
+void txservice::remote::RemotePostDelete::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_postdelete_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
+
+    const PostDeleteRequest &post_delete = input_msg->postdelete_req();
+    const CceAddr_msg &cce_addr_msg = post_delete.cce_addr();
+
+    if (cce_addr_msg.entry_ptr_case() == CceAddr_msg::EntryPtrCase::kInsertPtr)
+    {
+        cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
+                            cce_addr_msg.term(),
+                            post_delete.node_group_id());
+    }
+    else
+    {
+        cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                         cce_addr_msg.term(),
+                         post_delete.node_group_id());
+    }
+    PostDeleteCc::Set(&cce_addr_, input_msg->tx_number(), &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteScanOpen::RemoteScanOpen()
-    : output_msg_(),
-      input_msg_(nullptr),
-      hd_(nullptr),
-      node_group_id_(0),
-      key_type_(KeyType::Normal),
-      start_key_str_(nullptr),
-      inclusive_(true),
-      direct_(ScanDirection::Forward),
-      scan_caches_(),
-      is_ckpt_delta_(false),
-      cc_res_(nullptr),
-      unfinish_cnt_(0)
 {
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse);
@@ -443,15 +735,13 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
 
         scan_open->set_node_group_id(node_group_id_);
         const ScanOpenRequest &req = input_msg_->scan_open_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteScanOpen::Set(
-    std::unique_ptr<CcMessage> input_msg,
-    RemoteCcHandler *hd,
-    uint32_t core_cnt)
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
 {
     assert(input_msg->has_scan_open_req());
 
@@ -508,8 +798,12 @@ void txservice::remote::RemoteScanOpen::Set(
 
     unfinish_cnt_.store(core_cnt);
 
-    hd_ = hd;
     input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }
 
 void txservice::remote::RemoteScanOpen::Free()
@@ -521,7 +815,7 @@ void txservice::remote::RemoteScanOpen::Free()
     }
 }
 
-txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch() : cc_res_(nullptr)
+txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 {
     scan_cache_.reserve(ScanCache::ScanBatchSize);
     output_msg_.set_type(
@@ -561,13 +855,13 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch() : cc_res_(nullptr)
             scan_next->mutable_scan_tuple()->Clear();
         }
 
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteScanNextBatch::Set(
-    std::unique_ptr<CcMessage> input_msg, RemoteCcHandler *hd)
+    std::unique_ptr<CcMessage> input_msg)
 {
     /*message ScanNextRequest
     {
@@ -611,12 +905,15 @@ void txservice::remote::RemoteScanNextBatch::Set(
 
     is_ckpt_delta_ = scan_next.ckpt();
 
-    hd_ = hd;
     input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }
 
 txservice::remote::RemoteCommitSk::RemoteCommitSk()
-    : output_msg_(), input_msg_(nullptr), hd_(nullptr), cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
@@ -633,18 +930,59 @@ txservice::remote::RemoteCommitSk::RemoteCommitSk()
         resp->set_error_code(res->ErrorCode());
 
         const CommitSkRequest &req = input_msg_->commit_sk_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
-txservice::remote::RemoteReadOutside::RemoteReadOutside()
-    : input_msg_(nullptr),
-      hd_(nullptr),
-      rec_str_(nullptr),
-      is_deleted_(false),
-      cce_addr_()
+void txservice::remote::RemoteCommitSk::Set(
+    std::unique_ptr<CcMessage> input_msg)
 {
+    assert(input_msg->has_commit_sk_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_read_resp();
+
+    const CommitSkRequest &req = input_msg->commit_sk_req();
+
+    CommitSkCc::Set(&req.tablename(),
+                    &req.sk(),
+                    req.key_shard_code(),
+                    &req.pk(),
+                    req.ts(),
+                    req.is_deleted(),
+                    &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+void txservice::remote::RemoteReadOutside::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_read_outside_req());
+
+    const ReadOutsideRequest &req = input_msg->read_outside_req();
+
+    assert(req.cce_addr().cce_ptr() != 0);
+    cce_addr_.SetCce(
+        req.cce_addr().cce_ptr(), req.cce_addr().term(), req.node_group_id());
+    is_deleted_ = req.is_deleted();
+    rec_str_ = &req.record();
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }
 
 void txservice::remote::RemoteReadOutside::Finish()
@@ -667,7 +1005,30 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
         resp->set_error_code(res->ErrorCode());
 
         const FaultInjectRequest &req = input_msg_->fault_inject_req();
-        hd_->SendResponse(req.src_node_id(), output_msg_);
+        hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
+}
+
+void txservice::remote::RemoteFaultInjectCC::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_fault_inject_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+
+    const FaultInjectRequest &req = input_msg->fault_inject_req();
+
+    FaultInjectCC::Set(&req.fault_name(), &req.fault_type(), &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
 }

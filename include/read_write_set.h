@@ -63,7 +63,7 @@ public:
         }
     }
 
-    void DedupRead(CcEntryAddr &cce_addr)
+    void DedupRead(const CcEntryAddr &cce_addr)
     {
         rset_.erase(cce_addr);
     }

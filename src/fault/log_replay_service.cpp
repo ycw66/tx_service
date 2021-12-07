@@ -1,4 +1,4 @@
-#include "log_replay_handler.h"
+#include "log_replay_service.h"
 
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
@@ -10,43 +10,26 @@ namespace txservice
 {
 namespace fault
 {
-LogReplayHandler::LogReplayHandler(LocalCcShards &local_shards, uint16_t port)
-    : local_shards_(local_shards), replay_server_()
+ReplayService::ReplayService(LocalCcShards &local_shards)
+    : local_shards_(local_shards)
 {
-    if (replay_server_.AddService(this, brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
-    {
-        LOG(ERROR) << "Fail to add the log replay service.";
-    }
-
-    brpc::ServerOptions options;
-    options.idle_timeout_sec = -1;
-    int error_code = replay_server_.Start(port, &options);
-    if (error_code != 0)
-    {
-        LOG(ERROR) << "Fail to start the log replay service. Error code:"
-                   << error_code;
-    }
-    else
-    {
-        LOG(INFO) << "Start the log replay service at the port " << port;
-    }
 }
 
-LogReplayHandler::~LogReplayHandler()
+ReplayService::~ReplayService()
 {
+    std::unique_lock<std::mutex> lk(inbound_mux_);
     for (auto &stream_id : inbound_streams_)
     {
         brpc::StreamClose(stream_id);
     }
 
-    replay_server_.Stop(0);
-    replay_server_.Join();
+    inbound_cv_.wait(lk, [this]() { return inbound_streams_.size() == 0; });
 }
 
-void LogReplayHandler::Connect(::google::protobuf::RpcController *controller,
-                               const ::txlog::LogReplayConnectRequest *request,
-                               ::txlog::LogReplayConnectResponse *response,
-                               ::google::protobuf::Closure *done)
+void ReplayService::Connect(::google::protobuf::RpcController *controller,
+                            const ::txlog::LogReplayConnectRequest *request,
+                            ::txlog::LogReplayConnectResponse *response,
+                            ::google::protobuf::Closure *done)
 {
     brpc::StreamId stream_socket;
     brpc::ClosureGuard done_guard(done);
@@ -68,9 +51,9 @@ void LogReplayHandler::Connect(::google::protobuf::RpcController *controller,
     inbound_streams_.emplace(stream_socket);
 }
 
-int LogReplayHandler::on_received_messages(brpc::StreamId stream_id,
-                                           butil::IOBuf *const messages[],
-                                           size_t size)
+int ReplayService::on_received_messages(brpc::StreamId stream_id,
+                                        butil::IOBuf *const messages[],
+                                        size_t size)
 {
     std::vector<::txlog::ReplayMessage> msg_vec(size);
     std::vector<std::unique_ptr<ReplayLogCc>> cc_req_vec;
@@ -232,6 +215,16 @@ int LogReplayHandler::on_received_messages(brpc::StreamId stream_id,
     }
 
     return 0;
+}
+
+void ReplayService::on_closed(brpc::StreamId id)
+{
+    std::unique_lock<std::mutex> lk(inbound_mux_);
+    inbound_streams_.erase(id);
+    if (inbound_streams_.size() == 0)
+    {
+        inbound_cv_.notify_one();
+    }
 }
 }  // namespace fault
 }  // namespace txservice

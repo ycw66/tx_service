@@ -15,6 +15,15 @@ struct CcRequestBase
 {
 public:
     virtual ~CcRequestBase() = default;
+
+    /**
+     * @brief Processes the cc request toward the input concurrency control (cc)
+     * shard.
+     *
+     * @param ccs The cc shard on which the cc request is processed.
+     * @return true, if the request needs to be freed and recycled; false, if
+     * the request should not be freed and recycled.
+     */
     virtual bool Execute(CcShard &ccs) = 0;
 
     bool InUse() const

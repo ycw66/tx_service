@@ -4,6 +4,7 @@
 #include <brpc/server.h>
 #include <brpc/stream.h>
 
+#include <condition_variable>
 #include <mutex>
 #include <unordered_set>
 
@@ -18,15 +19,15 @@ namespace fault
 {
 class CcNode;
 
-class LogReplayHandler : public brpc::StreamInputHandler,
-                         public ::txlog::LogReplayService
+class ReplayService : public brpc::StreamInputHandler,
+                      public ::txlog::LogReplayService
 {
 public:
-    LogReplayHandler() = delete;
+    ReplayService() = delete;
 
-    LogReplayHandler(LocalCcShards &local_shards, uint16_t port);
+    ReplayService(LocalCcShards &local_shards);
 
-    ~LogReplayHandler();
+    ~ReplayService();
 
     void Connect(::google::protobuf::RpcController *controller,
                  const ::txlog::LogReplayConnectRequest *request,
@@ -41,19 +42,13 @@ public:
     {
     }
 
-    void on_closed(brpc::StreamId id) override
-    {
-    }
+    void on_closed(brpc::StreamId id) override;
 
 private:
     LocalCcShards &local_shards_;
-    brpc::Server replay_server_;
-    uint32_t log_group_cnt_;
-    // Log groups that have finished log replay
     std::unordered_set<brpc::StreamId> inbound_streams_;
     std::mutex inbound_mux_;
-
-    // CcNode &cc_node_;
+    std::condition_variable inbound_cv_;
 };
 }  // namespace fault
 }  // namespace txservice
