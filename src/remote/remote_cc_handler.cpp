@@ -313,6 +313,7 @@ void txservice::remote::RemoteCcHandler::CommitCreateTable(
     uint32_t src_node_id,
     const TableName &table_name,
     std::string catalog_str,
+    int64_t tx_term,
     const TxId &txid,
     uint64_t ts,
     uint32_t node_group_id,
@@ -324,6 +325,7 @@ void txservice::remote::RemoteCcHandler::CommitCreateTable(
         CcMessage::MessageType::CcMessage_MessageType_CommitCreateTableRequest);
     send_msg.set_tx_number(txid.TxNumber());
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
 
     CommitCreateTableRequest *acq = send_msg.mutable_commit_create_table_req();
     acq->set_src_node_id(src_node_id);
@@ -349,6 +351,7 @@ void txservice::remote::RemoteCcHandler::CommitCreateTable(
 void txservice::remote::RemoteCcHandler::CommitDropTable(
     uint32_t src_node_id,
     const TableName &table_name,
+    int64_t tx_term,
     const TxId &txid,
     uint64_t ts,
     uint32_t node_group_id,
@@ -360,6 +363,7 @@ void txservice::remote::RemoteCcHandler::CommitDropTable(
         CcMessage::MessageType::CcMessage_MessageType_CommitDropTableRequest);
     send_msg.set_tx_number(txid.TxNumber());
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
 
     CommitDropTableRequest *acq = send_msg.mutable_commit_drop_table_req();
     acq->set_src_node_id(src_node_id);
@@ -639,6 +643,8 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     uint32_t src_node_id,
     const std::string &fault_name,
     const std::string &fault_type,
+    int64_t tx_term,
+    const TxId &txid,
     int node_id,
     CcHandlerResult<bool> &hres)
 {
@@ -647,6 +653,8 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_tx_number(txid.TxNumber());
 
     FaultInjectRequest *fi_req = send_msg.mutable_fault_inject_req();
     fi_req->set_src_node_id(src_node_id);

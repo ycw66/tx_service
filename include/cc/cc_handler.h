@@ -139,6 +139,7 @@ public:
     virtual void CommitCreateTable(const TableName &table_name,
                                    const unsigned char *catalog_image_,
                                    size_t catalog_length_,
+                                   int64_t tx_term,
                                    const TxId &txid,
                                    uint64_t ts,
                                    CcHandlerResult<Void> &hresult) = 0;
@@ -151,6 +152,7 @@ public:
     /// <param name="ts"></param>
     /// <param name="hresult"></param>
     virtual void CommitDropTable(const TableName &table_name,
+                                 int64_t tx_term,
                                  const TxId &txid,
                                  uint64_t ts,
                                  CcHandlerResult<Void> &hresult) = 0;
@@ -276,6 +278,8 @@ public:
 
     virtual void FaultInject(const std::string &fault_name,
                              const std::string &fault_type,
+                             int64_t tx_term,
+                             const TxId &txid,
                              int node_id,
                              CcHandlerResult<bool> &hres) = 0;
 

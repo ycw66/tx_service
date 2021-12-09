@@ -71,6 +71,7 @@ private:
     CcRequestPool<RemoteCommitCreateTable> commit_create_table_pool;
     CcRequestPool<RemoteReleaseTableWriteLock> release_table_write_lock_pool;
     CcRequestPool<RemoteCommitDropTable> commit_drop_table_pool;
+    CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
     // CcRequestPool<NegotiateCc> negoti_pool;
 
     friend class remote::CcStreamSender;

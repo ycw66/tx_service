@@ -83,6 +83,7 @@ public:
     void CommitCreateTable(uint32_t src_node_id,
                            const TableName &table_name,
                            std::string catalog_str,
+                           int64_t tx_term,
                            const TxId &txid,
                            uint64_t ts,
                            uint32_t node_group_id,
@@ -90,6 +91,7 @@ public:
 
     void CommitDropTable(uint32_t src_node_id,
                          const TableName &table_name,
+                         int64_t tx_term,
                          const TxId &txid,
                          uint64_t ts,
                          uint32_t node_group_id,
@@ -176,6 +178,8 @@ public:
     void FaultInject(uint32_t src_node_id,
                      const std::string &fault_name,
                      const std::string &fault_type,
+                     int64_t tx_term,
+                     const TxId &txid,
                      int node_id,
                      CcHandlerResult<bool> &hres);
 

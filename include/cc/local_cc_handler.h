@@ -99,11 +99,13 @@ public:
     void CommitCreateTable(const TableName &table_name,
                            const unsigned char *catalog_image_,
                            size_t catalog_length_,
+                           int64_t tx_term,
                            const TxId &txid,
                            uint64_t ts,
                            CcHandlerResult<Void> &hresult) override;
 
     void CommitDropTable(const TableName &table_name,
+                         int64_t tx_term,
                          const TxId &txid,
                          uint64_t ts,
                          CcHandlerResult<Void> &hresult) override;
@@ -238,6 +240,8 @@ public:
 
     void FaultInject(const std::string &fault_name,
                      const std::string &fault_type,
+                     int64_t tx_term,
+                     const TxId &txid,
                      int node_id,
                      CcHandlerResult<bool> &hres) override;
 

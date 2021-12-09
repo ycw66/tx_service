@@ -209,7 +209,7 @@ void txservice::remote::RemoteReleaseTableWriteLock::Set(
 
     input_msg_ = std::move(input_msg);
 
-    if (hd_ = nullptr)
+    if (hd_ == nullptr)
     {
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
@@ -999,6 +999,8 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<bool> *res)
     {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         FaultInjectResponse *resp = output_msg_.mutable_fault_inject_resp();

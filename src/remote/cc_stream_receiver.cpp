@@ -898,6 +898,45 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                        commit_sk_req);
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest:
+    {
+        RemoteFaultInjectCC *fault_inject_req =
+            fault_inject_pool_.NextRequest();
+        fault_inject_req->Set(std::move(msg));
+        local_shards_.EnqueueCcRequest(0, fault_inject_req);
+
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_FaultInjectResponse:
+    {
+        assert(msg->has_fault_inject_resp());
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx node has failed. Pointer stability does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        CcHandlerResult<bool> *hd_res =
+            reinterpret_cast<CcHandlerResult<bool> *>(msg->handler_addr());
+
+        const FaultInjectResponse &fi_res = msg->fault_inject_resp();
+
+        if (fi_res.error_code() != 0)
+        {
+            hd_res->SetError(fi_res.error_code());
+        }
+        else
+        {
+            hd_res->SetFinished();
+        }
+
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
     default:
         break;
     }

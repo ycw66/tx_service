@@ -301,6 +301,7 @@ void txservice::LocalCcHandler::CommitCreateTable(
     const TableName &table_name,
     const unsigned char *catalog_image_,
     size_t catalog_length_,
+    int64_t tx_term,
     const TxId &txid,
     uint64_t ts,
     CcHandlerResult<Void> &hresult)
@@ -337,6 +338,7 @@ void txservice::LocalCcHandler::CommitCreateTable(
             remote_hd_.CommitCreateTable(cc_shards_.node_id_,
                                          table_name,
                                          catalog_str,
+                                         tx_term,
                                          txid,
                                          ts,
                                          ng_id,
@@ -350,6 +352,7 @@ void txservice::LocalCcHandler::CommitCreateTable(
   Delete table catalog and refresh monograph share on runtime
  */
 void txservice::LocalCcHandler::CommitDropTable(const TableName &table_name,
+                                                int64_t tx_term,
                                                 const TxId &txid,
                                                 uint64_t ts,
                                                 CcHandlerResult<Void> &hresult)
@@ -379,8 +382,13 @@ void txservice::LocalCcHandler::CommitDropTable(const TableName &table_name,
         }
         else
         {
-            remote_hd_.CommitDropTable(
-                cc_shards_.node_id_, table_name, txid, ts, ng_id, hresult);
+            remote_hd_.CommitDropTable(cc_shards_.node_id_,
+                                       table_name,
+                                       tx_term,
+                                       txid,
+                                       ts,
+                                       ng_id,
+                                       hresult);
         }
     }
 }
@@ -771,6 +779,8 @@ void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
 
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                             const std::string &fault_type,
+                                            int64_t tx_term,
+                                            const TxId &txid,
                                             int node_id,
                                             CcHandlerResult<bool> &hres)
 {
@@ -783,8 +793,13 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
     }
     else
     {
-        remote_hd_.FaultInject(
-            cc_shards_.node_id_, fault_name, fault_type, node_id, hres);
+        remote_hd_.FaultInject(cc_shards_.node_id_,
+                               fault_name,
+                               fault_type,
+                               tx_term,
+                               txid,
+                               node_id,
+                               hres);
     }
 }
 

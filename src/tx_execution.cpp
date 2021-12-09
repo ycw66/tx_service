@@ -718,7 +718,8 @@ TxResult<bool> *TransactionExecution::FaultInject(const std::string &fault_name,
     CcHandlerResult<bool> &hres = fault_inject_op.cc_result_;
     hres.Reset();
 
-    handler->FaultInject(fault_name, fault_type, node_id, hres);
+    handler->FaultInject(
+        fault_name, fault_type, tx_term_, txid_, node_id, hres);
 
     return bool_resp_;
 }
@@ -1242,6 +1243,7 @@ void TransactionExecution::PostProcessCreateTable()
         handler->CommitCreateTable(*mysql_table_name_,
                                    catalog_image_,
                                    catalog_length_,
+                                   tx_term_,
                                    txid_,
                                    commit_ts_,
                                    hres);
@@ -1257,7 +1259,8 @@ void TransactionExecution::PostProcessDropTable()
         CcHandlerResult<Void> &hres = post_process_ddl_op.results_;
         hres.Reset();
 
-        handler->CommitDropTable(*mysql_table_name_, txid_, commit_ts_, hres);
+        handler->CommitDropTable(
+            *mysql_table_name_, tx_term_, txid_, commit_ts_, hres);
     }
 }
 
