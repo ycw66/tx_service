@@ -207,6 +207,7 @@ void UploadOperation::Forward(TransactionExecution *txm)
                 // Assigns to the write entry the cc entry address obtained
                 // in the acquire phase.
                 write_entry.cce_addr_ = results_.at(idx).Value().cce_addr_;
+                assert(write_entry.cce_addr_.CcePtr() != 0);
                 txm->rw_set_.DedupRead(write_entry.cce_addr_);
             }
             else if (results_.at(idx).ErrorCode() == -1)
@@ -680,6 +681,13 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 
         txm->PostScanOpen();
     }
+}
+
+void ScanNextOperation::Reset()
+{
+    cc_result_.Reset();
+    scanner_ = nullptr;
+    alias_ = 0;
 }
 
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)

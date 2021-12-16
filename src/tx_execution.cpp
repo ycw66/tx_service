@@ -311,6 +311,7 @@ TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
     CcScanner &scanner = *it->second;
 
     current_op_ = &scan_next_;
+    scan_next_.Reset();
     scan_next_.Set(alias, &scanner);
 
     if (kvp_resp_ == nullptr)
@@ -352,6 +353,7 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 
 void TransactionExecution::PostScanNext()
 {
+    prev_op_ = current_op_;
     current_op_ = nullptr;
     if (scan_next_.cc_result_.IsError())
     {
@@ -376,6 +378,7 @@ void TransactionExecution::PostScanNext()
                                    commit_ts_bound_,
                                    *scan_next_.scanner_,
                                    scan_next_.cc_result_);
+            current_op_ = prev_op_;
             return;
         }
     }

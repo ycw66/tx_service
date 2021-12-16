@@ -255,6 +255,8 @@ struct ScanNextOperation : TransactionOperation
         scanner_ = scanner;
     }
 
+    void Reset();
+
     CcHandlerResult<ScanNextResult> cc_result_;
     size_t alias_{0};
     CcScanner *scanner_{nullptr};
