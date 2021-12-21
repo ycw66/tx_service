@@ -22,13 +22,13 @@ public:
     TemplateCcMap(CcShard *shard,
                   const Schema *key_schema = nullptr,
                   const Schema *rec_schema = nullptr)
-        : CcMap(shard),
-          ccm_(),
-          neg_inf_(this),
-          pos_inf_(this),
-          key_schema_(key_schema),
-          record_schema_(rec_schema)
+        : CcMap(shard), ccm_(), neg_inf_(this), pos_inf_(this)
     {
+        // need to make a copy of key_schema and rec_schema to manage the
+        // lifecycle of schema by ccmap.
+        key_schema_.reset(key_schema->Clone().release());
+        record_schema_.reset(rec_schema->Clone().release());
+
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
 
@@ -105,7 +105,7 @@ public:
             assert(key_str != nullptr);
 
             size_t offset = 0;
-            decoded_key.Deserialize(key_str->data(), offset, key_schema_);
+            decoded_key.Deserialize(key_str->data(), offset, key_schema_.get());
             target_key = &decoded_key;
         }
 
@@ -607,7 +607,7 @@ public:
                 KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
-                    req.key_str_->data(), offset, key_schema_);
+                    req.key_str_->data(), offset, key_schema_.get());
 
                 cce = FindEmplace(decoded_key, req.ts_);
 
@@ -967,7 +967,7 @@ public:
         default:
             size_t offset = 0;
             key_obj.Deserialize(
-                req.start_key_str_->data(), offset, key_schema_);
+                req.start_key_str_->data(), offset, key_schema_.get());
             look_key = &key_obj;
             break;
         }
@@ -1200,7 +1200,7 @@ public:
 
         while (offset < log_blob.size())
         {
-            key.Deserialize(log_blob.data(), offset, key_schema_);
+            key.Deserialize(log_blob.data(), offset, key_schema_.get());
             uint8_t delete_flag =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
@@ -1275,8 +1275,8 @@ public:
     std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const override
     {
-        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(direction,
-                                                                 key_schema_);
+        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
+            direction, key_schema_.get());
     }
 
     size_t VerifyOrdering() override
@@ -1330,18 +1330,18 @@ public:
 
     const Schema *KeySchema() const override
     {
-        return key_schema_;
+        return key_schema_.get();
     }
 
     const Schema *RecordSchema() const override
     {
-        return record_schema_;
+        return record_schema_.get();
     }
 
     std::unique_ptr<CcMap> Clone() const override
     {
         return std::make_unique<TemplateCcMap<KeyT, ValueT>>(
-            shard_, key_schema_, record_schema_);
+            shard_, key_schema_.get(), record_schema_.get());
     }
 
 private:
@@ -1575,7 +1575,7 @@ private:
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
-    const Schema *const key_schema_;
-    const Schema *const record_schema_;
+    std::unique_ptr<const Schema> key_schema_;
+    std::unique_ptr<const Schema> record_schema_;
 };
 }  // namespace txservice

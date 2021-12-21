@@ -335,7 +335,7 @@ public:
                 size_t offset = 0;
                 look_sk.Deserialize(req.start_key_str_->data(),
                                     offset,
-                                    compound_schema_.sk_schema_);
+                                    compound_schema_.sk_schema_.get());
                 floor_cce = Floor(look_sk, req.direct_, req.inclusive_);
             }
 
@@ -384,7 +384,7 @@ public:
                 size_t offset = 0;
                 look_sk.Deserialize(req.start_key_str_->data(),
                                     offset,
-                                    compound_schema_.sk_schema_);
+                                    compound_schema_.sk_schema_.get());
                 cce = Floor(look_sk, req.direct_, req.inclusive_);
             }
 
@@ -504,13 +504,15 @@ public:
         {
             SkT sk_obj;
             size_t offset = 0;
-            sk_obj.Deserialize(
-                req.skey_str_->data(), offset, compound_schema_.sk_schema_);
+            sk_obj.Deserialize(req.skey_str_->data(),
+                               offset,
+                               compound_schema_.sk_schema_.get());
 
             PkT pk_obj;
             offset = 0;
-            pk_obj.Deserialize(
-                req.pkey_str_->data(), offset, compound_schema_.pk_schema_);
+            pk_obj.Deserialize(req.pkey_str_->data(),
+                               offset,
+                               compound_schema_.pk_schema_.get());
 
             cce = FindEmplace(sk_obj, pk_obj, req.ts_);
         }
@@ -742,7 +744,9 @@ public:
     std::unique_ptr<CcMap> Clone() const override
     {
         return std::make_unique<SkCcMap<SkT, PkT>>(
-            shard_, compound_schema_.sk_schema_, compound_schema_.pk_schema_);
+            shard_,
+            compound_schema_.sk_schema_.get(),
+            compound_schema_.pk_schema_.get());
     }
 
 private:

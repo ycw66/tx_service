@@ -79,8 +79,8 @@ public:
         if (schema != nullptr)
         {
             const SkSchema *sk_sch = static_cast<const SkSchema *>(schema);
-            sk_schema = sk_sch->sk_schema_;
-            pk_schema = sk_sch->pk_schema_;
+            sk_schema = sk_sch->sk_schema_.get();
+            pk_schema = sk_sch->pk_schema_.get();
         }
 
         sk_.Deserialize(buf, offset, sk_schema);
