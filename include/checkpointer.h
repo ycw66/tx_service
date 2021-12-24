@@ -54,7 +54,7 @@ public:
      * Normalize the table name which is consistent with storage engine, ie.
      * Cassandra.
      * Input table name format: ./dbname/tablename
-     * Normalized table name format: dbname.tablename
+     * Normalized table name format: dbname_tablename
      */
     std::string NormalizeTablename(const std::string &name)
     {
@@ -62,7 +62,7 @@ public:
         size_t slash_pos = norm_name.find_first_of('/');
         norm_name = norm_name.substr(slash_pos + 1);
         slash_pos = norm_name.find_first_of('/');
-        norm_name.at(slash_pos) = '.';
+        norm_name.at(slash_pos) = '_';
 
         return norm_name;
     }
