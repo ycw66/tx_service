@@ -54,12 +54,6 @@ public:
 
         if (!ret)
         {
-            if (cc_hd_ == nullptr)
-            {
-                cc_hd_ =
-                    std::make_unique<LocalCcHandler>(thd_id_, local_cc_shards_);
-            }
-
             tx = std::make_unique<TransactionExecution>(
                 cc_hd_.get(), txlog_hd_ == nullptr ? nullptr : txlog_hd_.get());
         }
@@ -214,6 +208,15 @@ public:
         }
     }
 
+    void InitializeLocalHandler()
+    {
+        if (cc_hd_ == nullptr)
+        {
+            cc_hd_ =
+                std::make_unique<LocalCcHandler>(thd_id_, local_cc_shards_);
+        }
+    }
+
     size_t thd_id_;
     std::atomic<uint32_t> tx_cnt_;
     std::atomic<bool> terminate_;
@@ -270,6 +273,8 @@ public:
         for (size_t thd_idx = 0; thd_idx < pool_.size(); ++thd_idx)
         {
             TxProcessor *tp = pool_[thd_idx].get();
+
+            tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
     }
