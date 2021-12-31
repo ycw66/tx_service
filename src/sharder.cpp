@@ -183,6 +183,7 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
+    // start braft state machine by initialize braft node.
     for (auto rit = cc_nodes_.begin(); rit != cc_nodes_.end(); ++rit)
     {
         rit->second->Start();
@@ -255,6 +256,7 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     node_group_id.append(std::to_string(ng_id));
 
     std::lock_guard<std::mutex> lk(mux_);
+    // Blocking the thread until query_leader finishes
     butil::Status st = braft::rtb::refresh_leader(node_group_id, 1000);
     if (!st.ok())
     {
@@ -263,7 +265,7 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     }
 
     braft::PeerId leader;
-    // Selects the leader of the target group from RouteTable
+    // Get the cached leader of the target group from RouteTable
     if (braft::rtb::select_leader(node_group_id, &leader) != 0)
     {
         std::cout << "Fail to select the leader." << std::endl;

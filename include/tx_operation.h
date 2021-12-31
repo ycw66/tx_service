@@ -54,21 +54,27 @@ public:
     std::atomic<bool> error_{false};
 };
 
-struct UploadOperation : TransactionOperation
+/**
+ * @brief
+ * Acquire write lock operation.
+ * Write are cached in local rwset for each transaction, hence no write lock is
+ * held at write operation. This operation is called right after Commit request.
+ */
+struct AcquireWriteOperation : TransactionOperation
 {
 public:
-    UploadOperation(TransactionExecution *txm);
+    AcquireWriteOperation(TransactionExecution *txm);
     void Resize(size_t new_size);
-    void Reset(size_t upload_cnt);
+    void Reset(size_t acquire_write_cnt);
     void Forward(TransactionExecution *txm) override;
 
     std::vector<CcHandlerResult<AcquireKeyResult>> results_;
-    std::vector<WriteSetEntry *> upload_entries_{16};
-    uint32_t upload_cnt_{0};
+    std::vector<WriteSetEntry *> acquire_write_entries_{16};
+    uint32_t acquire_write_cnt_{0};
     std::atomic<uint32_t> finish_cnt_{0};
     std::atomic<uint32_t> fail_cnt_{0};
-    // Number of remote keys on which the upload operation needs to acquire
-    // write intentions/locks.
+    // Number of remote keys on which the acquire write operation needs to
+    // acquire write intentions/locks.
     std::atomic<int32_t> remote_ack_cnt_{0};
 };
 
@@ -197,7 +203,7 @@ struct PostProcessOp : TransactionOperation
 
     std::vector<CcHandlerResult<Void>> write_results_;
     std::vector<CcHandlerResult<std::vector<TxId>>> read_results_;
-    size_t upload_cnt_{0};
+    size_t acquire_write_cnt_{0};
     std::atomic<size_t> finish_cnt_{0};
 };
 

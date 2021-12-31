@@ -59,14 +59,25 @@ public:
     {
     }
 
+    /**
+     * @brief check whether the entry can be kicked out from ccmap, iff no key
+     * lock, no gap lock and not 'dirty' entry (entry which has been
+     * checkpointed since the last change).
+     *
+     * @return true: entry can be kicked out.
+     */
     bool IsFree() const
     {
         return key_lock_.IsEmpty() && gap_lock_.IsEmpty() &&
                commit_ts_ <= ckpt_ts_.load(std::memory_order_acquire);
     }
 
+    // Lru link which records the age of entries, when ccmap is full, kickout
+    // the entries by the order of lru.
     LruEntry *lru_prev_{nullptr};
     LruEntry *lru_next_{nullptr};
+    // Checkpoint link which is used by CkptScanCc to iterate and generate the
+    // list of payload_ckpt_.
     LruEntry *ckpt_prev_{nullptr};
     LruEntry *ckpt_next_{nullptr};
     CcMap *const parent_map_;

@@ -702,6 +702,9 @@ public:
         return nullptr;
     }
 
+    /**
+     * Used for debug to verify the map_link is complete.
+     */
     size_t VerifyOrdering() override
     {
         CcEntry<KeyPair, KeyPtrPair> *cce_prev = nullptr;

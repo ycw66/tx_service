@@ -81,8 +81,8 @@ public:
           req_buf_(),
           size_(0),
           tx_vec_(),
-          tx_head_(0),
-          tx_cnt_(0),
+          next_tx_idx_(0),
+          next_tx_ident_(0),
           ts_base_(base_ts),
           head_cce_(nullptr),
           tail_cce_(nullptr),
@@ -172,7 +172,11 @@ public:
         return req_cnt;
     }
 
-    TEntry &NewTx(uint64_t start_ts = 0);
+    /**
+     * @brief Find an available TEntry in tranaction array and initialize it.
+     *
+     */
+    TEntry &NewTx();
 
     TEntry *LocateTx(const TxId &tx_id);
 
@@ -187,6 +191,10 @@ public:
 
     size_t Clean();
 
+    /**
+     * @brief Get the number of ccentries in this ccshard
+     *
+     */
     size_t Size() const
     {
         return size_;
@@ -278,6 +286,10 @@ public:
         }
     }
 
+    /**
+     * @brief detach the entry from checkpoint link list.
+     *
+     */
     static void DetachCkpt(LruEntry *entry)
     {
         LruEntry *prev = entry->ckpt_prev_;
@@ -469,18 +481,23 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, TableCatalog>>
         failover_table_metadata_;
 
+    // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
 
-    /// <summary>
-    /// A variable tracking the cc maps' size in memory
-    /// </summary>
-    uint64_t size_;
-
+    // all the transactions started on this ccshard. Some txs are Ongoing while
+    // others are Available, new transaction request has to traverse the array
+    // and find an available one.
     std::vector<TEntry> tx_vec_;
-    uint32_t tx_head_;
-    uint32_t tx_cnt_;
+    // pointer to the next slot in tx array.
+    uint32_t next_tx_idx_;
+    // tx identifier inside a CPU core. It's a uint32 value and will become 0
+    // after wraparound. Global tx_number is 64 bits: higher 32 bits are
+    // global_core_id, while lower 32 bits are tx_ident.
+    uint32_t next_tx_ident_;
+    // the base timestamp of ccshard which will be adjust by local clock and
+    // commit timestamp of transaction on this ccshard to keep it up to date.
     std::atomic<uint64_t> ts_base_;
 
     /**
@@ -489,6 +506,9 @@ private:
      *
      */
     LruEntry head_cce_, tail_cce_;
+
+    // the number of ccentry in all the ccmap of this ccshard.
+    uint64_t size_;
 
     /**
      * @brief A collection of active tx's that have acquired locks/intentions in
@@ -516,7 +536,8 @@ private:
      */
     std::atomic<bool> processor_sleep_;
 
-    // Catalog handlers
+    // Catalog handler which is used to execute catalog related callback
+    // function at runtime side.
     Catalog *catalog_;
 
     // The number of cc entries to free in one invocation of Clean().

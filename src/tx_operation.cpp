@@ -67,7 +67,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
     // cancel if the remote node is unresponsive.
 }
 
-UploadOperation::UploadOperation(TransactionExecution *txm)
+AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
 {
     results_.reserve(16);
 
@@ -92,16 +92,16 @@ UploadOperation::UploadOperation(TransactionExecution *txm)
     }
 }
 
-void UploadOperation::Reset(size_t upload_cnt)
+void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
 {
     finish_cnt_.store(0);
     fail_cnt_.store(0);
     remote_ack_cnt_.store(0);
-    upload_cnt_ = upload_cnt;
-    Resize(upload_cnt);
+    acquire_write_cnt_ = acquire_write_cnt;
+    Resize(acquire_write_cnt);
 }
 
-void UploadOperation::Resize(size_t new_size)
+void AcquireWriteOperation::Resize(size_t new_size)
 {
     size_t old_size = results_.size();
 
@@ -112,8 +112,8 @@ void UploadOperation::Resize(size_t new_size)
             size_t shrink_size = std::max(new_size, (size_t) 16);
             results_.erase(results_.begin() + shrink_size, results_.end());
             results_.shrink_to_fit();
-            upload_entries_.resize(shrink_size);
-            upload_entries_.shrink_to_fit();
+            acquire_write_entries_.resize(shrink_size);
+            acquire_write_entries_.shrink_to_fit();
         }
     }
     else
@@ -136,11 +136,11 @@ void UploadOperation::Resize(size_t new_size)
             };
         }
 
-        upload_entries_.resize(new_size);
+        acquire_write_entries_.resize(new_size);
     }
 }
 
-void UploadOperation::Forward(TransactionExecution *txm)
+void AcquireWriteOperation::Forward(TransactionExecution *txm)
 {
     // Each write-set key acquires a write lock and gets the key's last
     // validation ts and commit ts. If the write key has been read before and
@@ -155,9 +155,9 @@ void UploadOperation::Forward(TransactionExecution *txm)
         if (time_out)
         {
             // At least one remote acquire request has not received
-            // acknowledgement and the upload phase has timed out. Forces
+            // acknowledgement and the acquire write phase has timed out. Forces
             // un-acknowledged requests to finish with an error.
-            for (size_t idx = 0; idx < upload_cnt_; ++idx)
+            for (size_t idx = 0; idx < acquire_write_cnt_; ++idx)
             {
                 CcHandlerResult<AcquireKeyResult> &hd_result = results_.at(idx);
                 const AcquireKeyResult &acquire_key_res = hd_result.Value();
@@ -205,25 +205,25 @@ void UploadOperation::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->PostUpload();
+                txm->PostAcquireWrite();
             }
         }
     }
-    else if (finish_cnt_.load() == upload_cnt_)
+    else if (finish_cnt_.load() == acquire_write_cnt_)
     {
         // TODO: for locking-based protocols, though the tx may be blocked
         // arbitrarily long, after all acquire requests are acknowledged, we
         // still need to periodically check liveness of the remote node.
         std::unordered_set<uint32_t> outdated_node_set;
 
-        for (size_t idx = 0; idx < upload_cnt_; ++idx)
+        for (size_t idx = 0; idx < acquire_write_cnt_; ++idx)
         {
             const AcquireKeyResult &acquire_key_res = results_.at(idx).Value();
             const CcEntryAddr &addr = acquire_key_res.cce_addr_;
 
             if (!results_.at(idx).IsError())
             {
-                WriteSetEntry &write_entry = *upload_entries_.at(idx);
+                WriteSetEntry &write_entry = *acquire_write_entries_.at(idx);
                 // Assigns to the write entry the cc entry address obtained
                 // in the acquire phase.
                 write_entry.cce_addr_ = addr;
@@ -252,7 +252,7 @@ void UploadOperation::Forward(TransactionExecution *txm)
         }
         else
         {
-            txm->PostUpload();
+            txm->PostAcquireWrite();
         }
     }
 }
@@ -463,7 +463,14 @@ void ValidateOperation::Forward(TransactionExecution *txm)
             }
             else
             {
-                // Skips tx negotiations for now.
+                // If some entries's validation results contain conflict
+                // transactions, e.g. the target entry holds a write lock during
+                // validation. Abort the transaction now.
+                // TODO: Abort() is too strict here. Consider the following
+                // cases: 1. the commit_ts of the write(held write lock)
+                // transaction is bigger than validate transaction, 2. the write
+                // transaction abort when we re-check at here. The above cases
+                // allow the validate transaction to commit successfully.
                 txm->Abort();
             }
         }
@@ -577,7 +584,7 @@ PostProcessOp::PostProcessOp(TransactionExecution *txm)
 void PostProcessOp::Reset(size_t read_cnt, size_t write_cnt)
 {
     finish_cnt_.store(0);
-    upload_cnt_ = read_cnt + write_cnt;
+    acquire_write_cnt_ = read_cnt + write_cnt;
     Resize(read_cnt, write_cnt);
 }
 
@@ -629,7 +636,7 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
-    if (finish_cnt_.load(std::memory_order_acquire) == upload_cnt_)
+    if (finish_cnt_.load(std::memory_order_acquire) == acquire_write_cnt_)
     {
         txm->ReleaseAllTableLocks();
     }

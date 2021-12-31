@@ -33,13 +33,13 @@ public:
                 LocalCcShards &shards,
                 std::unique_ptr<TxLog> txlog_hd)
         : thd_id_(thd_id),
-          tx_cnt_(0),
+          active_tx_cnt_(0),
           terminate_(false),
           in_sleep_(false),
           local_cc_shards_(shards),
-          tx_ws_(),
-          ws_mutex_(),
-          free_tx_(),
+          active_tx_list_(),
+          active_tx_mutex_(),
+          free_tx_list_(),
           waiting_mux_(shards.ShardMutex(thd_id)),
           waiting_cv_(shards.ShardCv(thd_id)),
           txlog_hd_(std::move(txlog_hd))
@@ -50,7 +50,7 @@ public:
     TransactionExecution *NewTx()
     {
         TransactionExecution::uptr tx = nullptr;
-        bool ret = free_tx_.try_dequeue(tx);
+        bool ret = free_tx_list_.try_dequeue(tx);
 
         if (!ret)
         {
@@ -64,12 +64,14 @@ public:
 
         TransactionExecution *tx_ptr = tx.get();
 
+        // add new transaction into active_tx_list_.
         {
-            const std::lock_guard<std::mutex> lock(ws_mutex_);
-            tx_ws_.emplace_back(std::move(tx));
+            const std::lock_guard<std::mutex> lock(active_tx_mutex_);
+            active_tx_list_.emplace_back(std::move(tx));
         }
 
-        uint32_t prev_tx_cnt = tx_cnt_.fetch_add(1);
+        // wake up TxProcessor worker thread if neccessary.
+        uint32_t prev_tx_cnt = active_tx_cnt_.fetch_add(1);
         if (prev_tx_cnt == 0 && in_sleep_.load(std::memory_order_acquire))
         {
             waiting_cv_.notify_one();
@@ -84,35 +86,39 @@ public:
         req_cnt = 0;
         size_t sweep_batch = 20;
         bool first_batch = true;
-        std::list<TransactionExecution::uptr>::iterator ws_it;
+        std::list<TransactionExecution::uptr>::iterator active_tx_it;
 
         do
         {
             batch_.clear();
             {
-                const std::lock_guard<std::mutex> lock(ws_mutex_);
+                const std::lock_guard<std::mutex> lock(active_tx_mutex_);
 
                 if (first_batch)
                 {
-                    ws_it = tx_ws_.begin();
+                    active_tx_it = active_tx_list_.begin();
                     first_batch = false;
                 }
 
                 size_t cnt = 0;
-                while (ws_it != tx_ws_.end() && cnt < sweep_batch)
+                while (active_tx_it != active_tx_list_.end() &&
+                       cnt < sweep_batch)
                 {
-                    if (ws_it->get()->finish_)
+                    if (active_tx_it->get()->tx_status_.load(
+                            std::memory_order_relaxed) == TxnStatus::Finished)
                     {
-                        TransactionExecution::uptr tx_p = std::move(*ws_it);
-                        ws_it = tx_ws_.erase(ws_it);
-                        free_tx_.enqueue(std::move(tx_p));
-                        tx_cnt_.fetch_sub(1);
+                        // clean transaction and put it to free list.
+                        TransactionExecution::uptr tx_p =
+                            std::move(*active_tx_it);
+                        active_tx_it = active_tx_list_.erase(active_tx_it);
+                        free_tx_list_.enqueue(std::move(tx_p));
+                        active_tx_cnt_.fetch_sub(1);
                     }
                     else
                     {
-                        batch_.emplace_back(ws_it->get());
+                        batch_.emplace_back(active_tx_it->get());
                         ++cnt;
-                        ++ws_it;
+                        ++active_tx_it;
                     }
                 }
             }
@@ -120,6 +126,7 @@ public:
             for (auto iter = batch_.begin(); iter != batch_.end(); ++iter)
             {
                 TransactionExecution *txm = *iter;
+                // Forward transaction state machine.
                 txm->Forward();
 
                 if (txm->Idle())
@@ -127,6 +134,7 @@ public:
                     TxRequest *req = txm->next_req_.exchange(nullptr);
                     if (req != nullptr)
                     {
+                        // Process TxRequests.
                         req->Process(txm);
                         ++active_cnt;
                     }
@@ -138,6 +146,7 @@ public:
             }
         } while (batch_.size() == sweep_batch);
 
+        // Process CcRequests.
         req_cnt = local_cc_shards_.ProcessRequests(thd_id_);
     }
 
@@ -178,7 +187,8 @@ public:
                     idle_rnd = 0;
 
                     std::unique_lock<std::mutex> lk(waiting_mux_);
-                    while (tx_cnt_.load(std::memory_order_acquire) == 0 &&
+                    while (active_tx_cnt_.load(std::memory_order_acquire) ==
+                               0 &&
                            local_cc_shards_.IsIdle(thd_id_) &&
                            !terminate_.load(std::memory_order_acquire))
                     {
@@ -218,16 +228,16 @@ public:
     }
 
     size_t thd_id_;
-    std::atomic<uint32_t> tx_cnt_;
+    std::atomic<uint32_t> active_tx_cnt_;
     std::atomic<bool> terminate_;
     std::atomic<bool> in_sleep_;
 
     LocalCcShards &local_cc_shards_;
     std::unique_ptr<LocalCcHandler> cc_hd_;
 
-    std::list<TransactionExecution::uptr> tx_ws_;
-    std::mutex ws_mutex_;
-    moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_tx_;
+    std::list<TransactionExecution::uptr> active_tx_list_;
+    std::mutex active_tx_mutex_;
+    moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_tx_list_;
     std::vector<TransactionExecution *> batch_;
 
     std::mutex &waiting_mux_;

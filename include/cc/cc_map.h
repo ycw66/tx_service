@@ -78,6 +78,10 @@ public:
     virtual size_t size() const = 0;
 
     virtual void Clean(LruEntry *remove_entry) = 0;
+
+    /**
+     * Used for debug to verify the map_link is complete.
+     */
     virtual size_t VerifyOrdering() = 0;
 
     virtual void GetCkptKeyRecord(const LruEntry *lru_entry,

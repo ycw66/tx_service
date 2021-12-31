@@ -174,12 +174,12 @@ void txservice::LocalCcHandler::ReleaseTableWriteLock(
 }
 
 void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
-                                            int64_t tx_term,
-                                            uint64_t commit_ts,
-                                            const CcEntryAddr &cce_addr,
-                                            const TxRecord *record,
-                                            bool is_deleted,
-                                            CcHandlerResult<Void> &hres)
+                                          int64_t tx_term,
+                                          uint64_t commit_ts,
+                                          const CcEntryAddr &cce_addr,
+                                          const TxRecord *record,
+                                          bool is_deleted,
+                                          CcHandlerResult<Void> &hres)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -197,13 +197,13 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
     else
     {
         remote_hd_.PostWrite(cc_shards_.node_id_,
-                               tx_number,
-                               tx_term,
-                               commit_ts,
-                               cce_addr,
-                               record,
-                               is_deleted,
-                               hres);
+                             tx_number,
+                             tx_term,
+                             commit_ts,
+                             cce_addr,
+                             record,
+                             is_deleted,
+                             hres);
     }
 }
 
@@ -234,14 +234,14 @@ void txservice::LocalCcHandler::PostRead(
     else
     {
         remote_hd_.PostRead(cc_shards_.node_id_,
-                                tx_number,
-                                tx_term,
-                                key_ts,
-                                gap_ts,
-                                commit_ts,
-                                cce_addr,
-                                hres,
-                                protocol);
+                            tx_number,
+                            tx_term,
+                            key_ts,
+                            gap_ts,
+                            commit_ts,
+                            cce_addr,
+                            hres,
+                            protocol);
     }
 }
 
@@ -748,7 +748,7 @@ void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
 
     CheckCatalogCC *req = commit_check_catalog_pool.NextRequest();
     req->Set(&table_name, source_version, tx_number, &hres);
-    
+
     // Put the request in the queue if failed to get read intention.
     if (!ccs.AcquireTableReadIntention(table_name, req))
     {

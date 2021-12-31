@@ -78,26 +78,25 @@ void CcShard::Enqueue(CcRequestBase *req)
     }
 }
 
-TEntry &CcShard::NewTx(uint64_t start_ts)
+TEntry &CcShard::NewTx()
 {
-    start_ts = ts_base_.load(std::memory_order_relaxed);
+    // allocate start timestamp.
+    uint64_t start_ts = ts_base_.load(std::memory_order_relaxed);
 
-    // Cicurlar iteration
+    // Cicurlar iteration to find an available transaction entry.
     size_t cnt = 0;
     while (cnt < tx_vec_.size())
     {
-        TEntry &te = tx_vec_[tx_head_];
-        if ((te.status_ == TxnStatus::Committed ||
-             te.status_ == TxnStatus::Aborted) &&
-            start_ts - te.commit_ts_ > 1000)  // in macro sec
+        TEntry &te = tx_vec_[next_tx_idx_];
+        if (te.status_ == TxnStatus::Finished)
         {
             break;
         }
 
-        ++tx_head_;
-        if (tx_head_ >= tx_vec_.size())
+        ++next_tx_idx_;
+        if (next_tx_idx_ >= tx_vec_.size())
         {
-            tx_head_ = 0;
+            next_tx_idx_ = 0;
         }
 
         ++cnt;
@@ -105,31 +104,26 @@ TEntry &CcShard::NewTx(uint64_t start_ts)
 
     if (cnt == tx_vec_.size())
     {
+        uint32_t old_size = (uint32_t) tx_vec_.size();
         // Increases the capacity of the tx vector.
-        tx_head_ = (uint32_t) tx_vec_.size();
         uint32_t new_size = (uint32_t) (tx_vec_.size() * 1.5);
         tx_vec_.reserve(new_size);
 
-        for (uint32_t idx = tx_head_; idx < new_size; ++idx)
+        for (uint32_t idx = old_size; idx < new_size; ++idx)
         {
             tx_vec_.emplace_back(idx);
         }
 
-        tx_vec_[tx_head_].status_ = TxnStatus::Ongoing;
-    }
-    else
-    {
-        tx_vec_[tx_head_].status_ = TxnStatus::Ongoing;
+        // position old_size must be an available slot.
+        next_tx_idx_ = old_size;
     }
 
-    TEntry &tentry = tx_vec_.at(tx_head_);
-    tentry.Reset(start_ts, tx_cnt_);
-    ++tx_cnt_;
-    ++tx_head_;
-    tx_head_ = tx_head_ == tx_vec_.size() ? 0 : tx_head_;
-
-    tentry.commit_ts_ = 0;
-    tentry.lower_bound_ = start_ts;
+    TEntry &tentry = tx_vec_.at(next_tx_idx_);
+    // Reset() set lower_bound ts and commit ts.
+    tentry.Reset(start_ts, next_tx_ident_);
+    ++next_tx_ident_;
+    ++next_tx_idx_;
+    next_tx_idx_ = next_tx_idx_ == tx_vec_.size() ? 0 : next_tx_idx_;
     return tentry;
 }
 
@@ -173,7 +167,8 @@ inline void CcShard::DetachLru(LruEntry *entry)
 
 void CcShard::UpdateLruList(LruEntry *entry)
 {
-    // Removes the entry from the list, if it's already in the list. A
+    // Removes the entry from the list, if it's already in the list. This is
+    // used to keep the updated entry at the end(tail) of the LRU list. A
     // entry's prev and post are both not-null when the entry is in the
     // list. This is because we have a reserved head and tail for the list.
     if (entry->lru_prev_ != nullptr)
@@ -268,6 +263,11 @@ void CcShard::ClearTx(TxNumber txn)
     lock_holding_txs_.erase(tx_it);
 }
 
+/**
+ * @brief Kick out freeable entries from ccmap.
+ *
+ * @return the number of freed entries in ccmap.
+ */
 size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;
@@ -294,6 +294,8 @@ size_t CcShard::Clean()
         cce = next_cce;
     }
 
+    // notify the checkpointer thread to do checkpoint if there is not freeable
+    // entries to be kicked out from ccmap.
     if (free_cnt == 0 && ckpter_ != nullptr)
     {
         ckpter_->Notify();

@@ -47,6 +47,9 @@ public:
     TransactionExecution(const TransactionExecution &) = delete;
 
     /**
+     * Interface for TxProcessor.
+     */
+    /**
      * @brief Resets the internal states of the tx state machine. Called when
      * the tx finishes.
      *
@@ -61,76 +64,20 @@ public:
      */
     void Restart();
 
-    TxResult<Void> *Begin(uint64_t start_ts = 0);
+    /**
+     * @brief Check whether transction is idle and waiting for new TxRequest
+     * from runtime.
+     */
+    bool Idle() const;
 
-    TxResult<RecordStatus> *Read(const TableName &table_name,
-                                 const TxKey &key,
-                                 TxRecord &record,
-                                 ReadType read_type = ReadType::Inside);
+    /**
+     * @brief Process different kinds of TxRequests based on the request state
+     * machine by TxProcessor.
+     */
 
-    TxResult<RecordStatus> *ReadOutside(TxRecord &record, bool is_deleted);
-
-    TxResult<size_t> *ScanOpen(const TableName &table_name,
-                               ScanIndexType indx_type,
-                               const TxKey &start_key,
-                               bool inclusive = true,
-                               ScanDirection direction = ScanDirection::Forward,
-                               bool is_ckpt_delta = false);
-
-    TxResult<std::tuple<const TxKey *, const TxRecord *, bool>> *ScanNext(
-        size_t alias);
-
-    void ScanClose(size_t alias, const TxKey &end_key);
-
-    TxResult<Void> *Update(const TableName &table_name,
-                           TxKeyContainer &key,
-                           TxRecordContainer &rec,
-                           SecondaryKeys *skeys = nullptr);
-
-    TxResult<Void> *Delete(const TableName &table_name,
-                           TxKeyContainer &key,
-                           SecondaryKeys *skeys = nullptr);
-
-    TxResult<Void> *Upsert(const TableName &table_name,
-                           TxKeyContainer &key,
-                           TxRecordContainer &rec,
-                           SecondaryKeys *skeys = nullptr,
-                           Operation op = Operation::Upsert);
-
-    TxResult<Void> *Insert(const TableName &table_name,
-                           TxKeyContainer &key,
-                           TxRecordContainer &rec,
-                           SecondaryKeys *skeys = nullptr);
-
-    TxResult<bool> *Commit();
-
-    TxResult<bool> *Abort();
-
-    TxResult<bool> *CreateTable();
-
-    TxResult<bool> *DropTable();
-
-    TxResult<bool> *FetchCatalog();
-
-    TxResult<bool> *CheckCatalogVersion();
-
-    void FindCatalogFinish(bool succeed);
-
-    void RequestFinish(bool succeed);
-
-    void WriteDDLLog();
-
-    bool Idle() const
-    {
-        return current_op_ == nullptr;
-    }
-
-    // Put request into next_req_ and wait to be processed.
-    // The hypothesis is that client can only execute one request at a time,
-    // and needs to call request.Wait() to wait for finish signal.
-    int Execute(TxRequest *tx_req);
-    uint64_t TxNumber() const;
-
+    /**
+     * @brief BeginRequest specifies the isolation level and cc protocol.
+     */
     void Process(BeginRequest &begin_req);
     void Process(ReadRequest &read_req);
     void Process(ReadOutsideRequest &read_outside_req);
@@ -145,6 +92,21 @@ public:
     void Process(FetchCatalogRequest &fc_req);
     void Process(CheckCatalogVersionRequest &ccv_req);
     void Process(FaultInjectRequest &fi_req);
+
+    /**
+     * Interface for storage engine runtime.
+     */
+    /**
+     * Put request into next_req_ and wait to be processed.
+     * The hypothesis is that a client can only execute one request at a time,
+     * and needs to call request.Wait() to wait for finish signal.
+     */
+    int Execute(TxRequest *tx_req);
+
+    /**
+     * General Interface
+     */
+    uint64_t TxNumber() const;
 
 private:
     /**
@@ -166,13 +128,71 @@ private:
      */
     void Forward();
 
+    void Begin(uint64_t start_ts = 0);
+
+    void Read(const TableName &table_name,
+              const TxKey &key,
+              TxRecord &record,
+              ReadType read_type = ReadType::Inside);
+
+    void ReadOutside(TxRecord &record, bool is_deleted);
+
+    void ScanOpen(const TableName &table_name,
+                  ScanIndexType indx_type,
+                  const TxKey &start_key,
+                  bool inclusive = true,
+                  ScanDirection direction = ScanDirection::Forward,
+                  bool is_ckpt_delta = false);
+
+    void ScanNext(size_t alias);
+
+    void ScanClose(size_t alias, const TxKey &end_key);
+
+    void Update(const TableName &table_name,
+                TxKeyContainer &key,
+                TxRecordContainer &rec,
+                SecondaryKeys *skeys = nullptr);
+
+    void Delete(const TableName &table_name,
+                TxKeyContainer &key,
+                SecondaryKeys *skeys = nullptr);
+
+    void Upsert(const TableName &table_name,
+                TxKeyContainer &key,
+                TxRecordContainer &rec,
+                SecondaryKeys *skeys = nullptr,
+                Operation op = Operation::Upsert);
+
+    void Insert(const TableName &table_name,
+                TxKeyContainer &key,
+                TxRecordContainer &rec,
+                SecondaryKeys *skeys = nullptr);
+
+    void Commit();
+
+    void Abort();
+
+    void CreateTable();
+
+    void DropTable();
+
+    void FetchCatalog();
+
+    void CheckCatalogVersion();
+
+    void FindCatalogFinish(bool succeed);
+
+    void WriteDDLLog();
+
+    void RequestFinish(bool succeed);
+
     void PostBegin();
     void PostRead();
     void PostScanOpen();
     void PostScanNext();
     void PostScanClose();
-    void Upload();
-    void PostUpload();
+    void AcquireWrite();
+    void PostAcquireWrite();
     void SetTs();
     void PostSetTs();
     void Vali();
@@ -181,7 +201,7 @@ private:
     void PostWriteLog();
     void SetTxStatus();
     void PostSetTxStatus();
-    void PostProcess();
+    void PostProcess(size_t read_intention_size, size_t write_intention_size);
     // release all the table level lock for this transaction.
     void ReleaseAllTableLocks();
     void PostPostProcess();
@@ -191,9 +211,9 @@ private:
     void PostProcessDropTable();
     void FindCatalogInCCShard();
     void CheckCatalogInCCShard();
-    TxResult<bool> *FaultInject(const std::string &fault_name,
-                                const std::string &fault_type,
-                                int node_id);
+    void FaultInject(const std::string &fault_name,
+                     const std::string &fault_type,
+                     int node_id);
 
     bool IsTimeOut();
     void StartTiming();
@@ -221,7 +241,6 @@ private:
     uint64_t commit_ts_;
     uint64_t commit_ts_bound_;
     std::atomic<TxnStatus> tx_status_;
-    bool finish_;
 
     // The number of calls to Forward() at a given state.
     uint32_t state_forward_cnt_;
@@ -230,33 +249,14 @@ private:
 
     TransactionOperation *current_op_, *prev_op_;
     size_t idle_rep_;
-    CcEntryAddr read_cce_addr_;
 
-    // Initialization phase.
-    InitTxnOperation init_txn_;
-    // Execution phase.
-    ReadOperation read_;
-    ScanOpenOperation scan_open_;
-    ScanNextOperation scan_next_;
-    // Committing phase.
-    UploadOperation upload_;
-    SetCommitTsOperation set_ts_;
-    ValidateOperation validate_;
-    UpdateTxnStatus update_txn_;
-    PostProcessOp post_process_;
-    WriteToLog write_log_;
-    AcquireTableWriteLockOp acquire_table_write_lock_op;
-    WriteDDLLogOp write_ddl_log_op;
-    PostProcessDDLOp post_process_ddl_op;
-    ReleaseTableWriteLockOp release_table_write_lock_op;
-    FindCatalogInCCShardOp find_catalog_in_ccshard_op;
-    CheckCatalogInCCShardOp check_catalog_in_ccshard_op;
-    FaultInjectOp fault_inject_op;
-    ReleaseAllTableLocksOp release_table_locks_op;
-
-    // size_t rset_post_cnt_;
-    size_t wset_post_cnt_;
+    // local cache of read/write entries.
     ReadWriteSet rw_set_;
+    // when read an entry, it may not exist in ccmap. In this case, we create a
+    // empty record in ccmap and add read intention for it. Then we read the
+    // entry from data store and backfill the ccmap. cache_miss_read_cce_addr_
+    // can help us to locate the previous empty cc entry quickly.
+    CcEntryAddr cache_miss_read_cce_addr_;
 
     // create table statement
     DDLType ddl_type_;
@@ -290,29 +290,51 @@ private:
     std::unordered_map<size_t, std::unique_ptr<CcScanner>> scans_;
 
     // Response whose returned result is void
-    TxResult<Void> void_res_;
     TxResult<Void> *void_resp_;
     // Response whose returned result is record
-    TxResult<RecordStatus> rec_res_;
     TxResult<RecordStatus> *rec_resp_;
     // Response whose returned result is bool
-    TxResult<bool> bool_res_;
     TxResult<bool> *bool_resp_;
     // Scan result
-    TxResult<std::tuple<const TxKey *, const TxRecord *, bool>> kvp_res_;
     TxResult<std::tuple<const TxKey *, const TxRecord *, bool>> *kvp_resp_;
-    //// Scan open result
-    TxResult<size_t> uint64_res_;
+    // Scan open result
     TxResult<size_t> *uint64_resp_;
 
+    // next_req_ is used to exchange request between runtime and TxProcessor.
     std::atomic<TxRequest *> next_req_;
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
 
+    // Initialization phase.
+    InitTxnOperation init_txn_;
+
+    // Execution phase.
+    FindCatalogInCCShardOp find_catalog_in_ccshard_op;
+    CheckCatalogInCCShardOp check_catalog_in_ccshard_op;
+    ReadOperation read_;
+    ScanOpenOperation scan_open_;
+    ScanNextOperation scan_next_;
+
+    // Committing phase.
+    AcquireWriteOperation acquire_write_;
+    SetCommitTsOperation set_ts_;
+    ValidateOperation validate_;
+    UpdateTxnStatus update_txn_;
+    PostProcessOp post_process_;
+    WriteToLog write_log_;
+    AcquireTableWriteLockOp acquire_table_write_lock_op;
+    WriteDDLLogOp write_ddl_log_op;
+    PostProcessDDLOp post_process_ddl_op;
+    ReleaseTableWriteLockOp release_table_write_lock_op;
+    ReleaseAllTableLocksOp release_table_locks_op;
+
+    // fault inject
+    FaultInjectOp fault_inject_op;
+
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;
-    friend struct UploadOperation;
+    friend struct AcquireWriteOperation;
     friend struct SetCommitTsOperation;
     friend struct WriteToLog;
     friend struct UpdateTxnStatus;

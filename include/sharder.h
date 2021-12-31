@@ -16,6 +16,18 @@ namespace txservice
 {
 class LocalCcShards;
 
+/**
+ * Sharder is the collection of services supplied by TxService, which includes:
+ * 1. cc_stream rpc service, which transfers CcRequests between different
+ * TxService nodes.
+ * 2. cc_node rpc service, which is used by raft protocol to communicate CcNodes
+ * among the raft group.
+ * 3. log_replay rpc service, which receives and replay redo log from log
+ * service by streaming.
+ *
+ * Sharder also specifies the hash function which shards the key to the
+ * corresponding TxProcessor.
+ */
 class Sharder
 {
 public:

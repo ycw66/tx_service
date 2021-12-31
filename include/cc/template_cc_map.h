@@ -313,6 +313,7 @@ public:
 
         if (cce_addr.InsertPtr() != 0)
         {
+            // insert branch.
             assert(is_del == false);
 
             InsertEntry<KeyT, ValueT> &insert_entry =
@@ -403,6 +404,7 @@ public:
         }
         else
         {
+            // upsert and delete branch.
             assert(cce_addr.CcePtr() != 0);
 
             CcEntry<KeyT, ValueT> &cce =
@@ -658,6 +660,8 @@ public:
                 }
                 else
                 {
+                    // ReadIntention prevents ccentry being kicked out from
+                    // cache, but will not block write lock.
                     cce->key_lock_.AcquireReadIntention(req.Txn());
                 }
 
@@ -674,10 +678,11 @@ public:
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
         }
 
+        // The request brings in the record to the cc entry for caching if
+        // cce->payload_status_ is Unknown which means it doesn't override by
+        // another transaction yet.
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
-            // The request brings in the record to the cc entry for caching
-
             if (req.Type() == ReadType::OutsideNormal)
             {
                 if (req.Record() != nullptr)
@@ -694,6 +699,7 @@ public:
                 }
                 cce->payload_status_ = RecordStatus::Normal;
             }
+            // set tomb ccentry to prevent access data store again.
             else if (req.Type() == ReadType::OutsideDeleted)
             {
                 cce->payload_status_ = RecordStatus::Deleted;
@@ -709,6 +715,8 @@ public:
             // that brings in the record from the data store for caching, but
             // the key has been updated by another committed tx since the first
             // read request.
+            // TODO: TxExecution and runtime also use this new value as read
+            // result to avoid future PostRead abort.
             if (req.Record() != nullptr)
             {
                 ValueT *typed_rec = static_cast<ValueT *>(req.Record());
@@ -1147,6 +1155,9 @@ public:
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(lru_cce);
 
+        // CkptScanCc is running on TxProcessor thread. To avoid blocking other
+        // transaction for a long time, we only process CkptScanBatch number of
+        // entries in each round.
         size_t cnt = 0;
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
@@ -1188,6 +1199,8 @@ public:
         }
         else
         {
+            // set the start_entry and put the CkptScanCc request in to CcQueue
+            // again.
             req.start_entry_ = cce;
             shard_->Enqueue(&req);
             return false;
@@ -1285,6 +1298,9 @@ public:
             direction, key_schema_.get());
     }
 
+    /**
+     * Used for debug to verify the map_link is complete.
+     */
     size_t VerifyOrdering() override
     {
         CcEntry<KeyT, ValueT> *cce_prev = nullptr;

@@ -22,14 +22,13 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       commit_ts_(UINT64_MAX),
       commit_ts_bound_(0),
       tx_status_(TxnStatus::Ongoing),
-      finish_(false),
       current_op_(nullptr),
-      read_cce_addr_(),
+      cache_miss_read_cce_addr_(),
       init_txn_(this),
       read_(this),
       scan_open_(this),
       scan_next_(this),
-      upload_(this),
+      acquire_write_(this),
       set_ts_(this),
       validate_(this),
       update_txn_(this),
@@ -43,19 +42,13 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       check_catalog_in_ccshard_op(this),
       fault_inject_op(this),
       release_table_locks_op(this),
-      wset_post_cnt_(0),
       rw_set_(),
       ddl_type_(DDLType::UNKNOWN),
       scans_(),
-      void_res_(),
       void_resp_(nullptr),
-      rec_res_(),
       rec_resp_(nullptr),
-      bool_res_(),
       bool_resp_(nullptr),
-      kvp_res_(),
       kvp_resp_(nullptr),
-      uint64_res_(),
       uint64_resp_(nullptr),
       next_req_(nullptr),
       protocol_(proto)
@@ -65,13 +58,12 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
 void TransactionExecution::Reset(CcProtocol proto)
 {
     current_op_ = nullptr;
-    read_cce_addr_.SetCce(0, -1, 0);
+    cache_miss_read_cce_addr_.SetCce(0, -1, 0);
     txid_.Reset();
     tx_number_.store(UINT32_MAX, std::memory_order_release);
     tx_term_ = -1;
     commit_ts_ = UINT64_MAX;
     commit_ts_bound_ = 0;
-    wset_post_cnt_ = 0;
     rw_set_.Reset();
     wset_iters_.clear();
     wset_reverse_iters_.clear();
@@ -81,11 +73,6 @@ void TransactionExecution::Reset(CcProtocol proto)
     bool_resp_ = nullptr;
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
-    void_res_.Reset();
-    rec_res_.Reset();
-    bool_res_.Reset();
-    kvp_res_.Reset();
-    uint64_res_.Reset();
     next_req_.store(nullptr);
     protocol_ = proto;
     ddl_type_ = DDLType::UNKNOWN;
@@ -94,20 +81,19 @@ void TransactionExecution::Reset(CcProtocol proto)
 void TransactionExecution::Restart()
 {
     tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
-    finish_ = false;
 }
 
-TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
-                                                   const TxKey &key,
-                                                   TxRecord &rec,
-                                                   ReadType read_type)
+bool TransactionExecution::Idle() const
 {
-    if (rec_resp_ == nullptr)
-    {
-        rec_res_.Reset();
-        rec_resp_ = &rec_res_;
-    }
+    return current_op_ == nullptr;
+}
 
+void TransactionExecution::Read(const TableName &table_name,
+                                const TxKey &key,
+                                TxRecord &rec,
+                                ReadType read_type)
+{
+    // Step 1: fast path if key is update by the same tx.
     const WriteSetEntry *write = rw_set_.FindWrite(table_name, key);
     if (write != nullptr)
     {
@@ -120,15 +106,16 @@ TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
             rec.Copy(*write->rec_.get());
             rec_resp_->Finish(RecordStatus::Normal);
         }
-        return rec_resp_;
+        return;
     }
 
+    // Step 2: fast path if key is the same as last read key.
     if (rw_set_.cache_table_ == table_name && rw_set_.cache_key_ != nullptr &&
         *rw_set_.cache_key_ == key && rw_set_.cache_rec_ != nullptr)
     {
         rec.Copy(*rw_set_.cache_rec_);
         rec_resp_->Finish(RecordStatus::Normal);
-        return rec_resp_;
+        return;
     }
 
     current_op_ = &read_;
@@ -152,7 +139,7 @@ TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
 
     StartTiming();
 
-    return rec_resp_;
+    return;
 }
 
 void TransactionExecution::PostRead()
@@ -169,6 +156,8 @@ void TransactionExecution::PostRead()
     {
         const ReadKeyResult &read_res = read_.cc_result_.Value();
 
+        // optimization for case that we read the same key continuously
+        // especially speed up remote read. e.g. Read A, Write B, Read A.
         if (read_res.rec_status_ == RecordStatus::Normal)
         {
             rw_set_.cache_rec_ = read_res.rec_->Clone();
@@ -189,26 +178,19 @@ void TransactionExecution::PostRead()
             // If the read does not retrieve the value, the tx user is likely to
             // read the data store and brings in the value for caching. Cache
             // the cc entry's address in the tx's local variable.
-            read_cce_addr_ = read_res.cce_addr_;
+            cache_miss_read_cce_addr_ = read_res.cce_addr_;
         }
         else
         {
-            read_cce_addr_.SetCce(0, -1, 0);
+            cache_miss_read_cce_addr_.SetCce(0, -1, 0);
         }
 
         rec_resp_->Finish(read_res.rec_status_);
     }
 }
 
-TxResult<RecordStatus> *TransactionExecution::ReadOutside(TxRecord &record,
-                                                          bool is_deleted)
+void TransactionExecution::ReadOutside(TxRecord &record, bool is_deleted)
 {
-    if (rec_resp_ == nullptr)
-    {
-        rec_resp_ = &rec_res_;
-    }
-    rec_resp_->Reset();
-
     rw_set_.cache_rec_ = record.Clone();
 
     current_op_ = &read_;
@@ -216,31 +198,28 @@ TxResult<RecordStatus> *TransactionExecution::ReadOutside(TxRecord &record,
     read_.read_type_ =
         is_deleted ? ReadType::OutsideDeleted : ReadType::OutsideNormal;
 
-    handler->ReadOutside(
-        tx_term_, record, is_deleted, read_cce_addr_, read_.cc_result_);
+    handler->ReadOutside(tx_term_,
+                         record,
+                         is_deleted,
+                         cache_miss_read_cce_addr_,
+                         read_.cc_result_);
 
-    return rec_resp_;
+    return;
 }
 
 void TransactionExecution::PostScanClose()
 {
 }
 
-TxResult<size_t> *TransactionExecution::ScanOpen(const TableName &table_name,
-                                                 ScanIndexType index_type,
-                                                 const TxKey &start_key,
-                                                 bool inclusive,
-                                                 ScanDirection direction,
-                                                 bool is_ckpt_delta)
+void TransactionExecution::ScanOpen(const TableName &table_name,
+                                    ScanIndexType index_type,
+                                    const TxKey &start_key,
+                                    bool inclusive,
+                                    ScanDirection direction,
+                                    bool is_ckpt_delta)
 {
     current_op_ = &scan_open_;
     scan_open_.cc_result_.Reset();
-
-    if (uint64_resp_ == nullptr)
-    {
-        uint64_resp_ = &uint64_res_;
-    }
-    uint64_resp_->Reset();
 
     scan_open_.Set(&table_name, &start_key, inclusive, direction);
 
@@ -259,7 +238,7 @@ TxResult<size_t> *TransactionExecution::ScanOpen(const TableName &table_name,
 
     StartTiming();
 
-    return uint64_resp_;
+    return;
 }
 
 void TransactionExecution::PostScanOpen()
@@ -306,8 +285,7 @@ void TransactionExecution::PostScanOpen()
     uint64_resp_->Finish(open_result.scan_alias_);
 }
 
-TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
-    *TransactionExecution::ScanNext(size_t alias)
+void TransactionExecution::ScanNext(size_t alias)
 {
     auto it = scans_.find(alias);
     assert(it != scans_.end());
@@ -316,12 +294,6 @@ TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
     current_op_ = &scan_next_;
     scan_next_.Reset();
     scan_next_.Set(alias, &scanner);
-
-    if (kvp_resp_ == nullptr)
-    {
-        kvp_resp_ = &kvp_res_;
-    }
-    kvp_resp_->Reset();
 
     const ScanTuple *scan_tuple = scanner.Current();
 
@@ -347,13 +319,14 @@ TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
     // Invokes Forward() to move forward the tx machine.
     scan_next_.Forward(this);
 
-    return kvp_resp_;
+    return;
 }
 
 void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 {
     handler->ScanClose(alias, end_key, false);
     scans_.erase(alias);
+    void_resp_->Finish(void_);
 }
 
 void TransactionExecution::PostScanNext()
@@ -367,6 +340,11 @@ void TransactionExecution::PostScanNext()
     }
 
     const ScanTuple *cc_scan_tuple = scan_next_.scanner_->Current();
+
+    //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
+    //  store already contains this entry. Since the final scan result is the
+    //  merge of memory entries with data store entries, as a result it's safe
+    //  to skip these backfill entries.
     while (cc_scan_tuple != nullptr &&
            (cc_scan_tuple->key_ts_ == 0 ||
             cc_scan_tuple->rec_status_ == RecordStatus::Unknown))
@@ -397,6 +375,7 @@ void TransactionExecution::PostScanNext()
     {
         auto it = wset_iters_.find(scan_next_.alias_);
 
+        // Case that all the entries in the local write set have been scanned.
         if (it == wset_iters_.end() || it->second.first == it->second.second)
         {
             if (cc_scan_tuple != nullptr)
@@ -434,6 +413,7 @@ void TransactionExecution::PostScanNext()
 
         const WriteSetEntry &local_write = it->second.first->second;
 
+        // Case that needs to merge ccm entries with local write set entries.
         if (cc_scan_tuple == nullptr ||
             *local_write.key_.get() < *cc_scan_tuple->Key())
         {
@@ -491,6 +471,7 @@ void TransactionExecution::PostScanNext()
             scan_next_.scanner_->MoveNext();
         }
     }
+    // backward scan
     else
     {
         auto rit = wset_reverse_iters_.find(scan_next_.alias_);
@@ -583,95 +564,71 @@ void TransactionExecution::PostScanNext()
     }
 }
 
-TxResult<Void> *TransactionExecution::Update(const TableName &table_name,
-                                             TxKeyContainer &key,
-                                             TxRecordContainer &rec,
-                                             SecondaryKeys *skeys)
+void TransactionExecution::Update(const TableName &table_name,
+                                  TxKeyContainer &key,
+                                  TxRecordContainer &rec,
+                                  SecondaryKeys *skeys)
 {
-    return Upsert(table_name, key, rec, skeys, Operation::Update);
+    Upsert(table_name, key, rec, skeys, Operation::Update);
 }
 
-TxResult<Void> *TransactionExecution::Insert(const TableName &table_name,
-                                             TxKeyContainer &key,
-                                             TxRecordContainer &rec,
-                                             SecondaryKeys *skeys)
+void TransactionExecution::Insert(const TableName &table_name,
+                                  TxKeyContainer &key,
+                                  TxRecordContainer &rec,
+                                  SecondaryKeys *skeys)
 {
-    return Upsert(table_name, key, rec, skeys, Operation::Insert);
+    Upsert(table_name, key, rec, skeys, Operation::Insert);
 }
 
-TxResult<Void> *TransactionExecution::Delete(const TableName &table_name,
-                                             TxKeyContainer &key,
-                                             SecondaryKeys *skeys)
+void TransactionExecution::Delete(const TableName &table_name,
+                                  TxKeyContainer &key,
+                                  SecondaryKeys *skeys)
 {
     TxRecordContainer rcon(nullptr);
-    return Upsert(table_name, key, rcon, skeys, Operation::Delete);
+    Upsert(table_name, key, rcon, skeys, Operation::Delete);
 }
 
 // Upsert modify tuple without locking in OCC protocol.
-TxResult<Void> *TransactionExecution::Upsert(const TableName &table_name,
-                                             TxKeyContainer &key,
-                                             TxRecordContainer &rec,
-                                             SecondaryKeys *skeys,
-                                             Operation op)
+void TransactionExecution::Upsert(const TableName &table_name,
+                                  TxKeyContainer &key,
+                                  TxRecordContainer &rec,
+                                  SecondaryKeys *skeys,
+                                  Operation op)
 {
-    if (void_resp_ == nullptr)
-    {
-        void_resp_ = &void_res_;
-    }
-    void_resp_->Reset();
-
     rw_set_.AddWrite(table_name, key, rec, op, skeys);
 
     void_resp_->Finish(void_);
-    return void_resp_;
+    return;
 }
 
-TxResult<bool> *TransactionExecution::Commit()
+void TransactionExecution::Commit()
 {
     tx_status_.store(TxnStatus::Committing, std::memory_order_release);
 
-    if (bool_resp_ == nullptr)
-    {
-        bool_res_.Reset();
-        bool_resp_ = &bool_res_;
-    }
-
     if (rw_set_.WriteSetSize() > 0)
     {
-        Upload();
+        AcquireWrite();
     }
     else
     {
         SetTs();
     }
 
-    return bool_resp_;
+    return;
 }
 
-TxResult<bool> *TransactionExecution::CreateTable()
+void TransactionExecution::CreateTable()
 {
-    if (bool_resp_ == nullptr)
-    {
-        bool_resp_ = &bool_res_;
-    }
-    bool_resp_->Reset();
-
     AcquireTableWriteLock();
 
-    return bool_resp_;
+    return;
 }
 
-TxResult<bool> *TransactionExecution::DropTable()
+void TransactionExecution::DropTable()
 {
-    if (bool_resp_ == nullptr)
-    {
-        bool_resp_ = &bool_res_;
-    }
-    bool_resp_->Reset();
-
     AcquireTableWriteLock();
 
-    return bool_resp_;
+    return;
 }
 
 /*
@@ -687,43 +644,25 @@ TxResult<bool> *TransactionExecution::DropTable()
  * FetchCatalog request to transaction service to get the catalog binary and
  * initialize the table share based on it.
  */
-TxResult<bool> *TransactionExecution::FetchCatalog()
+void TransactionExecution::FetchCatalog()
 {
-    if (bool_resp_ == nullptr)
-    {
-        bool_resp_ = &bool_res_;
-    }
-    bool_resp_->Reset();
-
     FindCatalogInCCShard();
 
-    return bool_resp_;
+    return;
 }
 
-TxResult<bool> *TransactionExecution::CheckCatalogVersion()
+void TransactionExecution::CheckCatalogVersion()
 {
-    if (bool_resp_ == nullptr)
-    {
-        bool_resp_ = &bool_res_;
-    }
-    bool_resp_->Reset();
-
     CheckCatalogInCCShard();
 
-    return bool_resp_;
+    return;
 }
 
-TxResult<bool> *TransactionExecution::FaultInject(const std::string &fault_name,
-                                                  const std::string &fault_type,
-                                                  int node_id)
+void TransactionExecution::FaultInject(const std::string &fault_name,
+                                       const std::string &fault_type,
+                                       int node_id)
 {
     current_op_ = &fault_inject_op;
-
-    if (bool_resp_ == nullptr)
-    {
-        bool_resp_ = &bool_res_;
-    }
-    bool_resp_->Reset();
 
     CcHandlerResult<bool> &hres = fault_inject_op.cc_result_;
     hres.Reset();
@@ -731,14 +670,14 @@ TxResult<bool> *TransactionExecution::FaultInject(const std::string &fault_name,
     handler->FaultInject(
         fault_name, fault_type, tx_term_, txid_, node_id, hres);
 
-    return bool_resp_;
+    return;
 }
 
-void TransactionExecution::Upload()
+void TransactionExecution::AcquireWrite()
 {
-    current_op_ = &upload_;
+    current_op_ = &acquire_write_;
     size_t wset_size = rw_set_.WriteSetSize();
-    upload_.Reset(wset_size);
+    acquire_write_.Reset(wset_size);
 
     size_t idx = 0;
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
@@ -748,11 +687,12 @@ void TransactionExecution::Upload()
              key_it != table_it->second.end();
              ++key_it)
         {
-            CcHandlerResult<AcquireKeyResult> &hres = upload_.results_[idx];
+            CcHandlerResult<AcquireKeyResult> &hres =
+                acquire_write_.results_[idx];
             hres.Reset();
-            hres.Value().remote_ack_cnt_ = &upload_.remote_ack_cnt_;
+            hres.Value().remote_ack_cnt_ = &acquire_write_.remote_ack_cnt_;
             WriteSetEntry &write_entry = key_it->second;
-            upload_.upload_entries_.at(idx) = &write_entry;
+            acquire_write_.acquire_write_entries_.at(idx) = &write_entry;
             handler->AcquireWrite(table_it->first,
                                   *write_entry.key_.get(),
                                   txid_,
@@ -818,7 +758,7 @@ void TransactionExecution::RequestFinish(bool succeed)
     bool_resp_->Finish(succeed);
 }
 
-void TransactionExecution::PostUpload()
+void TransactionExecution::PostAcquireWrite()
 {
     SetTs();
 }
@@ -829,10 +769,11 @@ void TransactionExecution::SetTs()
     set_ts_.result_of_set_commit_ts_.Reset();
 
     uint64_t candidate = commit_ts_bound_;
-    for (size_t idx = 0; idx < upload_.upload_cnt_; ++idx)
+    for (size_t idx = 0; idx < acquire_write_.acquire_write_cnt_; ++idx)
     {
-        uint64_t upload_ts = upload_.results_[idx].Value().last_vali_ts_;
-        candidate = std::max(candidate, upload_ts + 1);
+        uint64_t acquire_write_ts =
+            acquire_write_.results_[idx].Value().last_vali_ts_;
+        candidate = std::max(candidate, acquire_write_ts + 1);
     }
 
     const std::unordered_map<CcEntryAddr, uint64_t> &rset = rw_set_.ReadSet();
@@ -1209,13 +1150,15 @@ void TransactionExecution::SetTxStatus()
 
 void TransactionExecution::PostSetTxStatus()
 {
-    wset_post_cnt_ = rw_set_.WriteSetSize() > 0
-                         ? upload_.upload_cnt_ -
-                               upload_.fail_cnt_.load(std::memory_order_acquire)
-                         : 0;
-    if (wset_post_cnt_ != 0 || rw_set_.ReadSetSize() != 0)
+    // Only
+    int wset_intention_cnt =
+        rw_set_.WriteSetSize() > 0
+            ? acquire_write_.acquire_write_cnt_ -
+                  acquire_write_.fail_cnt_.load(std::memory_order_acquire)
+            : 0;
+    if (wset_intention_cnt != 0 || rw_set_.ReadSetSize() != 0)
     {
-        PostProcess();
+        PostProcess(rw_set_.ReadSetSize(), wset_intention_cnt);
     }
     else if (ddl_type_ == DDLType::CREATE_TABLE)
     {
@@ -1227,9 +1170,8 @@ void TransactionExecution::PostSetTxStatus()
     }
     else
     {
-        // For tx's that have finished validation and have not uploaded
-        // anything, skips post-processing.
-        // PostPostProcess();
+        // For tx's that have finished validation and have not write lock or
+        // read lock, skips post-processing.
         ReleaseAllTableLocks();
     }
 }
@@ -1249,7 +1191,7 @@ void TransactionExecution::PostProcessCreateTable()
 {
     current_op_ = &post_process_ddl_op;
 
-    if (tx_status_ == TxnStatus::Committed)
+    if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
         CcHandlerResult<Void> &hres = post_process_ddl_op.results_;
         hres.Reset();
@@ -1268,7 +1210,7 @@ void TransactionExecution::PostProcessDropTable()
 {
     current_op_ = &post_process_ddl_op;
 
-    if (tx_status_ == TxnStatus::Committed)
+    if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
         CcHandlerResult<Void> &hres = post_process_ddl_op.results_;
         hres.Reset();
@@ -1278,7 +1220,8 @@ void TransactionExecution::PostProcessDropTable()
     }
 }
 
-void TransactionExecution::PostProcess()
+void TransactionExecution::PostProcess(size_t read_intention_size,
+                                       size_t write_intention_size)
 {
     current_op_ = &post_process_;
 
@@ -1337,7 +1280,7 @@ void TransactionExecution::PostProcess()
         // phase, post-processing removes write intentions of write-set keys and
         // clears read intentions/locks of read-set keys.
 
-        post_process_.Reset(rw_set_.ReadSetSize(), wset_post_cnt_);
+        post_process_.Reset(read_intention_size, write_intention_size);
 
         size_t offset = 0;
         size_t idx = 0;
@@ -1347,10 +1290,10 @@ void TransactionExecution::PostProcess()
         {
             for (const auto &[key, write_entry] : table_write_set)
             {
-                if (upload_.results_[idx].IsError())
+                if (acquire_write_.results_[idx].IsError())
                 {
-                    // Keys that were not successfully uploaded to the cc map do
-                    // not need post-processing.
+                    // Keys that were not successfully acquire write lock in the
+                    // cc map do not need post-processing.
                     ++idx;
                     continue;
                 }
@@ -1372,7 +1315,7 @@ void TransactionExecution::PostProcess()
                 ++idx;
             }
         }
-        assert(offset == wset_post_cnt_);
+        assert(offset == write_intention_size);
 
         idx = 0;
         const std::unordered_map<CcEntryAddr, uint64_t> &rset =
@@ -1411,7 +1354,6 @@ void TransactionExecution::ReleaseAllTableLocks()
 void TransactionExecution::PostPostProcess()
 {
     current_op_ = nullptr;
-    finish_ = true;
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
@@ -1422,27 +1364,29 @@ void TransactionExecution::PostPostProcess()
         bool_resp_->Finish(false);
     }
 
+    // transaction can be recycled and put into free list.
+    tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+
+    CcHandlerResult<Void> fake_result(this);
+    handler->UpdateTxnStatus(
+        txid_, tx_status_.load(std::memory_order_relaxed), fake_result);
+
     Reset();
 }
 
-TxResult<bool> *TransactionExecution::Abort()
+void TransactionExecution::Abort()
 {
     tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
 
-    if (bool_resp_ == nullptr)
-    {
-        bool_res_.Reset();
-        bool_resp_ = &bool_res_;
-    }
-
     SetTxStatus();
 
-    return bool_resp_;
+    return;
 }
 
 void TransactionExecution::Process(BeginRequest &begin_req)
 {
     void_resp_ = &begin_req.cc_result_;
+    void_resp_->Reset();
     iso_level_ = begin_req.iso_level_;
     protocol_ = begin_req.protocol_;
     Begin();
@@ -1451,18 +1395,21 @@ void TransactionExecution::Process(BeginRequest &begin_req)
 void TransactionExecution::Process(ReadRequest &read_req)
 {
     rec_resp_ = &read_req.cc_result_;
+    rec_resp_->Reset();
     Read(*read_req.tab_name_, *read_req.key_, *read_req.rec_, read_req.type_);
 }
 
 void TransactionExecution::Process(ReadOutsideRequest &read_outside_req)
 {
     rec_resp_ = &read_outside_req.cc_result_;
+    rec_resp_->Reset();
     ReadOutside(read_outside_req.rec_, read_outside_req.is_deleted_);
 }
 
 void TransactionExecution::Process(ScanOpenRequest &scan_open_req)
 {
     uint64_resp_ = &scan_open_req.cc_result_;
+    uint64_resp_->Reset();
     ScanOpen(*scan_open_req.tab_name_,
              scan_open_req.indx_type_,
              *scan_open_req.start_key_,
@@ -1474,19 +1421,21 @@ void TransactionExecution::Process(ScanOpenRequest &scan_open_req)
 void TransactionExecution::Process(ScanNextRequest &scan_next_req)
 {
     kvp_resp_ = &scan_next_req.cc_result_;
+    kvp_resp_->Reset();
     ScanNext(scan_next_req.alias_);
 }
 
 void TransactionExecution::Process(ScanCloseRequest &scan_close_req)
 {
     void_resp_ = &scan_close_req.cc_result_;
+    void_resp_->Reset();
     ScanClose(scan_close_req.alias_, *scan_close_req.end_key_.get());
-    void_resp_->Finish(void_);
 }
 
 void TransactionExecution::Process(UpsertRequest &upsert_req)
 {
     void_resp_ = &upsert_req.cc_result_;
+    void_resp_->Reset();
     Upsert(*upsert_req.tab_name_,
            upsert_req.key_,
            upsert_req.rec_,
@@ -1497,12 +1446,14 @@ void TransactionExecution::Process(UpsertRequest &upsert_req)
 void TransactionExecution::Process(CommitRequest &commit_req)
 {
     bool_resp_ = &commit_req.cc_result_;
+    bool_resp_->Reset();
     Commit();
 }
 
 void TransactionExecution::Process(AbortRequest &abort_req)
 {
     bool_resp_ = &abort_req.cc_result_;
+    bool_resp_->Reset();
     // When the tx is aborted/rolled back by the user, write intentions must
     // have not acquired. Clear the write set before entering post-processing.
     rw_set_.ClearWriteSet();
@@ -1512,6 +1463,7 @@ void TransactionExecution::Process(AbortRequest &abort_req)
 void TransactionExecution::Process(CreateTableRequest &ct_req)
 {
     bool_resp_ = &ct_req.cc_result_;
+    bool_resp_->Reset();
 
     ddl_type_ = DDLType::CREATE_TABLE;
     mysql_table_name_ = &ct_req.mysql_table_name_;
@@ -1525,6 +1477,7 @@ void TransactionExecution::Process(CreateTableRequest &ct_req)
 void TransactionExecution::Process(DropTableRequest &dt_req)
 {
     bool_resp_ = &dt_req.cc_result_;
+    bool_resp_->Reset();
 
     ddl_type_ = DDLType::DROP_TABLE;
     mysql_table_name_ = &dt_req.mysql_table_name_;
@@ -1536,6 +1489,7 @@ void TransactionExecution::Process(DropTableRequest &dt_req)
 void TransactionExecution::Process(FetchCatalogRequest &fc_req)
 {
     bool_resp_ = &fc_req.cc_result_;
+    bool_resp_->Reset();
 
     mysql_table_name_ = &fc_req.mysql_table_name_;
     catalog_content_ = fc_req.catalog_content_;
@@ -1547,6 +1501,7 @@ void TransactionExecution::Process(FetchCatalogRequest &fc_req)
 void TransactionExecution::Process(CheckCatalogVersionRequest &ccv_req)
 {
     bool_resp_ = &ccv_req.cc_result_;
+    bool_resp_->Reset();
 
     mysql_table_name_ = &ccv_req.mysql_table_name_;
     source_version_ = &ccv_req.source_version_;
@@ -1558,29 +1513,22 @@ void TransactionExecution::Process(CheckCatalogVersionRequest &ccv_req)
 void TransactionExecution::Process(FaultInjectRequest &fi_req)
 {
     bool_resp_ = &fi_req.cc_result_;
+    bool_resp_->Reset();
 
     FaultInject(fi_req.fault_name_, fi_req.fault_type_, fi_req.node_id_);
 }
 
-TxResult<Void> *TransactionExecution::Begin(uint64_t start_ts)
+void TransactionExecution::Begin(uint64_t start_ts)
 {
     current_op_ = &init_txn_;
 
-    if (void_resp_ == nullptr)
-    {
-        void_res_.Reset();
-        void_resp_ = &void_res_;
-    }
-
-    current_op_ = &init_txn_;
     commit_ts_ = 0;
     commit_ts_bound_ = start_ts;
-    tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
 
     handler->NewTxn(init_txn_.result_);
     init_txn_.Forward(this);
 
-    return void_resp_;
+    return;
 }
 
 void TransactionExecution::PostBegin()

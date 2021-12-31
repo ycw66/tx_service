@@ -74,12 +74,18 @@ public:
             return;
         }
 
+        // FIXME: If checkpoint interval is large and workload is bulk insert,
+        // the memory usage of cce_buf vector would be large.
         std::vector<LruEntry *> cce_buf;
         cce_buf.reserve(1000000);
 
         uint64_t ckpt_ts = UINT64_MAX;
         CkptTsCc ckpt_ts_cc(id);
 
+        // find minimum ckpt_ts from all the ccshard.  ckpt_ts is the minimum
+        // timestamp minus 1 among all the active transactions, thus it's safe
+        // to flush all the entries smaller or equal to this timestamp.
+        // TODO: find ckpt_ts in parallel.
         for (const auto &ccs : local_shards_.cc_shards_)
         {
             ckpt_ts_cc.Reset();
@@ -97,6 +103,9 @@ public:
 
         const CcShard &shard = *local_shards_.cc_shards_.at(0);
 
+        // iteratate all the tables and execute CkptScanCc requests on each
+        // ccshard on all the ccmaps. The result of CkptScanCc is stored in
+        // cce_buf.
         for (const auto &ccm_pair : shard.native_ccms_)
         {
             const TableName &tabname = ccm_pair.first;
@@ -145,6 +154,8 @@ public:
                         NormalizeTablename(tabname), cce_buf, sk_schema);
                 }
 
+                // if flush to data store succeeds, update the ckpt_ts for each
+                // entries in ccmap.
                 if (ckpt_ret)
                 {
                     for (LruEntry *&entry : cce_buf)
@@ -188,17 +199,14 @@ public:
         cv_.notify_all();
     }
 
+    /**
+     * @brief Called by TxProcessor thread to notify checkpointer thread to do
+     * checkpoint if there is no freeable entries to be kicked out from ccmap.
+     */
     void Notify()
     {
         std::unique_lock<std::mutex> lk(mux_);
         request_ckpt_ = true;
-        cv_.notify_one();
-    }
-
-    void Exit()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        status_ = Status::Terminating;
         cv_.notify_one();
     }
 

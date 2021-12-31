@@ -25,6 +25,9 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
     notify_thd_ = std::thread(
         [this]
         {
+            // send ReplayLog request to all the log groups of LogService, since
+            // one phase commit shuffles the redo logs to every log groups and
+            // thus requires full recovery.
             std::unique_ptr<TxLog> log_agent =
                 Sharder::Instance().GetLogAgent();
 

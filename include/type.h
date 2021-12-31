@@ -21,7 +21,9 @@ enum class TxnStatus
     // closes the connection to the runtime. This status marks the period
     // between when the tx starts committing and when the tx's fate is finalized
     // (committed or aborted).
-    Committing
+    Committing,
+    // transaction is finished and can be recycled. 
+    Finished
 };
 
 using TableName = std::string;
