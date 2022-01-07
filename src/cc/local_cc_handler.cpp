@@ -734,7 +734,10 @@ void txservice::LocalCcHandler::FindCatalogInCCShard(
 
     hres.SetValue(ret);
     hres.SetFinished();
+
+    req->Free();
 }
+
 void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
     const TableName &table_name,
     std::string *source_version,
@@ -745,7 +748,7 @@ void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
 
     CheckCatalogCC *req = commit_check_catalog_pool.NextRequest();
     req->Set(&table_name, source_version, tx_number, &hres);
-
+    
     // Put the request in the queue if failed to get read intention.
     if (!ccs.AcquireTableReadIntention(table_name, req))
     {
@@ -757,6 +760,8 @@ void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
 
     hres.SetValue(ret);
     hres.SetFinished();
+
+    req->Free();
 }
 
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
