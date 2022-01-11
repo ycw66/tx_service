@@ -52,6 +52,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_ts(ts);
     acq->set_insert(is_insert);
     acq->set_key_shard_code(key_shard_code);
+    acq->set_protocol(ConvertProtocol(proto));
 
     bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
 
@@ -142,48 +143,13 @@ void txservice::remote::RemoteCcHandler::ReleaseTableWriteLock(
     }
 }
 
-void txservice::remote::RemoteCcHandler::ReleaseWrite(
-    uint32_t src_node_id,
-    uint64_t tx_number,
-    int64_t tx_term,
-    const CcEntryAddr &cce_addr,
-    CcHandlerResult<Void> &hd_res)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_PostDeleteRequest);
-    send_msg.set_tx_number(tx_number);
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
-    send_msg.set_tx_term(tx_term);
-
-    PostDeleteRequest *post_del = send_msg.mutable_postdelete_req();
-    post_del->set_src_node_id(src_node_id);
-    post_del->set_node_group_id(cce_addr.NodeGroupId());
-    CceAddr_msg *cce_addr_msg = post_del->mutable_cce_addr();
-    cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
-    cce_addr_msg->set_term(cce_addr.Term());
-
-    bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_postdelete_req();
-
-    if (!success)
-    {
-        hd_res.SetError(-1);
-    }
-}
-
-void txservice::remote::RemoteCcHandler::CommitWrite(
+void txservice::remote::RemoteCcHandler::PostWrite(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    const TxRecord &record,
+    const TxRecord *record,
     bool is_deleted,
     CcHandlerResult<Void> &hres)
 {
@@ -211,9 +177,12 @@ void txservice::remote::RemoteCcHandler::CommitWrite(
     }
 
     post_commit->clear_record();
-    if (!is_deleted)
+    if (commit_ts > 0 && !is_deleted)
     {
-        record.Serialize(*post_commit->mutable_record());
+        // The commit ts is 0, if the post-write request is used to clear the
+        // write lock when the tx aborts.
+        assert(record != nullptr);
+        record->Serialize(*post_commit->mutable_record());
     }
 
     post_commit->set_commit_ts(commit_ts);
@@ -232,7 +201,7 @@ void txservice::remote::RemoteCcHandler::CommitWrite(
     }
 }
 
-void txservice::remote::RemoteCcHandler::ValidateRead(
+void txservice::remote::RemoteCcHandler::PostRead(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
@@ -240,7 +209,8 @@ void txservice::remote::RemoteCcHandler::ValidateRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<std::vector<TxId>> &hres)
+    CcHandlerResult<std::vector<TxId>> &hres,
+    CcProtocol protocol)
 {
     CcMessage send_msg;
 
@@ -259,6 +229,7 @@ void txservice::remote::RemoteCcHandler::ValidateRead(
     vali->set_commit_ts(commit_ts);
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
+    vali->set_protocol(ConvertProtocol(protocol));
 
     bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
 
@@ -266,42 +237,6 @@ void txservice::remote::RemoteCcHandler::ValidateRead(
     send_msg.clear_tx_number();
     send_msg.clear_handler_addr();
     send_msg.clear_validate_req();
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
-}
-
-void txservice::remote::RemoteCcHandler::PostprocessRead(
-    uint32_t src_node_id,
-    uint64_t tx_number,
-    int64_t tx_term,
-    const CcEntryAddr &cce_addr,
-    CcHandlerResult<Void> &hres,
-    CcProtocol proto)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_PostReadRequest);
-    send_msg.set_tx_number(tx_number);
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
-    send_msg.set_tx_term(tx_term);
-
-    PostReadRequest *post_read = send_msg.mutable_postread_req();
-    post_read->set_src_node_id(src_node_id);
-    post_read->set_node_group_id(cce_addr.NodeGroupId());
-    CceAddr_msg *cce_addr_msg = post_read->mutable_cce_addr();
-    cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
-    cce_addr_msg->set_term(cce_addr.Term());
-
-    bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_postread_req();
 
     if (!success)
     {
@@ -396,6 +331,7 @@ void txservice::remote::RemoteCcHandler::Read(
     int64_t tx_term,
     const uint64_t ts,
     CcHandlerResult<ReadKeyResult> &hres,
+    IsolationLevel iso_level,
     CcProtocol proto)
 {
     CcMessage send_msg;
@@ -412,6 +348,8 @@ void txservice::remote::RemoteCcHandler::Read(
     read->clear_key();
     key.Serialize(*read->mutable_key());
     read->set_key_shard_code(key_shard_code);
+    read->set_iso_level(ConvertIsolation(iso_level));
+    read->set_protocol(ConvertProtocol(proto));
 
     read->clear_record();
     switch (read_type)
@@ -454,12 +392,17 @@ void txservice::remote::RemoteCcHandler::Read(
  * ReadOutside fills the tuple read from KV into cache.
  */
 void txservice::remote::RemoteCcHandler::ReadOutside(
-    const TxRecord &record, bool is_deleted, const CcEntryAddr &cce_addr)
+    int64_t tx_term,
+    const TxRecord &record,
+    bool is_deleted,
+    const CcEntryAddr &cce_addr)
 {
     CcMessage send_msg;
 
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ReadOutsideRequest);
+    send_msg.set_tx_number(0);
+    send_msg.set_tx_term(tx_term);
 
     ReadOutsideRequest *read_outside = send_msg.mutable_read_outside_req();
     assert(cce_addr.CcePtr() != 0);
@@ -497,6 +440,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     uint64_t ts,
     CcHandlerResult<ScanOpenResult> &hd_res,
     ScanDirection direction,
+    IsolationLevel iso_level,
     CcProtocol proto,
     bool is_ckpt)
 {
@@ -530,6 +474,8 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_inclusive(inclusive);
     scan_open->set_direction(direction == ScanDirection::Forward);
     scan_open->set_ts(ts);
+    scan_open->set_iso_level(ConvertIsolation(iso_level));
+    scan_open->set_protocol(ConvertProtocol(proto));
     scan_open->set_ckpt(is_ckpt);
 
     bool success = stream_sender_.SendMessage(node_group_id, send_msg);
@@ -553,6 +499,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     uint64_t start_ts,
     ScanCache *scan_cache,
     CcHandlerResult<ScanNextResult> &hd_res,
+    IsolationLevel iso_level,
     CcProtocol proto,
     bool is_ckpt)
 {
@@ -574,6 +521,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
                              ScanDirection::Forward);
     scan_next->set_ts(start_ts);
     scan_next->set_scan_cache_ptr(reinterpret_cast<uint64_t>(scan_cache));
+    scan_next->set_iso_level(ConvertIsolation(iso_level));
+    scan_next->set_protocol(ConvertProtocol(proto));
     scan_next->set_ckpt(is_ckpt);
 
     bool success = stream_sender_.SendMessage(ng_id, send_msg);
@@ -670,5 +619,36 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     if (!success)
     {
         hres.SetError(-1);
+    }
+}
+
+txservice::remote::IsolationType
+txservice::remote::RemoteCcHandler::ConvertIsolation(IsolationLevel iso_level)
+{
+    switch (iso_level)
+    {
+    case IsolationLevel::ReadCommitted:
+        return IsolationType::ReadCommitted;
+    case IsolationLevel::Snapshot:
+        return IsolationType::SnapshotIsolation;
+    case IsolationLevel::RepeatableRead:
+        return IsolationType::RepeatableRead;
+    case IsolationLevel::Serializable:
+        return IsolationType::Serializable;
+    default:
+        return IsolationType::ReadCommitted;
+    }
+}
+
+txservice::remote::CcProtocolType
+txservice::remote::RemoteCcHandler::ConvertProtocol(CcProtocol proto)
+{
+    if (proto == CcProtocol::Locking)
+    {
+        return CcProtocolType::Locking;
+    }
+    else
+    {
+        return CcProtocolType::Occ;
     }
 }

@@ -147,6 +147,7 @@ TxResult<RecordStatus> *TransactionExecution::Read(const TableName &table_name,
                   tx_term_,
                   commit_ts_,
                   read_.cc_result_,
+                  iso_level_,
                   protocol_);
 
     StartTiming();
@@ -176,11 +177,11 @@ void TransactionExecution::PostRead()
         // Does not add the record to the read set for now to simulate isolation
         // levels lower than repeatable read.
 
-        /*if (status != RecordStatus::RemoteUnknown)
+        if (read_res.rec_status_ != RecordStatus::RemoteUnknown &&
+            iso_level_ >= IsolationLevel::RepeatableRead)
         {
-            const uint64_t &ts = std::get<1>(res);
-            rw_set_.AddRead(cce_addr, ts, read_.read_type_);
-        }*/
+            rw_set_.AddRead(read_res.cce_addr_, read_res.ts_, read_.read_type_);
+        }
 
         if (read_.read_type_ == ReadType::Inside &&
             read_res.rec_status_ == RecordStatus::Unknown)
@@ -215,7 +216,8 @@ TxResult<RecordStatus> *TransactionExecution::ReadOutside(TxRecord &record,
     read_.read_type_ =
         is_deleted ? ReadType::OutsideDeleted : ReadType::OutsideNormal;
 
-    handler->ReadOutside(record, is_deleted, read_cce_addr_, read_.cc_result_);
+    handler->ReadOutside(
+        tx_term_, record, is_deleted, read_cce_addr_, read_.cc_result_);
 
     return rec_resp_;
 }
@@ -251,6 +253,7 @@ TxResult<size_t> *TransactionExecution::ScanOpen(const TableName &table_name,
                       commit_ts_bound_,
                       scan_open_.cc_result_,
                       direction,
+                      iso_level_,
                       protocol_,
                       is_ckpt_delta);
 
@@ -329,7 +332,9 @@ TxResult<std::tuple<const TxKey *, const TxRecord *, bool>>
                                tx_term_,
                                commit_ts_bound_,
                                scanner,
-                               scan_next_.cc_result_);
+                               scan_next_.cc_result_,
+                               iso_level_,
+                               protocol_);
     }
     else
     {
@@ -377,7 +382,9 @@ void TransactionExecution::PostScanNext()
                                    tx_term_,
                                    commit_ts_bound_,
                                    *scan_next_.scanner_,
-                                   scan_next_.cc_result_);
+                                   scan_next_.cc_result_,
+                                   iso_level_,
+                                   protocol_);
             current_op_ = prev_op_;
             return;
         }
@@ -859,7 +866,9 @@ void TransactionExecution::SetTs()
 void TransactionExecution::PostSetTs()
 {
     commit_ts_ = set_ts_.result_of_set_commit_ts_.Value();
-    if ((rw_set_.ReadSetSize() > 0) && protocol_ == CcProtocol::OCC)
+    // Only isolation levels of repeatable read and serializability result in a
+    // non-empty read set.
+    if (rw_set_.ReadSetSize() > 0)
     {
         Vali();
     }
@@ -896,13 +905,14 @@ void TransactionExecution::Vali()
         CcHandlerResult<std::vector<TxId>> &hres = validate_.results_[offset];
         hres.Reset();
 
-        handler->ValidateRead(tx_number_.load(std::memory_order_relaxed),
-                              tx_term_,
-                              read_ts,
-                              0,
-                              commit_ts_,
-                              cce_addr,
-                              hres);
+        handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                          tx_term_,
+                          read_ts,
+                          0,
+                          commit_ts_,
+                          cce_addr,
+                          hres,
+                          protocol_);
 
         ++offset;
     }
@@ -924,7 +934,7 @@ void TransactionExecution::Vali()
                     hres.Reset();
 
                     const ScanSetEntry &scanEntry = sset_it->second;
-                    handler->ValidateRead(tx_number_,
+                    handler->PostRead(tx_number_,
                                                               scanEntry.key_ts_,
                                                               scanEntry.gap_ts_,
                                                               commit_ts_,
@@ -1200,7 +1210,8 @@ void TransactionExecution::SetTxStatus()
 void TransactionExecution::PostSetTxStatus()
 {
     wset_post_cnt_ = rw_set_.WriteSetSize() > 0
-                         ? upload_.upload_cnt_ - upload_.fail_cnt_.load()
+                         ? upload_.upload_cnt_ -
+                               upload_.fail_cnt_.load(std::memory_order_acquire)
                          : 0;
     if (wset_post_cnt_ != 0 || rw_set_.ReadSetSize() != 0)
     {
@@ -1273,16 +1284,7 @@ void TransactionExecution::PostProcess()
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
-        size_t post_read_cnt =
-            protocol_ == CcProtocol::OCC ? 0 : rw_set_.ReadSetSize();
-
-        if (rw_set_.WriteSetSize() + post_read_cnt >
-            post_process_.results_.size())
-        {
-            post_process_.Resize(rw_set_.WriteSetSize() + post_read_cnt);
-        }
-
-        post_process_.Reset(rw_set_.WriteSetSize() + post_read_cnt);
+        post_process_.Reset(0, rw_set_.WriteSetSize());
 
         size_t idx = 0;
         std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
@@ -1290,24 +1292,23 @@ void TransactionExecution::PostProcess()
         {
             for (auto key_it = table_it->second.begin();
                  key_it != table_it->second.end();
-                 ++key_it)
+                 ++key_it, ++idx)
             {
                 WriteSetEntry &write_entry = key_it->second;
-                CcHandlerResult<Void> &hres = post_process_.results_[idx];
-                ++idx;
+                CcHandlerResult<Void> &hres = post_process_.write_results_[idx];
                 hres.Reset();
                 if (write_entry.sindx_.size() > 0)
                 {
                     hres.SetRefCnt((uint32_t) write_entry.sindx_.size() + 1);
                 }
 
-                handler->CommitWrite(tx_number_.load(std::memory_order_relaxed),
-                                     tx_term_,
-                                     commit_ts_,
-                                     write_entry.cce_addr_,
-                                     *write_entry.rec_.get(),
-                                     write_entry.op_ == Operation::Delete,
-                                     hres);
+                handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   commit_ts_,
+                                   write_entry.cce_addr_,
+                                   write_entry.rec_.get(),
+                                   write_entry.op_ == Operation::Delete,
+                                   hres);
 
                 for (auto sk_iter = write_entry.sindx_.begin();
                      sk_iter != write_entry.sindx_.end();
@@ -1326,55 +1327,25 @@ void TransactionExecution::PostProcess()
                 }
             }
         }
-
-        if (protocol_ == CcProtocol::Locking)
-        {
-            // For 2PL, releases the read lock for each read-set key.
-            const std::unordered_map<CcEntryAddr, uint64_t> &rset =
-                rw_set_.ReadSet();
-
-            for (auto read_it = rset.begin(); read_it != rset.end(); ++read_it)
-            {
-                CcHandlerResult<Void> &hres =
-                    post_process_.results_[idx + rw_set_.WriteSetSize()];
-                hres.Reset();
-                handler->PostprocessRead(
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    read_it->first,
-                    hres,
-                    protocol_);
-                ++idx;
-            }
-        }
     }
     else
     {
-        // For OCC, if the tx has finished validation, the read set
-        // has been cleared right after validation. Post-processing only
-        // processes write-set entries. If the tx failed during the acquire
-        // phase, post-processing removes write intentions and clears markers of
-        // read-set keys. For 2PL, since there is no validation, the read set
-        // has not been cleared. Post-processing clears the locks of all
-        // read-set entries.
+        // If the tx has finished validation, the read intentions/locks of the
+        // read-set keys have been cleared after validation. Post-processing
+        // only clears the write locks of the write-set keys. If the tx failed
+        // during the acquire phase or was aborted before entering the commit
+        // phase, post-processing removes write intentions of write-set keys and
+        // clears read intentions/locks of read-set keys.
 
-        if (rw_set_.ReadSetSize() + wset_post_cnt_ >
-            post_process_.results_.size())
-        {
-            post_process_.Resize(rw_set_.ReadSetSize() + wset_post_cnt_);
-        }
-
-        post_process_.Reset(rw_set_.ReadSetSize() + wset_post_cnt_);
+        post_process_.Reset(rw_set_.ReadSetSize(), wset_post_cnt_);
 
         size_t offset = 0;
         size_t idx = 0;
         const std::unordered_map<TableName, TableWriteSet> &wset =
             rw_set_.WriteSet();
-        for (auto table_it = wset.begin(); table_it != wset.end(); ++table_it)
+        for (const auto &[table_name, table_write_set] : wset)
         {
-            for (auto key_it = table_it->second.begin();
-                 key_it != table_it->second.end();
-                 ++key_it)
+            for (const auto &[key, write_entry] : table_write_set)
             {
                 if (upload_.results_[idx].IsError())
                 {
@@ -1383,38 +1354,44 @@ void TransactionExecution::PostProcess()
                     ++idx;
                     continue;
                 }
+                assert(!write_entry.cce_addr_.Empty());
 
-                assert(!key_it->second.cce_addr_.Empty());
-
-                const WriteSetEntry &write_entry = key_it->second;
-                CcHandlerResult<Void> &hres = post_process_.results_[offset];
+                CcHandlerResult<Void> &hres =
+                    post_process_.write_results_[offset];
                 hres.Reset();
 
-                handler->ReleaseWrite(
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    write_entry.cce_addr_,
-                    hres);
+                handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   0,
+                                   write_entry.cce_addr_,
+                                   nullptr,
+                                   false,
+                                   hres);
+
                 ++offset;
                 ++idx;
             }
         }
         assert(offset == wset_post_cnt_);
 
-        offset = 0;
+        idx = 0;
         const std::unordered_map<CcEntryAddr, uint64_t> &rset =
             rw_set_.ReadSet();
-        for (auto read_it = rset.begin(); read_it != rset.end(); ++read_it)
+        for (auto read_it = rset.begin(); read_it != rset.end();
+             ++read_it, ++idx)
         {
-            CcHandlerResult<Void> &hres =
-                post_process_.results_[offset + wset_post_cnt_];
+            CcHandlerResult<std::vector<TxId>> &hres =
+                post_process_.read_results_[idx];
             hres.Reset();
-            handler->PostprocessRead(tx_number_.load(std::memory_order_relaxed),
-                                     tx_term_,
-                                     read_it->first,
-                                     hres,
-                                     protocol_);
-            ++offset;
+
+            handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                              tx_term_,
+                              0,
+                              0,
+                              0,
+                              read_it->first,
+                              hres,
+                              protocol_);
         }
     }
 
@@ -1466,6 +1443,8 @@ TxResult<bool> *TransactionExecution::Abort()
 void TransactionExecution::Process(BeginRequest &begin_req)
 {
     void_resp_ = &begin_req.cc_result_;
+    iso_level_ = begin_req.iso_level_;
+    protocol_ = begin_req.protocol_;
     Begin();
 }
 
@@ -1606,11 +1585,17 @@ TxResult<Void> *TransactionExecution::Begin(uint64_t start_ts)
 
 void TransactionExecution::PostBegin()
 {
-    const auto &[txid, start_ts, tx_term] = init_txn_.result_.Value();
-    txid_ = txid;
+    if (init_txn_.result_.IsError())
+    {
+        void_resp_->FinishError();
+        return;
+    }
+
+    const InitTxResult &init_result = init_txn_.result_.Value();
+    txid_ = init_result.txid_;
     tx_number_.store(txid_.TxNumber(), std::memory_order_release);
-    commit_ts_bound_ = start_ts;
-    tx_term_ = tx_term;
+    commit_ts_bound_ = init_result.start_ts_;
+    tx_term_ = init_result.term_;
     current_op_ = nullptr;
     void_resp_->Finish(void_);
 }

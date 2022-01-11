@@ -57,6 +57,18 @@ message CceAddr_msg {
 	int64 term = 3;
 }
 
+enum IsolationType {
+	ReadCommitted = 0;
+	SnapshotIsolation = 1;
+	RepeatableRead = 2;
+	Serializable = 3;
+}
+
+enum CcProtocolType {
+	Occ = 0;
+	Locking = 1;
+}
+
 message AcquireRequest {
 	uint32 src_node_id = 1;
 	string tablename = 2;
@@ -65,12 +77,16 @@ message AcquireRequest {
 	uint32 vec_idx = 5;
 	uint64 ts = 6;
 	bool insert = 7;
+	CcProtocolType protocol = 8;
 }
 
 message AcquireResponse {
 	int32 error_code = 1;
 	uint64 vali_ts = 2;
-	CceAddr_msg cce_addr = 3;
+	uint64 commit_ts = 3;
+	CceAddr_msg cce_addr = 4;
+	// The response is an acknowledgement or the result
+	bool is_ack = 5;
 }
 
 message AcquireTableWriteLockRequest {
@@ -129,6 +145,7 @@ message ValidateRequest {
 	uint64 commit_ts = 4;
 	uint64 key_ts = 5;
 	uint64 gap_ts = 6;
+	CcProtocolType protocol = 7;
 }
 
 message ValidateResponse {
@@ -138,12 +155,6 @@ message ValidateResponse {
 
 message PostprocessResponse {
 	int32 error_code = 1;
-}
-
-message PostReadRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg cce_addr = 3;
 }
 
 message ReadRequest {
@@ -159,6 +170,8 @@ message ReadRequest {
 	}
 	ReadType read_type = 6;
 	uint64 ts = 7;
+	IsolationType iso_level = 8;
+	CcProtocolType protocol = 9;
 }
 
 message ReadResponse {
@@ -172,6 +185,8 @@ message ReadResponse {
 	RecordStatus rec_status = 3;
 	uint64 ts = 4;
 	CceAddr_msg cce_addr = 5;
+	// The response is an acknowledgement or the result
+	bool is_ack = 6;
 }
 
 message ReadOutsideRequest {
@@ -188,12 +203,6 @@ message PostCommitRequest {
 	uint64 commit_ts = 4;
 	bytes record = 5;
 	bool is_deleted = 6;
-}
-
-message PostDeleteRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg cce_addr = 3;
 }
 
 message ScanTuple_msg {
@@ -223,6 +232,8 @@ message ScanOpenRequest {
 	bool direction = 8;
 	uint64 ts = 9;
 	bool ckpt = 10;
+	IsolationType iso_level = 11;
+	CcProtocolType protocol = 12;
 }
 
 message ScanCache_msg {
@@ -243,6 +254,8 @@ message ScanNextRequest {
 	uint64 ts = 5;
 	uint64 scan_cache_ptr = 6;
 	bool ckpt = 7;
+	IsolationType iso_level = 8;
+	CcProtocolType protocol = 9;
 }
 
 message ScanNextResponse {
@@ -281,25 +294,23 @@ message CcMessage {
 		ValidateRequest = 6;
 		ValidateResponse = 7;
 		PostprocessResponse = 8;
-		PostReadRequest = 9;
 		PostCommitRequest = 10;
-		PostDeleteRequest = 11;
 		ScanOpenRequest = 12;
 		ScanOpenResponse = 13;
 		ScanNextRequest = 14;
 		ScanNextResponse = 15;
 		CommitSkRequest = 16;
 		ReadOutsideRequest = 17;
-    AcquireTableWriteLockRequest = 18;
-    AcquireTableWriteLockResponse = 19;
-    CommitCreateTableRequest = 20;
-    CommitCreateTableResponse = 21;
-    ReleaseTableWriteLockRequest = 22;
-    ReleaseTableWriteLockResponse = 23;
-    CommitDropTableRequest = 24;
-    CommitDropTableResponse = 25;
-    FaultInjectRequest = 26;
-    FaultInjectResponse = 27;
+		AcquireTableWriteLockRequest = 18;
+		AcquireTableWriteLockResponse = 19;
+		CommitCreateTableRequest = 20;
+		CommitCreateTableResponse = 21;
+		ReleaseTableWriteLockRequest = 22;
+		ReleaseTableWriteLockResponse = 23;
+		CommitDropTableRequest = 24;
+		CommitDropTableResponse = 25;
+		FaultInjectRequest = 26;
+		FaultInjectResponse = 27;
 	}
 
 	MessageType type = 1;
@@ -315,24 +326,22 @@ message CcMessage {
 		ValidateRequest validate_req = 14;
 		ValidateResponse validate_resp = 15;
 		PostprocessResponse post_resp = 16;
-		PostReadRequest postread_req = 17;
 		PostCommitRequest postcommit_req = 18;
-		PostDeleteRequest postdelete_req = 19;
 		ScanOpenRequest scan_open_req = 20;
 		ScanOpenResponse scan_open_resp = 21;
 		ScanNextRequest scan_next_req = 22;
 		ScanNextResponse scan_next_resp = 23;
 		CommitSkRequest commit_sk_req = 24;
 		ReadOutsideRequest read_outside_req = 25;
-    AcquireTableWriteLockRequest acquire_table_req = 26;
-    AcquireTableWriteLockResponse acquire_table_resp = 27;
-    CommitCreateTableRequest commit_create_table_req = 28;
-    CommitCreateTableResponse commit_create_table_resp = 29;
-    ReleaseTableWriteLockRequest release_table_req = 30;
-    ReleaseTableWriteLockResponse release_table_resp = 31;
-    CommitDropTableRequest commit_drop_table_req = 32;
-    CommitDropTableResponse commit_drop_table_resp = 33;
-    FaultInjectRequest fault_inject_req = 34;
-    FaultInjectResponse fault_inject_resp= 35;
+		AcquireTableWriteLockRequest acquire_table_req = 26;
+		AcquireTableWriteLockResponse acquire_table_resp = 27;
+		CommitCreateTableRequest commit_create_table_req = 28;
+		CommitCreateTableResponse commit_create_table_resp = 29;
+		ReleaseTableWriteLockRequest release_table_req = 30;
+		ReleaseTableWriteLockResponse release_table_resp = 31;
+		CommitDropTableRequest commit_drop_table_req = 32;
+		CommitDropTableResponse commit_drop_table_resp = 33;
+		FaultInjectRequest fault_inject_req = 34;
+		FaultInjectResponse fault_inject_resp= 35;
 	}
 }

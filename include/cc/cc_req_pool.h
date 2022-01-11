@@ -93,12 +93,12 @@ public:
 
             // Before: 0-------Tail-Head---------N-1
             // After:  0----------------------------Tail------------M-1
-            // Copy Head --> N-1
+            // Copy [Head, N-1] to the new vector
             std::copy(
                 vec_.get() + head_, vec_.get() + capacity_, new_vec.get());
 
             size_t half_cnt = capacity_ - head_;
-            // Copy 0 --> Tail
+            // Copy [0, Tail] to the new vector
             std::copy(vec_.get(),
                       vec_.get() + cnt_ - half_cnt,
                       new_vec.get() + half_cnt);

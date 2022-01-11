@@ -24,6 +24,23 @@ public:
 
     virtual ~CcHandler() = default;
 
+    /**
+     * @brief Acquires a write lock for the input key in the concurrency control
+     * (cc) map. When there is no conflict, the request puts a write lock on the
+     * key's cc entry and returns the cc entry's version. When there is a
+     * conflict, the request is blocked and put into a waiting queue, if the tx
+     * is under 2PL. The request returns with an error upon conflicts, if the tx
+     * is under OCC/MVCC, forcing the tx to abort immediately.
+     *
+     * @param table_name Table name of the input key
+     * @param key The key to be locked
+     * @param txid Tx ID
+     * @param tx_term The term of the tx node
+     * @param ts Start timestamp of the tx
+     * @param is_insert Whether or not the write operation is an insert
+     * @param hres Result handler of the request
+     * @param proto Concurrency control protocol
+     */
     virtual void AcquireWrite(const TableName &table_name,
                               const TxKey &key,
                               const TxId &txid,
@@ -31,7 +48,32 @@ public:
                               uint64_t ts,
                               bool is_insert,
                               CcHandlerResult<AcquireKeyResult> &hres,
-                              const CcProtocol proto = CcProtocol::OCC) = 0;
+                              CcProtocol proto) = 0;
+
+    /**
+     * @brief Acquires write locks for the input key in all shards. This method
+     * is used for replicated cc maps, where identical cc maps appear in all
+     * nodes. Replicated cc maps are for data frequently accessed, rarely
+     * modified and needs to be strongly consistent and performant, e.g., table
+     * catalog and range partition function.
+     *
+     * @param table_name Table name of the input key
+     * @param key The key to be locked
+     * @param txid Tx ID
+     * @param tx_term Term of the tx node
+     * @param ts Start timestamp of the tx
+     * @param is_insert Whether or not the write operation is an insert
+     * @param hres Result handler of the request
+     * @param proto Concurrency control protocol, 2PL or OCC/MVCC
+     */
+    virtual void AcquireWriteAll(const TableName &table_name,
+                                 const TxKey &key,
+                                 const TxId &txid,
+                                 int64_t tx_term,
+                                 uint64_t ts,
+                                 bool is_insert,
+                                 CcHandlerResult<AcquireKeyResult> &hres,
+                                 CcProtocol proto) = 0;
 
     /// <summary>
     /// Acquire table level write lock.
@@ -60,72 +102,58 @@ public:
                                        uint64_t tx_number,
                                        CcHandlerResult<Void> &hres) = 0;
 
-    /// <summary>
-    /// Releases the write intention/lock for the input key after the tx aborts.
-    /// The operation also unblocks the pending requests on the key.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="txid"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    virtual void ReleaseWrite(uint64_t tx_number,
-                              int64_t tx_term,
-                              const CcEntryAddr &ccentry_addr,
-                              CcHandlerResult<Void> &hres) = 0;
+    /**
+     * @brief Post-processes a write key. Post-processing clears the write lock,
+     * and if the tx commits, installs the committed record.
+     *
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param commit_ts Commit timestamp, if the tx commits. 0, if the tx aborts
+     * and the sole purpose of the request is to release the write lock of the
+     * key.
+     * @param ccentry_addr Address of the cc entry, on which the write lock
+     * is put.
+     * @param record Pointer to the committed record. Null, if the tx aborts.
+     * @param is_deleted Whether or not the write deletes a record
+     * @param hres Result handler of the request
+     */
+    virtual void PostWrite(uint64_t tx_number,
+                           int64_t tx_term,
+                           uint64_t commit_ts,
+                           const CcEntryAddr &ccentry_addr,
+                           const TxRecord *record,
+                           bool is_deleted,
+                           CcHandlerResult<Void> &hres) = 0;
 
-    /// <summary>
-    /// Installs the committed write and releases the write intention/lock after
-    /// the tx commits. The operation unblocks the pending requests, if there
-    /// are any, on the key.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="txid"></param>
-    /// <param name="commit_ts"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    /// <param name="record"></param>
-    /// <param name="is_deleted"></param>
-    virtual void CommitWrite(uint64_t tx_number,
-                             int64_t tx_term,
-                             uint64_t commit_ts,
-                             const CcEntryAddr &ccentry_addr,
-                             const TxRecord &record,
-                             bool is_deleted,
-                             CcHandlerResult<Void> &hres) = 0;
-
-    /// <summary>
-    /// For OCC, validates whether or not the key has changed since the prior
-    /// read.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="version_ts"></param>
-    /// <param name="commit_ts"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    virtual void ValidateRead(uint64_t tx_number,
-                              int64_t tx_term,
-                              uint64_t key_ts,
-                              uint64_t gap_ts,
-                              uint64_t commit_ts,
-                              const CcEntryAddr &ccentry_addr,
-                              CcHandlerResult<std::vector<TxId>> &hres) = 0;
-
-    /// <summary>
-    ///
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="TxId"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    virtual void PostprocessRead(uint64_t tx_number,
-                                 int64_t tx_term,
-                                 const CcEntryAddr &ccentry_addr,
-                                 CcHandlerResult<Void> &,
-                                 CcProtocol proto = CcProtocol::OCC) = 0;
+    /**
+     * @brief Post-processes a read/scan key. Post-processing clears the read
+     * lock or intention on the key's cc entry, matches the input key/gap
+     * timestamps against those of the cc entry and updates the cc entry's
+     * last_vali_ts field. The last_vali_ts field forces future transactions
+     * writing the key to commit at timestamps later than the reading tx. For
+     * OCC/MVCC, mismatches of the key/gap timestamps indicate that version
+     * stability is violated. For isolation levels greater than or equal to
+     * repeatable read, the reading tx needs to abort.
+     *
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param key_ts Version of the key. 0, if the tx does not read the key and
+     * does not check version stability.
+     * @param gap_ts Version of the gap. 0, if the tx does not read the gap and
+     * does not check version stability.
+     * @param commit_ts Commit timestamp of the tx. 0, if the tx aborts.
+     * @param ccentry_addr Address of the cc entry
+     * @param hres Result handler of the request
+     * @param protocol Concurrency control protocol
+     */
+    virtual void PostRead(uint64_t tx_number,
+                          int64_t tx_term,
+                          uint64_t key_ts,
+                          uint64_t gap_ts,
+                          uint64_t commit_ts,
+                          const CcEntryAddr &ccentry_addr,
+                          CcHandlerResult<std::vector<TxId>> &hres,
+                          CcProtocol protocol) = 0;
 
     /// <summary>
     /// PostProcess for create table.
@@ -157,15 +185,25 @@ public:
                                  uint64_t ts,
                                  CcHandlerResult<Void> &hresult) = 0;
 
-    /// <summary>
-    /// Starts concurrency control for the input key and returns the key's
-    /// committed value, if there is any.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="TxId"></param>
-    /// <param name="time"></param>
-    /// <param name=""></param>
+    /**
+     * @brief Reads the input key and returns the key's record. The request puts
+     * a read lock (for 2PL) or intention (for OCC/MVCC) on the key's cc entry,
+     * if the tx's isolation level is equal to or greater than repeatable read.
+     * The request is blocked and put into a waiting queue, if (1) there is a
+     * read-write conflict, (2) the tx is under 2PL, and (3) the isolation level
+     * is greater than or equal to repeatable read.
+     *
+     * @param table_name Table name of the input key
+     * @param key The key to be read
+     * @param rec Key's record to be filled
+     * @param read_type Read type
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param ts Start timestamp of the tx
+     * @param hres Result handler of the read request
+     * @param iso_level Isolation level
+     * @param proto Concurrency control (cc) protocol
+     */
     virtual void Read(const TableName &table_name,
                       const TxKey &key,
                       TxRecord &rec,
@@ -174,31 +212,49 @@ public:
                       int64_t tx_term,
                       const uint64_t ts,
                       CcHandlerResult<ReadKeyResult> &hres,
+                      IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                       CcProtocol proto = CcProtocol::OCC) = 0;
 
-    virtual void ReadOutside(TxRecord &rec,
+    /**
+     * @brief Brings the previously-read key's record into the cc map for
+     * caching. The method is only called after Read(), which starts
+     * concurrency control for a key not in the cc map and thus does not return
+     * the key's record.
+     *
+     * @param tx_term Term of the tx node
+     * @param rec Record to be cached
+     * @param is_deleted Whether or not the record is deleted
+     * @param cce_addr Address of the key's cc entry
+     * @param hres Result handler of the request
+     */
+    virtual void ReadOutside(int64_t tx_term,
+                             TxRecord &rec,
                              bool is_deleted,
                              const CcEntryAddr &cce_addr,
                              CcHandlerResult<ReadKeyResult> &hres) = 0;
 
-    virtual void ScanOpen(const TableName &table_name,
-                          ScanIndexType index_type,
-                          const TxKey &start_key,
-                          bool inclusive,
-                          uint64_t tx_number,
-                          int64_t tx_term,
-                          uint64_t start_ts,
-                          CcHandlerResult<ScanOpenResult> &hd_res,
-                          ScanDirection direction = ScanDirection::Forward,
-                          CcProtocol proto = CcProtocol::OCC,
-                          bool is_ckpt = false) = 0;
+    virtual void ScanOpen(
+        const TableName &table_name,
+        ScanIndexType index_type,
+        const TxKey &start_key,
+        bool inclusive,
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint64_t start_ts,
+        CcHandlerResult<ScanOpenResult> &hd_res,
+        ScanDirection direction = ScanDirection::Forward,
+        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+        CcProtocol proto = CcProtocol::OCC,
+        bool is_ckpt = false) = 0;
 
-    virtual void ScanNextBatch(uint64_t tx_number,
-                               int64_t tx_term,
-                               uint64_t start_ts,
-                               CcScanner &scanner,
-                               CcHandlerResult<ScanNextResult> &hd_res,
-                               CcProtocol proto = CcProtocol::OCC) = 0;
+    virtual void ScanNextBatch(
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint64_t start_ts,
+        CcScanner &scanner,
+        CcHandlerResult<ScanNextResult> &hd_res,
+        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+        CcProtocol proto = CcProtocol::OCC) = 0;
 
     virtual void ScanClose(size_t alias,
                            const TxKey &end_key,

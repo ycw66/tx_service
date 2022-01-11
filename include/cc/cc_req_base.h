@@ -41,41 +41,27 @@ public:
         in_use_.store(true, std::memory_order_release);
     }
 
-    TxNumber Tx() const
+    TxNumber Txn() const
     {
         return tx_number_;
     }
 
-protected:
-    CcRequestBase()
-        : in_use_(false),
-          proto_(CcProtocol::OCC),
-          isolation_level_(IsolationLevel::ReadCommitted)
+    CcProtocol Protocol() const
     {
+        return proto_;
     }
 
-    std::atomic<bool> in_use_;
-    TxNumber tx_number_;
+    IsolationLevel Isolation() const
+    {
+        return isolation_level_;
+    }
 
-public:
-    CcProtocol proto_;
-    IsolationLevel isolation_level_;
-};
+protected:
+    CcRequestBase() = default;
 
-/// <summary>
-/// An interface for CC requests that may be blocked. Requests blocked on a key
-/// are put into a queue and upon the key's state changes, the requests'
-/// executions are resumed.
-/// </summary>
-struct Resumable
-{
-    virtual ~Resumable() = default;
-
-    /// <summary>
-    /// Resume the execution of a blocked cc request.
-    /// </summary>
-    /// <returns>True, if the execution finishes; false, if the request is still
-    /// blocked.</returns>
-    virtual bool Resume() = 0;
+    std::atomic<bool> in_use_{false};
+    TxNumber tx_number_{0};
+    CcProtocol proto_{CcProtocol::OCC};
+    IsolationLevel isolation_level_{IsolationLevel::ReadCommitted};
 };
 }  // namespace txservice

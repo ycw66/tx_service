@@ -184,13 +184,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            // For locking-based protocols, when the acquire request is blocked
-            // in a remote node, the remote node will send an acknowledgement
-            // message to notify the sending tx the cce address and the node's
-            // term. When the acquire request is unblocked, the response will
-            // send back the last validation ts of the key.
-            acq_res.last_vali_ts_ = cc_res.vali_ts();
-            hd_res->SetFinished();
+            if (!cc_res.is_ack())
+            {
+                // For locking-based protocols, when the acquire request is
+                // blocked in a remote node, the remote node will send an
+                // acknowledgement message to notify the sending tx the cce
+                // address and the node's term. When the acquire request is
+                // unblocked, the response will send back the last validation ts
+                // of the key.
+                acq_res.last_vali_ts_ = cc_res.vali_ts();
+                acq_res.commit_ts_ = cc_res.commit_ts();
+                hd_res->SetFinished();
+            }
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -452,7 +457,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ValidateRequest:
     {
-        RemoteValidate *vali_req = vali_pool_.NextRequest();
+        RemotePostRead *vali_req = postread_pool_.NextRequest();
         vali_req->Set(std::move(msg));
         vali_req->Ccm()->shard_->Enqueue(vali_req);
         break;
@@ -505,13 +510,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
         msg_pool_.enqueue(std::move(msg));
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_PostReadRequest:
-    {
-        RemotePostRead *post_read = postread_pool_.NextRequest();
-        post_read->Set(std::move(msg));
-        post_read->Ccm()->shard_->Enqueue(post_read);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse:
@@ -621,57 +619,68 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         else
         {
             ReadKeyResult &read_result = hd_res->Value();
-            switch (read_res.rec_status())
-            {
-            case ReadResponse::RecordStatus::ReadResponse_RecordStatus_NORMAL:
-            {
-                read_result.rec_status_ = RecordStatus::Normal;
 
-                size_t offset = 0;
-                read_result.rec_->Deserialize(read_res.record().data(), offset);
-
-                break;
-            }
-            case ReadResponse::RecordStatus::ReadResponse_RecordStatus_DELETED:
+            if (read_result.cce_addr_.Term() < 0)
             {
-                read_result.rec_status_ = RecordStatus::Deleted;
-                break;
-            }
-            case ReadResponse::RecordStatus::ReadResponse_RecordStatus_UNKNOWN:
-            {
-                read_result.rec_status_ = RecordStatus::Unknown;
-                break;
-            }
-            default:
-                break;
+                const CceAddr_msg &cce_addr_msg = read_res.cce_addr();
+                read_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                                             cce_addr_msg.term());
+                // CC entry's shard Id has been set when the read request was
+                // sent.
             }
 
-            read_result.ts_ = read_res.ts();
+            if (!read_res.is_ack())
+            {
+                switch (read_res.rec_status())
+                {
+                case ReadResponse::RecordStatus::
+                    ReadResponse_RecordStatus_NORMAL:
+                {
+                    read_result.rec_status_ = RecordStatus::Normal;
 
-            const CceAddr_msg &cce_addr_msg = read_res.cce_addr();
-            read_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                                         cce_addr_msg.term());
-            // CC entry's shard Id has been set when the read request was sent.
+                    size_t offset = 0;
+                    read_result.rec_->Deserialize(read_res.record().data(),
+                                                  offset);
 
-            hd_res->SetFinished();
+                    break;
+                }
+                case ReadResponse::RecordStatus::
+                    ReadResponse_RecordStatus_DELETED:
+                {
+                    read_result.rec_status_ = RecordStatus::Deleted;
+                    break;
+                }
+                case ReadResponse::RecordStatus::
+                    ReadResponse_RecordStatus_UNKNOWN:
+                {
+                    read_result.rec_status_ = RecordStatus::Unknown;
+                    break;
+                }
+                default:
+                    break;
+                }
+
+                read_result.ts_ = read_res.ts();
+                hd_res->SetFinished();
+            }
         }
         msg_pool_.enqueue(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostCommitRequest:
     {
-        RemotePostCommit *post_commit = postcommit_pool_.NextRequest();
+        RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
         post_commit->Set(std::move(msg));
         post_commit->Ccm()->shard_->Enqueue(post_commit);
         break;
     }
-    case CcMessage::MessageType::CcMessage_MessageType_PostDeleteRequest:
-    {
-        RemotePostDelete *post_del = postdel_pool_.NextRequest();
-        post_del->Set(std::move(msg));
-        post_del->Ccm()->shard_->Enqueue(post_del);
-        break;
-    }
+    // case CcMessage::MessageType::CcMessage_MessageType_PostDeleteRequest:
+    // {
+    //     RemotePostDelete *post_del = postdel_pool_.NextRequest();
+    //     post_del->Set(std::move(msg));
+    //     post_del->Ccm()->shard_->Enqueue(post_del);
+    //     break;
+    // }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
         RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
@@ -939,6 +948,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     default:
         break;
+    }
+}
+
+IsolationLevel CcStreamReceiver::ConvertIsolation(IsolationType iso_type)
+{
+    switch (iso_type)
+    {
+    case IsolationType::ReadCommitted:
+        return IsolationLevel::ReadCommitted;
+    case IsolationType::SnapshotIsolation:
+        return IsolationLevel::Snapshot;
+    case IsolationType::RepeatableRead:
+        return IsolationLevel::RepeatableRead;
+    case IsolationType::Serializable:
+        return IsolationLevel::Serializable;
+    default:
+        return IsolationLevel::ReadCommitted;
+    }
+}
+
+CcProtocol CcStreamReceiver::ConvertProtocol(CcProtocolType proto)
+{
+    if (proto == CcProtocolType::Locking)
+    {
+        return CcProtocol::Locking;
+    }
+    else
+    {
+        return CcProtocol::OCC;
     }
 }
 }  // namespace remote

@@ -61,11 +61,6 @@ public:
         }
     }
 
-    /*bool Resume() override
-    {
-        return ccm_->Resume(*this);
-    }*/
-
     CcHandlerResult<ResultType> *Result()
     {
         return res_;
@@ -79,6 +74,11 @@ public:
     virtual const TableName *GetTableName()
     {
         return table_name_;
+    }
+
+    uint32_t NodeGroupId() const
+    {
+        return node_group_id_;
     }
 
 protected:
@@ -183,8 +183,7 @@ private:
     const TxId *txid_;
 };
 
-struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>,
-                   Resumable
+struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>
 {
 public:
     AcquireCc()
@@ -211,7 +210,7 @@ public:
              uint64_t ts,
              bool is_insert,
              CcHandlerResult<AcquireKeyResult> *res,
-             CcProtocol proto = CcProtocol::OCC)
+             CcProtocol proto)
     {
         table_name_ = tname;
         key_ = key;
@@ -219,12 +218,14 @@ public:
         key_shard_code_ = key_shard_code;
         node_group_id_ = key_shard_code >> 10;
         txid_ = txid;
+        tx_number_ = txid->TxNumber();
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         res_ = res;
         ccm_ = nullptr;
         proto_ = proto;
+        cce_ptr_ = nullptr;
     }
 
     void Set(const TableName *tname,
@@ -235,7 +236,7 @@ public:
              uint64_t ts,
              bool is_insert,
              CcHandlerResult<AcquireKeyResult> *res,
-             CcProtocol proto = CcProtocol::OCC)
+             CcProtocol proto)
     {
         table_name_ = tname;
         key_ = nullptr;
@@ -243,17 +244,14 @@ public:
         key_shard_code_ = key_shard_code;
         node_group_id_ = key_shard_code >> 10;
         txid_ = txid;
+        tx_number_ = txid->TxNumber();
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         res_ = res;
         ccm_ = nullptr;
         proto_ = proto;
-    }
-
-    bool Resume() override
-    {
-        return true;
+        cce_ptr_ = nullptr;
     }
 
     const TxKey *Key() const
@@ -291,6 +289,16 @@ public:
         return key_shard_code_;
     }
 
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
@@ -299,6 +307,12 @@ private:
     int64_t tx_term_;
     uint64_t ts_;
     bool is_insert_;
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to read-write conflicts in 2PL. After the request is
+    // unblocked and acquires the lock, the request's execution resumes without
+    // further lookup of the cc entry.
+    LruEntry *cce_ptr_;
 };
 
 struct CommitCreateTableCC
@@ -433,61 +447,11 @@ private:
     bool is_local_req_;
 };
 
-struct PostDeleteCc : public TemplatedCcRequest<PostDeleteCc, Void>
+struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, Void>
 {
 public:
-    PostDeleteCc() : cce_addr_(nullptr), tx_number_(0)
-    {
-    }
-
-    PostDeleteCc(const PostDeleteCc &rhs) = delete;
-    PostDeleteCc(PostDeleteCc &&rhs) = delete;
-
-    void Set(const CcEntryAddr *addr,
-             uint64_t tx_number,
-             CcHandlerResult<Void> *res)
-    {
-        cce_addr_ = addr;
-        tx_number_ = tx_number;
-        res_ = res;
-
-        if (addr->InsertPtr() != 0)
-        {
-            const UntypedInsertEntry *ins_ptr =
-                reinterpret_cast<const UntypedInsertEntry *>(addr->InsertPtr());
-            ccm_ = ins_ptr->Parent().parent_map_;
-        }
-        else
-        {
-            const LruEntry *lru_entry =
-                reinterpret_cast<const LruEntry *>(addr->CcePtr());
-            ccm_ = lru_entry->parent_map_;
-        }
-
-        node_group_id_ = cce_addr_->NodeGroupId();
-    }
-
-    const CcEntryAddr *CceAddr() const
-    {
-        return cce_addr_;
-    }
-
-    uint64_t TxNumber() const
-    {
-        return tx_number_;
-    }
-
-private:
-    const CcEntryAddr *cce_addr_;
-    uint64_t tx_number_;
-};
-
-struct PostCommitCc : public TemplatedCcRequest<PostCommitCc, Void>
-{
-public:
-    PostCommitCc()
+    PostWriteCc()
         : cce_addr_(nullptr),
-          tx_number_(0),
           commit_ts_(0),
           payload_(nullptr),
           payload_str_(nullptr),
@@ -495,8 +459,8 @@ public:
     {
     }
 
-    PostCommitCc(const PostCommitCc &rhs) = delete;
-    PostCommitCc(PostCommitCc &&rhs) = delete;
+    PostWriteCc(const PostWriteCc &rhs) = delete;
+    PostWriteCc(PostWriteCc &&rhs) = delete;
 
     void Set(const CcEntryAddr *addr,
              uint64_t tx_number,
@@ -563,11 +527,6 @@ public:
         return cce_addr_;
     }
 
-    uint64_t TxNumber() const
-    {
-        return tx_number_;
-    }
-
     uint64_t CommitTs() const
     {
         return commit_ts_;
@@ -590,34 +549,29 @@ public:
 
 private:
     const CcEntryAddr *cce_addr_;
-    uint64_t tx_number_;
     uint64_t commit_ts_;
     const TxRecord *payload_;
     const std::string *payload_str_;
     bool is_deleted_;
 };
 
-struct ValidateCc : public TemplatedCcRequest<ValidateCc, std::vector<TxId>>
+struct PostReadCc : public TemplatedCcRequest<PostReadCc, std::vector<TxId>>
 {
 public:
-    ValidateCc()
-        : cce_addr_(nullptr),
-          tx_number_(0),
-          commit_ts_(0),
-          key_ts_(0),
-          gap_ts_(0)
+    PostReadCc() : cce_addr_(nullptr), commit_ts_(0), key_ts_(0), gap_ts_(0)
     {
     }
 
-    ValidateCc(const ValidateCc &rhs) = delete;
-    ValidateCc(ValidateCc &&rhs) = delete;
+    PostReadCc(const PostReadCc &rhs) = delete;
+    PostReadCc(PostReadCc &&rhs) = delete;
 
     void Set(const CcEntryAddr *addr,
              uint64_t tx_number,
              uint64_t commit_ts,
              uint64_t key_ts,
              uint64_t gap_ts,
-             CcHandlerResult<std::vector<TxId>> *res)
+             CcHandlerResult<std::vector<TxId>> *res,
+             CcProtocol protocol)
     {
         cce_addr_ = addr;
         tx_number_ = tx_number;
@@ -625,6 +579,8 @@ public:
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
         res_ = res;
+        proto_ = protocol;
+        res->Value().clear();
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(addr->CcePtr());
@@ -636,11 +592,6 @@ public:
     const CcEntryAddr *CceAddr() const
     {
         return cce_addr_;
-    }
-
-    uint64_t TxNumber() const
-    {
-        return tx_number_;
     }
 
     uint64_t CommitTs() const
@@ -660,53 +611,12 @@ public:
 
 private:
     const CcEntryAddr *cce_addr_;
-    uint64_t tx_number_;
     uint64_t commit_ts_;
     uint64_t key_ts_;
     uint64_t gap_ts_;
 };
 
-struct PostReadCc : public TemplatedCcRequest<PostReadCc, Void>
-{
-public:
-    PostReadCc() : cce_addr_(nullptr), tx_number_(0)
-    {
-    }
-
-    PostReadCc(const PostReadCc &rhs) = delete;
-    PostReadCc(PostReadCc &&rhs) = delete;
-
-    void Set(const CcEntryAddr *addr,
-             uint64_t tx_number,
-             CcHandlerResult<Void> *res,
-             CcProtocol proto = CcProtocol::OCC)
-    {
-        cce_addr_ = addr;
-        tx_number_ = tx_number;
-        res_ = res;
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(addr->CcePtr());
-        ccm_ = lru_entry->parent_map_;
-        node_group_id_ = addr->NodeGroupId();
-        proto_ = proto;
-    }
-
-    const CcEntryAddr *CceAddr() const
-    {
-        return cce_addr_;
-    }
-
-    uint64_t TxNumber() const
-    {
-        return tx_number_;
-    }
-
-private:
-    const CcEntryAddr *cce_addr_;
-    uint64_t tx_number_;
-};
-
-struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>, Resumable
+struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
 {
 public:
     ReadCc()
@@ -714,7 +624,6 @@ public:
           key_str_(nullptr),
           rec_(nullptr),
           rec_str_(nullptr),
-          tx_number_(0),
           ts_(0),
           type_(ReadType::Inside)
     {
@@ -729,9 +638,11 @@ public:
              TxRecord *rec,
              ReadType read_type,
              uint64_t tx_number,
+             int64_t tx_term,
              uint64_t ts,
              CcHandlerResult<ReadKeyResult> *res,
-             CcProtocol proto = CcProtocol::OCC)
+             IsolationLevel iso_level,
+             CcProtocol proto)
     {
         key_ = key;
         key_str_ = nullptr;
@@ -741,8 +652,10 @@ public:
         type_ = read_type;
         res_ = res;
         tx_number_ = tx_number;
+        tx_term_ = tx_term;
         ts_ = ts;
         proto_ = proto;
+        isolation_level_ = iso_level;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -759,6 +672,7 @@ public:
         }
 
         node_group_id_ = key_shard_code >> 10;
+        cce_ptr_ = nullptr;
     }
 
     void Set(const TableName *tn,
@@ -767,9 +681,11 @@ public:
              std::string *rec_str,
              ReadType read_type,
              uint64_t tx_number,
+             int64_t tx_term,
              uint64_t ts,
              CcHandlerResult<ReadKeyResult> *res,
-             CcProtocol proto = CcProtocol::OCC)
+             IsolationLevel iso_level,
+             CcProtocol proto)
     {
         key_ = nullptr;
         key_str_ = key_str;
@@ -779,8 +695,10 @@ public:
         type_ = read_type;
         res_ = res;
         tx_number_ = tx_number;
+        tx_term_ = tx_term;
         ts_ = ts;
         proto_ = proto;
+        isolation_level_ = iso_level;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -797,16 +715,57 @@ public:
         }
 
         node_group_id_ = key_shard_code >> 10;
-    }
-
-    bool Resume() override
-    {
-        return true;
+        cce_ptr_ = nullptr;
     }
 
     uint32_t KeyShardCode() const
     {
         return key_shard_code_;
+    }
+
+    const TxKey *Key() const
+    {
+        return key_;
+    }
+
+    const std::string *KeyBlob() const
+    {
+        return key_str_;
+    }
+
+    TxRecord *Record()
+    {
+        return rec_;
+    }
+
+    std::string *RecordBlob()
+    {
+        return rec_str_;
+    }
+
+    int64_t TxTerm() const
+    {
+        return tx_term_;
+    }
+
+    uint64_t ReadTimestamp() const
+    {
+        return ts_;
+    }
+
+    ReadType Type() const
+    {
+        return type_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
     }
 
 private:
@@ -815,32 +774,22 @@ private:
     uint32_t key_shard_code_;
     TxRecord *rec_;
     std::string *rec_str_;
-    uint64_t tx_number_;
+    int64_t tx_term_;
     uint64_t ts_;
     ReadType type_;
-
-    template <typename KeyT, typename ValueT>
-    friend class TemplateCcMap;
-
-    template <typename SkT, typename PkT>
-    friend class SkCcMap;
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 };
 
 struct ScanOpenBatchCc
     : public TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>
 {
 public:
-    ScanOpenBatchCc()
-        : index_type_(ScanIndexType::Primary),
-          start_key_(nullptr),
-          inclusive_(true),
-          direct_(ScanDirection::Forward),
-          ts_(0),
-          scan_cache_(nullptr),
-          term_(-1),
-          is_ckpt_delta_(false)
-    {
-    }
+    ScanOpenBatchCc() = default;
 
     void Set(const TableName *tn,
              ScanIndexType type,
@@ -853,7 +802,8 @@ public:
              ScanCache *cache,
              int64_t term,
              CcHandlerResult<ScanOpenResult> *open_res,
-             const CcProtocol &proto,
+             IsolationLevel iso_level,
+             CcProtocol proto,
              bool is_delta)
     {
         table_name_ = tn;
@@ -867,20 +817,22 @@ public:
         scan_cache_ = cache;
         term_ = term;
         res_ = open_res;
+        iso_level_ = iso_level;
         proto_ = proto;
         ccm_ = nullptr;
         is_ckpt_delta_ = is_delta;
     }
 
 private:
-    ScanIndexType index_type_;
-    const TxKey *start_key_;
-    bool inclusive_;
-    ScanDirection direct_;
-    uint64_t ts_;
-    ScanCache *scan_cache_;
-    int64_t term_;
-    bool is_ckpt_delta_;
+    ScanIndexType index_type_{ScanIndexType::Primary};
+    const TxKey *start_key_{nullptr};
+    bool inclusive_{false};
+    ScanDirection direct_{ScanDirection::Forward};
+    uint64_t ts_{0};
+    ScanCache *scan_cache_{nullptr};
+    int64_t term_{-1};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    bool is_ckpt_delta_{false};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -893,15 +845,14 @@ struct ScanNextBatchCc
     : public TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>
 {
 public:
-    ScanNextBatchCc() : ts_(0), scan_cache_(nullptr), is_ckpt_delta_(false)
-    {
-    }
+    ScanNextBatchCc() = default;
 
     void Set(const uint32_t &ng_id,
              const uint64_t &ts,
              ScanCache *cache,
              CcHandlerResult<ScanNextResult> *next_res,
-             const CcProtocol &proto,
+             IsolationLevel iso_level,
+             CcProtocol proto,
              bool is_delta)
     {
         node_group_id_ = ng_id;
@@ -912,14 +863,16 @@ public:
             reinterpret_cast<const LruEntry *>(last_tuple->cce_addr_.CcePtr());
         ccm_ = lru_entry->parent_map_;
         res_ = next_res;
+        iso_level_ = iso_level;
         proto_ = proto;
         is_ckpt_delta_ = is_delta;
     }
 
 private:
-    uint64_t ts_;
-    ScanCache *scan_cache_;
-    bool is_ckpt_delta_;
+    uint64_t ts_{0};
+    ScanCache *scan_cache_{nullptr};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    bool is_ckpt_delta_{false};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -1093,19 +1046,20 @@ private:
     friend class Checkpointer;
 };
 
-/// <summary>
-/// The post-processing request that commits a write to a secondary index.
-/// Contrary to the primary index where a write consists of the acquiring phase
-/// and the post-processing phase, isolation levels other than serializability
-/// allows a write to the secondary index to skip the acquiring phase. This is
-/// because concurrency control of the secondary index always traces back to the
-/// primary index, which resolves all read-write and write-write conflicts. If a
-/// tx has no conflicts on the primary index, it is allowed to commit and will
-/// commit the change to the secondary index in post-processing. The only
-/// exception is serializability which avoids phantom reads. To detect and
-/// resolve phantom reads, a secondary index write needs the acquiring phase to
-/// negotiate with index scans.
-/// </summary>
+/**
+ * @brief The post-processing request that commits a write to a secondary index.
+ * Contrary to the primary index where a write consists of the acquiring phase
+ * and the post-processing phase, isolation levels other than serializability
+ * allows a write to the secondary index to skip the acquiring phase. This is
+ * because concurrency control of the secondary index always traces back to the
+ * primary index, which resolves all read-write and write-write conflicts. If a
+ * tx has no conflicts on the primary index, it is allowed to commit and will
+ * commit the change to the secondary index in post-processing. The only
+ * exception is serializability which avoids phantom reads. To detect and
+ * resolve phantom reads, a secondary index write needs the acquiring phase to
+ * resolve with index scans.
+ *
+ */
 struct CommitSkCc : public TemplatedCcRequest<CommitSkCc, Void>
 {
 public:
@@ -1244,8 +1198,7 @@ struct CheckTxStatusCc : public CcRequestBase
 {
 public:
     CheckTxStatusCc(const TxNumber &tx_number)
-        : tx_number_(tx_number),
-          tx_status_(TxnStatus::Ongoing),
+        : tx_status_(TxnStatus::Ongoing),
           exists_(false),
           finish_(false),
           mux_(),
@@ -1296,7 +1249,6 @@ public:
     }
 
 private:
-    TxNumber tx_number_;
     TxnStatus tx_status_;
     bool exists_;
     bool finish_;
@@ -1415,21 +1367,7 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        TxLockInfo *lk_info = ccs.GetActiveTxLockInfo(tx_number_);
-
-        if (lk_info != nullptr)
-        {
-            for (LruEntry *&lru_ptr : lk_info->cce_list_)
-            {
-                if (!lru_ptr->write_intention_.Empty() &&
-                    lru_ptr->write_intention_.TxNumber() == tx_number_)
-                {
-                    lru_ptr->write_intention_.Reset();
-                }
-            }
-        }
-
-        ccs.DeleteLockHolidngTx(tx_number_);
+        ccs.ClearTx(tx_number_);
 
         std::unique_lock<std::mutex> lk(mux_);
         ++finish_cnt_;
@@ -1447,7 +1385,6 @@ public:
     }
 
 private:
-    uint64_t tx_number_;
     std::mutex mux_;
     std::condition_variable wait_cv_;
     uint32_t finish_cnt_;

@@ -307,7 +307,8 @@ private:
 
     std::atomic<TxRequest *> next_req_;
 
-    CcProtocol protocol_;
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    CcProtocol protocol_{CcProtocol::OCC};
 
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;

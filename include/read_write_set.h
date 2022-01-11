@@ -63,9 +63,26 @@ public:
         }
     }
 
-    void DedupRead(const CcEntryAddr &cce_addr)
+    /**
+     * @brief Removes the read-set key given the cc entry's address.
+     *
+     * @param cce_addr The cc entry's address.
+     * @return uint64_t Commit timestamp of the cc entry, if the specified
+     * cc entry exists and is removed. 0, if the specified cc entry does not
+     * exist.
+     */
+    uint64_t DedupRead(const CcEntryAddr &cce_addr)
     {
-        rset_.erase(cce_addr);
+        uint64_t read_ts = 0;
+
+        auto cce_it = rset_.find(cce_addr);
+        if (cce_it != rset_.end())
+        {
+            read_ts = cce_it->second;
+            rset_.erase(cce_it);
+        }
+
+        return read_ts;
     }
 
     void AddWrite(const TableName &tabname,

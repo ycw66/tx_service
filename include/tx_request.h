@@ -67,7 +67,14 @@ protected:
 
 struct BeginRequest : public TemplateTxRequest<BeginRequest, Void>
 {
-    BeginRequest() = default;
+    BeginRequest(IsolationLevel level = IsolationLevel::ReadCommitted,
+                 CcProtocol proto = CcProtocol::OCC)
+        : iso_level_(level), protocol_(proto)
+    {
+    }
+
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    CcProtocol protocol_{CcProtocol::OCC};
 };
 
 struct ReadRequest : public TemplateTxRequest<ReadRequest, RecordStatus>

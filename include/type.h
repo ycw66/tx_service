@@ -30,7 +30,9 @@ using NodeGroupId = uint32_t;
 enum struct TableType
 {
     Primary,
-    Secondary
+    Secondary,
+    Catalog,
+    RangePartition
 };
 
 enum struct ReadType

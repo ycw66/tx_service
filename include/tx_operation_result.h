@@ -11,6 +11,7 @@ class CcScanner;
 struct AcquireKeyResult
 {
     uint64_t last_vali_ts_;
+    uint64_t commit_ts_;
     CcEntryAddr cce_addr_;
     // Number of remote acquire requests to be acknowledged in the transaction's
     // upload phase. For OCC/MVCC protocols, an acquire request is non-blocking,

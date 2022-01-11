@@ -49,22 +49,7 @@ public:
         return true;
     }
 
-    bool Resume(AcquireCc &req) override
-    {
-        return true;
-    }
-
-    bool Execute(PostDeleteCc &req) override
-    {
-        return true;
-    }
-
-    bool Execute(PostCommitCc &req) override
-    {
-        return true;
-    }
-
-    bool Execute(ValidateCc &req) override
+    bool Execute(PostWriteCc &req) override
     {
         return true;
     }
@@ -78,7 +63,7 @@ public:
     {
         auto hd_res = req.Result();
 
-        uint32_t ng_id = req.key_shard_code_ >> 10;
+        uint32_t ng_id = req.KeyShardCode() >> 10;
         int64_t term = Sharder::Instance().LeaderTerm(ng_id);
         if (term < 0)
         {
@@ -90,17 +75,18 @@ public:
         // issues a key-oriented read toward the cc map of a secondary index,
         // except for using the read request to bring an index entry (sk, pk)
         // into the cc map for concurrency control, i.e., read outside.
-        assert(req.type_ == ReadType::OutsideNormal);
+        assert(req.Type() == ReadType::OutsideNormal);
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyPair, KeyPtrPair> *cce_ptr = nullptr;
 
-        if (req.key_ != nullptr)
+        if (req.Key() != nullptr)
         {
             const SecondaryKey<SkT, PkT> *look_key =
-                static_cast<const SecondaryKey<SkT, PkT> *>(req.key_);
+                static_cast<const SecondaryKey<SkT, PkT> *>(req.Key());
 
-            cce_ptr = FindEmplace(look_key->SKey(), look_key->PKey(), req.ts_);
+            cce_ptr = FindEmplace(
+                look_key->SKey(), look_key->PKey(), req.ReadTimestamp());
 
             if (cce_ptr == nullptr)
             {
@@ -110,15 +96,15 @@ public:
         }
         else
         {
-            assert(req.key_str_ != nullptr);
+            assert(req.KeyBlob() != nullptr);
 
             SecondaryKey<SkT, PkT> decoded_key;
             size_t offset = 0;
             decoded_key.Deserialize(
-                req.key_str_->data(), offset, &compound_schema_);
+                req.KeyBlob()->data(), offset, &compound_schema_);
 
-            cce_ptr =
-                FindEmplace(decoded_key.SKey(), decoded_key.PKey(), req.ts_);
+            cce_ptr = FindEmplace(
+                decoded_key.SKey(), decoded_key.PKey(), req.ReadTimestamp());
 
             if (cce_ptr == nullptr)
             {
@@ -134,11 +120,6 @@ public:
         hd_res->Value().rec_status_ = cce_ptr->payload_status_;
 
         hd_res->SetFinished();
-        return true;
-    }
-
-    bool Resume(ReadCc &req) override
-    {
         return true;
     }
 
@@ -559,7 +540,7 @@ public:
             // The checkpoint ts should be smaller than the ts when an ongoing
             // tx acquired the write intention. Or, there is a possibility that
             // the tx commits prior to the checkpoint.
-            assert(cce->write_intention_.Empty() ||
+            assert(!cce->key_lock_.HasWriteLock() ||
                    req.ckpt_ts_ <= cce->last_vali_ts_);
 
             if (cce->commit_ts_ <= req.ckpt_ts_ &&

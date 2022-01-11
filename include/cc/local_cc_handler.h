@@ -22,7 +22,18 @@ public:
                       uint64_t ts,
                       bool is_insert,
                       CcHandlerResult<AcquireKeyResult> &hres,
-                      const CcProtocol proto = CcProtocol::OCC) override;
+                      const CcProtocol proto) override;
+
+    void AcquireWriteAll(const TableName &table_name,
+                         const TxKey &key,
+                         const TxId &txid,
+                         int64_t tx_term,
+                         uint64_t ts,
+                         bool is_insert,
+                         CcHandlerResult<AcquireKeyResult> &hres,
+                         CcProtocol proto) override
+    {
+    }
 
     void AcquireTableWriteLock(
         const TableName &table_name,
@@ -38,20 +49,6 @@ public:
                                CcHandlerResult<Void> &hres) override;
 
     /// <summary>
-    /// Releases the write intention/lock for the input key after the tx aborts.
-    /// The operation also unblocks the pending requests on the same key.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="txid"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    void ReleaseWrite(uint64_t tx_number,
-                      int64_t tx_term,
-                      const CcEntryAddr &ccentry_addr,
-                      CcHandlerResult<Void> &) override;
-
-    /// <summary>
     /// Installs the committed write and releases the write intention/lock after
     /// the tx commits. The operation unblocks the pending requests, if there
     /// are any, on the key.
@@ -64,13 +61,13 @@ public:
     /// <param name=""></param>
     /// <param name="record"></param>
     /// <param name="is_deleted"></param>
-    void CommitWrite(uint64_t tx_number,
-                     int64_t tx_term,
-                     uint64_t commit_ts,
-                     const CcEntryAddr &ccentry_addr,
-                     const TxRecord &record,
-                     bool is_deleted,
-                     CcHandlerResult<Void> &hres) override;
+    void PostWrite(uint64_t tx_number,
+                   int64_t tx_term,
+                   uint64_t commit_ts,
+                   const CcEntryAddr &ccentry_addr,
+                   const TxRecord *record,
+                   bool is_deleted,
+                   CcHandlerResult<Void> &hres) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the prior
@@ -82,19 +79,14 @@ public:
     /// <param name="commit_ts"></param>
     /// <param name="extension"></param>
     /// <param name=""></param>
-    void ValidateRead(uint64_t tx_number,
-                      int64_t tx_term,
-                      uint64_t key_ts,
-                      uint64_t gap_ts,
-                      uint64_t commit_ts,
-                      const CcEntryAddr &ccentry_addr,
-                      CcHandlerResult<std::vector<TxId>> &hres) override;
-
-    void PostprocessRead(uint64_t tx_number,
-                         int64_t tx_term,
-                         const CcEntryAddr &ccentry_addr,
-                         CcHandlerResult<Void> &hres,
-                         CcProtocol proto = CcProtocol::OCC) override;
+    void PostRead(uint64_t tx_number,
+                  int64_t tx_term,
+                  uint64_t key_ts,
+                  uint64_t gap_ts,
+                  uint64_t commit_ts,
+                  const CcEntryAddr &ccentry_addr,
+                  CcHandlerResult<std::vector<TxId>> &hres,
+                  CcProtocol protocol) override;
 
     void CommitCreateTable(const TableName &table_name,
                            const unsigned char *catalog_image_,
@@ -130,9 +122,11 @@ public:
               int64_t tx_term,
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
+              IsolationLevel iso_level = IsolationLevel::ReadCommitted,
               CcProtocol proto = CcProtocol::OCC) override;
 
-    void ReadOutside(TxRecord &rec,
+    void ReadOutside(int64_t tx_term,
+                     TxRecord &rec,
                      bool is_deleted,
                      const CcEntryAddr &cce_addr,
                      CcHandlerResult<ReadKeyResult> &hres) override;
@@ -146,6 +140,7 @@ public:
                   uint64_t ts,
                   CcHandlerResult<ScanOpenResult> &hd_res,
                   ScanDirection direction = ScanDirection::Forward,
+                  IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_ckpt_delta = false) override;
 
@@ -154,6 +149,7 @@ public:
                        uint64_t start_ts,
                        CcScanner &scanner,
                        CcHandlerResult<ScanNextResult> &hd_res,
+                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                        CcProtocol proto = CcProtocol::OCC) override;
 
     void ScanClose(size_t alias,
@@ -268,10 +264,8 @@ private:
     CcRequestPool<AcquireCc> acquire_pool;
     CcRequestPool<AcquireTableWriteLockCC> table_write_lock_pool;
     CcRequestPool<ReleaseTableWriteLockCC> release_table_write_lock_pool;
-    CcRequestPool<PostDeleteCc> postdel_pool;
-    CcRequestPool<PostCommitCc> postcommit_pool;
-    CcRequestPool<ValidateCc> reread_pool;
-    CcRequestPool<PostReadCc> postread_pool;
+    CcRequestPool<PostWriteCc> postwrite_pool;
+    CcRequestPool<PostReadCc> postread_pool_;
     CcRequestPool<ReadCc> read_pool;
     CcRequestPool<NegotiateCc> negoti_pool;
     CcRequestPool<CommitSkCc> commitsk_pool;

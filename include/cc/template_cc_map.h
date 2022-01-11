@@ -86,75 +86,93 @@ public:
 
     bool Execute(AcquireCc &req) override
     {
-        auto hd_res = req.Result();
-        CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
-
+        CcHandlerResult<AcquireKeyResult> *hd_res = req.Result();
+        AcquireKeyResult &acquire_key_result = hd_res->Value();
+        CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        bool resume = false;
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
 
-        const TxKey *req_key = req.Key();
-        if (req_key != nullptr)
-        {
-            target_key = static_cast<const KeyT *>(req_key);
-        }
-        else
-        {
-            const std::string *key_str = req.KeyStr();
-
-            assert(key_str != nullptr);
-
-            size_t offset = 0;
-            decoded_key.Deserialize(key_str->data(), offset, key_schema_.get());
-            target_key = &decoded_key;
-        }
-
-        uint32_t ng_id = req.KeyShardCode() >> 10;
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
             hd_res->SetError(-1);
             return true;
         }
 
-        if (req.IsInsert())
+        if (req.CcePtr() != nullptr)
         {
-            cce_ptr = Floor(*target_key);
-
-            if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
-            {
-                // The floor entry's key is equal to the insert key. If the key
-                // is deleted, the insert becomes become an update. Or the
-                // insert is aborted due to the duplidate key conflict.
-                if (cce_ptr->payload_status_ == RecordStatus::Deleted)
-                {
-                    cce_addr.SetCce(
-                        reinterpret_cast<uint64_t>(cce_ptr), ng_term, ng_id);
-                }
-                else
-                {
-                    // Inserts a duplicate key.
-                    hd_res->SetError(1);
-                    return true;
-                }
-            }
+            // The request was blocked before and is now unblocked.
+            resume = true;
+            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
         }
         else
         {
-            cce_ptr = FindEmplace(*target_key, req.Ts());
+            // First time the request is processed.
 
-            if (cce_ptr == nullptr)
+            const TxKey *req_key = req.Key();
+            if (req_key != nullptr)
             {
-                // The acquire request needs a new cc entry but the cc map
-                // has reached the maximal capacity. Blocks the request by
-                // putting it back to the cc request queue.
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
-                return false;
+                target_key = static_cast<const KeyT *>(req_key);
+            }
+            else
+            {
+                const std::string *key_str = req.KeyStr();
+
+                assert(key_str != nullptr);
+
+                size_t offset = 0;
+                decoded_key.Deserialize(
+                    key_str->data(), offset, key_schema_.get());
+                target_key = &decoded_key;
             }
 
-            assert(cce_ptr != nullptr);
-            cce_addr.SetCce(
-                reinterpret_cast<uint64_t>(cce_ptr), ng_term, ng_id);
+            if (req.IsInsert())
+            {
+                cce_ptr = Floor(*target_key);
+
+                if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
+                {
+                    // The floor entry's key is equal to the insert key. If the
+                    // key is deleted, the insert becomes become an update. Or
+                    // the insert is aborted due to the duplidate key conflict.
+                    if (cce_ptr->payload_status_ == RecordStatus::Deleted)
+                    {
+                        cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
+                                        ng_term,
+                                        req.NodeGroupId());
+                    }
+                    else
+                    {
+                        // Inserts a duplicate key.
+                        hd_res->SetError(1);
+                        return true;
+                    }
+                }
+
+                req.SetCcePtr(cce_ptr);
+            }
+            else
+            {
+                cce_ptr = FindEmplace(*target_key, req.Ts());
+
+                if (cce_ptr == nullptr)
+                {
+                    // The acquire request needs a new cc entry but the cc map
+                    // has reached the maximal capacity. Blocks the request by
+                    // putting it back to the cc request queue.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+
+                assert(cce_ptr != nullptr);
+                cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
+                                ng_term,
+                                req.NodeGroupId());
+
+                req.SetCcePtr(cce_ptr);
+            }
         }
 
         // Cce ptr either points to the cc entry whose gap will accommodate the
@@ -184,119 +202,92 @@ public:
             std::unique_ptr<InsertEntry<KeyT, ValueT>> insert_entry =
                 std::make_unique<InsertEntry<KeyT, ValueT>>(
                     *target_key, *txid, cce_ptr);
-            cce_addr.SetInsert(
-                reinterpret_cast<uint64_t>(insert_entry.get()), ng_term, ng_id);
+            cce_addr.SetInsert(reinterpret_cast<uint64_t>(insert_entry.get()),
+                               ng_term,
+                               req.NodeGroupId());
 
             cc_entry.insert_intention_set_.emplace(&insert_entry->key_,
                                                    std::move(insert_entry));
             // Cc entry address has been updated. Only reset the result's last
             // validation ts.
-            hd_res->Value().last_vali_ts_ = cc_entry.gap_last_vali_ts_;
+            acquire_key_result.last_vali_ts_ = cc_entry.gap_last_vali_ts_;
+            acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
             hd_res->SetFinished();
         }
         else
         {
-            uint64_t tx_number = txid->TxNumber();
             int64_t tx_term = req.TxTerm();
 
-            if (req.proto_ == CcProtocol::Locking &&
-                (cc_entry.rlck_holders_.size() > 1 ||
-                 (cc_entry.rlck_holders_.size() == 1 &&
-                  cc_entry.rlck_holders_.find(tx_number) ==
-                      cc_entry.rlck_holders_.end())))
+            // On execution resumption, the write lock has been acquired when
+            // being unblocked.
+            bool lock_success = resume ? true
+                                       : cc_entry.key_lock_.AcquireWriteLock(
+                                             &req, tx_term, req.Protocol());
+
+            if (lock_success)
             {
-                // When there is at least one read locking not owned by the
-                // calling tx, blocks the acquire request.
-                cc_entry.blocking_queue_.Enqueue(&req);
-                return false;
-            }
+                shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), cce_ptr);
 
-            if (cc_entry.write_intention_.Empty())
-            {
-                cc_entry.write_intention_ = *txid;
-                cc_entry.tx_term_ = tx_term;
-
-                // If the tx previously read the key and now tries to update it,
-                // replaces the read lock with the write intention.
-                cc_entry.rlck_holders_.erase(tx_number);
-
-                // Updates last_vali_ts when acquiring the write intention such
-                // that it is no smaller than the current time of the shard.
-                // The net effect is that the tx acquiring the write intention
-                // is forced not to commit at a time earlier than the clock of
-                // the participating node, even if the clock of the tx's
+                // Updates last_vali_ts after successfully acquiring the write
+                // lock such that it is no smaller than the current time of
+                // the shard. The net effect is that the tx acquiring the write
+                // lock is forced not to commit at a time earlier than the
+                // clock of this cc node, even if the clock of the tx's
                 // coordinator node drifts and falls behind. Checkpointing
-                // relies on this property to avoid picking a checkpoint ts that
-                // may overlap with an ongoing tx.
-                uint64_t now_ts = shard_->Now();
-                cc_entry.last_vali_ts_ =
-                    std::max(cc_entry.last_vali_ts_, now_ts + 1);
-
-                shard_->UpsertLockHoldingTx(
-                    tx_number, cc_entry.last_vali_ts_, cce_ptr);
-
-                hd_res->Value().last_vali_ts_ = cc_entry.last_vali_ts_;
+                // relies on this property to avoid picking a checkpoint ts in
+                // this shard that may overlap with the ongoing tx.
+                acquire_key_result.last_vali_ts_ =
+                    std::max(cc_entry.last_vali_ts_, shard_->Now());
+                acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
                 hd_res->SetFinished();
             }
             else
             {
-                using namespace std::chrono_literals;
-                uint64_t ts_gap =
-                    std::chrono::duration_cast<std::chrono::seconds>(5s)
-                        .count();
-
-                TxNumber lk_holding_tx = cc_entry.write_intention_.TxNumber();
-                TxLockInfo *lk_info =
-                    shard_->GetActiveTxLockInfo(lk_holding_tx);
-                uint64_t now_ts = shard_->Now();
-
-                // If the write intention has been held by a conflicting tx
-                // for a period of time (more than 5 seconds), tries to
-                // recover the intention by inquiring the conflicting tx's
-                // status. If the tx has failed or committed, recovers the
-                // orphan intention. Or, keeps being blocked until the tx
-                // makes further actions.
-                if (lk_info == nullptr ||
-                    (now_ts - lk_info->ts_ >= ts_gap &&
-                     now_ts - lk_info->last_recover_ts_ >= ts_gap))
+                const std::unordered_set<TxNumber> &read_locks =
+                    cc_entry.key_lock_.ReadLocks();
+                if (read_locks.size() > 0)
                 {
-                    // The intention's holding tx may not exist in the cc
-                    // shard's active tx set. This is possible when the first
-                    // attempt to recover the tx detects that the tx has
-                    // committed and hence removes it from the active tx set,
-                    // but the following log replay requests fail, leaving the
-                    // intention unrecovered. Another possibility is that
-                    // post-processing directs two requests to this shard, one
-                    // succeeds and the other fails. The successful
-                    // post-processing request removes the tx from the active tx
-                    // set, so when the failed key's intention is recovered, the
-                    // intention holding tx does not exist in the active set.
-                    if (lk_info == nullptr)
+                    // If the request fails to acquire the write lock because of
+                    // read locks, checks each read lock and recovers if needed.
+                    for (const auto &read_tx : read_locks)
                     {
-                        lk_info = shard_->UpsertLockHoldingTx(
-                            lk_holding_tx, now_ts, &cc_entry);
+                        shard_->CheckRecoverTx(
+                            read_tx, req.NodeGroupId(), ng_term);
                     }
-
-                    Sharder::Instance().RecoverTx(
-                        lk_holding_tx, cc_entry.tx_term_, ng_id, ng_term);
-
-                    // Updates the last_recover_ts field, so that following
-                    // conflicting tx's will not try recovery immediately,
-                    // avoiding a flood of recovery requests.
-                    lk_info->last_recover_ts_ = now_ts;
-                }
-
-                if (req.proto_ == CcProtocol::OCC)
-                {
-                    // For OCC, a write-write conflict causes the tx to abort
-                    // immediately.
-                    hd_res->SetError(1);
                 }
                 else
                 {
-                    // For 2PL, a write-write conflict causes the acuquire
-                    // request to block.
-                    cc_entry.blocking_queue_.Enqueue(&req);
+                    // The request fails because of write-write conflicts.
+                    assert(cc_entry.key_lock_.HasWriteLock());
+                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteTx(),
+                                           req.NodeGroupId(),
+                                           ng_term);
+                }
+
+                if (req.Protocol() == CcProtocol::OCC)
+                {
+                    // For OCC/MVCC, a conflict causes the tx to abort
+                    // immediately.
+                    hd_res->SetError(1);
+                    return true;
+                }
+                else
+                {
+                    // For 2PL, a conflict blocks the tx by putting it into the
+                    // lock's blocking queue.
+
+                    uint32_t tx_node = (req.Txn() >> 32L) >> 10;
+                    if (tx_node != shard_->node_id_)
+                    {
+                        // If the acquire request comes from a remote node,
+                        // sends acknowledgement to the sender when the request
+                        // is blocked.
+                        remote::RemoteAcquire &remote_req =
+                            static_cast<remote::RemoteAcquire &>(req);
+                        remote_req.Acknowledge();
+                    }
+
+                    return false;
                 }
             }
         }
@@ -304,53 +295,7 @@ public:
         return true;
     }
 
-    bool Resume(AcquireCc &req) override
-    {
-        return true;
-    }
-
-    bool Execute(PostDeleteCc &req) override
-    {
-        const CcEntryAddr &cce_addr = *req.CceAddr();
-
-        if (cce_addr.InsertPtr() != 0)
-        {
-            InsertEntry<KeyT, ValueT> &insert_entry =
-                *reinterpret_cast<InsertEntry<KeyT, ValueT> *>(
-                    cce_addr.InsertPtr());
-
-            CcEntry<KeyT, ValueT> &parent_entry = *insert_entry.parent_entry_;
-            parent_entry.insert_intention_set_.erase(&insert_entry.key_);
-            // The write lock/intention was released. Process blocking requests,
-            // if there are any.
-            parent_entry.UnblockRequests();
-        }
-        else
-        {
-            assert(cce_addr.CcePtr() != 0);
-
-            CcEntry<KeyT, ValueT> &cc_entry =
-                *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-
-            // Clears the write intention if the intention is still held
-            // by the calling txn.
-            TxNumber txn = req.TxNumber();
-            if (cc_entry.write_intention_ == txn)
-            {
-                cc_entry.write_intention_.Reset();
-
-                shard_->DeleteLockHolidngTx(txn);
-
-                // The write lock/intention was released. Process blocking
-                // requests, if there are any.
-                cc_entry.UnblockRequests();
-            }
-        }
-        req.Result()->SetFinished();
-        return true;
-    }
-
-    bool Execute(PostCommitCc &req) override
+    bool Execute(PostWriteCc &req) override
     {
         const CcEntryAddr &cce_addr = *req.CceAddr();
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
@@ -361,7 +306,7 @@ public:
         }
 
         const ValueT *commit_val = static_cast<const ValueT *>(req.Payload());
-        TxNumber txn = req.TxNumber();
+        TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
         const std::string *payload_str = req.PayloadStr();
         bool is_del = req.IsDeleted();
@@ -373,67 +318,88 @@ public:
             InsertEntry<KeyT, ValueT> &insert_entry =
                 *reinterpret_cast<InsertEntry<KeyT, ValueT> *>(
                     cce_addr.InsertPtr());
-
-            CcEntry<KeyT, ValueT> *new_cce =
-                Emplace(insert_entry.key_, commit_ts);
-
-            if (new_cce == nullptr)
-            {
-                // The cc map has reached the maximal capacity.
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
-
-                // finally release table read lock
-                shard_->ReleaseTableReadIntention(*req.GetTableName(), &req);
-
-                return false;
-            }
-
             CcEntry<KeyT, ValueT> &prior_cce = *insert_entry.parent_entry_;
 
-            auto ite = prior_cce.insert_intention_set_.find(&insert_entry.key_);
-            assert(ite != prior_cce.insert_intention_set_.end());
-            assert(ite->second->tx_id_ == txn);
-
-            if (payload_str == nullptr)
+            if (commit_ts == 0)
             {
-                new_cce->payload_ = *commit_val;
+                // When the commit ts is 0, this request has a sole purpose:
+                // undoes any effects left by the write operation. This is used
+                // when the tx receives the abort command before entering the
+                // commit phase. For an insert, in addition to removing the
+                // write lock, the undo operation also includes removing the
+                // temporary insert entry in the gap.
+                CcEntry<KeyT, ValueT> &parent_entry =
+                    *insert_entry.parent_entry_;
+                parent_entry.insert_intention_set_.erase(&insert_entry.key_);
             }
             else
             {
-                size_t offset = 0;
-                new_cce->payload_.Deserialize(payload_str->data(), offset);
+                CcEntry<KeyT, ValueT> *new_cce =
+                    Emplace(insert_entry.key_, commit_ts);
+
+                if (new_cce == nullptr)
+                {
+                    // The cc map has reached the maximal capacity.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+
+                    // finally release table read lock
+                    shard_->ReleaseTableReadIntention(*req.GetTableName(),
+                                                      &req);
+
+                    return false;
+                }
+
+                auto ite =
+                    prior_cce.insert_intention_set_.find(&insert_entry.key_);
+                assert(ite != prior_cce.insert_intention_set_.end());
+                assert(ite->second->tx_id_ == txn);
+
+                if (payload_str == nullptr)
+                {
+                    new_cce->payload_ = *commit_val;
+                }
+                else
+                {
+                    size_t offset = 0;
+                    new_cce->payload_.Deserialize(payload_str->data(), offset);
+                }
+                new_cce->payload_status_ = RecordStatus::Normal;
+
+                ++ite;
+                for (auto it = ite; it != prior_cce.insert_intention_set_.end();
+                     ++it)
+                {
+                    InsertEntry<KeyT, ValueT> &insert_entry = *it->second.get();
+                    insert_entry.parent_entry_ = new_cce;
+                    new_cce->insert_intention_set_.emplace(
+                        it->first, std::move(it->second));
+                }
+
+                new_cce->gap_commit_ts_ = commit_ts;
+                new_cce->commit_ts_ = commit_ts;
+                new_cce->gap_last_vali_ts_ = prior_cce.gap_last_vali_ts_;
+
+                prior_cce.gap_commit_ts_ = commit_ts;
+                prior_cce.insert_intention_set_.erase(
+                    --ite, prior_cce.insert_intention_set_.end());
+
+                if (new_cce->ckpt_next_ == nullptr)
+                {
+                    // If the new cc entry is not in the checkpoint list,
+                    // enlists the new entry.
+                    LruEntry *second_last = pos_inf_.ckpt_prev_;
+                    second_last->ckpt_next_ = new_cce;
+                    new_cce->ckpt_prev_ = second_last;
+                    new_cce->ckpt_next_ = &pos_inf_;
+                    pos_inf_.ckpt_prev_ = new_cce;
+                }
             }
-            new_cce->payload_status_ = RecordStatus::Normal;
 
-            ++ite;
-            for (auto it = ite; it != prior_cce.insert_intention_set_.end();
-                 ++it)
-            {
-                InsertEntry<KeyT, ValueT> &insert_entry = *it->second.get();
-                insert_entry.parent_entry_ = new_cce;
-                new_cce->insert_intention_set_.emplace(it->first,
-                                                       std::move(it->second));
-            }
-
-            new_cce->gap_commit_ts_ = commit_ts;
-            new_cce->commit_ts_ = commit_ts;
-            new_cce->gap_last_vali_ts_ = prior_cce.gap_last_vali_ts_;
-
-            prior_cce.gap_commit_ts_ = commit_ts;
-            prior_cce.insert_intention_set_.erase(
-                --ite, prior_cce.insert_intention_set_.end());
-            prior_cce.UnblockRequests();
-
-            if (new_cce->ckpt_next_ == nullptr)
-            {
-                // If the new cc entry is not in the checkpoint list, enlists
-                // the new entry.
-                LruEntry *second_last = pos_inf_.ckpt_prev_;
-                second_last->ckpt_next_ = new_cce;
-                new_cce->ckpt_prev_ = second_last;
-                new_cce->ckpt_next_ = &pos_inf_;
-                pos_inf_.ckpt_prev_ = new_cce;
-            }
+            req.Result()->SetFinished();
+            prior_cce.gap_lock_.ReleaseWriteLock(txn, shard_);
+            // The insert places a write lock on the prior cc entry's gap.
+            shard_->DeleteLockHolidngTx(txn, &prior_cce);
+            return true;
         }
         else
         {
@@ -442,7 +408,13 @@ public:
             CcEntry<KeyT, ValueT> &cce =
                 *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-            if (cce.write_intention_ == txn)
+            if (cce.key_lock_.WriteTx() != txn)
+            {
+                req.Result()->SetFinished();
+                return true;
+            }
+
+            if (commit_ts > 0)
             {
                 cce.commit_ts_ = commit_ts;
 
@@ -457,11 +429,6 @@ public:
                 }
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
-                cce.write_intention_.Reset();
-
-                shard_->DeleteLockHolidngTx(txn);
-
-                cce.UnblockRequests();
 
                 if (cce.ckpt_next_ == nullptr)
                 {
@@ -474,13 +441,15 @@ public:
                     pos_inf_.ckpt_prev_ = &cce;
                 }
             }
-        }
 
-        req.Result()->SetFinished();
-        return true;
+            req.Result()->SetFinished();
+            cce.key_lock_.ReleaseWriteLock(txn, shard_);
+            shard_->DeleteLockHolidngTx(txn, &cce);
+            return true;
+        }
     }
 
-    bool Execute(ValidateCc &req) override
+    bool Execute(PostReadCc &req) override
     {
         auto hd_res = req.Result();
 
@@ -495,21 +464,35 @@ public:
         CcEntry<KeyT, ValueT> &cc_entry =
             *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-        cc_entry.rlck_holders_.erase(req.TxNumber());
-
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
         uint64_t commit_ts = req.CommitTs();
+        TxNumber txn = req.Txn();
 
         if ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
             (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_))
         {
+            // 2PL is a blocking protocol. Once a read lock is acquired, no one
+            // can possibly change the key. So, this branch is only reachable
+            // for OCC/MVCC protocols validating version stability.
+            assert(req.Protocol() == CcProtocol::OCC);
+
+            // Releases intentions for OCC/MVCC protocols.
+            if (key_ts > 0)
+            {
+                cc_entry.key_lock_.ReleaseReadIntention(txn);
+            }
+
+            if (gap_ts > 0)
+            {
+                cc_entry.gap_lock_.ReleaseReadIntention(txn);
+            }
+
             hd_res->SetError(1);
         }
-        else
+        else if (req.Protocol() == CcProtocol::OCC)
         {
             std::vector<TxId> &conflicting_txs = hd_res->Value();
-            conflicting_txs.clear();
 
             if (gap_ts > 0)
             {
@@ -526,47 +509,59 @@ public:
                     conflicting_txs.emplace_back(it->second->tx_id_);
                 }
             }
+            cc_entry.gap_lock_.ReleaseReadIntention(txn);
 
             if (key_ts > 0)
             {
                 cc_entry.last_vali_ts_ =
                     std::max(cc_entry.last_vali_ts_, commit_ts);
 
-                if (!cc_entry.write_intention_.Empty())
+                if (cc_entry.key_lock_.HasWriteLock())
                 {
-                    conflicting_txs.emplace_back(cc_entry.write_intention_);
+                    conflicting_txs.emplace_back(cc_entry.key_lock_.WriteTx());
                 }
             }
+            cc_entry.key_lock_.ReleaseReadIntention(txn);
 
             hd_res->SetFinished();
         }
-
-        return true;
-    }
-
-    bool Execute(PostReadCc &req) override
-    {
-        const CcEntryAddr &cce_addr = *req.CceAddr();
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()))
+        else if (req.Protocol() == CcProtocol::Locking)
         {
-            req.Result()->SetError(-1);
-            return true;
+            // For 2PL, read validation is equivalent to releasing the read
+            // lock. In contrast to the conventional 2PL where read locks
+            // are released after logging, our protocol releases the read
+            // lock before the log is persisted. This difference demands
+            // that future write transactions modifying this key cannot commit
+            // prior to this read tx. This is achieved via updating the
+            // last_vali_ts field of the cc entry, which pushes future
+            // transactions' commit timestamps larger than the largest commit
+            // timestamp of all read transactions that have released the read
+            // lock on the key.
+
+            if (gap_ts > 0)
+            {
+                cc_entry.gap_last_vali_ts_ =
+                    std::max(cc_entry.gap_last_vali_ts_, commit_ts);
+            }
+
+            if (key_ts > 0)
+            {
+                cc_entry.last_vali_ts_ =
+                    std::max(cc_entry.last_vali_ts_, commit_ts);
+            }
+
+            // For 2PL, releasing read locks may spend extra cycles to
+            // process unblocked requests. Sets the handler's finish signal
+            // before releasing read locks, so that if blocking requests come
+            // from a different core or a remote node, their tx's can move
+            // forward immediately.
+            hd_res->SetFinished();
+
+            cc_entry.key_lock_.ReleaseReadLock(txn, shard_);
+            cc_entry.gap_lock_.ReleaseReadLock(txn, shard_);
         }
 
-        CcEntry<KeyT, ValueT> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-
-        cc_entry.rlck_holders_.erase(req.TxNumber());
-
-        if (req.proto_ == CcProtocol::Locking)
-        {
-            // Only reads under 2PL may block other tx's.
-            cc_entry.UnblockRequests();
-        }
-
-        req.Result()->SetFinished();
-
+        shard_->DeleteLockHolidngTx(txn, &cc_entry);
         return true;
     }
 
@@ -579,21 +574,32 @@ public:
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 
-        uint32_t ng_id = req.KeyShardCode() >> 10;
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
             hd_res->SetError(-1);
             return true;
         }
 
-        if (cce_addr.CcePtr() == 0)
-        {
-            if (req.key_ != nullptr)
-            {
-                const KeyT *look_key = static_cast<const KeyT *>(req.key_);
-                cce = FindEmplace(*look_key, req.ts_);
+        TxNumber txn = req.Txn();
+        int64_t tx_term = req.TxTerm();
 
+        if (req.CcePtr() != nullptr)
+        {
+            // The request was blocked before. This is execution resumption
+            // after the request is unblocked. The read lock/intention must have
+            // been acquired.
+            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+        }
+        else if (cce_addr.CcePtr() == 0)
+        {
+            if (req.Key() != nullptr)
+            {
+                const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+                cce = FindEmplace(*look_key, req.ReadTimestamp());
+
+                // The read request accesses a new key not in the cc map. But
+                // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
                 {
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
@@ -602,14 +608,14 @@ public:
             }
             else
             {
-                assert(req.key_str_ != nullptr);
+                assert(req.KeyBlob() != nullptr);
 
                 KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
-                    req.key_str_->data(), offset, key_schema_.get());
+                    req.KeyBlob()->data(), offset, key_schema_.get());
 
-                cce = FindEmplace(decoded_key, req.ts_);
+                cce = FindEmplace(decoded_key, req.ReadTimestamp());
 
                 if (cce == nullptr)
                 {
@@ -617,50 +623,54 @@ public:
                     return false;
                 }
             }
-            cce_addr.SetCce(reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
+            cce_addr.SetCce(
+                reinterpret_cast<uint64_t>(cce), ng_term, req.NodeGroupId());
 
-            if (req.proto_ == CcProtocol::Locking)
+            req.SetCcePtr(cce);
+
+            if (req.Isolation() >= IsolationLevel::RepeatableRead)
             {
-                bool own_lock = cce->rlck_holders_.find(req.tx_number_) !=
-                                cce->rlck_holders_.end();
-
-                if (!cce->write_intention_.Empty() ||
-                    (cce->blocking_queue_.Size() > 0 && !own_lock))
+                // Isolation levels greater than or equal to repeatable read
+                // need to lock the cc entry or re-access the cc entry in the
+                // commit phase to validate version stability. Adds the read
+                // lock or intention to lock the key and prevent the cc entry
+                // from being kicked out from the cc map.
+                if (req.Protocol() == CcProtocol::Locking)
                 {
-                    // When the blocking queue is non-empty, it's either there
-                    // is a write being blocked by concurrent reads or a read
-                    // being blocked by the write.  For the former case, the
-                    // current read request can  proceed, because it does not
-                    // conflict with current read lock owners. However, this may
-                    // result in starvation for the write, as reads continuously
-                    // jump before the write. So, the current read request adds
-                    // itself to the blocking queue, as long as the queue is
-                    // non-empty.
-                    cce->blocking_queue_.Enqueue(&req);
-                    return false;
+                    bool lock_success =
+                        cce->key_lock_.AcquireReadLock(&req, tx_term);
+
+                    if (!lock_success)
+                    {
+                        uint32_t tx_node = (txn >> 32L) >> 10;
+                        if (tx_node != shard_->node_id_)
+                        {
+                            // If the read request comes from a remote node,
+                            // sends acknowledgement to the sender when the
+                            // request is blocked.
+                            remote::RemoteRead &remote_req =
+                                static_cast<remote::RemoteRead &>(req);
+                            remote_req.Acknowledge();
+                        }
+
+                        return false;
+                    }
+                }
+                else
+                {
+                    cce->key_lock_.AcquireReadIntention(req.Txn());
                 }
 
-                if (!own_lock)
-                {
-                    cce->rlck_holders_.emplace(req.tx_number_);
-                }
-            }
-            else
-            {
-                // cce->rlck_holders_.emplace(req.tx_number_);
+                shard_->UpsertLockHoldingTx(txn, tx_term, cce);
             }
         }
         else
         {
-            assert(req.type_ != ReadType::Inside);
-            assert(ng_id == cce_addr.NodeGroupId());
-
-            if (ng_term != cce_addr.Term())
-            {
-                hd_res->SetError(-1);
-                return true;
-            }
-
+            // For the read-outside request whose goal is to bring in a
+            // record from the data store for caching, the cc entry's
+            // address is known.
+            assert(req.Type() != ReadType::Inside);
+            assert(req.NodeGroupId() == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
         }
 
@@ -668,30 +678,30 @@ public:
         {
             // The request brings in the record to the cc entry for caching
 
-            if (req.type_ == ReadType::OutsideNormal)
+            if (req.Type() == ReadType::OutsideNormal)
             {
-                if (req.rec_ != nullptr)
+                if (req.Record() != nullptr)
                 {
-                    ValueT *typed_rec = static_cast<ValueT *>(req.rec_);
+                    ValueT *typed_rec = static_cast<ValueT *>(req.Record());
                     cce->payload_ = *typed_rec;
                 }
                 else
                 {
-                    assert(req.rec_str_ != nullptr);
+                    assert(req.RecordBlob() != nullptr);
 
                     size_t offset = 0;
-                    cce->payload_.Deserialize(req.rec_str_->data(), offset);
+                    cce->payload_.Deserialize(req.RecordBlob()->data(), offset);
                 }
                 cce->payload_status_ = RecordStatus::Normal;
             }
-            else if (req.type_ == ReadType::OutsideDeleted)
+            else if (req.Type() == ReadType::OutsideDeleted)
             {
                 cce->payload_status_ = RecordStatus::Deleted;
             }
         }
 
         if (cce->payload_status_ == RecordStatus::Normal &&
-            (req.type_ == ReadType::Inside || cce->commit_ts_ > 1))
+            (req.Type() == ReadType::Inside || cce->commit_ts_ > 1))
         {
             // Copies the newest committed payload to the read result, if (1)
             // this is a read request that starts concurrency control for
@@ -699,15 +709,15 @@ public:
             // that brings in the record from the data store for caching, but
             // the key has been updated by another committed tx since the first
             // read request.
-            if (req.rec_ != nullptr)
+            if (req.Record() != nullptr)
             {
-                ValueT *typed_rec = static_cast<ValueT *>(req.rec_);
+                ValueT *typed_rec = static_cast<ValueT *>(req.Record());
                 *typed_rec = cce->payload_;
             }
             else
             {
-                assert(req.rec_str_ != nullptr);
-                cce->payload_.Serialize(*req.rec_str_);
+                assert(req.RecordBlob() != nullptr);
+                cce->payload_.Serialize(*req.RecordBlob());
             }
         }
 
@@ -715,11 +725,6 @@ public:
         hd_res->Value().rec_status_ = cce->payload_status_;
 
         hd_res->SetFinished();
-        return true;
-    }
-
-    bool Resume(ReadCc &req) override
-    {
         return true;
     }
 
@@ -1147,8 +1152,8 @@ public:
         {
             // The checkpoint ts should be smaller than the ts when an ongoing
             // tx acquired the write intention. Or, there is a possibility that
-            // the tx commits prior to the checkpoint.
-            assert(cce->write_intention_.Empty() ||
+            // the ongoing tx commits prior to the checkpoint.
+            assert(!cce->key_lock_.HasWriteLock() ||
                    req.ckpt_ts_ <= cce->last_vali_ts_);
 
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
@@ -1243,17 +1248,18 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                 }
                 cce->commit_ts_ = req.commit_ts_;
-                if (!cce->write_intention_.Empty())
+
+                if (cce->key_lock_.HasWriteLock())
                 {
                     // If the record in the log has a commit ts greater than
-                    // that of the cc entry and the cc entry has a write
-                    // intention, the intention's owner must be the tx that
-                    // commits the log record. TODO: it is safer if we ship the
-                    // tx ID with the recovering message and match it against
-                    // the lock holder.
-                    shard_->DeleteLockHolidngTx(
-                        cce->write_intention_.TxNumber());
-                    cce->write_intention_.Reset();
+                    // that of the cc entry and the cc entry has a write lock,
+                    // the lock's owner must be the tx that commits the log
+                    // record. TODO: it is safer if we ship the tx ID with the
+                    // recovering message and match it against the lock holder.
+                    TxNumber txn = cce->key_lock_.WriteTx();
+                    cce->key_lock_.ReleaseWriteLock(txn, shard_);
+                    shard_->DeleteLockHolidngTx(txn, cce);
+                    // cce->key_lock_.ClearTx(txn);
                 }
             }
         }
@@ -1344,7 +1350,7 @@ public:
             shard_, key_schema_.get(), record_schema_.get());
     }
 
-private:
+protected:
     CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, uint64_t ts)
     {
         auto lb_it = ccm_.lower_bound(key);

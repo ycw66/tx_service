@@ -193,6 +193,76 @@ void CcShard::UpdateLruList(LruEntry *entry)
     tail_cce_.lru_prev_ = entry;
 }
 
+TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
+                                         int64_t tx_term,
+                                         LruEntry *cce_ptr)
+{
+    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
+    em_it.first->second.cce_list_.emplace(cce_ptr);
+    return &em_it.first->second;
+}
+
+void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
+{
+    auto tx_it = lock_holding_txs_.find(txn);
+    if (tx_it == lock_holding_txs_.end())
+    {
+        return;
+    }
+
+    TxLockInfo &lk_info = tx_it->second;
+    lk_info.cce_list_.erase(cce_ptr);
+}
+
+void CcShard::CheckRecoverTx(TxNumber txn,
+                             uint32_t cc_ng_id,
+                             int64_t cc_ng_term)
+{
+    auto tx_it = lock_holding_txs_.find(txn);
+    if (tx_it == lock_holding_txs_.end())
+    {
+        return;
+    }
+    TxLockInfo &lk_info = tx_it->second;
+
+    using namespace std::chrono_literals;
+    constexpr uint64_t ts_gap =
+        std::chrono::duration_cast<std::chrono::seconds>(5s).count();
+    uint64_t now_ts = Now();
+
+    // If the tx has been holding a lock/intention for an extended period of
+    // time (more than 5 seconds), inquires the tx's status. If the tx has
+    // failed or committed, recovers the orphan lock/intention. Or, does nothing
+    // and waits for the tx to make further actions.
+    if (now_ts - lk_info.ts_ >= ts_gap &&
+        now_ts - lk_info.last_recover_ts_ >= ts_gap)
+    {
+        Sharder::Instance().RecoverTx(txn, lk_info.term_, cc_ng_id, cc_ng_term);
+
+        // Updates the last_recover_ts field, so that following
+        // conflicting tx's will not try recovery immediately,
+        // avoiding a flood of recovery requests.
+        lk_info.last_recover_ts_ = now_ts;
+    }
+}
+
+void CcShard::ClearTx(TxNumber txn)
+{
+    auto tx_it = lock_holding_txs_.find(txn);
+    if (tx_it == lock_holding_txs_.end())
+    {
+        return;
+    }
+
+    TxLockInfo &lk_info = tx_it->second;
+    for (auto &lru_ptr : lk_info.cce_list_)
+    {
+        lru_ptr->key_lock_.ClearTx(txn, this);
+    }
+
+    lock_holding_txs_.erase(tx_it);
+}
+
 size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;

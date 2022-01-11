@@ -40,6 +40,9 @@ public:
 
     void on_closed(brpc::StreamId stream) override;
 
+    static IsolationLevel ConvertIsolation(IsolationType iso_level);
+    static CcProtocol ConvertProtocol(CcProtocolType proto);
+
 private:
     std::unique_ptr<CcMessage> GetCcMsg();
     void OnReceiveCcMsg(std::unique_ptr<CcMessage> msg);
@@ -58,9 +61,7 @@ private:
     // Cc requests received via the stream are first de-serialized as remote cc
     // requests and then enqueued into the local cc shards for processing.
     CcRequestPool<RemoteAcquire> acquire_pool_;
-    CcRequestPool<RemotePostDelete> postdel_pool_;
-    CcRequestPool<RemotePostCommit> postcommit_pool_;
-    CcRequestPool<RemoteValidate> vali_pool_;
+    CcRequestPool<RemotePostWrite> postwrite_pool_;
     CcRequestPool<RemotePostRead> postread_pool_;
     CcRequestPool<RemoteRead> read_pool_;
     CcRequestPool<RemoteReadOutside> read_outside_pool_;

@@ -26,6 +26,7 @@ public:
     RemoteAcquire(const RemoteAcquire &rhs) = delete;
     RemoteAcquire(RemoteAcquire &&rhs) = delete;
     void Set(std::unique_ptr<CcMessage> input_msg);
+    void Acknowledge();
 
 private:
     CcMessage output_msg_;
@@ -36,10 +37,10 @@ private:
     CcHandlerResult<AcquireKeyResult> cc_res_{nullptr};
 };
 
-struct RemoteValidate : public ValidateCc
+struct RemotePostRead : public PostReadCc
 {
 public:
-    RemoteValidate();
+    RemotePostRead();
     void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
@@ -176,26 +177,12 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
-struct RemotePostRead : public PostReadCc
-{
-public:
-    RemotePostRead();
-    void Set(std::unique_ptr<CcMessage> input_msg);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_{nullptr};
-};
-
 struct RemoteRead : public ReadCc
 {
 public:
     RemoteRead();
     void Set(std::unique_ptr<CcMessage> input_msg);
+    void Acknowledge();
 
 private:
     CcMessage output_msg_;
@@ -243,28 +230,10 @@ private:
     friend class ::txservice::SkCcMap;
 };
 
-struct RemotePostCommit : public PostCommitCc
+struct RemotePostWrite : public PostWriteCc
 {
 public:
-    RemotePostCommit();
-    void Set(std::unique_ptr<CcMessage> input_msg);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_{nullptr};
-};
-
-struct RemotePostDelete : public PostDeleteCc
-{
-public:
-    RemotePostDelete();
-
-    RemotePostDelete(const RemotePostDelete &rhs) = delete;
-    RemotePostDelete(RemotePostDelete &&rhs) = delete;
+    RemotePostWrite();
     void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
@@ -315,6 +284,8 @@ private:
     bool is_ckpt_delta_{false};
     CcHandlerResult<Void> cc_res_{nullptr};
     std::atomic<uint32_t> unfinish_cnt_{0};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    CcProtocol protocol_{CcProtocol::OCC};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -342,6 +313,8 @@ private:
     bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    CcProtocol protocol_{CcProtocol::OCC};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -375,7 +348,7 @@ public:
     RemoteFaultInjectCC(RemoteFaultInjectCC &&rhs) = delete;
 
     void Set(std::unique_ptr<CcMessage> input_msg);
-    
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;

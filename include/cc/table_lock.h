@@ -43,16 +43,16 @@ public:
     {
         if (is_write_lock_empty_ && read_intentions_.size() == 0)
         {
-            write_lock_ = cc_req->Tx();
+            write_lock_ = cc_req->Txn();
             is_write_lock_empty_ = false;
             return true;
         }
         else if (is_write_lock_empty_ && read_intentions_.size() == 1 &&
-                 read_intentions_.find(cc_req->Tx()) != read_intentions_.end())
+                 read_intentions_.find(cc_req->Txn()) != read_intentions_.end())
         {
             // upgrade the read intension to write lock
-            read_intentions_.erase(cc_req->Tx());
-            write_lock_ = cc_req->Tx();
+            read_intentions_.erase(cc_req->Txn());
+            write_lock_ = cc_req->Txn();
             is_write_lock_empty_ = false;
             return true;
         }
@@ -73,11 +73,11 @@ public:
     {
         if (is_write_lock_empty_ && write_blocking_queue_.Size() == 0)
         {
-            auto table_iter = read_intentions_.find(cc_req->Tx());
+            auto table_iter = read_intentions_.find(cc_req->Txn());
 
             if (table_iter == read_intentions_.end())
             {
-                read_intentions_.try_emplace(cc_req->Tx(), 1);
+                read_intentions_.try_emplace(cc_req->Txn(), 1);
             }
             else
             {

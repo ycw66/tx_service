@@ -40,17 +40,18 @@ public:
 struct TxLockInfo
 {
     TxLockInfo() = delete;
-    TxLockInfo(uint64_t ts) : ts_(ts), last_recover_ts_(0), cce_list_()
+    TxLockInfo(int64_t term, uint64_t ts)
+        : term_(term), ts_(ts), last_recover_ts_(0), cce_list_()
     {
     }
 
-    // The timestamp when the tx acquires the first write intention in the
-    // cc shard.
+    int64_t term_;
+    // The timestamp when the tx acquires the first lock in the cc shard.
     uint64_t ts_;
-    // The time when last tx tries to recover the intention/lock.
+    // The last time when the tx is recovered.
     uint64_t last_recover_ts_;
-    // A list of cc entries on which the tx has put the write intention.
-    std::vector<LruEntry *> cce_list_;
+    // A list of cc entries on which the tx has acquired write/read locks.
+    std::unordered_set<LruEntry *> cce_list_;
 };
 
 class CcShard
@@ -226,31 +227,24 @@ public:
     void UpdateLruList(LruEntry *entry);
 
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
-                                    uint64_t ts,
-                                    LruEntry *cce_ptr)
-    {
-        auto em_it = lock_holding_txs_.try_emplace(txn, ts);
-        em_it.first->second.cce_list_.emplace_back(cce_ptr);
-        return &em_it.first->second;
-    }
+                                    int64_t tx_term,
+                                    LruEntry *cce_ptr);
 
-    void DeleteLockHolidngTx(TxNumber txn)
-    {
-        lock_holding_txs_.erase(txn);
-    }
+    void DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr);
 
-    TxLockInfo *GetActiveTxLockInfo(uint64_t txn)
-    {
-        auto tx_it = lock_holding_txs_.find(txn);
-        if (tx_it == lock_holding_txs_.end())
-        {
-            return nullptr;
-        }
-        else
-        {
-            return &tx_it->second;
-        }
-    }
+    /**
+     * @brief When a tx fails to acquire a lock, it invokes this method to check
+     * how long the conflicting tx has been holding the lock. If the conflicting
+     * tx has been holding the lock for an extended period of time, tries to
+     * recover the conflicting tx.
+     *
+     * @param txn Tx number of the conflicting tx
+     * @param cc_ng_id ID of the cc node group in which the conflict happens
+     * @param cc_ng_term Leader term of the cc node group
+     */
+    void CheckRecoverTx(TxNumber txn, uint32_t cc_ng_id, int64_t cc_ng_term);
+
+    void ClearTx(TxNumber txn);
 
     uint64_t ActiveTxMinTs()
     {
@@ -340,7 +334,7 @@ public:
 
         TableLock &tab_lock = table_iter->second;
 
-        tab_lock.ReleaseReadIntention(cc_req->Tx(), this);
+        tab_lock.ReleaseReadIntention(cc_req->Txn(), this);
 
         return true;
     }
@@ -358,7 +352,7 @@ public:
 
         TableLock &tab_lock = table_iter->second;
 
-        tab_lock.ReleaseWrite(cc_req->Tx(), this);
+        tab_lock.ReleaseWrite(cc_req->Txn(), this);
 
         return true;
     }
@@ -462,6 +456,8 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;
 
+    std::unordered_map<TableName, CcMap::uptr> range_func_;
+
     // table metadata store catalog and table lock information
     std::unordered_map<TableName, TableLock> table_locks_;
     std::unordered_map<TableName, TableCatalog> table_metadata_;
@@ -495,11 +491,10 @@ private:
     LruEntry head_cce_, tail_cce_;
 
     /**
-     * @brief A collection of active tx's that have acquired write intentions in
-     * this shard and lock/intention information associated with the tx,
-     * including when the tx acquires the first intention, the term of the tx
-     * node and a list of pointers to the cc entries containing the tx's
-     * intentions.
+     * @brief A collection of active tx's that have acquired locks/intentions in
+     * this shard and the tx's information, including when the tx acquires the
+     * first lock, the term of the tx node and a list of pointers to the cc
+     * entries containing the tx's locks/intentions.
      *
      */
     std::unordered_map<TxNumber, TxLockInfo> lock_holding_txs_;

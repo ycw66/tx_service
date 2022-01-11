@@ -142,6 +142,12 @@ void UploadOperation::Resize(size_t new_size)
 
 void UploadOperation::Forward(TransactionExecution *txm)
 {
+    // Each write-set key acquires a write lock and gets the key's last
+    // validation ts and commit ts. If the write key has been read before and
+    // the key's commit ts mismatches the prior version, this is not a
+    // repeatable read.
+    bool read_version_mismatch = false;
+
     if (remote_ack_cnt_.load(std::memory_order_acquire) > 0)
     {
         bool time_out = txm->IsTimeOut();
@@ -154,7 +160,8 @@ void UploadOperation::Forward(TransactionExecution *txm)
             for (size_t idx = 0; idx < upload_cnt_; ++idx)
             {
                 CcHandlerResult<AcquireKeyResult> &hd_result = results_.at(idx);
-                const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+                const AcquireKeyResult &acquire_key_res = hd_result.Value();
+                const CcEntryAddr &cce_addr = acquire_key_res.cce_addr_;
 
                 if (cce_addr.Term() < 0)
                 {
@@ -164,10 +171,12 @@ void UploadOperation::Forward(TransactionExecution *txm)
                         // Up until this point, we consider that the acquire
                         // request has failed. The tx will proceed to abort
                         // without trying to release the lock claimed by this
-                        // request. In rare circumstances, it is still possible
-                        // that the acquire request's response arrives after
-                        // this point. We rely on the lock recovery mechanism in
-                        // the remote node to clear such an orphan lock.
+                        // request. However, it is still possible that the
+                        // acquire request actually succeeds, either because the
+                        // response message is lost or the remote node is
+                        // extremely slow and the response arrives after this
+                        // point. We rely on the lock recovery mechanism in the
+                        // remote node to clear such an orphan lock.
                         continue;
                     }
                 }
@@ -178,11 +187,19 @@ void UploadOperation::Forward(TransactionExecution *txm)
                 // acquire request from the blocking queue in the remote node.
                 if (!hd_result.IsError())
                 {
-                    txm->rw_set_.DedupRead(cce_addr);
+                    // Only tx's under repeatable read or serializability have
+                    // non-empty read sets.
+                    uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
+                    if (read_version > 0 &&
+                        read_version != acquire_key_res.commit_ts_)
+                    {
+                        read_version_mismatch = true;
+                    }
                 }
             }
 
-            if (fail_cnt_.load(std::memory_order_acquire) > 0)
+            if (fail_cnt_.load(std::memory_order_acquire) > 0 ||
+                read_version_mismatch)
             {
                 txm->Abort();
             }
@@ -201,18 +218,24 @@ void UploadOperation::Forward(TransactionExecution *txm)
 
         for (size_t idx = 0; idx < upload_cnt_; ++idx)
         {
+            const AcquireKeyResult &acquire_key_res = results_.at(idx).Value();
+            const CcEntryAddr &addr = acquire_key_res.cce_addr_;
+
             if (!results_.at(idx).IsError())
             {
                 WriteSetEntry &write_entry = *upload_entries_.at(idx);
                 // Assigns to the write entry the cc entry address obtained
                 // in the acquire phase.
-                write_entry.cce_addr_ = results_.at(idx).Value().cce_addr_;
-                assert(write_entry.cce_addr_.CcePtr() != 0);
-                txm->rw_set_.DedupRead(write_entry.cce_addr_);
+                write_entry.cce_addr_ = addr;
+                uint64_t read_version = txm->rw_set_.DedupRead(addr);
+                if (read_version > 0 &&
+                    read_version != acquire_key_res.commit_ts_)
+                {
+                    read_version_mismatch = true;
+                }
             }
             else if (results_.at(idx).ErrorCode() == -1)
             {
-                const CcEntryAddr &addr = results_.at(idx).Value().cce_addr_;
                 auto find_it = outdated_node_set.find(addr.NodeGroupId());
                 if (find_it == outdated_node_set.end())
                 {
@@ -222,7 +245,8 @@ void UploadOperation::Forward(TransactionExecution *txm)
             }
         }
 
-        if (fail_cnt_.load(std::memory_order_acquire) > 0)
+        if (fail_cnt_.load(std::memory_order_acquire) > 0 ||
+            read_version_mismatch)
         {
             txm->Abort();
         }
@@ -523,55 +547,80 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
 {
     if (result_.IsFinished())
     {
-        if (result_.IsError())
-        {
-            txm->Abort();
-        }
-        else
-        {
-            txm->PostBegin();
-        }
+        txm->PostBegin();
     }
 }
 
 PostProcessOp::PostProcessOp(TransactionExecution *txm)
 {
-    results_.reserve(16);
+    read_results_.reserve(8);
+    write_results_.reserve(8);
 
-    for (size_t idx = 0; idx < 16; ++idx)
+    for (size_t idx = 0; idx < 8; ++idx)
     {
-        CcHandlerResult<Void> &res = results_.emplace_back(txm);
+        CcHandlerResult<std::vector<TxId>> &res =
+            read_results_.emplace_back(txm);
+
+        res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
+        { finish_cnt_.fetch_add(1); };
+    }
+
+    for (size_t idx = 0; idx < 8; ++idx)
+    {
+        CcHandlerResult<Void> &res = write_results_.emplace_back(txm);
 
         res.post_lambda_ = [this](CcHandlerResult<Void> *)
         { finish_cnt_.fetch_add(1); };
     }
 }
 
-void PostProcessOp::Reset(size_t upload_cnt)
+void PostProcessOp::Reset(size_t read_cnt, size_t write_cnt)
 {
     finish_cnt_.store(0);
-    upload_cnt_ = upload_cnt;
-    Resize(upload_cnt);
+    upload_cnt_ = read_cnt + write_cnt;
+    Resize(read_cnt, write_cnt);
 }
 
-void PostProcessOp::Resize(size_t new_size)
+void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
 {
-    size_t old_size = results_.size();
+    size_t read_old_size = read_results_.size();
 
-    if (new_size <= old_size)
+    if (read_cnt < read_old_size)
     {
-        if (old_size > TransactionExecution::LargeTxKeySize)
+        if (read_old_size > TransactionExecution::LargeTxKeySize)
         {
-            size_t shrink_size = std::max(new_size, (size_t) 16);
-            results_.erase(results_.begin() + shrink_size, results_.end());
-            results_.shrink_to_fit();
+            size_t shrink_size = std::max(read_cnt, (size_t) 8);
+            read_results_.erase(read_results_.begin() + shrink_size,
+                                read_results_.end());
+            read_results_.shrink_to_fit();
         }
     }
-    else
+    else if (read_cnt > read_old_size)
     {
-        for (size_t idx = old_size; idx < new_size; ++idx)
+        for (size_t idx = read_old_size; idx < read_cnt; ++idx)
         {
-            auto &res = results_.emplace_back(results_.at(0).Txm());
+            auto &res = read_results_.emplace_back(read_results_[0].Txm());
+            res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
+            { finish_cnt_.fetch_add(1); };
+        }
+    }
+
+    size_t write_old_size = write_results_.size();
+    if (write_cnt < write_old_size)
+    {
+        if (write_old_size > TransactionExecution::LargeTxKeySize)
+        {
+            size_t shrink_size = std::max(write_cnt, (size_t) 8);
+            write_results_.erase(write_results_.begin() + shrink_size,
+                                 write_results_.end());
+            write_results_.shrink_to_fit();
+        }
+    }
+    else if (write_cnt > write_old_size)
+    {
+        for (size_t idx = write_old_size; idx < write_cnt; ++idx)
+        {
+            auto &res = write_results_.emplace_back(write_results_[0].Txm());
             res.post_lambda_ = [this](CcHandlerResult<Void> *)
             { finish_cnt_.fetch_add(1); };
         }

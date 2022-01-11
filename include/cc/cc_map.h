@@ -17,9 +17,7 @@ struct RemoteAcquireTableWriteLockCC;
 }  // namespace remote
 
 struct AcquireCc;
-struct PostDeleteCc;
-struct PostCommitCc;
-struct ValidateCc;
+struct PostWriteCc;
 struct PostReadCc;
 struct ReadCc;
 struct ScanCloseCc;
@@ -53,13 +51,9 @@ public:
     virtual ~CcMap() = default;
 
     virtual bool Execute(AcquireCc &req) = 0;
-    virtual bool Resume(AcquireCc &req) = 0;
-    virtual bool Execute(PostDeleteCc &req) = 0;
-    virtual bool Execute(PostCommitCc &req) = 0;
-    virtual bool Execute(ValidateCc &req) = 0;
+    virtual bool Execute(PostWriteCc &req) = 0;
     virtual bool Execute(PostReadCc &req) = 0;
     virtual bool Execute(ReadCc &req) = 0;
-    virtual bool Resume(ReadCc &req) = 0;
     virtual bool Execute(ScanCloseCc &req) = 0;
     virtual bool Execute(ScanOpenBatchCc &req) = 0;
     virtual bool Execute(ScanNextBatchCc &req) = 0;

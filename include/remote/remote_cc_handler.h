@@ -49,36 +49,24 @@ public:
                                uint32_t node_group_id,
                                CcHandlerResult<Void> &hres);
 
-    void ReleaseWrite(uint32_t src_node_id,
-                      uint64_t tx_number,
-                      int64_t tx_term,
-                      const CcEntryAddr &cce_addr,
-                      CcHandlerResult<Void> &hd_res);
+    void PostWrite(uint32_t src_node_id,
+                   uint64_t tx_number,
+                   int64_t tx_term,
+                   uint64_t commit_ts,
+                   const CcEntryAddr &cce_addr,
+                   const TxRecord *record,
+                   bool is_deleted,
+                   CcHandlerResult<Void> &hres);
 
-    void CommitWrite(uint32_t src_node_id,
-                     uint64_t tx_number,
-                     int64_t tx_term,
-                     uint64_t commit_ts,
-                     const CcEntryAddr &cce_addr,
-                     const TxRecord &record,
-                     bool is_deleted,
-                     CcHandlerResult<Void> &hres);
-
-    void ValidateRead(uint32_t src_node_id,
-                      uint64_t tx_number,
-                      int64_t tx_term,
-                      uint64_t key_ts,
-                      uint64_t gap_ts,
-                      uint64_t commit_ts,
-                      const CcEntryAddr &cce_addr,
-                      CcHandlerResult<std::vector<TxId>> &hres);
-
-    void PostprocessRead(uint32_t src_node_id,
-                         uint64_t tx_number,
-                         int64_t tx_term,
-                         const CcEntryAddr &cce_addr,
-                         CcHandlerResult<Void> &hres,
-                         CcProtocol proto = CcProtocol::OCC);
+    void PostRead(uint32_t src_node_id,
+                  uint64_t tx_number,
+                  int64_t tx_term,
+                  uint64_t key_ts,
+                  uint64_t gap_ts,
+                  uint64_t commit_ts,
+                  const CcEntryAddr &cce_addr,
+                  CcHandlerResult<std::vector<TxId>> &hres,
+                  CcProtocol protocol);
 
     void CommitCreateTable(uint32_t src_node_id,
                            const TableName &table_name,
@@ -107,9 +95,11 @@ public:
               int64_t tx_term,
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
+              IsolationLevel iso_level = IsolationLevel::ReadCommitted,
               CcProtocol proto = CcProtocol::OCC);
 
-    void ReadOutside(const TxRecord &record,
+    void ReadOutside(int64_t tx_term,
+                     const TxRecord &record,
                      bool is_deleted,
                      const CcEntryAddr &cce_addr);
 
@@ -124,6 +114,7 @@ public:
                   uint64_t ts,
                   CcHandlerResult<ScanOpenResult> &hd_res,
                   ScanDirection direction = ScanDirection::Forward,
+                  IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_ckpt = false);
 
@@ -134,6 +125,7 @@ public:
                   uint64_t start_ts,
                   ScanCache *scan_cache,
                   CcHandlerResult<ScanNextResult> &hd_res,
+                  IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_ckpt = false);
 
@@ -184,6 +176,9 @@ public:
                      CcHandlerResult<bool> &hres);
 
 private:
+    static IsolationType ConvertIsolation(IsolationLevel iso_level);
+    static CcProtocolType ConvertProtocol(CcProtocol proto);
+
     CcStreamSender &stream_sender_;
 };
 }  // namespace remote

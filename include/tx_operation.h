@@ -191,11 +191,12 @@ struct UpdateTxnStatus : TransactionOperation
 struct PostProcessOp : TransactionOperation
 {
     PostProcessOp(TransactionExecution *txm);
-    void Reset(size_t upload_cnt);
-    void Resize(size_t new_size);
+    void Reset(size_t read_cnt, size_t write_cnt);
+    void Resize(size_t read_cnt, size_t write_cnt);
     void Forward(TransactionExecution *txm) override;
 
-    std::vector<CcHandlerResult<Void>> results_;
+    std::vector<CcHandlerResult<Void>> write_results_;
+    std::vector<CcHandlerResult<std::vector<TxId>>> read_results_;
     size_t upload_cnt_{0};
     std::atomic<size_t> finish_cnt_{0};
 };

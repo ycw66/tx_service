@@ -11,8 +11,8 @@ enum class CcProtocol
 enum class IsolationLevel
 {
     ReadCommitted = 0,
-    RepeatableRead,
     Snapshot,
+    RepeatableRead,
     Serializable
 };
 }  // namespace txservice

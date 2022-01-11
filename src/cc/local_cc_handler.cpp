@@ -173,36 +173,11 @@ void txservice::LocalCcHandler::ReleaseTableWriteLock(
     }
 }
 
-void txservice::LocalCcHandler::ReleaseWrite(uint64_t tx_number,
-                                             int64_t tx_term,
-                                             const CcEntryAddr &cce_addr,
-                                             CcHandlerResult<Void> &hres)
-{
-    uint32_t ng_id = cce_addr.NodeGroupId();
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-
-    if (dest_node_id == cc_shards_.node_id_)
-    {
-        PostDeleteCc *req = postdel_pool.NextRequest();
-        req->Set(&cce_addr, tx_number, &hres);
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-        CcMap *ccm = lru_entry->parent_map_;
-
-        ccm->shard_->Enqueue(thd_id_, req);
-    }
-    else
-    {
-        remote_hd_.ReleaseWrite(
-            cc_shards_.node_id_, tx_number, tx_term, cce_addr, hres);
-    }
-}
-
-void txservice::LocalCcHandler::CommitWrite(uint64_t tx_number,
+void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
                                             int64_t tx_term,
                                             uint64_t commit_ts,
                                             const CcEntryAddr &cce_addr,
-                                            const TxRecord &record,
+                                            const TxRecord *record,
                                             bool is_deleted,
                                             CcHandlerResult<Void> &hres)
 {
@@ -211,8 +186,8 @@ void txservice::LocalCcHandler::CommitWrite(uint64_t tx_number,
 
     if (dest_node_id == cc_shards_.node_id_)
     {
-        PostCommitCc *req = postcommit_pool.NextRequest();
-        req->Set(&cce_addr, tx_number, commit_ts, &record, is_deleted, &hres);
+        PostWriteCc *req = postwrite_pool.NextRequest();
+        req->Set(&cce_addr, tx_number, commit_ts, record, is_deleted, &hres);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -221,7 +196,7 @@ void txservice::LocalCcHandler::CommitWrite(uint64_t tx_number,
     }
     else
     {
-        remote_hd_.CommitWrite(cc_shards_.node_id_,
+        remote_hd_.PostWrite(cc_shards_.node_id_,
                                tx_number,
                                tx_term,
                                commit_ts,
@@ -232,22 +207,24 @@ void txservice::LocalCcHandler::CommitWrite(uint64_t tx_number,
     }
 }
 
-void txservice::LocalCcHandler::ValidateRead(
+void txservice::LocalCcHandler::PostRead(
     uint64_t tx_number,
     int64_t tx_term,
     uint64_t key_ts,
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<std::vector<TxId>> &hres)
+    CcHandlerResult<std::vector<TxId>> &hres,
+    CcProtocol protocol)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 
     if (dest_node_id == cc_shards_.node_id_)
     {
-        ValidateCc *req = reread_pool.NextRequest();
-        req->Set(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
+        PostReadCc *req = postread_pool_.NextRequest();
+        req->Set(
+            &cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres, protocol);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -256,40 +233,15 @@ void txservice::LocalCcHandler::ValidateRead(
     }
     else
     {
-        remote_hd_.ValidateRead(cc_shards_.node_id_,
+        remote_hd_.PostRead(cc_shards_.node_id_,
                                 tx_number,
                                 tx_term,
                                 key_ts,
                                 gap_ts,
                                 commit_ts,
                                 cce_addr,
-                                hres);
-    }
-}
-
-void txservice::LocalCcHandler::PostprocessRead(uint64_t tx_number,
-                                                int64_t tx_term,
-                                                const CcEntryAddr &cce_addr,
-                                                CcHandlerResult<Void> &hres,
-                                                CcProtocol proto)
-{
-    uint32_t ng_id = cce_addr.NodeGroupId();
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-
-    if (dest_node_id == cc_shards_.node_id_)
-    {
-        PostReadCc *req = postread_pool.NextRequest();
-        req->Set(&cce_addr, tx_number, &hres, proto);
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-        CcMap *ccm = lru_entry->parent_map_;
-
-        ccm->shard_->Enqueue(thd_id_, req);
-    }
-    else
-    {
-        remote_hd_.PostprocessRead(
-            cc_shards_.node_id_, tx_number, tx_term, cce_addr, hres, proto);
+                                hres,
+                                protocol);
     }
 }
 
@@ -401,6 +353,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      int64_t tx_term,
                                      const uint64_t ts,
                                      CcHandlerResult<ReadKeyResult> &hres,
+                                     IsolationLevel iso_level,
                                      CcProtocol proto)
 {
     hres.Value().rec_ = &record;
@@ -420,8 +373,10 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                  &record,
                  read_type,
                  tx_number,
+                 tx_term,
                  ts,
                  &hres,
+                 iso_level,
                  proto);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
     }
@@ -437,6 +392,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         tx_term,
                         ts,
                         hres,
+                        iso_level,
                         proto);
     }
 }
@@ -445,6 +401,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
  * ReadOutside fills the tuple read from KV into cache.
  */
 void txservice::LocalCcHandler::ReadOutside(
+    int64_t tx_term,
     TxRecord &rec,
     bool is_deleted,
     const CcEntryAddr &cce_addr,
@@ -464,7 +421,26 @@ void txservice::LocalCcHandler::ReadOutside(
             cce_addr.CcePtr(), cce_addr.Term(), cce_addr.NodeGroupId());
 
         ReadCc *req = read_pool.NextRequest();
-        req->Set(nullptr, nullptr, ng_id << 10, &rec, read_type, 0, 0, &hres);
+        // A read-outside request brings a record into the cc map for caching.
+        // Its tx number is meaningless: it does not represent the tx committing
+        // the record. Thus, it is set to 0. The commit timestamp is set to 1,
+        // the beginning of history. Once a record is flushed to the data store
+        // and kicked out from the cc map, the record history only exists in the
+        // log. We pretend the record exists since the beginning of history,
+        // which is good enough for the concurrency control purpose. The
+        // isolation level is set to read committed, so that the request leaves
+        // no read intention or lock on the cc entry.
+        req->Set(nullptr,
+                 nullptr,
+                 ng_id << 10,
+                 &rec,
+                 read_type,
+                 0,
+                 tx_term,
+                 1,
+                 &hres,
+                 IsolationLevel::ReadCommitted,
+                 CcProtocol::OCC);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -473,7 +449,7 @@ void txservice::LocalCcHandler::ReadOutside(
     }
     else
     {
-        remote_hd_.ReadOutside(rec, is_deleted, cce_addr);
+        remote_hd_.ReadOutside(tx_term, rec, is_deleted, cce_addr);
         // we don't care whether the remote request succeeds or not,
         // since it's just a fill of cache.
         hres.Value().rec_status_ = RecordStatus::RemoteUnknown;
@@ -491,6 +467,7 @@ void txservice::LocalCcHandler::ScanOpen(
     uint64_t ts,
     CcHandlerResult<ScanOpenResult> &hd_res,
     ScanDirection direction,
+    IsolationLevel iso_level,
     CcProtocol proto,
     bool is_ckpt_delta)
 {
@@ -557,6 +534,7 @@ void txservice::LocalCcHandler::ScanOpen(
                          shard_scan_cache,
                          local_term,
                          &hd_res,
+                         iso_level,
                          proto,
                          scanner_ptr->is_ckpt_delta_);
 
@@ -584,6 +562,7 @@ void txservice::LocalCcHandler::ScanOpen(
                                 ts,
                                 hd_res,
                                 direction,
+                                iso_level,
                                 proto,
                                 scanner_ptr->is_ckpt_delta_);
         }
@@ -596,6 +575,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     uint64_t start_ts,
     CcScanner &scanner,
     CcHandlerResult<ScanNextResult> &hd_res,
+    IsolationLevel iso_level,
     CcProtocol proto)
 {
     uint32_t shard_code = scanner.BlockedShard();
@@ -611,6 +591,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  start_ts,
                  blocked_cache,
                  &hd_res,
+                 iso_level,
                  proto,
                  scanner.is_ckpt_delta_);
 
@@ -625,6 +606,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             start_ts,
                             blocked_cache,
                             hd_res,
+                            iso_level,
                             proto,
                             scanner.is_ckpt_delta_);
     }
