@@ -212,6 +212,11 @@ void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
 
     TxLockInfo &lk_info = tx_it->second;
     lk_info.cce_list_.erase(cce_ptr);
+
+    if (lk_info.cce_list_.empty())
+    {
+        lock_holding_txs_.erase(tx_it);
+    }
 }
 
 void CcShard::CheckRecoverTx(TxNumber txn,
