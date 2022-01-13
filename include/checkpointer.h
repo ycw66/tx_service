@@ -51,20 +51,31 @@ public:
     }
 
     /*
-     * Normalize the table name which is consistent with storage engine, ie.
-     * Cassandra.
+     * Get Cassandra the table name.
+     *
      * Input table name format: ./dbname/tablename
-     * Normalized table name format: dbname_tablename
+     * Cassandra table name format: dbname___tablename
      */
-    std::string NormalizeTablename(const std::string &name)
+    std::string GetCassTablename(const std::string &name)
     {
-        std::string norm_name(name);
-        size_t slash_pos = norm_name.find_first_of('/');
-        norm_name = norm_name.substr(slash_pos + 1);
-        slash_pos = norm_name.find_first_of('/');
-        norm_name.at(slash_pos) = '_';
+        std::vector<std::string> tokens;
+        std::string token;
+        // full table name's format is "./dbname/tablename"
+        // token[1] is dbname, token[2] is table name given '/' as splitter
+        std::istringstream tokenStream(name);
+        while (std::getline(tokenStream, token, '/'))
+        {
+            tokens.push_back(token);
+        }
 
-        return norm_name;
+        std::string cass_name;
+        cass_name.append(tokens[1]);
+        // use three underscore as delimiter of mariadb database name and table
+        // name in cassandra table name.
+        cass_name.append("___");
+        cass_name.append(tokens[2]);
+
+        return cass_name;
     }
 
     void Ckpt(int id)
@@ -141,7 +152,7 @@ public:
                 {
                     const Schema *key_schema = ccm_pair.second->KeySchema();
                     const Schema *rec_schema = ccm_pair.second->RecordSchema();
-                    ckpt_ret = store_hd_->PutAll(NormalizeTablename(tabname),
+                    ckpt_ret = store_hd_->PutAll(GetCassTablename(tabname),
                                                  cce_buf,
                                                  key_schema,
                                                  rec_schema);
@@ -151,7 +162,7 @@ public:
                     const SkSchema *sk_schema = static_cast<const SkSchema *>(
                         ccm_pair.second->KeySchema());
                     ckpt_ret = store_hd_->PutSkAll(
-                        NormalizeTablename(tabname), cce_buf, sk_schema);
+                        GetCassTablename(tabname), cce_buf, sk_schema);
                 }
 
                 // if flush to data store succeeds, update the ckpt_ts for each
