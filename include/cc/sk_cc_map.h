@@ -850,6 +850,7 @@ private:
             {
                 return nullptr;
             }
+            sk_it = sk_index_.lower_bound(sk);
         }
 
         if (pk_group == nullptr)

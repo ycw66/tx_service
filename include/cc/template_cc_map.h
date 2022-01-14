@@ -1369,6 +1369,7 @@ protected:
             {
                 return nullptr;
             }
+            lb_it = ccm_.lower_bound(key);
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
