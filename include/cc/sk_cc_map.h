@@ -843,6 +843,26 @@ private:
             }
         }
 
+        /*
+        * 
+        * When the program reaches here:
+        * 1) it's a cache miss for sk;
+        * 2) it's a cache hit for sk but cache miss for pk.
+        * 
+        * After Clean() two situations require extra consideration:
+        * either the cache hit sk map is deleted,
+        * or some pk elements within the cache hit sk map are deleted.
+        * 
+        * For situation 1:
+        * Recheck sk_it in case the iterator may change during Clean().
+        * 
+        * For situation 2:
+        * If the cache hit sk is not cleaned, recheck sk_it, and reset pk_group accordingly, then recheck pk_it in case the iterator may change during Clean()
+        * If the cache hit sk is cleaned, recheck sk_it, and reset pk_group to nullptr.
+        * 
+        */
+
+
         if (shard_->Full())
         {
             // The shard has reached the maximal capacity. Tries to clean cc
@@ -853,7 +873,19 @@ private:
             {
                 return nullptr;
             }
+
             sk_it = sk_index_.lower_bound(sk);
+            if (sk_it->first == sk)
+            {
+                assert(!sk_it->second.empty());
+                pk_group = &sk_it->second;
+                pk_it = pk_group->lower_bound(pk);
+            }
+            else
+            {
+                pk_group = nullptr;
+            }
+
         }
 
         if (pk_group == nullptr)
