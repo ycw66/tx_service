@@ -1463,7 +1463,11 @@ void TransactionExecution::PostBegin()
 {
     if (init_txn_.result_.IsError())
     {
+        state_stack_.clear();
         void_resp_->FinishError();
+        // transaction can be recycled and put into free list.
+        tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+        Reset();
         return;
     }
 
