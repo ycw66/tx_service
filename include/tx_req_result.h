@@ -15,15 +15,15 @@ enum struct TxResultStatus
     Error
 };
 
-/// <summary>
-/// The result of a transaction request, i.e., begin, read, write, scan_begin,
-/// scan_next, scan_end, commit and abort. The sender of the request is blocked,
-/// when the result has not returned. If the sender needs to yield by context
-/// switching, the sender should block on a condition variable and be woke up
-/// later when Finish() is invoked by the tx service.
-/// </summary>
-/// <typeparam name="T">The type of the returned result of a tx
-/// request</typeparam>
+/**
+ * @brief The result of a transaction request, i.e., begin, read, write,
+ * scan_begin, scan_next, scan_end, commit and abort. The sender of the request
+ * is blocked, when the result has not returned. If the sender needs to yield by
+ * context switching, the sender should block on a condition variable and be
+ * woke up later when Finish() is invoked by the tx service.
+ *
+ * @tparam T The type of the returned result of the tx request.
+ */
 template <typename T>
 class TxResult
 {

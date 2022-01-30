@@ -39,6 +39,13 @@ public:
     {
     }
 
+    InsertEntry(const KeyT &key,
+                TxNumber &txn,
+                CcEntry<KeyT, ValueT> *parent_entry)
+        : key_(key), txn_(txn), parent_entry_(parent_entry)
+    {
+    }
+
     const LruEntry &Parent() const override
     {
         return *parent_entry_;
@@ -46,6 +53,7 @@ public:
 
     const KeyT key_;  // owner of key_
     TxId tx_id_;
+    TxNumber txn_;
     CcEntry<KeyT, ValueT> *parent_entry_;
 };
 
@@ -55,9 +63,7 @@ public:
     LruEntry() = delete;
     virtual ~LruEntry() = default;
 
-    LruEntry(CcMap *parent) : parent_map_(parent)
-    {
-    }
+    LruEntry(CcMap *parent);
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
@@ -66,11 +72,7 @@ public:
      *
      * @return true: entry can be kicked out.
      */
-    bool IsFree() const
-    {
-        return key_lock_.IsEmpty() && gap_lock_.IsEmpty() &&
-               commit_ts_ <= ckpt_ts_.load(std::memory_order_acquire);
-    }
+    bool IsFree() const;
 
     // Lru link which records the age of entries, when ccmap is full, kickout
     // the entries by the order of lru.

@@ -6,6 +6,7 @@
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "tx_id.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -24,11 +25,11 @@ public:
 
     /**
      * @brief Tries to acqurie the write lock. The operation succeeds, if no one
-     * is holding the read and write lock. Note that the write lock does not
-     * conflict with read intentions. The net effect of the failed operation
-     * varies by concurrency control (cc) protocols: for 2PL, the request is put
-     * into a waiting queue; for OCC/MVCC protocols, the request returns without
-     * blocking.
+     * is holding the read lock, the write lock or the write intent. Note that
+     * the write lock does not conflict with read intentions. The net effect of
+     * the failed operation varies by concurrency control (cc) protocols: for
+     * 2PL, the request is put into a waiting queue; for OCC/MVCC protocols, the
+     * request returns without blocking.
      *
      * @param cc_req The cc request that tries to acquire the write lock.
      * @param tx_term The term of the cc node from which the tx comes.
@@ -42,10 +43,16 @@ public:
 
     void ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
 
+    bool AcquireWriteIntent(CcRequestBase *cc_req,
+                            int64_t tx_term,
+                            CcProtocol protocol);
+
+    void ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs);
+
     /**
      * @brief Tries to acquire the read lock. Only tx's under 2PL acquire read
      * locks. The operation succeeds, if no one is holding the write lock and no
-     * write request is blocked. The operation is blocked and put into the
+     * write lock request is blocked. The operation is blocked and put into the
      * waiting queue, if the write lock is held by someone else or someone is
      * blocked and waiting for the write lock.
      *
@@ -59,34 +66,32 @@ public:
     void ReleaseReadLock(TxNumber tx_number, CcShard *ccs);
 
     /**
-     * @brief Acquires a read intention. Tx's under OCC/MVCC acquire read
-     * intentions for read operations. Read intentions do not block writes.
-     * Their goal is to prevent the cache replacement algorithm from kicking out
-     * the cc entry from the cc map.
+     * @brief Acquires a read intent. Tx's under OCC/MVCC acquire read intents
+     * for read operations. Read intents do not block writes. Their goal is to
+     * prevent the cache replacement algorithm from kicking out the cc entry
+     * from the cc map.
      *
      * @param tx_number The tx who acquires the read intention
      */
-    void AcquireReadIntention(TxNumber tx_number);
+    void AcquireReadIntent(TxNumber tx_number);
 
-    void ReleaseReadIntention(TxNumber tx_number);
+    void ReleaseReadIntent(TxNumber tx_number);
 
     bool IsEmpty() const;
 
-    TxNumber WriteTx() const;
+    TxNumber WriteLockTx() const;
 
     bool HasWriteLock() const;
+
+    TxNumber WriteIntentTx() const;
+    
+    bool HasWriteIntent() const;
 
     void ClearTx(TxNumber tx_number, CcShard *ccs);
 
     const std::unordered_set<TxNumber> &ReadLocks() const;
 
 private:
-    enum struct LockType
-    {
-        Read = 0,
-        Write
-    };
-
     struct LockQueueEntry
     {
         LockQueueEntry() = default;
@@ -97,7 +102,7 @@ private:
         }
 
         CcRequestBase *req_{nullptr};
-        LockType lk_type_{LockType::Read};
+        LockType lk_type_{LockType::ReadLock};
         int64_t tx_term_;
     };
 
@@ -108,8 +113,10 @@ private:
     std::unordered_set<TxNumber> read_intentions_;
     // Tx's who have acquired read locks and their terms
     std::unordered_set<TxNumber> read_locks_;
-    TxNumber write_tx_{0};
+    TxNumber write_lock_tx_{0};
     bool is_write_lock_empty_{true};
+    TxNumber write_intent_tx_{0};
+    bool is_write_intent_empty_{true};
     CircularQueue<LockQueueEntry> blocking_queue_;
 
     template <typename KeyT, typename ValueT>

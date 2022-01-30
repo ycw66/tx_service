@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog_key_record.h"
 #include "scan.h"
 #include "tx_container.h"
 #include "tx_execution.h"
@@ -83,26 +84,34 @@ public:
     ReadRequest(const TableName *tab_name = nullptr,
                 const TxKey *key = nullptr,
                 TxRecord *rec = nullptr,
-                ReadType type = ReadType::Inside)
-        : tab_name_(tab_name), key_(key), rec_(rec), type_(type)
+                ReadType type = ReadType::Inside,
+                bool read_local = false)
+        : tab_name_(tab_name),
+          key_(key),
+          rec_(rec),
+          type_(type),
+          read_local_(read_local)
     {
     }
 
     void Set(const TableName *tab_name,
              const TxKey *key,
              TxRecord *rec,
-             ReadType type)
+             ReadType type,
+             bool read_local = false)
     {
         tab_name_ = tab_name;
         key_ = key;
         rec_ = rec;
         type_ = type;
+        read_local_ = read_local;
     }
 
     const TableName *tab_name_;
     const TxKey *key_;
     TxRecord *rec_;
     ReadType type_;
+    bool read_local_;
 };
 
 struct ReadOutsideRequest
@@ -210,55 +219,26 @@ struct CommitRequest : public TemplateTxRequest<CommitRequest, bool>
     CommitRequest() = default;
 };
 
-struct CreateTableRequest : public TemplateTxRequest<CreateTableRequest, bool>
+struct UpsertTableRequest : public TemplateTxRequest<UpsertTableRequest, bool>
 {
-    CreateTableRequest(const std::string &mysql_table_name,
-                       const unsigned char *catalog_image,
-                       size_t catalog_length)
-        : mysql_table_name_(mysql_table_name),
+    UpsertTableRequest(const TableName *table_name,
+                       const TableName *kv_table_name,
+                       const char *catalog_image,
+                       size_t catalog_len,
+                       bool is_deleted)
+        : table_name_(table_name),
+          kv_table_name_(kv_table_name),
           catalog_image_(catalog_image),
-          catalog_length_(catalog_length)
+          catalog_length_(catalog_len),
+          is_deleted_(is_deleted)
     {
     }
 
-    const std::string mysql_table_name_;
-    const unsigned char *catalog_image_;
+    const TableName *table_name_;
+    const TableName *kv_table_name_;
+    const char *catalog_image_;
     size_t catalog_length_;
-};
-
-struct DropTableRequest : public TemplateTxRequest<DropTableRequest, bool>
-{
-    DropTableRequest(const std::string &mysql_table_name)
-        : mysql_table_name_(mysql_table_name)
-    {
-    }
-
-    const std::string mysql_table_name_;
-};
-
-struct FetchCatalogRequest : public TemplateTxRequest<FetchCatalogRequest, bool>
-{
-    FetchCatalogRequest(const std::string &mysql_table_name,
-                        std::string *catalog_content)
-        : mysql_table_name_(mysql_table_name), catalog_content_(catalog_content)
-    {
-    }
-
-    const std::string mysql_table_name_;
-    std::string *catalog_content_;
-};
-
-struct CheckCatalogVersionRequest
-    : public TemplateTxRequest<CheckCatalogVersionRequest, bool>
-{
-    CheckCatalogVersionRequest(const std::string &mysql_table_name,
-                               std::string &source_version)
-        : mysql_table_name_(mysql_table_name), source_version_(source_version)
-    {
-    }
-
-    const std::string mysql_table_name_;
-    std::string source_version_;
+    bool is_deleted_;
 };
 
 struct FaultInjectRequest : public TemplateTxRequest<FaultInjectRequest, bool>

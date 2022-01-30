@@ -22,13 +22,13 @@ public:
     TemplateCcMap(CcShard *shard,
                   const Schema *key_schema = nullptr,
                   const Schema *rec_schema = nullptr)
-        : CcMap(shard), ccm_(), neg_inf_(this), pos_inf_(this)
+        : CcMap(shard),
+          ccm_(),
+          neg_inf_(this),
+          pos_inf_(this),
+          key_schema_(key_schema),
+          record_schema_(rec_schema)
     {
-        // need to make a copy of key_schema and rec_schema to manage the
-        // lifecycle of schema by ccmap.
-        key_schema_.reset(key_schema->Clone().release());
-        record_schema_.reset(rec_schema->Clone().release());
-
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
 
@@ -41,47 +41,6 @@ public:
         neg_inf_.ckpt_next_ = &pos_inf_;
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
-    }
-
-    // function will not be executed
-    bool Execute(AcquireTableWriteLockCC &req) override
-    {
-        return true;
-    }
-    // function will not be executed
-    bool Execute(remote::RemoteAcquireTableWriteLockCC &req) override
-    {
-        return true;
-    }
-
-    // function will not be executed
-    bool Execute(ReleaseTableWriteLockCC &req) override
-    {
-        return true;
-    }
-
-    // function will not be executed
-    bool Execute(CommitCreateTableCC &req) override
-    {
-        return true;
-    }
-
-    // function will not be executed
-    bool Execute(CommitDropTableCC &req) override
-    {
-        return true;
-    }
-
-    // function will not be executed
-    bool Execute(FindCatalogCC &req) override
-    {
-        return true;
-    }
-
-    // function will not be executed
-    bool Execute(CheckCatalogCC &req) override
-    {
-        return true;
     }
 
     bool Execute(AcquireCc &req) override
@@ -123,8 +82,7 @@ public:
                 assert(key_str != nullptr);
 
                 size_t offset = 0;
-                decoded_key.Deserialize(
-                    key_str->data(), offset, key_schema_.get());
+                decoded_key.Deserialize(key_str->data(), offset, key_schema_);
                 target_key = &decoded_key;
             }
 
@@ -135,9 +93,9 @@ public:
                 if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
                 {
                     // The floor entry's key is equal to the insert key. If the
-                    // key is deleted, the insert becomes become an update. Or
-                    // the insert is aborted due to the duplidate key conflict.
-                    if (cce_ptr->payload_status_ == RecordStatus::Deleted)
+                    // key is deleted, the insert becomes an update. Or the
+                    // insert is aborted due to the duplidate key conflict.
+                    if (cce_ptr->payload_status_ != RecordStatus::Deleted)
                     {
                         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                         ng_term,
@@ -170,7 +128,6 @@ public:
                 cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                 ng_term,
                                 req.NodeGroupId());
-
                 req.SetCcePtr(cce_ptr);
             }
         }
@@ -259,7 +216,7 @@ public:
                 {
                     // The request fails because of write-write conflicts.
                     assert(cc_entry.key_lock_.HasWriteLock());
-                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteTx(),
+                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
                                            req.NodeGroupId(),
                                            ng_term);
                 }
@@ -342,18 +299,13 @@ public:
                 {
                     // The cc map has reached the maximal capacity.
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
-
-                    // finally release table read lock
-                    shard_->ReleaseTableReadIntention(*req.GetTableName(),
-                                                      &req);
-
                     return false;
                 }
 
                 auto ite =
                     prior_cce.insert_intention_set_.find(&insert_entry.key_);
                 assert(ite != prior_cce.insert_intention_set_.end());
-                assert(ite->second->tx_id_ == txn);
+                assert(ite->second->tx_id_.TxNumber() == txn);
 
                 if (payload_str == nullptr)
                 {
@@ -410,7 +362,7 @@ public:
             CcEntry<KeyT, ValueT> &cce =
                 *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-            if (cce.key_lock_.WriteTx() != txn)
+            if (cce.key_lock_.WriteLockTx() != txn)
             {
                 req.Result()->SetFinished();
                 return true;
@@ -451,6 +403,500 @@ public:
         }
     }
 
+    bool Execute(AcquireAllCc &req) override
+    {
+        CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
+        AcquireAllResult &acquire_all_result = hd_res->Value();
+        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        bool resume = false;
+        const KeyT *target_key = nullptr;
+
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        if (ng_term < 0)
+        {
+            hd_res->SetError(-1);
+            return true;
+        }
+
+        uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
+
+        if (req.CcePtr() != nullptr)
+        {
+            // The request was blocked before and is now unblocked.
+            resume = true;
+            cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+        }
+        else
+        {
+            // First time the request is processed in this shard. Or the request
+            // is blocked previously because the cc map is full.
+
+            const TxKey *req_key = req.Key();
+            if (req_key != nullptr)
+            {
+                target_key = static_cast<const KeyT *>(req_key);
+            }
+            else
+            {
+                const std::string *key_str = req.KeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, key_schema_);
+                target_key = decoded_key.get();
+                req.SetDecodedKey(std::move(decoded_key));
+            }
+
+            if (req.IsInsert())
+            {
+                // For insert requests, finds a cc entry whose gap will
+                // accommodate the insert key.
+                cce_ptr = Floor(*target_key);
+
+                if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
+                {
+                    // The floor entry's key is equal to the insert key. If the
+                    // key is deleted, the insert becomes an update. Or the
+                    // insert is aborted due to the duplidate key conflict.
+                    if (cce_ptr->payload_status_ != RecordStatus::Deleted)
+                    {
+                        // Inserts a duplicate key.
+                        hd_res->SetError(1);
+                        return true;
+                    }
+                    else
+                    {
+                        if (shard_->core_id_ == tx_core_id)
+                        {
+                            acquire_all_result.local_cce_addr_.SetCce(
+                                reinterpret_cast<uint64_t>(cce_ptr),
+                                ng_term,
+                                req.NodeGroupId());
+                        }
+
+                        req.SetCcePtr(cce_ptr);
+                    }
+                }
+            }
+            else
+            {
+                cce_ptr = FindEmplace(*target_key, 0);
+
+                if (cce_ptr == nullptr)
+                {
+                    // The acquire request needs a new cc entry but the cc map
+                    // has reached the maximal capacity. Blocks the request by
+                    // putting it back to the cc request queue.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+
+                if (shard_->core_id_ == tx_core_id)
+                {
+                    acquire_all_result.local_cce_addr_.SetCce(
+                        reinterpret_cast<uint64_t>(cce_ptr),
+                        ng_term,
+                        req.NodeGroupId());
+                }
+
+                req.SetCcePtr(cce_ptr);
+            }
+        }
+
+        // Cce ptr either points to the cc entry whose gap will accommodate the
+        // new insert, or the cc entry whose key will be updated/deleted.
+        CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
+        TxNumber txn = req.Txn();
+
+        if (req.IsInsert() &&
+            (cce_ptr == &neg_inf_ || !(*cce_ptr->key_ == *req.Key())))
+        {
+            // This is an insert. The new insert results in an insert entry in
+            // the intention set of the preceding key's gap.
+
+            auto ins_it = cc_entry.insert_intention_set_.find(target_key);
+            if (ins_it != cc_entry.insert_intention_set_.end())
+            {
+                InsertEntry<KeyT, ValueT> &insert_entry = *ins_it->second;
+                if (!(insert_entry.tx_id_.TxNumber() == txn))
+                {
+                    // If the same key is already in the insert intention set,
+                    // and its tx ID does not matches the request's, this is a
+                    // duplicate insert. Aborts the tx.
+                    hd_res->SetError(1);
+                    return true;
+                }
+            }
+
+            std::unique_ptr<InsertEntry<KeyT, ValueT>> insert_entry =
+                std::make_unique<InsertEntry<KeyT, ValueT>>(
+                    *target_key, txn, cce_ptr);
+
+            cc_entry.insert_intention_set_.emplace(&insert_entry->key_,
+                                                   std::move(insert_entry));
+            // Cc entry address has been updated. Only reset the result's last
+            // validation ts.
+            acquire_all_result.last_vali_ts_ = std::max(
+                cc_entry.gap_last_vali_ts_, acquire_all_result.last_vali_ts_);
+            acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
+            acquire_all_result.node_term_ = ng_term;
+            hd_res->SetFinished();
+        }
+        else
+        {
+            int64_t tx_term = req.TxTerm();
+
+            // On execution resumption, the write lock/intent has been acquired.
+            bool lock_success = false;
+            if (!resume)
+            {
+                if (req.LkType() == LockType::WriteIntent)
+                {
+                    lock_success = cc_entry.key_lock_.AcquireWriteIntent(
+                        &req, tx_term, req.Protocol());
+                }
+                else if (req.LkType() == LockType::WriteLock)
+                {
+                    lock_success = cc_entry.key_lock_.AcquireWriteLock(
+                        &req, tx_term, req.Protocol());
+                }
+            }
+            else
+            {
+                lock_success = true;
+            }
+
+            if (lock_success)
+            {
+                shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), cce_ptr);
+
+                // Updates last_vali_ts such that it is no smaller than (1) all
+                // read transactions that have read the item in all shards, and
+                // (2) the local time.
+
+                if (shard_->core_id_ == 0)
+                {
+                    acquire_all_result.last_vali_ts_ = cc_entry.last_vali_ts_;
+                }
+                else
+                {
+                    acquire_all_result.last_vali_ts_ =
+                        std::max(cc_entry.last_vali_ts_,
+                                 acquire_all_result.last_vali_ts_);
+                }
+
+                // AcquireAllCc request is executed at all shards consecutively.
+                // The request is set to be finished after executed at the last
+                // shard. At other shards, after the request is executed,
+                // MoveRequest() moves the request to the next shard to iterate
+                // through all shards.
+                if (shard_->core_id_ == shard_->core_cnt_ - 1)
+                {
+                    acquire_all_result.last_vali_ts_ = std::max(
+                        acquire_all_result.last_vali_ts_, shard_->Now());
+                    acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
+                    acquire_all_result.node_term_ = ng_term;
+
+                    hd_res->SetFinished();
+                }
+                else
+                {
+                    req.SetCcePtr(nullptr);
+                    MoveRequest(&req, shard_->core_id_ + 1);
+                    return false;
+                }
+            }
+            else
+            {
+                if (req.LkType() == LockType::WriteIntent &&
+                    cc_entry.key_lock_.HasWriteLock())
+                {
+                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
+                                           req.NodeGroupId(),
+                                           ng_term);
+                }
+                else if (req.LkType() == LockType::WriteLock)
+                {
+                    const std::unordered_set<TxNumber> &read_locks =
+                        cc_entry.key_lock_.ReadLocks();
+                    if (!read_locks.empty())
+                    {
+                        // If the request fails to acquire the write lock
+                        // because of read locks, checks each read lock and
+                        // recovers if needed.
+                        for (const auto &read_tx : read_locks)
+                        {
+                            shard_->CheckRecoverTx(
+                                read_tx, req.NodeGroupId(), ng_term);
+                        }
+                    }
+                    else if (cc_entry.key_lock_.HasWriteIntent())
+                    {
+                        // The request fails because of the write intent.
+                        shard_->CheckRecoverTx(
+                            cc_entry.key_lock_.WriteIntentTx(),
+                            req.NodeGroupId(),
+                            ng_term);
+                    }
+                    else if (cc_entry.key_lock_.HasWriteLock())
+                    {
+                        // The request fails because of the write lock.
+                        shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
+                                               req.NodeGroupId(),
+                                               ng_term);
+                    }
+                }
+
+                if (req.Protocol() == CcProtocol::OCC)
+                {
+                    // For OCC/MVCC, a conflict causes the tx to abort
+                    // immediately.
+                    hd_res->SetError(1);
+                    return true;
+                }
+                else
+                {
+                    // For 2PL, a conflict blocks the tx by putting it into the
+                    // lock's blocking queue.
+
+                    uint32_t tx_node = (req.Txn() >> 32L) >> 10;
+                    if (tx_node != shard_->node_id_)
+                    {
+                        req.Result()->Value().node_term_ = ng_term;
+                        // If the request comes from a remote node, sends
+                        // acknowledgement to the sender when the request is
+                        // blocked.
+                        remote::RemoteAcquireAll &remote_req =
+                            static_cast<remote::RemoteAcquireAll &>(req);
+                        remote_req.Acknowledge();
+                    }
+
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    bool Execute(PostWriteAllCc &req) override
+    {
+        if (Sharder::Instance().LeaderTerm(req.NodeGroupId()) < 0)
+        {
+            req.Result()->SetError(-1);
+            return true;
+        }
+
+        const KeyT *target_key = nullptr;
+        const TxKey *req_key = req.Key();
+        if (req_key != nullptr)
+        {
+            target_key = static_cast<const KeyT *>(req_key);
+        }
+        else
+        {
+            const std::string *key_str = req.KeyStr();
+            assert(key_str != nullptr);
+            std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+            size_t offset = 0;
+            decoded_key->Deserialize(key_str->data(), offset, key_schema_);
+            target_key = decoded_key.get();
+            req.SetDecodedKey(std::move(decoded_key));
+        }
+
+        const ValueT *payload = nullptr;
+        const TxRecord *rec = req.Payload();
+        if (rec != nullptr)
+        {
+            payload = static_cast<const ValueT *>(rec);
+        }
+        else
+        {
+            const std::string *payload_str = req.PayloadStr();
+            assert(payload_str != nullptr);
+            std::unique_ptr<ValueT> decoded_rec = std::make_unique<ValueT>();
+            size_t offset = 0;
+            decoded_rec->Deserialize(payload_str->data(), offset);
+            payload = decoded_rec.get();
+            req.SetDecodedPayload(std::move(decoded_rec));
+        }
+
+        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        if (req.DmlOp() == DmlOperation::Insert)
+        {
+            cce_ptr = Floor(*target_key);
+        }
+        else
+        {
+            cce_ptr = FindEmplace(*target_key, 0);
+        }
+
+        TxNumber txn = req.Txn();
+        uint64_t commit_ts = req.CommitTs();
+
+        if (req.DmlOp() == DmlOperation::Insert &&
+            !(*cce_ptr->key_ == *target_key))
+        {
+            auto insert_it = cce_ptr->insert_intention_set_.find(target_key);
+            if (insert_it != cce_ptr->insert_intention_set_.end() &&
+                insert_it->second->txn_ == txn)
+            {
+                if (commit_ts == 0)
+                {
+                    // When the commit ts is 0, this request has a sole purpose:
+                    // undoes any effects left by the write operation. This is
+                    // used when the tx receives the abort command before
+                    // entering the commit phase. For an insert, in addition to
+                    // removing the write lock, the undo operation also includes
+                    // removing the temporary insert entry in the gap.
+                    cce_ptr->insert_intention_set_.erase(insert_it);
+                }
+                else
+                {
+                    CcEntry<KeyT, ValueT> *new_cce =
+                        Emplace(insert_it->second->key_, commit_ts);
+
+                    if (new_cce == nullptr)
+                    {
+                        // The cc map has reached the maximal capacity.
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+
+                    new_cce->payload_ = *payload;
+                    new_cce->payload_status_ = RecordStatus::Normal;
+
+                    // Splits the gap.
+                    ++insert_it;
+                    for (auto it = insert_it;
+                         it != cce_ptr->insert_intention_set_.end();
+                         ++it)
+                    {
+                        InsertEntry<KeyT, ValueT> &insert_entry =
+                            *it->second.get();
+                        insert_entry.parent_entry_ = new_cce;
+                        new_cce->insert_intention_set_.emplace(
+                            it->first, std::move(it->second));
+                    }
+
+                    new_cce->gap_commit_ts_ = commit_ts;
+                    new_cce->commit_ts_ = commit_ts;
+                    new_cce->gap_last_vali_ts_ = cce_ptr->gap_last_vali_ts_;
+
+                    cce_ptr->gap_commit_ts_ = commit_ts;
+                    cce_ptr->insert_intention_set_.erase(
+                        --insert_it, cce_ptr->insert_intention_set_.end());
+
+                    if (new_cce->ckpt_next_ == nullptr)
+                    {
+                        // If the new cc entry is not in the checkpoint list,
+                        // enlists the new entry.
+                        LruEntry *second_last = pos_inf_.ckpt_prev_;
+                        second_last->ckpt_next_ = new_cce;
+                        new_cce->ckpt_prev_ = second_last;
+                        new_cce->ckpt_next_ = &pos_inf_;
+                        pos_inf_.ckpt_prev_ = new_cce;
+                    }
+                }
+            }
+
+            if (req.CommitType() != PostWriteType::PrepareCommit)
+            {
+                cce_ptr->gap_lock_.ReleaseWriteLock(txn, shard_);
+                // The insert places a write lock on the prior cc entry's gap.
+                shard_->DeleteLockHolidngTx(txn, cce_ptr);
+            }
+
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                req.Result()->SetFinished();
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+        else
+        {
+            LockType lk_type = LockType::NoLock;
+
+            if (cce_ptr->key_lock_.HasWriteLock() &&
+                cce_ptr->key_lock_.WriteLockTx() == txn)
+            {
+                lk_type = LockType::WriteLock;
+            }
+            else if (cce_ptr->key_lock_.HasWriteIntent() &&
+                     cce_ptr->key_lock_.WriteIntentTx() == txn)
+            {
+                lk_type = LockType::WriteIntent;
+            }
+
+            if (lk_type == LockType::WriteLock ||
+                lk_type == LockType::WriteIntent)
+            {
+                if (commit_ts > 0)
+                {
+                    cce_ptr->commit_ts_ = commit_ts;
+                    if (req.DmlOp() == DmlOperation::Delete)
+                    {
+                        cce_ptr->payload_status_ = RecordStatus::Deleted;
+                    }
+                    else
+                    {
+                        cce_ptr->payload_ = *payload;
+                        cce_ptr->payload_status_ = RecordStatus::Normal;
+                    }
+
+                    if (cce_ptr->ckpt_next_ == nullptr)
+                    {
+                        // If the cc entry is not in the checkpoint list,
+                        // enlists the entry.
+                        LruEntry *second_last = pos_inf_.ckpt_prev_;
+                        second_last->ckpt_next_ = cce_ptr;
+                        cce_ptr->ckpt_prev_ = second_last;
+                        cce_ptr->ckpt_next_ = &pos_inf_;
+                        pos_inf_.ckpt_prev_ = cce_ptr;
+                    }
+                }
+
+                // When commit_ts = 0, the request removes the write lock
+                // without installing a new value.
+
+                if (req.CommitType() != PostWriteType::PrepareCommit)
+                {
+                    // For prepare commit, the request installs the value,
+                    // but does not release the write intent/lock.
+                    if (lk_type == LockType::WriteLock)
+                    {
+                        cce_ptr->key_lock_.ReleaseWriteLock(txn, shard_);
+                        shard_->DeleteLockHolidngTx(txn, cce_ptr);
+                    }
+                    else if (lk_type == LockType::WriteIntent)
+                    {
+                        cce_ptr->key_lock_.ReleaseWriteIntent(txn, shard_);
+                        shard_->DeleteLockHolidngTx(txn, cce_ptr);
+                    }
+                }
+            }
+
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                req.Result()->SetFinished();
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+    }
+
     bool Execute(PostReadCc &req) override
     {
         auto hd_res = req.Result();
@@ -482,12 +928,12 @@ public:
             // Releases intentions for OCC/MVCC protocols.
             if (key_ts > 0)
             {
-                cc_entry.key_lock_.ReleaseReadIntention(txn);
+                cc_entry.key_lock_.ReleaseReadIntent(txn);
             }
 
             if (gap_ts > 0)
             {
-                cc_entry.gap_lock_.ReleaseReadIntention(txn);
+                cc_entry.gap_lock_.ReleaseReadIntent(txn);
             }
 
             hd_res->SetError(1);
@@ -511,7 +957,7 @@ public:
                     conflicting_txs.emplace_back(it->second->tx_id_);
                 }
             }
-            cc_entry.gap_lock_.ReleaseReadIntention(txn);
+            cc_entry.gap_lock_.ReleaseReadIntent(txn);
 
             if (key_ts > 0)
             {
@@ -520,10 +966,11 @@ public:
 
                 if (cc_entry.key_lock_.HasWriteLock())
                 {
-                    conflicting_txs.emplace_back(cc_entry.key_lock_.WriteTx());
+                    conflicting_txs.emplace_back(
+                        cc_entry.key_lock_.WriteLockTx());
                 }
             }
-            cc_entry.key_lock_.ReleaseReadIntention(txn);
+            cc_entry.key_lock_.ReleaseReadIntent(txn);
 
             hd_res->SetFinished();
         }
@@ -615,7 +1062,7 @@ public:
                 KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
-                    req.KeyBlob()->data(), offset, key_schema_.get());
+                    req.KeyBlob()->data(), offset, key_schema_);
 
                 cce = FindEmplace(decoded_key, req.ReadTimestamp());
 
@@ -662,7 +1109,8 @@ public:
                 {
                     // ReadIntention prevents ccentry being kicked out from
                     // cache, but will not block write lock.
-                    cce->key_lock_.AcquireReadIntention(req.Txn());
+                    // cce->key_lock_.AcquireReadIntention(req.Txn());
+                    cce->key_lock_.AcquireReadIntent(req.Txn());
                 }
 
                 shard_->UpsertLockHoldingTx(txn, tx_term, cce);
@@ -980,7 +1428,7 @@ public:
         default:
             size_t offset = 0;
             key_obj.Deserialize(
-                req.start_key_str_->data(), offset, key_schema_.get());
+                req.start_key_str_->data(), offset, key_schema_);
             look_key = &key_obj;
             break;
         }
@@ -1218,7 +1666,7 @@ public:
 
         while (offset < log_blob.size())
         {
-            key.Deserialize(log_blob.data(), offset, key_schema_.get());
+            key.Deserialize(log_blob.data(), offset, key_schema_);
             uint8_t delete_flag =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
@@ -1269,7 +1717,7 @@ public:
                     // the lock's owner must be the tx that commits the log
                     // record. TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
-                    TxNumber txn = cce->key_lock_.WriteTx();
+                    TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
                     shard_->DeleteLockHolidngTx(txn, cce);
                     // cce->key_lock_.ClearTx(txn);
@@ -1294,8 +1742,8 @@ public:
     std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const override
     {
-        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
-            direction, key_schema_.get());
+        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(direction,
+                                                                 key_schema_);
     }
 
     /**
@@ -1352,18 +1800,18 @@ public:
 
     const Schema *KeySchema() const override
     {
-        return key_schema_.get();
+        return key_schema_;
     }
 
     const Schema *RecordSchema() const override
     {
-        return record_schema_.get();
+        return record_schema_;
     }
 
     std::unique_ptr<CcMap> Clone() const override
     {
         return std::make_unique<TemplateCcMap<KeyT, ValueT>>(
-            shard_, key_schema_.get(), record_schema_.get());
+            shard_, key_schema_, record_schema_);
     }
 
 protected:
@@ -1472,6 +1920,14 @@ protected:
         return new_cce_ptr;
     }
 
+    /**
+     * @brief Finds the greatest cc entry whose key less than or equal to the
+     * input key. If the map is empty, the floor key is the negative infinity.
+     *
+     * @param key The input key
+     * @return CcEntry<KeyT, ValueT>* The pointer to the cc entry whose key is
+     * the greatest key less than or equal to the input key.
+     */
     CcEntry<KeyT, ValueT> *Floor(const KeyT &key)
     {
         if (ccm_.size() == 0)
@@ -1598,7 +2054,7 @@ protected:
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
-    std::unique_ptr<const Schema> key_schema_;
-    std::unique_ptr<const Schema> record_schema_;
+    const Schema *key_schema_;
+    const Schema *record_schema_;
 };
 }  // namespace txservice

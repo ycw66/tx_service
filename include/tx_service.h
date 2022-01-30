@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "catalog.h"
+#include "catalog_factory.h"
 #include "checkpointer.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
@@ -251,15 +252,15 @@ public:
 class TxService
 {
 public:
-    TxService(Catalog *catalog,
-              const std::string &local_path,
+    TxService(const std::string &local_path,
+              CatalogFactory *catalog_factory,
               uint32_t node_id = 0,
               uint16_t core_cnt = 1,
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
               store::DataStoreWriteHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr)
-        : local_cc_shards_(node_id, core_cnt, catalog),
+        : local_cc_shards_(node_id, core_cnt, catalog_factory, store_hd),
           ckpt_(local_cc_shards_, store_hd)
     {
         pool_.reserve(core_cnt);
@@ -340,21 +341,6 @@ public:
     {
         local_cc_shards_.CreateSkCcTable<SkT, PkT>(
             index_name, sk_schema, pk_schema, core_id, is_all);
-    }
-
-    void FillTableCatalog(const TableName &tabname,
-                          std::string &catalog_content,
-                          std::string table_version,
-                          uint32_t core_id = 0,
-                          bool is_all = true)
-    {
-        local_cc_shards_.FillTableCatalog(
-            tabname, catalog_content, table_version, core_id, is_all);
-    }
-
-    void RemoveTableCatalog(const TableName &tabname, uint32_t core_id)
-    {
-        local_cc_shards_.RemoveTableCatalog(tabname, core_id);
     }
 
     std::vector<std::unique_ptr<TxProcessor>> pool_;

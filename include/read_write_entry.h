@@ -10,14 +10,6 @@
 
 namespace txservice
 {
-enum class Operation
-{
-    Update,
-    Delete,
-    Insert,
-    Upsert
-};
-
 using SecondaryKeys =
     std::vector<std::tuple<const TableName *, TxKeyContainer, bool>>;
 
@@ -28,7 +20,7 @@ struct WriteSetEntry
     WriteSetEntry()
         : key_(nullptr, ContainerType::rvalue),
           rec_(nullptr, ContainerType::rvalue),
-          op_(Operation::Upsert),
+          op_(DmlOperation::Upsert),
           cce_addr_(),
           sindx_()
     {
@@ -47,9 +39,31 @@ struct WriteSetEntry
 
     TxKeyContainer key_;
     TxRecordContainer rec_;
-    Operation op_;
+    DmlOperation op_;
     CcEntryAddr cce_addr_;
     SecondaryKeys sindx_;
+};
+
+struct ReadSetEntry
+{
+    ReadSetEntry() = delete;
+    ReadSetEntry(uint64_t ts, CcProtocol proto)
+        : version_ts_(ts), protocol_(proto)
+    {
+    }
+
+    uint64_t version_ts_;
+    /**
+     * @brief The concurrency control protocol used when this read is performed.
+     * A tx reads two types of data: catalogs when the query is compiled, and
+     * data items when the query is executed. Data items are read under the
+     * concurrency control protocol specified by the tx. Catalogs are read under
+     * a fixed protocol irrespective of the tx's. The tx relies on this
+     * parameter to perform appropriate post-processing operations for read
+     * data.
+     *
+     */
+    CcProtocol protocol_;
 };
 
 struct ScanSetEntry

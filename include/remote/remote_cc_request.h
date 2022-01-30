@@ -37,6 +37,23 @@ private:
     CcHandlerResult<AcquireKeyResult> cc_res_{nullptr};
 };
 
+struct RemoteAcquireAll : public AcquireAllCc
+{
+public:
+    RemoteAcquireAll();
+    RemoteAcquireAll(const RemoteAcquireAll &rhs) = delete;
+    RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
+    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Acknowledge();
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+
+    CcHandlerResult<AcquireAllResult> cc_res_{nullptr};
+};
+
 struct RemotePostRead : public PostReadCc
 {
 public:
@@ -50,131 +67,6 @@ private:
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<std::vector<TxId>> cc_res_{nullptr};
-};
-
-/*
-   RemoteAcquireTableWriteLock request adds table write lock on every shard of
-   remote node. Every table DDL needs to acquire table write lock firstly.
- */
-struct RemoteAcquireTableWriteLockCC
-    : public TemplatedCcRequest<RemoteAcquireTableWriteLockCC, Void>
-{
-public:
-    RemoteAcquireTableWriteLockCC();
-
-    RemoteAcquireTableWriteLockCC(const RemoteAcquireTableWriteLockCC &rhs) =
-        delete;
-    RemoteAcquireTableWriteLockCC(RemoteAcquireTableWriteLockCC &&rhs) = delete;
-
-    void Free() override;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        bool success = ccs.AcquireTableWriteLock(*table_name_, this);
-
-        if (success)
-        {
-            res_->SetFinished();
-            return true;
-        }
-        else
-        {
-            // AcqureTableWriteLock is blocked
-            return false;
-        }
-    }
-
-    void Set(std::unique_ptr<CcMessage> input_msg,
-             uint32_t core_cnt,
-             int64_t node_term);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    TxId txid_obj_;
-    int64_t node_term_{-1};
-    CcHandlerResult<Void> cc_res_{nullptr};
-    std::atomic<uint32_t> unfinish_cnt_{0};
-};
-
-/*
-  RemoteReleaseTableWriteLock request release table write lock on every shard of
-  remote node. Every table DDL needs to release table write lock at the end of
-  postprocess.
-*/
-struct RemoteReleaseTableWriteLock : public ReleaseTableWriteLockCC
-{
-public:
-    RemoteReleaseTableWriteLock();
-
-    RemoteReleaseTableWriteLock(const RemoteReleaseTableWriteLock &rhs) =
-        delete;
-    RemoteReleaseTableWriteLock(RemoteReleaseTableWriteLock &&rhs) = delete;
-
-    void Free() override;
-
-    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    TxId txid_obj_;
-    uint32_t node_group_id_{0};
-    CcHandlerResult<Void> cc_res_{nullptr};
-    std::atomic<uint32_t> unfinish_cnt_{0};
-};
-
-/*
-  Postprocess of create table.
- */
-struct RemoteCommitCreateTable : public CommitCreateTableCC
-{
-public:
-    RemoteCommitCreateTable();
-
-    RemoteCommitCreateTable(const RemoteCommitCreateTable &rhs) = delete;
-    RemoteCommitCreateTable(RemoteCommitCreateTable &&rhs) = delete;
-
-    void Free() override;
-
-    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    CcHandlerResult<Void> cc_res_{nullptr};
-    std::atomic<uint32_t> unfinish_cnt_{0};
-};
-
-/*
-  Postprocess of drop table.
-  clear ccm entry, drop table in Cassandra on runtime.
- */
-struct RemoteCommitDropTable : public CommitDropTableCC
-{
-public:
-    RemoteCommitDropTable();
-
-    RemoteCommitDropTable(const RemoteCommitDropTable &rhs) = delete;
-    RemoteCommitDropTable(RemoteCommitDropTable &&rhs) = delete;
-
-    void Free() override;
-
-    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-
-    CcHandlerResult<Void> cc_res_{nullptr};
-    std::atomic<uint32_t> unfinish_cnt_{0};
 };
 
 struct RemoteRead : public ReadCc
@@ -245,37 +137,33 @@ private:
     CcHandlerResult<Void> cc_res_{nullptr};
 };
 
-struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
+struct RemotePostWriteAll : public PostWriteAllCc
 {
 public:
-    RemoteScanOpen();
-
-    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
-
-    void Free() override;
-
-    bool Execute(CcShard &ccs) override
-    {
-        int8_t err_code = 0;
-        ccm_ = ccs.GetCcm(*table_name_, node_group_id_, err_code);
-
-        if (ccm_ == nullptr)
-        {
-            cc_res_.SetError(err_code);
-            return true;
-        }
-        else
-        {
-            return ccm_->Execute(*this);
-        }
-    }
+    RemotePostWriteAll();
+    void Set(std::unique_ptr<CcMessage> input_msg);
 
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    uint32_t node_group_id_{0};
+    CcHandlerResult<Void> cc_res_{nullptr};
+};
+
+struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
+{
+public:
+    RemoteScanOpen();
+
+    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
+    void Free() override;
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+
     KeyType key_type_{KeyType::Normal};
     const std::string *start_key_str_{nullptr};
     bool inclusive_{true};
@@ -306,7 +194,6 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    uint32_t node_group_id_{0};
     uint64_t prior_cce_addr_{0};
     ScanDirection direct_{ScanDirection::Forward};
     std::vector<ScanTuple_msg *> scan_cache_;

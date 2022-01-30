@@ -8,9 +8,11 @@
 #include <unordered_map>
 
 #include "catalog.h"
+#include "catalog_factory.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_req_base.h"
+#include "cc_req_misc.h"
 #include "moodycamelqueue.h"
 #include "secondary_key.h"
 #include "table_lock.h"
@@ -69,44 +71,8 @@ public:
             uint32_t core_cnt,
             uint64_t base_ts,
             uint32_t node_id,
-            Catalog *catalog)
-        : node_id_(node_id),
-          core_id_(core_id),
-          core_cnt_(core_cnt),
-          native_ccms_(),
-          failover_ccms_(),
-          table_metadata_(),
-          failover_table_metadata_(),
-          cc_queue_(256),
-          req_buf_(),
-          size_(0),
-          tx_vec_(),
-          next_tx_idx_(0),
-          next_tx_ident_(0),
-          ts_base_(base_ts),
-          head_cce_(nullptr),
-          tail_cce_(nullptr),
-          ckpter_(nullptr),
-          processor_sleep_(false),
-          catalog_(catalog)
-    {
-        tx_vec_.reserve(128);
-        for (int idx = 0; idx < 128; ++idx)
-        {
-            tx_vec_.emplace_back(idx);
-        }
-
-        head_cce_.lru_prev_ = nullptr;
-        head_cce_.lru_next_ = &tail_cce_;
-        tail_cce_.lru_prev_ = &head_cce_;
-        tail_cce_.lru_next_ = nullptr;
-
-        thd_token_.reserve((size_t) core_cnt + 1);
-        for (size_t idx = 0; idx < core_cnt; ++idx)
-        {
-            thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
-        }
-    }
+            LocalCcShards &local_shards,
+            CatalogFactory *catalog_factory);
 
     /**
      * @brief Returns the cc map in this node given the table name and the cc
@@ -224,7 +190,7 @@ public:
 
     Catalog *GetCatalog()
     {
-        return catalog_;
+        return nullptr;
     }
 
     /// <summary>
@@ -300,139 +266,50 @@ public:
         entry->ckpt_next_ = nullptr;
     }
 
-    bool AcquireTableReadIntention(const TableName &table_name,
-                                   CcRequestBase *cc_req)
-    {
-        auto table_iter = table_locks_.find(table_name);
+    std::pair<const TableSchema *, const TableSchema *> *CreateCatalog(
+        const TableName &table_name,
+        const std::string &catalog_image,
+        uint64_t commit_ts);
 
-        if (table_iter == table_locks_.end())
-        {
-            auto iter = table_locks_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-        TableLock &tab_lock = table_iter->second;
+    std::pair<const TableSchema *, const TableSchema *> *CreateDirtyCatalog(
+        const TableName &table_name,
+        const std::string &catalog_image,
+        uint64_t commit_ts);
 
-        return tab_lock.AcquireReadIntention(cc_req);
-    }
+    std::pair<const TableSchema *, const TableSchema *> *CommitDirtyCatalog(
+        const TableName &table_name);
 
-    bool AcquireTableWriteLock(const TableName &table_name,
-                               CcRequestBase *cc_req)
-    {
-        // TODO: refactor to use function GetTableLock to get TableLock
-        // &tab_lock
-        auto table_iter = table_locks_.find(table_name);
+    std::pair<const TableSchema *, const TableSchema *> *GetCatalog(
+        const TableName &table_name);
 
-        if (table_iter == table_locks_.end())
-        {
-            auto iter = table_locks_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
+    /**
+     * @brief Fetches the table's catalog from the data store and temporarily
+     * caches the demanding cc request in the cc shard. After the catalog is
+     * fetched and instantiated in this node, re-enqueues the cc request for
+     * re-execution.
+     *
+     * @param table_name The table name
+     * @param requester The cc request that needs to access the input table's cc
+     * map but the cc map does not exist due to the missing of the catalog.
+     */
+    void FetchCatalog(const TableName &table_name, CcRequestBase *requester);
 
-        TableLock &tab_lock = table_iter->second;
+    void RemoveFetchRequest(const TableName &table_name);
 
-        return tab_lock.AcquireWrite(cc_req);
-    }
+    void CreatePkCcMap(const TableName &table_name,
+                       const TableSchema *table_schema,
+                       NodeGroupId ng_id);
 
-    bool ReleaseTableReadIntention(const TableName &table_name,
-                                   CcRequestBase *cc_req)
-    {
-        auto table_iter = table_locks_.find(table_name);
+    void CreateSkCcMap(const TableName &index_name,
+                       const TableSchema *table_schema,
+                       NodeGroupId ng_id);
 
-        if (table_iter == table_locks_.end())
-        {
-            auto iter = table_locks_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-
-        TableLock &tab_lock = table_iter->second;
-
-        tab_lock.ReleaseReadIntention(cc_req->Txn(), this);
-
-        return true;
-    }
-
-    bool ReleaseTableWriteLock(const TableName &table_name,
-                               CcRequestBase *cc_req)
-    {
-        auto table_iter = table_locks_.find(table_name);
-
-        if (table_iter == table_locks_.end())
-        {
-            auto iter = table_locks_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-
-        TableLock &tab_lock = table_iter->second;
-
-        tab_lock.ReleaseWrite(cc_req->Txn(), this);
-
-        return true;
-    }
-
-    bool ReleaseAllTableLocks(const TableName &table_name, TxNumber tx_number)
-    {
-        auto table_iter = table_locks_.find(table_name);
-
-        if (table_iter == table_locks_.end())
-        {
-            auto iter = table_locks_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-
-        TableLock &tab_lock = table_iter->second;
-
-        tab_lock.ReleaseAllTableLocks(tx_number, this);
-
-        return true;
-    }
-
-    bool FindCatalog(const TableName &table_name, std::string *catalog_content)
-    {
-        auto table_iter = table_metadata_.find(table_name);
-
-        if (table_iter == table_metadata_.end())
-        {
-            auto iter = table_metadata_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-
-        TableCatalog &tab_catalog = table_iter->second;
-
-        if (tab_catalog.table_catalog_info_ == "")
-        {
-            return false;
-        }
-        else
-        {
-            *catalog_content = tab_catalog.table_catalog_info_;
-        }
-
-        return true;
-    }
-
-    bool CheckCatalogVersion(const TableName &table_name,
-                             std::string &source_version)
-    {
-        auto table_iter = table_metadata_.find(table_name);
-
-        if (table_iter == table_metadata_.end())
-        {
-            auto iter = table_metadata_.try_emplace(table_name);
-            table_iter = iter.first;
-        }
-
-        TableCatalog &tab_catalog = table_iter->second;
-
-        if (source_version.compare(tab_catalog.table_catalog_version_) == 0)
-        {
-            return true;
-        }
-        return false;
-    }
+    void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 
     const uint32_t node_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
+    LocalCcShards &local_shards_;
 
 private:
     /**
@@ -468,18 +345,11 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;
 
+    std::unordered_map<TableName, FetchCatalogCc> fetch_catalog_reqs_;
+
     std::unordered_map<TableName, CcMap::uptr> range_func_;
-
-    // table metadata store catalog and table lock information
-    std::unordered_map<TableName, TableLock> table_locks_;
-    std::unordered_map<TableName, TableCatalog> table_metadata_;
-
-    // table_metadata_ for failover ccnode.
-    // TODO: failover logic not handled yet.
-    std::unordered_map<TableName, std::unordered_map<NodeGroupId, TableLock>>
-        failover_table_locks_;
-    std::unordered_map<TableName, std::unordered_map<NodeGroupId, TableCatalog>>
-        failover_table_metadata_;
+    std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
+        failover_range_func_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
@@ -538,7 +408,7 @@ private:
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
-    Catalog *catalog_;
+    CatalogFactory *const catalog_factory_;
 
     // The number of cc entries to free in one invocation of Clean().
     static constexpr uint64_t freeBatchSize = 100;

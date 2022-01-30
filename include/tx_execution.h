@@ -1,7 +1,9 @@
 #pragma once
 
+#include <stack>
 #include <unordered_set>
 
+#include "catalog_key_record.h"
 #include "cc/cc_handler.h"
 #include "cc/ccm_scanner.h"
 #include "cc_protocol.h"
@@ -24,6 +26,7 @@ struct UpsertRequest;
 struct CommitRequest;
 struct AbortRequest;
 struct CreateTableRequest;
+struct UpsertTableRequest;
 struct DropTableRequest;
 struct FetchCatalogRequest;
 struct CheckCatalogVersionRequest;
@@ -87,10 +90,7 @@ public:
     void Process(UpsertRequest &upsert_req);
     void Process(CommitRequest &commit_req);
     void Process(AbortRequest &abort_req);
-    void Process(CreateTableRequest &ct_req);
-    void Process(DropTableRequest &dt_req);
-    void Process(FetchCatalogRequest &fc_req);
-    void Process(CheckCatalogVersionRequest &ccv_req);
+    void Process(UpsertTableRequest &req);
     void Process(FaultInjectRequest &fi_req);
 
     /**
@@ -137,6 +137,22 @@ private:
 
     void ReadOutside(TxRecord &record, bool is_deleted);
 
+    /**
+     * @brief Reads the specified key from the local cc map to which this tx is
+     * bound. This API is used for reading cc maps replicated in all shards. A
+     * typical use case of ReadLocal is to read and start concurrency control of
+     * a table catalog.
+     *
+     * @param table_name The table name
+     * @param key The key to read
+     * @param record The record to which the key's content is copied.
+     * @param read_type The read type
+     */
+    void ReadLocal(const TableName &table_name,
+                   const TxKey &key,
+                   TxRecord &record,
+                   ReadType read_type);
+
     void ScanOpen(const TableName &table_name,
                   ScanIndexType indx_type,
                   const TxKey &start_key,
@@ -161,7 +177,7 @@ private:
                 TxKeyContainer &key,
                 TxRecordContainer &rec,
                 SecondaryKeys *skeys = nullptr,
-                Operation op = Operation::Upsert);
+                DmlOperation op = DmlOperation::Upsert);
 
     void Insert(const TableName &table_name,
                 TxKeyContainer &key,
@@ -171,18 +187,6 @@ private:
     void Commit();
 
     void Abort();
-
-    void CreateTable();
-
-    void DropTable();
-
-    void FetchCatalog();
-
-    void CheckCatalogVersion();
-
-    void FindCatalogFinish(bool succeed);
-
-    void WriteDDLLog();
 
     void RequestFinish(bool succeed);
 
@@ -202,18 +206,19 @@ private:
     void SetTxStatus();
     void PostSetTxStatus();
     void PostProcess(size_t read_intention_size, size_t write_intention_size);
-    // release all the table level lock for this transaction.
-    void ReleaseAllTableLocks();
     void PostPostProcess();
-    void PostProcessCreateTable();
-    void ReleaseTableWriteLock();
-    void AcquireTableWriteLock();
-    void PostProcessDropTable();
-    void FindCatalogInCCShard();
-    void CheckCatalogInCCShard();
+    void PostAcquireAll();
+    // release all the table level lock for this transaction.
     void FaultInject(const std::string &fault_name,
                      const std::string &fault_type,
                      int node_id);
+
+    void Process(AcquireAllOp &acq_all_op);
+    void Process(PostWriteAllOp &post_write_all_op);
+    void PostPostWriteAll();
+    void Process(WriteToLog &flush_log);
+    void PostDataStoreOp();
+    void Process(DsUpsertTableOp &ds_upsert_table_op);
 
     bool IsTimeOut();
     void StartTiming();
@@ -223,6 +228,13 @@ private:
         UNKNOWN,
         CREATE_TABLE,
         DROP_TABLE
+    };
+
+    enum struct TxType
+    {
+        Data = 0,
+        Schema,
+        PartitionFunction
     };
 
     CcHandler *handler;
@@ -247,7 +259,8 @@ private:
     // The local time when the tx machine first moves to its current state.
     uint64_t state_clock_;
 
-    TransactionOperation *current_op_, *prev_op_;
+    std::vector<TransactionOperation *> state_stack_;
+    TransactionOperation *prev_op_;
     size_t idle_rep_;
 
     // local cache of read/write entries.
@@ -258,25 +271,7 @@ private:
     // can help us to locate the previous empty cc entry quickly.
     CcEntryAddr cache_miss_read_cce_addr_;
 
-    // create table statement
-    DDLType ddl_type_;
-    const std::string *mysql_table_name_;
-    const unsigned char *catalog_image_;
-    size_t catalog_length_;
-
-    // record term information on each ccnode for table lock
-    // key is node id, value is term
-    std::unordered_map<uint32_t, int64_t> table_lock_term_map_;
-
-    // fetch catalog
-    std::string *catalog_content_;
-
-    // check catalog version
-    std::string *source_version_;
-
-    // track all the opened tables. ReleaseAllTableLocks is responsible
-    // for releasing the lock for opened tables.
-    std::unordered_set<std::string> opened_table_set_;
+    std::unique_ptr<SchemaOp> schema_op_;
 
     std::unordered_map<
         size_t,
@@ -310,8 +305,6 @@ private:
     InitTxnOperation init_txn_;
 
     // Execution phase.
-    FindCatalogInCCShardOp find_catalog_in_ccshard_op;
-    CheckCatalogInCCShardOp check_catalog_in_ccshard_op;
     ReadOperation read_;
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
@@ -323,11 +316,6 @@ private:
     UpdateTxnStatus update_txn_;
     PostProcessOp post_process_;
     WriteToLog write_log_;
-    AcquireTableWriteLockOp acquire_table_write_lock_op;
-    WriteDDLLogOp write_ddl_log_op;
-    PostProcessDDLOp post_process_ddl_op;
-    ReleaseTableWriteLockOp release_table_write_lock_op;
-    ReleaseAllTableLocksOp release_table_locks_op;
 
     // fault inject
     FaultInjectOp fault_inject_op;
@@ -343,14 +331,11 @@ private:
     friend struct PostProcessOp;
     friend struct ScanOpenOperation;
     friend struct ScanNextOperation;
-    friend struct AcquireTableWriteLockOp;
-    friend struct ReleaseTableWriteLockOp;
-    friend struct WriteDDLLogOp;
-    friend struct PostProcessDDLOp;
-    friend struct FindCatalogInCCShardOp;
-    friend struct CheckCatalogInCCShardOp;
     friend struct FaultInjectOp;
-    friend struct ReleaseAllTableLocksOp;
+    friend struct AcquireAllOp;
+    friend struct PostWriteAllOp;
+    friend struct UpsertTableOp;
+    friend struct DataStoreOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

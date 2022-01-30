@@ -32,22 +32,16 @@ public:
                       CcHandlerResult<AcquireKeyResult> &hres,
                       const CcProtocol proto = CcProtocol::OCC);
 
-    void AcquireTableWriteLock(
-        uint32_t src_node_id,
-        const TableName &table_name,
-        const TxId &txid,
-        int64_t tx_term,
-        uint64_t tx_number,
-        uint32_t node_group_id,
-        CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hres);
-
-    void ReleaseTableWriteLock(uint32_t src_node_id,
-                               const TableName &table_name,
-                               const TxId &txid,
-                               int64_t tx_term,
-                               uint64_t tx_number,
-                               uint32_t node_group_id,
-                               CcHandlerResult<Void> &hres);
+    void AcquireWriteAll(uint32_t src_node_id,
+                         const TableName &table_name,
+                         const TxKey &key,
+                         uint32_t node_group_id,
+                         TxNumber tx_number,
+                         int64_t tx_term,
+                         bool is_insert,
+                         CcHandlerResult<AcquireAllResult> &hres,
+                         CcProtocol proto,
+                         LockType lk_type);
 
     void PostWrite(uint32_t src_node_id,
                    uint64_t tx_number,
@@ -58,6 +52,18 @@ public:
                    bool is_deleted,
                    CcHandlerResult<Void> &hres);
 
+    void PostWriteAll(uint32_t src_node_id,
+                      const TableName &table_name,
+                      const TxKey &key,
+                      TxRecord &rec,
+                      NodeGroupId ng_id,
+                      uint64_t tx_number,
+                      int64_t tx_term,
+                      uint64_t commit_ts,
+                      CcHandlerResult<Void> &hres,
+                      DmlOperation dml_op,
+                      PostWriteType post_write_type);
+
     void PostRead(uint32_t src_node_id,
                   uint64_t tx_number,
                   int64_t tx_term,
@@ -67,23 +73,6 @@ public:
                   const CcEntryAddr &cce_addr,
                   CcHandlerResult<std::vector<TxId>> &hres,
                   CcProtocol protocol);
-
-    void CommitCreateTable(uint32_t src_node_id,
-                           const TableName &table_name,
-                           std::string catalog_str,
-                           int64_t tx_term,
-                           const TxId &txid,
-                           uint64_t ts,
-                           uint32_t node_group_id,
-                           CcHandlerResult<Void> &hresult);
-
-    void CommitDropTable(uint32_t src_node_id,
-                         const TableName &table_name,
-                         int64_t tx_term,
-                         const TxId &txid,
-                         uint64_t ts,
-                         uint32_t node_group_id,
-                         CcHandlerResult<Void> &hresult);
 
     void Read(uint32_t src_node_id,
               const TableName &table_name,
@@ -178,6 +167,7 @@ public:
 private:
     static IsolationType ConvertIsolation(IsolationLevel iso_level);
     static CcProtocolType ConvertProtocol(CcProtocol proto);
+    static CommitType ConvertPostWriteType(PostWriteType write_type);
 
     CcStreamSender &stream_sender_;
 };

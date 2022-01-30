@@ -54,6 +54,16 @@ public:
         return true;
     }
 
+    bool Execute(AcquireAllCc &req) override
+    {
+        return false;
+    }
+
+    bool Execute(PostWriteAllCc &req) override
+    {
+        return false;
+    }
+
     bool Execute(PostReadCc &req) override
     {
         return true;
@@ -582,48 +592,6 @@ public:
     }
 
     bool Execute(ReplayLogCc &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(AcquireTableWriteLockCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(remote::RemoteAcquireTableWriteLockCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(ReleaseTableWriteLockCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(CommitCreateTableCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(CommitDropTableCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(FindCatalogCC &req) override
-    {
-        return true;
-    }
-
-    // this function should not be executed.
-    bool Execute(CheckCatalogCC &req) override
     {
         return true;
     }

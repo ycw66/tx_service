@@ -26,27 +26,24 @@ public:
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,
-                         const TxId &txid,
+                         NodeGroupId ng_id,
+                         TxNumber txn,
                          int64_t tx_term,
-                         uint64_t ts,
                          bool is_insert,
-                         CcHandlerResult<AcquireKeyResult> &hres,
-                         CcProtocol proto) override
-    {
-    }
+                         CcHandlerResult<AcquireAllResult> &hres,
+                         CcProtocol proto,
+                         LockType lk_type) override;
 
-    void AcquireTableWriteLock(
-        const TableName &table_name,
-        const TxId &txid,
-        int64_t tx_term,
-        uint64_t tx_number,
-        CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hres) override;
-
-    void ReleaseTableWriteLock(const TableName &table_name,
-                               const TxId &txid,
-                               int64_t tx_term,
-                               uint64_t tx_number,
-                               CcHandlerResult<Void> &hres) override;
+    void PostWriteAll(const TableName &table_name,
+                      const TxKey &key,
+                      TxRecord &rec,
+                      NodeGroupId ng_id,
+                      uint64_t tx_number,
+                      int64_t tx_term,
+                      uint64_t commit_ts,
+                      CcHandlerResult<Void> &hres,
+                      DmlOperation dml_op,
+                      PostWriteType post_write_type) override;
 
     /// <summary>
     /// Installs the committed write and releases the write intention/lock after
@@ -88,20 +85,6 @@ public:
                   CcHandlerResult<std::vector<TxId>> &hres,
                   CcProtocol protocol) override;
 
-    void CommitCreateTable(const TableName &table_name,
-                           const unsigned char *catalog_image_,
-                           size_t catalog_length_,
-                           int64_t tx_term,
-                           const TxId &txid,
-                           uint64_t ts,
-                           CcHandlerResult<Void> &hresult) override;
-
-    void CommitDropTable(const TableName &table_name,
-                         int64_t tx_term,
-                         const TxId &txid,
-                         uint64_t ts,
-                         CcHandlerResult<Void> &hresult) override;
-
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's
     /// committed value, if there is any.
@@ -130,6 +113,17 @@ public:
                      bool is_deleted,
                      const CcEntryAddr &cce_addr,
                      CcHandlerResult<ReadKeyResult> &hres) override;
+
+    void ReadLocal(const TableName &table_name,
+                   const TxKey &key,
+                   TxRecord &record,
+                   ReadType read_type,
+                   uint64_t tx_number,
+                   int64_t tx_term,
+                   const uint64_t ts,
+                   CcHandlerResult<ReadKeyResult> &hres,
+                   IsolationLevel iso_level = IsolationLevel::RepeatableRead,
+                   CcProtocol proto = CcProtocol::Locking) override;
 
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,
@@ -224,16 +218,6 @@ public:
                          TxnStatus status,
                          CcHandlerResult<Void> &hres) override;
 
-    void FindCatalogInCCShard(const TableName &table_name,
-                              std::string *catalog_content,
-                              uint64_t tx_number,
-                              CcHandlerResult<bool> &hres) override;
-
-    void CheckCatalogVersionInCCShard(const TableName &table_name,
-                                      std::string *source_version,
-                                      uint64_t tx_number,
-                                      CcHandlerResult<bool> &hres) override;
-
     void FaultInject(const std::string &fault_name,
                      const std::string &fault_type,
                      int64_t tx_term,
@@ -241,9 +225,11 @@ public:
                      int node_id,
                      CcHandlerResult<bool> &hres) override;
 
-    void ReleaseAllTableLocks(std::unordered_set<std::string> opened_table_set,
-                              uint64_t tx_number,
-                              CcHandlerResult<bool> &hres) override;
+    void DataStoreUpsertTable(const TableName &table_name,
+                              const TableName &kv_table_name,
+                              const TableSchema *schema,
+                              bool is_deleted,
+                              CcHandlerResult<Void> &hres) override;
 
     /*
      * Get the node id which runs the current transaction.
@@ -262,19 +248,15 @@ private:
     size_t scan_alias_cnt_;
 
     CcRequestPool<AcquireCc> acquire_pool;
-    CcRequestPool<AcquireTableWriteLockCC> table_write_lock_pool;
-    CcRequestPool<ReleaseTableWriteLockCC> release_table_write_lock_pool;
+    CcRequestPool<AcquireAllCc> acquire_all_pool_;
     CcRequestPool<PostWriteCc> postwrite_pool;
+    CcRequestPool<PostWriteAllCc> postwrite_all_pool_;
     CcRequestPool<PostReadCc> postread_pool_;
     CcRequestPool<ReadCc> read_pool;
     CcRequestPool<NegotiateCc> negoti_pool;
     CcRequestPool<CommitSkCc> commitsk_pool;
     CcRequestPool<ScanOpenBatchCc> scan_open_pool;
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
-    CcRequestPool<CommitCreateTableCC> commit_create_table_pool;
-    CcRequestPool<CommitDropTableCC> commit_drop_table_pool;
-    CcRequestPool<FindCatalogCC> commit_find_catalog_pool;
-    CcRequestPool<CheckCatalogCC> commit_check_catalog_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
 
     friend class remote::RemoteCcHandler;

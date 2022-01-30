@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "raft_log.pb.h"
 #include "read_write_entry.h"
 
 namespace txservice
@@ -39,18 +40,19 @@ public:
         return wset_cnt_;
     }
 
-    const std::unordered_map<CcEntryAddr, uint64_t> &ReadSet() const
+    const std::unordered_map<CcEntryAddr, ReadSetEntry> &ReadSet() const
     {
         return rset_;
     }
 
     void AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
+                 CcProtocol proto,
                  ReadType read_type)
     {
         if (read_type == ReadType::Inside)
         {
-            rset_.try_emplace(cce_addr, read_ts);
+            rset_.try_emplace(cce_addr, read_ts, proto);
         }
         else
         {
@@ -59,7 +61,7 @@ public:
             // whose value is unknown. If the read-outside request returns a
             // version newer than the value in the data store, uses the new ts
             // for validation.
-            rset_.insert_or_assign(cce_addr, read_ts);
+            rset_.insert_or_assign(cce_addr, ReadSetEntry(read_ts, proto));
         }
     }
 
@@ -78,7 +80,7 @@ public:
         auto cce_it = rset_.find(cce_addr);
         if (cce_it != rset_.end())
         {
-            read_ts = cce_it->second;
+            read_ts = cce_it->second.version_ts_;
             rset_.erase(cce_it);
         }
 
@@ -88,7 +90,7 @@ public:
     void AddWrite(const TableName &tabname,
                   TxKeyContainer &key_c,
                   TxRecordContainer &rec_c,
-                  Operation op_type,
+                  DmlOperation op_type,
                   SecondaryKeys *skeys = nullptr)
     {
         auto table_iter = wset_.find(tabname);
@@ -232,7 +234,7 @@ public:
     TxRecord::Uptr cache_rec_;
 
 private:
-    std::unordered_map<CcEntryAddr, uint64_t> rset_;
+    std::unordered_map<CcEntryAddr, ReadSetEntry> rset_;
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
     /*std::unordered_map<TableName,

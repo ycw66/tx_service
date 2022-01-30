@@ -145,41 +145,6 @@ public:
         return false;
     }
 
-    bool Execute(AcquireTableWriteLockCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(remote::RemoteAcquireTableWriteLockCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(CommitCreateTableCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(ReleaseTableWriteLockCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(CommitDropTableCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(FindCatalogCC &req) override
-    {
-        return false;
-    }
-
-    bool Execute(CheckCatalogCC &req) override
-    {
-        return false;
-    }
-
     bool Execute(FaultInjectCC &req) override
     {
         return false;

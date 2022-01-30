@@ -56,48 +56,52 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
 
     bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
 
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
-
     if (!success)
     {
         hres.SetError(-1);
     }
 }
 
-void txservice::remote::RemoteCcHandler::AcquireTableWriteLock(
-    uint32_t src_id,
+void txservice::remote::RemoteCcHandler::AcquireWriteAll(
+    uint32_t src_node_id,
     const TableName &table_name,
-    const TxId &txid,
-    int64_t tx_term,
-    uint64_t tx_number,
+    const TxKey &key,
     uint32_t node_group_id,
-    CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hres)
+    TxNumber tx_number,
+    int64_t tx_term,
+    bool is_insert,
+    CcHandlerResult<AcquireAllResult> &hres,
+    CcProtocol proto,
+    LockType lk_type)
 {
     CcMessage send_msg;
 
-    send_msg.set_type(CcMessage::MessageType::
-                          CcMessage_MessageType_AcquireTableWriteLockRequest);
-    send_msg.set_tx_number(txid.TxNumber());
-    send_msg.set_tx_term(tx_term);
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AcquireAllRequest);
+    send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
 
-    AcquireTableWriteLockRequest *acq = send_msg.mutable_acquire_table_req();
-    acq->set_src_node_id(src_id);
-    acq->set_tablename(table_name);
+    AcquireAllRequest *acq_all = send_msg.mutable_acquire_all_req();
+    acq_all->set_src_node_id(src_node_id);
+    acq_all->set_tablename(table_name);
+    acq_all->clear_key();
+    key.Serialize(*acq_all->mutable_key());
 
-    acq->set_vec_idx(txid.VecIdx());
-    acq->set_tx_number(tx_number);
-    acq->set_node_group_id(node_group_id);
+    acq_all->set_node_group_id(node_group_id);
+    acq_all->set_insert(is_insert);
+    acq_all->set_protocol(ConvertProtocol(proto));
+
+    if (lk_type == LockType::WriteIntent)
+    {
+        acq_all->set_is_write_intent(true);
+    }
+    else
+    {
+        acq_all->set_is_write_intent(false);
+    }
 
     bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
 
     if (!success)
     {
@@ -105,53 +109,14 @@ void txservice::remote::RemoteCcHandler::AcquireTableWriteLock(
     }
 }
 
-void txservice::remote::RemoteCcHandler::ReleaseTableWriteLock(
-    uint32_t src_node_id,
-    const TableName &table_name,
-    const TxId &txid,
-    int64_t tx_term,
-    uint64_t tx_number,
-    uint32_t node_group_id,
-    CcHandlerResult<Void> &hres)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(CcMessage::MessageType::
-                          CcMessage_MessageType_ReleaseTableWriteLockRequest);
-    send_msg.set_tx_number(txid.TxNumber());
-    send_msg.set_tx_term(tx_term);
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
-
-    ReleaseTableWriteLockRequest *acq = send_msg.mutable_release_table_req();
-    acq->set_src_node_id(src_node_id);
-    acq->set_tablename(table_name);
-
-    acq->set_vec_idx(txid.VecIdx());
-    acq->set_tx_number(tx_number);
-    acq->set_node_group_id(node_group_id);
-
-    bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
-}
-
-void txservice::remote::RemoteCcHandler::PostWrite(
-    uint32_t src_node_id,
-    uint64_t tx_number,
-    int64_t tx_term,
-    uint64_t commit_ts,
-    const CcEntryAddr &cce_addr,
-    const TxRecord *record,
-    bool is_deleted,
-    CcHandlerResult<Void> &hres)
+void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
+                                                   uint64_t tx_number,
+                                                   int64_t tx_term,
+                                                   uint64_t commit_ts,
+                                                   const CcEntryAddr &cce_addr,
+                                                   const TxRecord *record,
+                                                   bool is_deleted,
+                                                   CcHandlerResult<Void> &hres)
 {
     CcMessage send_msg;
 
@@ -190,10 +155,65 @@ void txservice::remote::RemoteCcHandler::PostWrite(
 
     bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
 
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_postcommit_req();
+    if (!success)
+    {
+        hres.SetError(-1);
+    }
+}
+
+void txservice::remote::RemoteCcHandler::PostWriteAll(
+    uint32_t src_node_id,
+    const TableName &table_name,
+    const TxKey &key,
+    TxRecord &rec,
+    NodeGroupId ng_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t commit_ts,
+    CcHandlerResult<Void> &hres,
+    DmlOperation dml_op,
+    PostWriteType post_write_type)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PostWriteAllRequest);
+    send_msg.set_tx_number(tx_number);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+
+    PostWriteAllRequest *post_write_all = send_msg.mutable_post_write_all_req();
+    post_write_all->set_src_node_id(src_node_id);
+    post_write_all->set_tablename(table_name);
+    post_write_all->set_node_group_id(ng_id);
+    post_write_all->clear_key();
+    key.Serialize(*post_write_all->mutable_key());
+
+    post_write_all->set_commit_ts(commit_ts);
+
+    post_write_all->clear_record();
+    if (commit_ts > 0 && dml_op != DmlOperation::Delete &&
+        (post_write_type == PostWriteType::PrepareCommit ||
+         post_write_type == PostWriteType::Commit))
+    {
+        // The commit ts is 0, if the post-write request is used to clear the
+        // write lock when the tx aborts.
+        rec.Serialize(*post_write_all->mutable_record());
+    }
+
+    if (dml_op == DmlOperation::Delete)
+    {
+        post_write_all->set_is_deleted(true);
+    }
+    else
+    {
+        post_write_all->set_is_deleted(false);
+    }
+
+    CommitType commit_type = ConvertPostWriteType(post_write_type);
+    post_write_all->set_commit_type(commit_type);
+
+    bool success = stream_sender_.SendMessage(ng_id, send_msg);
 
     if (!success)
     {
@@ -232,87 +252,6 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_protocol(ConvertProtocol(protocol));
 
     bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_validate_req();
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
-}
-
-void txservice::remote::RemoteCcHandler::CommitCreateTable(
-    uint32_t src_node_id,
-    const TableName &table_name,
-    std::string catalog_str,
-    int64_t tx_term,
-    const TxId &txid,
-    uint64_t ts,
-    uint32_t node_group_id,
-    CcHandlerResult<Void> &hres)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CommitCreateTableRequest);
-    send_msg.set_tx_number(txid.TxNumber());
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
-    send_msg.set_tx_term(tx_term);
-
-    CommitCreateTableRequest *acq = send_msg.mutable_commit_create_table_req();
-    acq->set_src_node_id(src_node_id);
-    acq->set_tablename(table_name);
-
-    acq->set_catalog_str(catalog_str);
-    acq->set_ts(ts);
-    acq->set_node_group_id(node_group_id);
-
-    bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
-}
-
-void txservice::remote::RemoteCcHandler::CommitDropTable(
-    uint32_t src_node_id,
-    const TableName &table_name,
-    int64_t tx_term,
-    const TxId &txid,
-    uint64_t ts,
-    uint32_t node_group_id,
-    CcHandlerResult<Void> &hres)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CommitDropTableRequest);
-    send_msg.set_tx_number(txid.TxNumber());
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
-    send_msg.set_tx_term(tx_term);
-
-    CommitDropTableRequest *acq = send_msg.mutable_commit_drop_table_req();
-    acq->set_src_node_id(src_node_id);
-    acq->set_tablename(table_name);
-
-    acq->set_ts(ts);
-    acq->set_node_group_id(node_group_id);
-
-    bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
 
     if (!success)
     {
@@ -377,11 +316,6 @@ void txservice::remote::RemoteCcHandler::Read(
 
     bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
 
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_read_req();
-
     if (!success)
     {
         hres.SetError(-1);
@@ -423,9 +357,6 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     // ReadOutside doesn't care the execution of fill tuple succeeds or not.
     // Return value of SendRequest could be ignored.
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_read_outside_req();
 }
 
 void txservice::remote::RemoteCcHandler::ScanOpen(
@@ -480,11 +411,6 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
 
     bool success = stream_sender_.SendMessage(node_group_id, send_msg);
 
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_scan_open_req();
-
     if (!success)
     {
         hd_res.SetError(-1);
@@ -526,11 +452,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_ckpt(is_ckpt);
 
     bool success = stream_sender_.SendMessage(ng_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_tx_number();
-    send_msg.clear_handler_addr();
-    send_msg.clear_scan_next_req();
 
     if (!success)
     {
@@ -578,10 +499,6 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
 
     bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
 
-    send_msg.clear_type();
-    send_msg.clear_handler_addr();
-    send_msg.clear_commit_sk_req();
-
     if (!success)
     {
         hd_res.SetError(-1);
@@ -611,10 +528,6 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     fi_req->set_fault_type(fault_type);
 
     bool success = stream_sender_.SendMessage(node_id, send_msg);
-
-    send_msg.clear_type();
-    send_msg.clear_handler_addr();
-    send_msg.clear_acquire_req();
 
     if (!success)
     {
@@ -650,5 +563,19 @@ txservice::remote::RemoteCcHandler::ConvertProtocol(CcProtocol proto)
     else
     {
         return CcProtocolType::Occ;
+    }
+}
+
+txservice::remote::CommitType
+txservice::remote::RemoteCcHandler::ConvertPostWriteType(
+    PostWriteType write_type)
+{
+    if (write_type == PostWriteType::PrepareCommit)
+    {
+        return CommitType::PrepareCommit;
+    }
+    else
+    {
+        return CommitType::PostCommit;
     }
 }

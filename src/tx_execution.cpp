@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <cassert>
 #include <iostream>
 
 #include "local_cc_shards.h"
@@ -22,8 +23,16 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       commit_ts_(UINT64_MAX),
       commit_ts_bound_(0),
       tx_status_(TxnStatus::Ongoing),
-      current_op_(nullptr),
+      rw_set_(),
       cache_miss_read_cce_addr_(),
+      scans_(),
+      void_resp_(nullptr),
+      rec_resp_(nullptr),
+      bool_resp_(nullptr),
+      kvp_resp_(nullptr),
+      uint64_resp_(nullptr),
+      next_req_(nullptr),
+      protocol_(proto),
       init_txn_(this),
       read_(this),
       scan_open_(this),
@@ -34,31 +43,14 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       update_txn_(this),
       post_process_(this),
       write_log_(this),
-      acquire_table_write_lock_op(this),
-      write_ddl_log_op(this),
-      post_process_ddl_op(this),
-      release_table_write_lock_op(this),
-      find_catalog_in_ccshard_op(this),
-      check_catalog_in_ccshard_op(this),
-      fault_inject_op(this),
-      release_table_locks_op(this),
-      rw_set_(),
-      ddl_type_(DDLType::UNKNOWN),
-      scans_(),
-      void_resp_(nullptr),
-      rec_resp_(nullptr),
-      bool_resp_(nullptr),
-      kvp_resp_(nullptr),
-      uint64_resp_(nullptr),
-      next_req_(nullptr),
-      protocol_(proto)
+      fault_inject_op(this)
 {
 }
 
 void TransactionExecution::Reset(CcProtocol proto)
 {
-    current_op_ = nullptr;
     cache_miss_read_cce_addr_.SetCce(0, -1, 0);
+    state_stack_.clear();
     txid_.Reset();
     tx_number_.store(UINT32_MAX, std::memory_order_release);
     tx_term_ = -1;
@@ -75,7 +67,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     uint64_resp_ = nullptr;
     next_req_.store(nullptr);
     protocol_ = proto;
-    ddl_type_ = DDLType::UNKNOWN;
+    schema_op_ = nullptr;
 }
 
 void TransactionExecution::Restart()
@@ -85,7 +77,7 @@ void TransactionExecution::Restart()
 
 bool TransactionExecution::Idle() const
 {
-    return current_op_ == nullptr;
+    return state_stack_.empty();
 }
 
 void TransactionExecution::Read(const TableName &table_name,
@@ -97,7 +89,7 @@ void TransactionExecution::Read(const TableName &table_name,
     const WriteSetEntry *write = rw_set_.FindWrite(table_name, key);
     if (write != nullptr)
     {
-        if (write->op_ == Operation::Delete)
+        if (write->op_ == DmlOperation::Delete)
         {
             rec_resp_->Finish(RecordStatus::Deleted);
         }
@@ -118,9 +110,11 @@ void TransactionExecution::Read(const TableName &table_name,
         return;
     }
 
-    current_op_ = &read_;
+    state_stack_.push_back(&read_);
     read_.Reset();
     read_.read_type_ = read_type;
+    read_.protocol_ = protocol_;
+    read_.iso_level_ = iso_level_;
 
     rw_set_.cache_table_.clear();
     rw_set_.cache_table_ = table_name;
@@ -144,7 +138,8 @@ void TransactionExecution::Read(const TableName &table_name,
 
 void TransactionExecution::PostRead()
 {
-    current_op_ = nullptr;
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
 
     if (read_.cc_result_.IsError())
     {
@@ -163,13 +158,13 @@ void TransactionExecution::PostRead()
             rw_set_.cache_rec_ = read_res.rec_->Clone();
         }
 
-        // Does not add the record to the read set for now to simulate isolation
-        // levels lower than repeatable read.
-
         if (read_res.rec_status_ != RecordStatus::RemoteUnknown &&
-            iso_level_ >= IsolationLevel::RepeatableRead)
+            read_.iso_level_ >= IsolationLevel::RepeatableRead)
         {
-            rw_set_.AddRead(read_res.cce_addr_, read_res.ts_, read_.read_type_);
+            rw_set_.AddRead(read_res.cce_addr_,
+                            read_res.ts_,
+                            read_.protocol_,
+                            read_.read_type_);
         }
 
         if (read_.read_type_ == ReadType::Inside &&
@@ -193,7 +188,7 @@ void TransactionExecution::ReadOutside(TxRecord &record, bool is_deleted)
 {
     rw_set_.cache_rec_ = record.Clone();
 
-    current_op_ = &read_;
+    state_stack_.push_back(&read_);
     read_.Reset();
     read_.read_type_ =
         is_deleted ? ReadType::OutsideDeleted : ReadType::OutsideNormal;
@@ -207,6 +202,34 @@ void TransactionExecution::ReadOutside(TxRecord &record, bool is_deleted)
     return;
 }
 
+void TransactionExecution::ReadLocal(const TableName &table_name,
+                                     const TxKey &key,
+                                     TxRecord &record,
+                                     ReadType read_type)
+{
+    state_stack_.push_back(&read_);
+    read_.Reset();
+
+    // So far ReadLocal() is use exclusively for reading catalogs. Reading
+    // catalogs needs to put read locks, regardless of the tx's concurrency
+    // control protocol. So for now, a read's isolation level and cc protocol is
+    // fixed.
+    read_.read_type_ = read_type;
+    read_.iso_level_ = IsolationLevel::RepeatableRead;
+    read_.protocol_ = CcProtocol::Locking;
+
+    handler->ReadLocal(table_name,
+                       key,
+                       record,
+                       read_type,
+                       tx_number_.load(std::memory_order_relaxed),
+                       tx_term_,
+                       commit_ts_,
+                       read_.cc_result_,
+                       IsolationLevel::RepeatableRead,
+                       CcProtocol::Locking);
+}
+
 void TransactionExecution::PostScanClose()
 {
 }
@@ -218,7 +241,7 @@ void TransactionExecution::ScanOpen(const TableName &table_name,
                                     ScanDirection direction,
                                     bool is_ckpt_delta)
 {
-    current_op_ = &scan_open_;
+    state_stack_.push_back(&scan_open_);
     scan_open_.cc_result_.Reset();
 
     scan_open_.Set(&table_name, &start_key, inclusive, direction);
@@ -243,7 +266,8 @@ void TransactionExecution::ScanOpen(const TableName &table_name,
 
 void TransactionExecution::PostScanOpen()
 {
-    current_op_ = nullptr;
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
 
     if (scan_open_.cc_result_.IsError())
     {
@@ -291,8 +315,8 @@ void TransactionExecution::ScanNext(size_t alias)
     assert(it != scans_.end());
     CcScanner &scanner = *it->second;
 
-    current_op_ = &scan_next_;
     scan_next_.Reset();
+    state_stack_.push_back(&scan_next_);
     scan_next_.Set(alias, &scanner);
 
     const ScanTuple *scan_tuple = scanner.Current();
@@ -331,8 +355,10 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 
 void TransactionExecution::PostScanNext()
 {
-    prev_op_ = current_op_;
-    current_op_ = nullptr;
+    prev_op_ = state_stack_.back();
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
     if (scan_next_.cc_result_.IsError())
     {
         kvp_resp_->FinishError();
@@ -363,7 +389,7 @@ void TransactionExecution::PostScanNext()
                                    scan_next_.cc_result_,
                                    iso_level_,
                                    protocol_);
-            current_op_ = prev_op_;
+            state_stack_.push_back(prev_op_);
             return;
         }
     }
@@ -418,7 +444,7 @@ void TransactionExecution::PostScanNext()
             *local_write.key_.get() < *cc_scan_tuple->Key())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == Operation::Delete)
+            if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(
                     std::make_tuple(local_write.key_.get(), nullptr, true));
@@ -456,7 +482,7 @@ void TransactionExecution::PostScanNext()
         else if (*cc_scan_tuple->Key() == *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == Operation::Delete)
+            if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(
                     std::make_tuple(local_write.key_.get(), nullptr, true));
@@ -508,7 +534,7 @@ void TransactionExecution::PostScanNext()
             *cc_scan_tuple->Key() < *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == Operation::Delete)
+            if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(
                     std::make_tuple(local_write.key_.get(), nullptr, true));
@@ -547,7 +573,7 @@ void TransactionExecution::PostScanNext()
         else if (*cc_scan_tuple->Key() == *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == Operation::Delete)
+            if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(
                     std::make_tuple(local_write.key_.get(), nullptr, true));
@@ -569,7 +595,7 @@ void TransactionExecution::Update(const TableName &table_name,
                                   TxRecordContainer &rec,
                                   SecondaryKeys *skeys)
 {
-    Upsert(table_name, key, rec, skeys, Operation::Update);
+    Upsert(table_name, key, rec, skeys, DmlOperation::Update);
 }
 
 void TransactionExecution::Insert(const TableName &table_name,
@@ -577,7 +603,7 @@ void TransactionExecution::Insert(const TableName &table_name,
                                   TxRecordContainer &rec,
                                   SecondaryKeys *skeys)
 {
-    Upsert(table_name, key, rec, skeys, Operation::Insert);
+    Upsert(table_name, key, rec, skeys, DmlOperation::Insert);
 }
 
 void TransactionExecution::Delete(const TableName &table_name,
@@ -585,7 +611,7 @@ void TransactionExecution::Delete(const TableName &table_name,
                                   SecondaryKeys *skeys)
 {
     TxRecordContainer rcon(nullptr);
-    Upsert(table_name, key, rcon, skeys, Operation::Delete);
+    Upsert(table_name, key, rcon, skeys, DmlOperation::Delete);
 }
 
 // Upsert modify tuple without locking in OCC protocol.
@@ -593,12 +619,10 @@ void TransactionExecution::Upsert(const TableName &table_name,
                                   TxKeyContainer &key,
                                   TxRecordContainer &rec,
                                   SecondaryKeys *skeys,
-                                  Operation op)
+                                  DmlOperation op)
 {
     rw_set_.AddWrite(table_name, key, rec, op, skeys);
-
     void_resp_->Finish(void_);
-    return;
 }
 
 void TransactionExecution::Commit()
@@ -617,52 +641,11 @@ void TransactionExecution::Commit()
     return;
 }
 
-void TransactionExecution::CreateTable()
-{
-    AcquireTableWriteLock();
-
-    return;
-}
-
-void TransactionExecution::DropTable()
-{
-    AcquireTableWriteLock();
-
-    return;
-}
-
-/*
- * Fetch catalog from underlying catalog service. Take mariaDB runtime as an
- * example, the underlying catalog is stored in Cassandra. Transaction service
- * is responsible for fetching the catalog from Cassandra and cache it in every
- * ccshard. CCMap is also initialized when the catalog is written into ccshard
- * cache.
- *
- * The caller of FetchCatalog: runtime fetch catalog interface. Take mariaDB as
- * an example, the discover_table interface is the caller. The table catalog is
- * nolong stored in frm file, and discover_table interface will send the
- * FetchCatalog request to transaction service to get the catalog binary and
- * initialize the table share based on it.
- */
-void TransactionExecution::FetchCatalog()
-{
-    FindCatalogInCCShard();
-
-    return;
-}
-
-void TransactionExecution::CheckCatalogVersion()
-{
-    CheckCatalogInCCShard();
-
-    return;
-}
-
 void TransactionExecution::FaultInject(const std::string &fault_name,
                                        const std::string &fault_type,
                                        int node_id)
 {
-    current_op_ = &fault_inject_op;
+    state_stack_.push_back(&fault_inject_op);
 
     CcHandlerResult<bool> &hres = fault_inject_op.cc_result_;
     hres.Reset();
@@ -675,7 +658,8 @@ void TransactionExecution::FaultInject(const std::string &fault_name,
 
 void TransactionExecution::AcquireWrite()
 {
-    current_op_ = &acquire_write_;
+    state_stack_.push_back(&acquire_write_);
+
     size_t wset_size = rw_set_.WriteSetSize();
     acquire_write_.Reset(wset_size);
 
@@ -698,7 +682,7 @@ void TransactionExecution::AcquireWrite()
                                   txid_,
                                   tx_term_,
                                   commit_ts_bound_,
-                                  write_entry.op_ == Operation::Insert,
+                                  write_entry.op_ == DmlOperation::Insert,
                                   hres,
                                   protocol_);
             ++idx;
@@ -708,64 +692,33 @@ void TransactionExecution::AcquireWrite()
     StartTiming();
 }
 
-void TransactionExecution::AcquireTableWriteLock()
-{
-    current_op_ = &acquire_table_write_lock_op;
-
-    CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hres =
-        acquire_table_write_lock_op.cc_result_;
-    hres.Reset();
-
-    handler->AcquireTableWriteLock(
-        *mysql_table_name_, txid_, tx_term_, tx_number_, hres);
-}
-
-void TransactionExecution::FindCatalogInCCShard()
-{
-    current_op_ = &find_catalog_in_ccshard_op;
-
-    CcHandlerResult<bool> &hres = find_catalog_in_ccshard_op.cc_result_;
-    hres.Reset();
-
-    handler->FindCatalogInCCShard(
-        *mysql_table_name_, catalog_content_, tx_number_, hres);
-
-    find_catalog_in_ccshard_op.Forward(this);
-}
-
-void TransactionExecution::FindCatalogFinish(bool succeed)
-{
-    current_op_ = nullptr;
-    bool_resp_->Finish(succeed);
-}
-
-void TransactionExecution::CheckCatalogInCCShard()
-{
-    current_op_ = &check_catalog_in_ccshard_op;
-
-    CcHandlerResult<bool> &hres = check_catalog_in_ccshard_op.cc_result_;
-    hres.Reset();
-
-    handler->CheckCatalogVersionInCCShard(
-        *mysql_table_name_, source_version_, tx_number_, hres);
-
-    check_catalog_in_ccshard_op.Forward(this);
-}
-
 void TransactionExecution::RequestFinish(bool succeed)
 {
-    current_op_ = nullptr;
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
     bool_resp_->Finish(succeed);
 }
 
 void TransactionExecution::PostAcquireWrite()
 {
-    SetTs();
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (acquire_write_.fail_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        Abort();
+    }
+    else
+    {
+        SetTs();
+    }
 }
 
 void TransactionExecution::SetTs()
 {
-    current_op_ = &set_ts_;
+    state_stack_.push_back(&set_ts_);
+
     set_ts_.result_of_set_commit_ts_.Reset();
 
     uint64_t candidate = commit_ts_bound_;
@@ -776,10 +729,11 @@ void TransactionExecution::SetTs()
         candidate = std::max(candidate, acquire_write_ts + 1);
     }
 
-    const std::unordered_map<CcEntryAddr, uint64_t> &rset = rw_set_.ReadSet();
+    const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
+        rw_set_.ReadSet();
     for (auto read_it = rset.begin(); read_it != rset.end(); ++read_it)
     {
-        candidate = std::max(candidate, read_it->second + 1);
+        candidate = std::max(candidate, read_it->second.version_ts_ + 1);
     }
 
     /*const std::unordered_map<
@@ -806,28 +760,31 @@ void TransactionExecution::SetTs()
 
 void TransactionExecution::PostSetTs()
 {
-    commit_ts_ = set_ts_.result_of_set_commit_ts_.Value();
-    // Only isolation levels of repeatable read and serializability result in a
-    // non-empty read set.
-    if (rw_set_.ReadSetSize() > 0)
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (set_ts_.result_of_set_commit_ts_.IsError())
     {
-        Vali();
-    }
-    else if (txlog_ != nullptr && (ddl_type_ == DDLType::CREATE_TABLE ||
-                                   ddl_type_ == DDLType::DROP_TABLE))
-    {
-        // write create table or drop table log
-        WriteDDLLog();
+        Abort();
     }
     else
     {
-        PostVali();
+        commit_ts_ = set_ts_.result_of_set_commit_ts_.Value();
+        if (rw_set_.ReadSetSize() > 0)
+        {
+            Vali();
+        }
+        else
+        {
+            PostVali();
+        }
     }
 }
 
 void TransactionExecution::Vali()
 {
-    current_op_ = &validate_;
+    state_stack_.push_back(&validate_);
+
     validate_.Reset(rw_set_.ReadSetSize());
     validate_.vali_cce_addr_.clear();
 
@@ -837,9 +794,10 @@ void TransactionExecution::Vali()
     }*/
 
     size_t offset = 0;
-    const std::unordered_map<CcEntryAddr, uint64_t> &rset = rw_set_.ReadSet();
+    const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
+        rw_set_.ReadSet();
 
-    for (const auto &[cce_addr, read_ts] : rset)
+    for (const auto &[cce_addr, read_entry] : rset)
     {
         validate_.vali_cce_addr_.emplace_back(&cce_addr);
 
@@ -848,12 +806,12 @@ void TransactionExecution::Vali()
 
         handler->PostRead(tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
-                          read_ts,
+                          read_entry.version_ts_,
                           0,
                           commit_ts_,
                           cce_addr,
                           hres,
-                          protocol_);
+                          read_entry.protocol_);
 
         ++offset;
     }
@@ -888,7 +846,19 @@ void TransactionExecution::Vali()
 
 void TransactionExecution::PostVali()
 {
-    if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
+    // The validation step is optional. Only pops the stack if the last step is
+    // the validation step.
+    if (!state_stack_.empty())
+    {
+        assert(state_stack_.back() == &validate_);
+        state_stack_.pop_back();
+    }
+
+    if (validate_.error_.load(std::memory_order_acquire))
+    {
+        Abort();
+    }
+    else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
     {
         WriteLog();
     }
@@ -901,18 +871,26 @@ void TransactionExecution::PostVali()
 
 void TransactionExecution::WriteLog()
 {
-    current_op_ = &write_log_;
+    state_stack_.push_back(&write_log_);
     write_log_.Reset();
 
-    ::txlog::LogRequest &log_req = write_log_.log_closure_.MutableLogRequest();
+    write_log_.log_closure_.LogResponse()
+        .mutable_write_log_response()
+        ->clear_redirect();
+
+    ::txlog::LogRequest &log_req = write_log_.log_closure_.LogRequest();
     ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();
-    assert(log_rec->node_terms_size() == 0);
-    assert(log_rec->node_txn_logs_size() == 0);
+
     log_rec->set_txn_number(txid_.TxNumber());
     log_rec->set_commit_timestamp(commit_ts_);
 
     auto shard_terms = log_rec->mutable_node_terms();
+    shard_terms->clear();
     auto shard_logs = log_rec->mutable_node_txn_logs();
+    shard_logs->clear();
+
+    assert(log_rec->node_terms_size() == 0);
+    assert(log_rec->node_txn_logs_size() == 0);
 
     const std::unordered_map<TableName, TableWriteSet> &wset =
         rw_set_.WriteSet();
@@ -945,7 +923,7 @@ void TransactionExecution::WriteLog()
                 // a write intention before the failure. The tx must abort
                 // because the write intention obtained before the failure have
                 // been invalidated.
-                write_log_.res_.SetError(1);
+                write_log_.hd_result_.SetError(1);
                 return;
             }
 
@@ -1006,7 +984,8 @@ void TransactionExecution::WriteLog()
             {
                 wset_entry->key_.get()->Serialize(*log_ng_blob);
 
-                uint8_t rec_flag = wset_entry->op_ == Operation::Delete ? 1 : 0;
+                uint8_t rec_flag =
+                    wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
                 log_ng_blob->append(reinterpret_cast<const char *>(&rec_flag),
                                     1);
 
@@ -1035,111 +1014,37 @@ void TransactionExecution::WriteLog()
     txlog_->WriteLog(log_group_id,
                      write_log_.log_closure_.Controller(),
                      log_req,
-                     write_log_.log_closure_.MutableLogResponse(),
+                     write_log_.log_closure_.LogResponse(),
                      write_log_.log_closure_);
-}
-
-void TransactionExecution::WriteDDLLog()
-{
-    current_op_ = &write_ddl_log_op;
-    write_ddl_log_op.Reset();
-
-    ::txlog::LogRequest &log_req =
-        write_ddl_log_op.log_closure_.MutableLogRequest();
-    ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();
-    assert(log_rec->node_terms_size() == 0);
-    assert(log_rec->node_txn_logs_size() == 0);
-    log_rec->set_txn_number(txid_.TxNumber());
-    log_rec->set_commit_timestamp(commit_ts_);
-
-    auto &shard_terms = *log_rec->mutable_node_terms();
-    auto shard_logs = log_rec->mutable_node_txn_logs();
-
-    uint32_t local_node_id = handler->GetNodeId();
-
-    for (auto term_it = table_lock_term_map_.begin();
-         term_it != table_lock_term_map_.end();
-         ++term_it)
-    {
-        shard_terms[term_it->first] = term_it->second;
-    }
-
-    std::string *log_ng_blob = nullptr;
-    auto shard_it = shard_logs->find(local_node_id);
-    if (shard_it == shard_logs->end())
-    {
-        std::string blob;
-        (*shard_logs)[local_node_id] = blob;
-        log_ng_blob = &shard_logs->at(local_node_id);
-    }
-    else
-    {
-        log_ng_blob = &shard_it->second;
-    }
-
-    if (ddl_type_ == DDLType::CREATE_TABLE)
-    {
-        // the log blob of a create table is in the following format:
-        // (1) A 1-byte integer to indicate log type is DDL
-        // (2) A 1-byte integer for the length of the table name, followed by
-        // (3) The string of the table name
-        // (4) A 4-byte integer for the length of the table catalog, followed by
-        // (5) The string of the table catalog information
-        uint8_t log_type = static_cast<uint8_t>(LogType::CREATE_TABLE);
-        const char *ptr = reinterpret_cast<const char *>(&log_type);
-        log_ng_blob->append(ptr, sizeof(uint8_t));
-
-        uint8_t tabname_len = mysql_table_name_->length();
-        ptr = reinterpret_cast<const char *>(&tabname_len);
-        log_ng_blob->append(ptr, sizeof(uint8_t));
-        log_ng_blob->append(mysql_table_name_->data(), tabname_len);
-
-        uint32_t catalog_len = catalog_length_;
-        ptr = reinterpret_cast<const char *>(&catalog_len);
-        log_ng_blob->append(ptr, sizeof(uint32_t));
-        log_ng_blob->append(reinterpret_cast<const char *>(catalog_image_),
-                            catalog_len);
-    }
-    else
-    {
-        // drop table case
-        // the log blob of a create table is in the following format:
-        // (1) A 1-byte integer to indicate log type is DDL
-        // (2) A 1-byte integer for the length of the table name, followed by
-        // (3) The string of the table name
-        uint8_t log_type = static_cast<uint8_t>(LogType::DROP_TABLE);
-        const char *ptr = reinterpret_cast<const char *>(&log_type);
-        log_ng_blob->append(ptr, sizeof(uint8_t));
-
-        uint8_t tabname_len = mysql_table_name_->length();
-        ptr = reinterpret_cast<const char *>(&tabname_len);
-        log_ng_blob->append(ptr, sizeof(uint8_t));
-        log_ng_blob->append(mysql_table_name_->data(), tabname_len);
-    }
-
-    assert(txlog_ != nullptr);
-
-    // Note that node_id calculated from global core ID should always be equal
-    // to the actual ccshard node id. But from txservice layer's view, only txid
-    // is available. Txservice get txid from the bottom layer (ccshard).
-    uint32_t log_group_id = txlog_->GetLogGroupId(txid_.GetNodeId());
-    txlog_->WriteLog(log_group_id,
-                     write_ddl_log_op.log_closure_.Controller(),
-                     log_req,
-                     write_ddl_log_op.log_closure_.MutableLogResponse(),
-                     write_ddl_log_op.log_closure_);
-
-    return;
 }
 
 void TransactionExecution::PostWriteLog()
 {
-    SetTxStatus();
+    WriteToLog *log_op = static_cast<WriteToLog *>(state_stack_.back());
+    state_stack_.pop_back();
+
+    if (state_stack_.empty())
+    {
+        if (log_op->hd_result_.IsError())
+        {
+            tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
+        }
+        else
+        {
+            tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+        }
+        SetTxStatus();
+    }
+    else
+    {
+        // The tx is committing a multi-stage operation, e.g., schema changes.
+        Forward();
+    }
 }
 
 void TransactionExecution::SetTxStatus()
 {
-    current_op_ = &update_txn_;
+    state_stack_.push_back(&update_txn_);
     update_txn_.Reset();
 
     handler->UpdateTxnStatus(
@@ -1150,7 +1055,8 @@ void TransactionExecution::SetTxStatus()
 
 void TransactionExecution::PostSetTxStatus()
 {
-    // Only
+    state_stack_.pop_back();
+
     int wset_intention_cnt =
         rw_set_.WriteSetSize() > 0
             ? acquire_write_.acquire_write_cnt_ -
@@ -1160,70 +1066,18 @@ void TransactionExecution::PostSetTxStatus()
     {
         PostProcess(rw_set_.ReadSetSize(), wset_intention_cnt);
     }
-    else if (ddl_type_ == DDLType::CREATE_TABLE)
-    {
-        PostProcessCreateTable();
-    }
-    else if (ddl_type_ == DDLType::DROP_TABLE)
-    {
-        PostProcessDropTable();
-    }
     else
     {
-        // For tx's that have finished validation and have not write lock or
-        // read lock, skips post-processing.
-        ReleaseAllTableLocks();
-    }
-}
-
-void TransactionExecution::ReleaseTableWriteLock()
-{
-    current_op_ = &release_table_write_lock_op;
-
-    CcHandlerResult<Void> &hres = release_table_write_lock_op.cc_result_;
-    hres.Reset();
-
-    handler->ReleaseTableWriteLock(
-        *mysql_table_name_, txid_, tx_term_, tx_number_, hres);
-}
-
-void TransactionExecution::PostProcessCreateTable()
-{
-    current_op_ = &post_process_ddl_op;
-
-    if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
-    {
-        CcHandlerResult<Void> &hres = post_process_ddl_op.results_;
-        hres.Reset();
-
-        handler->CommitCreateTable(*mysql_table_name_,
-                                   catalog_image_,
-                                   catalog_length_,
-                                   tx_term_,
-                                   txid_,
-                                   commit_ts_,
-                                   hres);
-    }
-}
-
-void TransactionExecution::PostProcessDropTable()
-{
-    current_op_ = &post_process_ddl_op;
-
-    if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
-    {
-        CcHandlerResult<Void> &hres = post_process_ddl_op.results_;
-        hres.Reset();
-
-        handler->CommitDropTable(
-            *mysql_table_name_, tx_term_, txid_, commit_ts_, hres);
+        // For tx's that have finished validation and have not uploaded
+        // anything, skips post-processing.
+        PostPostProcess();
     }
 }
 
 void TransactionExecution::PostProcess(size_t read_intention_size,
                                        size_t write_intention_size)
 {
-    current_op_ = &post_process_;
+    state_stack_.push_back(&post_process_);
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
@@ -1250,7 +1104,7 @@ void TransactionExecution::PostProcess(size_t read_intention_size,
                                    commit_ts_,
                                    write_entry.cce_addr_,
                                    write_entry.rec_.get(),
-                                   write_entry.op_ == Operation::Delete,
+                                   write_entry.op_ == DmlOperation::Delete,
                                    hres);
 
                 for (auto sk_iter = write_entry.sindx_.begin();
@@ -1318,7 +1172,7 @@ void TransactionExecution::PostProcess(size_t read_intention_size,
         assert(offset == write_intention_size);
 
         idx = 0;
-        const std::unordered_map<CcEntryAddr, uint64_t> &rset =
+        const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
             rw_set_.ReadSet();
         for (auto read_it = rset.begin(); read_it != rset.end();
              ++read_it, ++idx)
@@ -1334,26 +1188,21 @@ void TransactionExecution::PostProcess(size_t read_intention_size,
                               0,
                               read_it->first,
                               hres,
-                              protocol_);
+                              read_it->second.protocol_);
         }
     }
 
     StartTiming();
 }
 
-void TransactionExecution::ReleaseAllTableLocks()
-{
-    current_op_ = &release_table_locks_op;
-
-    CcHandlerResult<bool> &hres = release_table_locks_op.cc_result_;
-    hres.Reset();
-
-    handler->ReleaseAllTableLocks(opened_table_set_, tx_number_, hres);
-}
-
 void TransactionExecution::PostPostProcess()
 {
-    current_op_ = nullptr;
+    if (!state_stack_.empty())
+    {
+        assert(state_stack_.back() == &post_process_);
+        state_stack_.pop_back();
+    }
+    assert(state_stack_.empty());
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
@@ -1377,10 +1226,110 @@ void TransactionExecution::PostPostProcess()
 void TransactionExecution::Abort()
 {
     tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
-
     SetTxStatus();
+}
 
-    return;
+void TransactionExecution::PostAcquireAll()
+{
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(AcquireAllOp &acq_all_op)
+{
+    state_stack_.push_back(&acq_all_op);
+
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    acq_all_op.Reset(node_group_cnt);
+
+    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    {
+        CcHandlerResult<AcquireAllResult> &hres = acq_all_op.hd_results_[nid];
+        hres.Reset();
+        hres.Value().remote_ack_cnt_ = &acq_all_op.remote_ack_cnt_;
+        handler->AcquireWriteAll(*acq_all_op.table_name_,
+                                 *acq_all_op.key_,
+                                 nid,
+                                 tx_number_.load(std::memory_order_relaxed),
+                                 tx_term_,
+                                 false,
+                                 hres,
+                                 acq_all_op.protocol_,
+                                 acq_all_op.lk_type_);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
+{
+    state_stack_.push_back(&post_write_all_op);
+
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    post_write_all_op.Reset(node_group_cnt);
+
+    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    {
+        CcHandlerResult<Void> &hres = post_write_all_op.hd_results_[nid];
+        hres.Reset();
+        handler->PostWriteAll(*post_write_all_op.table_name_,
+                              *post_write_all_op.key_,
+                              *post_write_all_op.rec_,
+                              nid,
+                              tx_number_.load(std::memory_order_relaxed),
+                              tx_term_,
+                              commit_ts_,
+                              hres,
+                              post_write_all_op.dml_op_,
+                              post_write_all_op.write_type_);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostPostWriteAll()
+{
+    state_stack_.pop_back();
+    // So far, post-write-all is only used for schema evolution operations.
+    assert(!state_stack_.empty());
+    Forward();
+}
+
+void TransactionExecution::Process(WriteToLog &flush_log)
+{
+    state_stack_.push_back(&flush_log);
+    flush_log.Reset();
+
+    assert(txlog_ != nullptr);
+
+    // Note that node_id calculated from global core ID should always be equal
+    // to the actual ccshard node id. But from txservice layer's view, only txid
+    // is available. Txservice get txid from the bottom layer (ccshard).
+    uint32_t log_group_id = txlog_->GetLogGroupId(txid_.GetNodeId());
+    txlog_->WriteLog(log_group_id,
+                     flush_log.log_closure_.Controller(),
+                     flush_log.log_closure_.LogRequest(),
+                     flush_log.log_closure_.LogResponse(),
+                     flush_log.log_closure_);
+}
+
+void TransactionExecution::PostDataStoreOp()
+{
+    state_stack_.pop_back();
+    assert(!state_stack_.empty());
+    Forward();
+}
+
+void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
+{
+    state_stack_.push_back(&ds_upsert_table_op);
+
+    ds_upsert_table_op.Reset();
+    handler->DataStoreUpsertTable(*ds_upsert_table_op.table_name_,
+                                  *ds_upsert_table_op.kv_table_name_,
+                                  ds_upsert_table_op.table_schema_,
+                                  ds_upsert_table_op.is_deleted_,
+                                  ds_upsert_table_op.result_);
 }
 
 void TransactionExecution::Process(BeginRequest &begin_req)
@@ -1396,7 +1345,21 @@ void TransactionExecution::Process(ReadRequest &read_req)
 {
     rec_resp_ = &read_req.cc_result_;
     rec_resp_->Reset();
-    Read(*read_req.tab_name_, *read_req.key_, *read_req.rec_, read_req.type_);
+
+    if (read_req.read_local_)
+    {
+        ReadLocal(*read_req.tab_name_,
+                  *read_req.key_,
+                  *read_req.rec_,
+                  read_req.type_);
+    }
+    else
+    {
+        Read(*read_req.tab_name_,
+             *read_req.key_,
+             *read_req.rec_,
+             read_req.type_);
+    }
 }
 
 void TransactionExecution::Process(ReadOutsideRequest &read_outside_req)
@@ -1440,7 +1403,7 @@ void TransactionExecution::Process(UpsertRequest &upsert_req)
            upsert_req.key_,
            upsert_req.rec_,
            upsert_req.skeys_,
-           upsert_req.is_delete_ ? Operation::Delete : Operation::Upsert);
+           upsert_req.is_delete_ ? DmlOperation::Delete : DmlOperation::Upsert);
 }
 
 void TransactionExecution::Process(CommitRequest &commit_req)
@@ -1460,54 +1423,19 @@ void TransactionExecution::Process(AbortRequest &abort_req)
     Abort();
 }
 
-void TransactionExecution::Process(CreateTableRequest &ct_req)
+void TransactionExecution::Process(UpsertTableRequest &req)
 {
-    bool_resp_ = &ct_req.cc_result_;
-    bool_resp_->Reset();
+    bool_resp_ = &req.cc_result_;
 
-    ddl_type_ = DDLType::CREATE_TABLE;
-    mysql_table_name_ = &ct_req.mysql_table_name_;
-    catalog_image_ = ct_req.catalog_image_;
-    catalog_length_ = ct_req.catalog_length_;
-    opened_table_set_.emplace(ct_req.mysql_table_name_);
+    schema_op_ = std::make_unique<UpsertTableOp>(*req.table_name_,
+                                                 *req.kv_table_name_,
+                                                 req.catalog_image_,
+                                                 req.catalog_length_,
+                                                 req.is_deleted_,
+                                                 this);
 
-    CreateTable();
-}
-
-void TransactionExecution::Process(DropTableRequest &dt_req)
-{
-    bool_resp_ = &dt_req.cc_result_;
-    bool_resp_->Reset();
-
-    ddl_type_ = DDLType::DROP_TABLE;
-    mysql_table_name_ = &dt_req.mysql_table_name_;
-    opened_table_set_.emplace(dt_req.mysql_table_name_);
-
-    DropTable();
-}
-
-void TransactionExecution::Process(FetchCatalogRequest &fc_req)
-{
-    bool_resp_ = &fc_req.cc_result_;
-    bool_resp_->Reset();
-
-    mysql_table_name_ = &fc_req.mysql_table_name_;
-    catalog_content_ = fc_req.catalog_content_;
-    opened_table_set_.emplace(fc_req.mysql_table_name_);
-
-    FetchCatalog();
-}
-
-void TransactionExecution::Process(CheckCatalogVersionRequest &ccv_req)
-{
-    bool_resp_ = &ccv_req.cc_result_;
-    bool_resp_->Reset();
-
-    mysql_table_name_ = &ccv_req.mysql_table_name_;
-    source_version_ = &ccv_req.source_version_;
-    opened_table_set_.emplace(ccv_req.mysql_table_name_);
-
-    CheckCatalogVersion();
+    state_stack_.push_back(schema_op_.get());
+    Forward();
 }
 
 void TransactionExecution::Process(FaultInjectRequest &fi_req)
@@ -1520,7 +1448,7 @@ void TransactionExecution::Process(FaultInjectRequest &fi_req)
 
 void TransactionExecution::Begin(uint64_t start_ts)
 {
-    current_op_ = &init_txn_;
+    state_stack_.push_back(&init_txn_);
 
     commit_ts_ = 0;
     commit_ts_bound_ = start_ts;
@@ -1544,7 +1472,7 @@ void TransactionExecution::PostBegin()
     tx_number_.store(txid_.TxNumber(), std::memory_order_release);
     commit_ts_bound_ = init_result.start_ts_;
     tx_term_ = init_result.term_;
-    current_op_ = nullptr;
+    state_stack_.pop_back();
     void_resp_->Finish(void_);
 }
 
@@ -1555,13 +1483,13 @@ uint64_t TransactionExecution::TxNumber() const
 
 void TransactionExecution::Forward()
 {
-    if (current_op_ == nullptr)
+    if (state_stack_.empty())
     {
         return;
     }
 
-    prev_op_ = current_op_;
-    current_op_->Forward(this);
+    prev_op_ = state_stack_.back();
+    prev_op_->Forward(this);
 }
 
 int TransactionExecution::Execute(TxRequest *tx_req)
@@ -1595,7 +1523,7 @@ bool TransactionExecution::IsTimeOut()
             // current time is greater than the prior one, the tx machine has
             // been stuck in this state for at least 2 seconds.
             state_clock_ = now_ts;
-            return true;
+            return false;
         }
     }
 

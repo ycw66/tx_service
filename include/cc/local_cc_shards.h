@@ -2,9 +2,11 @@
 
 #include <chrono>
 #include <iostream>
+#include <shared_mutex>
 #include <unordered_map>
 
 #include "catalog.h"
+#include "catalog_factory.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
 #include "sk_cc_map.h"
@@ -25,14 +27,10 @@ class LocalCcShards
 public:
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
-                  Catalog *catalog = nullptr);
+                  CatalogFactory *catalog_factory = nullptr,
+                  store::DataStoreWriteHandler *store_hd = nullptr);
 
-    ~LocalCcShards()
-    {
-        timer_terminate_.store(true, std::memory_order_release);
-        timer_thd_.join();
-        cc_shards_.clear();
-    }
+    ~LocalCcShards();
 
     LocalCcShards(LocalCcShards const &) = delete;
     void operator=(LocalCcShards const &) = delete;
@@ -121,42 +119,6 @@ public:
         }
     }
 
-    // store table catalog information in ccshard.
-    // core_id specify which ccshard to store the table catalog.
-    // if is_all is true (e.g. during startup of tx service), then all the
-    // ccshard store the table catalog.
-    void FillTableCatalog(const TableName &tabname,
-                          std::string &catalog_content,
-                          std::string &table_version,
-                          uint32_t core_id,
-                          bool is_all)
-    {
-        for (uint32_t id = 0; id < cc_shards_.size(); id++)
-        {
-            if (is_all || id == core_id)
-            {
-                auto table_iter = cc_shards_[id]->table_metadata_.find(tabname);
-
-                if (table_iter == cc_shards_[id]->table_metadata_.end())
-                {
-                    auto iter =
-                        cc_shards_[id]->table_metadata_.try_emplace(tabname);
-                    table_iter = iter.first;
-                }
-
-                TableCatalog &tab_catalog = table_iter->second;
-                tab_catalog.table_catalog_info_ = catalog_content;
-                tab_catalog.table_catalog_version_ = table_version;
-            }
-        }
-    }
-
-    // table is dropped, we erase the catalog information in cchard as well
-    void RemoveTableCatalog(const TableName &tabname, uint32_t core_id)
-    {
-        cc_shards_[core_id]->table_metadata_.erase(tabname);
-    }
-
     void PrintCcMap()
     {
         std::unordered_map<TableName, size_t> mapsizes;
@@ -229,6 +191,24 @@ public:
 
     static uint64_t ClockTs();
 
+    std::pair<const TableSchema *, const TableSchema *> *CreateCatalog(
+        const std::string &table_name,
+        const std::string &catalog_image,
+        uint64_t commit_ts);
+
+    std::pair<const TableSchema *, const TableSchema *> *CreateDirtyCatalog(
+        const std::string &table_name,
+        const std::string &catalog_image,
+        uint64_t commit_ts);
+
+    std::pair<const TableSchema *, const TableSchema *> *CommitDirtyCatalog(
+        const std::string &table_name);
+
+    std::pair<const TableSchema *, const TableSchema *> *GetCatalog(
+        const std::string &table_name);
+
+    store::DataStoreWriteHandler *const store_hd_;
+
 private:
     void TimerRun();
 
@@ -245,6 +225,23 @@ private:
     // local time is used by transaction state machines to determine if a lock
     // has been held too long and if so, invoke lock recovery.
     static std::atomic<uint64_t> local_clock;
+
+    struct CatalogEntry
+    {
+        CatalogEntry() = default;
+
+        std::unique_ptr<TableSchema> schema_{nullptr};
+        std::unique_ptr<TableSchema> dirty_schema_{nullptr};
+        std::pair<const TableSchema *, const TableSchema *> view_{nullptr,
+                                                                  nullptr};
+
+        uint64_t ts_{0};
+        uint64_t dirty_ts_{0};
+    };
+
+    CatalogFactory *const catalog_factory_;
+    std::unordered_map<TableName, CatalogEntry> table_catalogs_;
+    std::shared_mutex catalog_mux_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

@@ -69,6 +69,11 @@ enum CcProtocolType {
 	Locking = 1;
 }
 
+enum CommitType {
+	PrepareCommit = 0;
+	PostCommit = 1;
+}
+
 message AcquireRequest {
 	uint32 src_node_id = 1;
 	string tablename = 2;
@@ -89,53 +94,23 @@ message AcquireResponse {
 	bool is_ack = 5;
 }
 
-message AcquireTableWriteLockRequest {
-    uint32 src_node_id = 1;
-    string tablename = 2;
-    uint32 vec_idx = 3;
-    uint64 tx_number = 4;
-    uint32 node_group_id = 5;
+message AcquireAllRequest {
+	uint32 src_node_id = 1;
+	string tablename = 2;
+	bytes key = 3;
+	uint32 node_group_id = 4;
+	bool insert = 5;
+	CcProtocolType protocol = 6;
+	bool is_write_intent = 7;
 }
 
-message AcquireTableWriteLockResponse {
-    int32 error_code = 1;
-    uint32 node_id = 2;
-    int64 term = 3;
-}
-
-message ReleaseTableWriteLockRequest {
-    uint32 src_node_id = 1;
-    string tablename = 2;
-    uint32 vec_idx = 3;
-    uint64 tx_number = 4;
-    uint32 node_group_id = 5;
-}
-
-message ReleaseTableWriteLockResponse {
-    int32 error_code = 1;
-}
-
-message CommitCreateTableRequest {
-    uint32 src_node_id = 1;
-    string tablename = 2;
-    bytes catalog_str = 3;
-    uint64 ts = 4;
-    uint32 node_group_id = 5;
-}
-
-message CommitCreateTableResponse {
-    int32 error_code = 1;
-}
-
-message CommitDropTableRequest {
-    uint32 src_node_id = 1;
-    string tablename = 2;
-    uint64 ts = 3;
-    uint32 node_group_id = 4;
-}
-
-message CommitDropTableResponse {
-    int32 error_code = 1;
+message AcquireAllResponse {
+	int32 error_code = 1;
+	uint64 vali_ts = 2;
+	uint64 commit_ts = 3;
+	int64 node_term = 4;
+	// The response is an acknowledgement or the result
+	bool is_ack = 5;
 }
 
 message ValidateRequest {
@@ -203,6 +178,17 @@ message PostCommitRequest {
 	uint64 commit_ts = 4;
 	bytes record = 5;
 	bool is_deleted = 6;
+}
+
+message PostWriteAllRequest {
+	uint32 src_node_id = 1;
+	string tablename = 2;
+	uint32 node_group_id = 3;
+	bytes key = 4;
+	uint64 commit_ts = 5;
+	bytes record = 6;
+	bool is_deleted = 7;
+	CommitType commit_type = 8;
 }
 
 message ScanTuple_msg {
@@ -301,16 +287,11 @@ message CcMessage {
 		ScanNextResponse = 15;
 		CommitSkRequest = 16;
 		ReadOutsideRequest = 17;
-		AcquireTableWriteLockRequest = 18;
-		AcquireTableWriteLockResponse = 19;
-		CommitCreateTableRequest = 20;
-		CommitCreateTableResponse = 21;
-		ReleaseTableWriteLockRequest = 22;
-		ReleaseTableWriteLockResponse = 23;
-		CommitDropTableRequest = 24;
-		CommitDropTableResponse = 25;
 		FaultInjectRequest = 26;
 		FaultInjectResponse = 27;
+		AcquireAllRequest = 28;
+		AcquireAllResponse = 29;
+		PostWriteAllRequest = 30;
 	}
 
 	MessageType type = 1;
@@ -333,15 +314,10 @@ message CcMessage {
 		ScanNextResponse scan_next_resp = 23;
 		CommitSkRequest commit_sk_req = 24;
 		ReadOutsideRequest read_outside_req = 25;
-		AcquireTableWriteLockRequest acquire_table_req = 26;
-		AcquireTableWriteLockResponse acquire_table_resp = 27;
-		CommitCreateTableRequest commit_create_table_req = 28;
-		CommitCreateTableResponse commit_create_table_resp = 29;
-		ReleaseTableWriteLockRequest release_table_req = 30;
-		ReleaseTableWriteLockResponse release_table_resp = 31;
-		CommitDropTableRequest commit_drop_table_req = 32;
-		CommitDropTableResponse commit_drop_table_resp = 33;
 		FaultInjectRequest fault_inject_req = 34;
 		FaultInjectResponse fault_inject_resp= 35;
+		AcquireAllRequest acquire_all_req = 36;
+		AcquireAllResponse acquire_all_resp = 37;
+		PostWriteAllRequest post_write_all_req = 38;
 	}
 }

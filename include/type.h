@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace txservice
 {
 struct Void
@@ -9,6 +11,14 @@ struct Void
 constexpr Void void_ = Void();
 
 #define void_return return void_;
+
+enum class DmlOperation
+{
+    Update,
+    Delete,
+    Insert,
+    Upsert
+};
 
 enum class TxnStatus
 {
@@ -22,7 +32,7 @@ enum class TxnStatus
     // between when the tx starts committing and when the tx's fate is finalized
     // (committed or aborted).
     Committing,
-    // transaction is finished and can be recycled. 
+    // transaction is finished and can be recycled.
     Finished
 };
 
@@ -39,19 +49,40 @@ enum struct TableType
 
 enum struct ReadType
 {
-    /// <summary>
-    /// Starts concurrency control for the input the key.
-    /// </summary>
+    // Starts concurrency control for the input the key and returns the key's
+    // value.
     Inside,
-    /// <summary>
-    /// Starts concurrency control for the input key-value pair retrieved from
-    /// the data store.
-    /// </summary>
+    // Starts concurrency control for the input key-value pair retrieved from
+    // the data store.
     OutsideNormal,
-    /// <summary>
-    /// Starts concurrency control for the input key that does not exist in the
-    /// data store.
-    /// </summary>
-    OutsideDeleted,
+    // Starts concurrency control for the input key that does not exist in the
+    // data store.
+    OutsideDeleted
 };
+
+enum struct LockType
+{
+    NoLock = 0,
+    ReadIntention,
+    ReadLock,
+    WriteIntent,
+    WriteLock
+};
+
+enum struct PostWriteType
+{
+    // Single commit installs the committed value and removes the write
+    // lock/intent.
+    Commit,
+    // PrepareCommit uploads a dirty value but does not release the write
+    // intent/lock acquired previously. After the prepare commit log flushed,
+    // the operation is guaranteed to succeed and can only roll forward upon
+    // failures.
+    PrepareCommit,
+    // PostCommit releases the write lock/intent and turns the dirty value to
+    // the committed value.
+    PostCommit
+};
+
+inline static TableName catalog_ccm_name{"__catalog"};
 }  // namespace txservice

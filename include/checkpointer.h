@@ -113,25 +113,28 @@ public:
         }
 
         const CcShard &shard = *local_shards_.cc_shards_.at(0);
+        bool flushed = false;
 
         // iteratate all the tables and execute CkptScanCc requests on each
         // ccshard on all the ccmaps. The result of CkptScanCc is stored in
         // cce_buf.
-        for (const auto &ccm_pair : shard.native_ccms_)
+        for (const auto &[table_name, ccm] : shard.native_ccms_)
         {
-            const TableName &tabname = ccm_pair.first;
-            TableType type = ccm_pair.second->Type();
+            if (table_name == catalog_ccm_name)
+            {
+                continue;
+            }
+
             cce_buf.clear();
 
-            CkptScanCc ckpt_scan_cc(tabname, ckpt_ts, cce_buf);
-
+            CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, cce_buf);
             for (auto &ccs : local_shards_.cc_shards_)
             {
                 ckpt_scan_cc.Reset(ccs->node_id_);
                 ccs->Enqueue(&ckpt_scan_cc);
                 ckpt_scan_cc.Wait();
 
-                auto table_it = ccs->failover_ccms_.find(tabname);
+                auto table_it = ccs->failover_ccms_.find(table_name);
                 if (table_it != ccs->failover_ccms_.end())
                 {
                     for (auto &ng_pair : table_it->second)
@@ -148,21 +151,21 @@ public:
                 // Flushes to the data store
                 bool ckpt_ret = false;
 
-                if (type == TableType::Primary)
+                if (ccm->Type() == TableType::Primary)
                 {
-                    const Schema *key_schema = ccm_pair.second->KeySchema();
-                    const Schema *rec_schema = ccm_pair.second->RecordSchema();
-                    ckpt_ret = store_hd_->PutAll(GetCassTablename(tabname),
+                    const Schema *key_schema = ccm->KeySchema();
+                    const Schema *rec_schema = ccm->RecordSchema();
+                    ckpt_ret = store_hd_->PutAll(GetCassTablename(table_name),
                                                  cce_buf,
                                                  key_schema,
                                                  rec_schema);
                 }
                 else
                 {
-                    const SkSchema *sk_schema = static_cast<const SkSchema *>(
-                        ccm_pair.second->KeySchema());
+                    const SkSchema *sk_schema =
+                        static_cast<const SkSchema *>(ccm->KeySchema());
                     ckpt_ret = store_hd_->PutSkAll(
-                        GetCassTablename(tabname), cce_buf, sk_schema);
+                        GetCassTablename(table_name), cce_buf, sk_schema);
                 }
 
                 // if flush to data store succeeds, update the ckpt_ts for each
@@ -174,11 +177,15 @@ public:
                         entry->ckpt_ts_.store(ckpt_ts,
                                               std::memory_order_release);
                     }
+                    flushed = true;
                 }
             }
         }
 
-        last_ckpt_ts_ = ckpt_ts;
+        if (flushed)
+        {
+            last_ckpt_ts_ = ckpt_ts;
+        }
     }
 
     void Run()
@@ -193,7 +200,7 @@ public:
             {
                 cv_.wait_for(
                     lk,
-                    5s,
+                    600s,
                     [this]
                     { return status_ != Status::Active || request_ckpt_; });
             }

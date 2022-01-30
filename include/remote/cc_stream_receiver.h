@@ -42,6 +42,7 @@ public:
 
     static IsolationLevel ConvertIsolation(IsolationType iso_level);
     static CcProtocol ConvertProtocol(CcProtocolType proto);
+    static PostWriteType ConvertCommitType(CommitType commit_type);
 
 private:
     std::unique_ptr<CcMessage> GetCcMsg();
@@ -62,16 +63,14 @@ private:
     // requests and then enqueued into the local cc shards for processing.
     CcRequestPool<RemoteAcquire> acquire_pool_;
     CcRequestPool<RemotePostWrite> postwrite_pool_;
+    CcRequestPool<RemoteAcquireAll> acquire_all_pool_;
+    CcRequestPool<RemotePostWriteAll> post_write_all_pool_;
     CcRequestPool<RemotePostRead> postread_pool_;
     CcRequestPool<RemoteRead> read_pool_;
     CcRequestPool<RemoteReadOutside> read_outside_pool_;
     CcRequestPool<RemoteScanOpen> scan_open_pool_;
     CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
     CcRequestPool<RemoteCommitSk> commit_sk_pool_;
-    CcRequestPool<RemoteAcquireTableWriteLockCC> acquire_table_write_lock_pool;
-    CcRequestPool<RemoteCommitCreateTable> commit_create_table_pool;
-    CcRequestPool<RemoteReleaseTableWriteLock> release_table_write_lock_pool;
-    CcRequestPool<RemoteCommitDropTable> commit_drop_table_pool;
     CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
     // CcRequestPool<NegotiateCc> negoti_pool;
 

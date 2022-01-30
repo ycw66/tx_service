@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog_factory.h"
 #include "cc/cc_entry.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -20,6 +21,15 @@ public:
     virtual bool PutSkAll(const TableName &table_name,
                           std::vector<LruEntry *> &batch,
                           const SkSchema *sk_schema) = 0;
+
+    virtual void UpsertTable(const TableName &ccm_table_name,
+                             const txservice::TableName &kv_table_name,
+                             const TableSchema *table_schema,
+                             bool is_deleted,
+                             CcHandlerResult<Void> *hd_res) = 0;
+
+    virtual void FetchTableCatalog(const TableName &ccm_table_name,
+                                   void *fetch_req) = 0;
 };
 
 // class IntMemoryStore : public DataStoreWriteHandler

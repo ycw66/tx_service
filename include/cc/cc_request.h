@@ -47,18 +47,56 @@ public:
         {
             assert(table_name_ != nullptr);
             ccm_ = ccs.GetCcm(*table_name_, node_group_id_, error_code);
+
+            if (ccm_ == nullptr)
+            {
+                std::pair<const TableSchema *, const TableSchema *>
+                    *schema_view = ccs.GetCatalog(*table_name_);
+
+                if (schema_view != nullptr)
+                {
+                    const TableSchema *curr_schema = schema_view->first;
+                    if (curr_schema != nullptr)
+                    {
+                        ccs.CreatePkCcMap(
+                            *table_name_, curr_schema, node_group_id_);
+
+                        std::vector<TableName> index_names =
+                            curr_schema->IndexNames();
+                        for (const TableName &index_name : index_names)
+                        {
+                            ccs.CreateSkCcMap(
+                                index_name, curr_schema, node_group_id_);
+                        }
+
+                        ccm_ = ccs.GetCcm(
+                            *table_name_, node_group_id_, error_code);
+                    }
+                    else
+                    {
+                        // The local node (LocalCcShards) contains a schema
+                        // instance, which indicates that the table has been
+                        // dropped. Returns the request with an error.
+                        res_->SetError(100);
+                        return true;
+                    }
+                }
+                else
+                {
+                    // The local node does not contain the table's schema
+                    // instance. The FetchCatalog() method will send an async
+                    // request toward the data store to fetch the catalog. After
+                    // fetching is finished, this cc request is re-enqueued for
+                    // re-execution.
+                    ccs.FetchCatalog(*table_name_, this);
+                    return false;
+                }
+            }
         }
 
-        if (ccm_ == nullptr)
-        {
-            res_->SetError(error_code);
-            return true;
-        }
-        else
-        {
-            RequestT *typed_req = static_cast<RequestT *>(this);
-            return ccm_->Execute(*typed_req);
-        }
+        assert(ccm_ != nullptr);
+        RequestT *typed_req = static_cast<RequestT *>(this);
+        return ccm_->Execute(*typed_req);
     }
 
     CcHandlerResult<ResultType> *Result()
@@ -86,101 +124,6 @@ protected:
     const TableName *table_name_;
     CcMap *ccm_;
     uint32_t node_group_id_;
-};
-
-struct AcquireTableWriteLockCC
-    : public TemplatedCcRequest<AcquireTableWriteLockCC,
-                                std::unordered_map<uint32_t, int64_t>>
-{
-    AcquireTableWriteLockCC() : txid_(nullptr)
-    {
-    }
-
-    virtual ~AcquireTableWriteLockCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        bool success = ccs.AcquireTableWriteLock(*table_name_, this);
-
-        if (success)
-        {
-            res_->SetFinished();
-            return true;
-        }
-        else
-        {
-            // AcqureTableWriteLock is blocked
-            return false;
-        }
-    }
-
-    void Set(const TableName *tname,
-             const TxId *txid,
-             uint64_t tx_number,
-             uint32_t node_group_id,
-             CcHandlerResult<std::unordered_map<uint32_t, int64_t>> *res)
-    {
-        table_name_ = tname;
-        txid_ = txid;
-        tx_number_ = tx_number;
-        node_group_id_ = node_group_id;
-        res_ = res;
-    }
-
-    const TxId *Txid() const
-    {
-        return txid_;
-    }
-
-private:
-    const TxId *txid_;
-};
-
-struct ReleaseTableWriteLockCC
-    : public TemplatedCcRequest<ReleaseTableWriteLockCC, Void>
-{
-    ReleaseTableWriteLockCC() : txid_(nullptr)
-    {
-    }
-
-    virtual ~ReleaseTableWriteLockCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        bool success = ccs.ReleaseTableWriteLock(*table_name_, this);
-
-        if (success)
-        {
-            res_->SetFinished();
-            return true;
-        }
-        else
-        {
-            // RleaseTableWriteLock is blocked
-            return false;
-        }
-    }
-
-    void Set(const TableName *tname,
-             const TxId *txid,
-             uint64_t tx_number,
-             uint32_t node_group_id,
-             CcHandlerResult<Void> *res)
-    {
-        table_name_ = tname;
-        txid_ = txid;
-        tx_number_ = tx_number;
-        node_group_id_ = node_group_id;
-        res_ = res;
-    }
-
-    const TxId *Txid() const
-    {
-        return txid_;
-    }
-
-private:
-    const TxId *txid_;
 };
 
 struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>
@@ -315,136 +258,126 @@ private:
     LruEntry *cce_ptr_;
 };
 
-struct CommitCreateTableCC
-    : public TemplatedCcRequest<CommitCreateTableCC, Void>
+struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
 {
 public:
-    CommitCreateTableCC() : node_group_id_(0), catalog_str_("")
+    AcquireAllCc() = default;
+    virtual ~AcquireAllCc() = default;
+
+    AcquireAllCc(const AcquireAllCc &rhs) = delete;
+    AcquireAllCc(AcquireAllCc &&rhs) = delete;
+
+    void Set(const TableName *tname,
+             const TxKey *key,
+             uint32_t node_group_id,
+             TxNumber tx_num,
+             int64_t tx_term,
+             bool is_insert,
+             CcHandlerResult<AcquireAllResult> *res,
+             CcProtocol proto,
+             LockType lk_type)
     {
-    }
-
-    CommitCreateTableCC(const CommitCreateTableCC &rhs) = delete;
-    CommitCreateTableCC(CommitCreateTableCC &&rhs) = delete;
-
-    virtual ~CommitCreateTableCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        std::vector<std::string> tokens;
-        std::string token;
-        // full table name's format is "./dbname/tablename"
-        // token[1] is dbname, token[2] is table name given '/' as splitter
-        // FIXME: fix this hardcode
-        std::istringstream tokenStream(*table_name_);
-        while (std::getline(tokenStream, token, '/'))
-        {
-            tokens.push_back(token);
-        }
-
-        // only the local request and the first TxProcessor needs to create
-        // table on Cassandra
-        bool create_cass_table = is_local_req_ && (ccs.core_id_ == 0);
-        // FIXME: handle the case that post process is failed. For example,
-        // Cassandra is down.
-        ccs.GetCatalog()->CreateTable(tokens[1],
-                                      tokens[2],
-                                      catalog_str_,
-                                      ccs.core_id_,
-                                      create_cass_table);
-
-        res_->SetFinished();
-        return true;
+        table_name_ = tname;
+        key_ = key;
+        key_str_ = nullptr;
+        node_group_id_ = node_group_id;
+        tx_number_ = tx_num;
+        tx_term_ = tx_term;
+        is_insert_ = is_insert;
+        res_ = res;
+        ccm_ = nullptr;
+        proto_ = proto;
+        cce_ptr_ = nullptr;
+        lock_type_ = lk_type;
     }
 
     void Set(const TableName *tname,
-             const std::string &catalog_str,
+             const std::string *key_str,
              uint32_t node_group_id,
-             CcHandlerResult<Void> *res,
-             bool is_local_req)
+             TxNumber tx_num,
+             int64_t tx_term,
+             bool is_insert,
+             CcHandlerResult<AcquireAllResult> *res,
+             CcProtocol proto,
+             LockType lk_type)
     {
         table_name_ = tname;
-        catalog_str_ = catalog_str;
+        key_ = nullptr;
+        key_str_ = key_str;
         node_group_id_ = node_group_id;
+        tx_number_ = tx_num;
+        tx_term_ = tx_term;
+        is_insert_ = is_insert;
         res_ = res;
-        is_local_req_ = is_local_req;
+        ccm_ = nullptr;
+        proto_ = proto;
+        cce_ptr_ = nullptr;
+        lock_type_ = lk_type;
     }
 
-    std::string &GetFrm()
+    const TxKey *Key() const
     {
-        return catalog_str_;
+        return key_;
     }
 
-    const std::string *GetFullTableName()
+    const std::string *KeyStr() const
     {
-        return table_name_;
+        return key_str_;
+    }
+
+    int64_t TxTerm() const
+    {
+        return tx_term_;
+    }
+
+    bool IsInsert() const
+    {
+        return is_insert_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+        ccm_ = nullptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
+    LockType LkType() const
+    {
+        return lock_type_;
+    }
+
+    TxKey *DecodedKey() const
+    {
+        return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
+    }
+
+    void SetDecodedKey(std::unique_ptr<TxKey> decoded_key)
+    {
+        decoded_key_ = std::move(decoded_key);
+        key_ = decoded_key_.get();
     }
 
 private:
-    uint32_t node_group_id_;
-    std::string catalog_str_;
-    bool is_local_req_;
-};
-
-struct CommitDropTableCC : public TemplatedCcRequest<CommitDropTableCC, Void>
-{
-public:
-    CommitDropTableCC() : node_group_id_(0)
-    {
-    }
-
-    CommitDropTableCC(const CommitDropTableCC &rhs) = delete;
-    CommitDropTableCC(CommitDropTableCC &&rhs) = delete;
-
-    virtual ~CommitDropTableCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        std::vector<std::string> tokens;
-        std::string token;
-        // full table name's format is "./dbname/tablename"
-        // token[1] is dbname, token[2] is table name given '/' as splitter
-        // FIXME: fix this hardcode
-        std::istringstream tokenStream(*table_name_);
-        while (std::getline(tokenStream, token, '/'))
-        {
-            tokens.push_back(token);
-        }
-
-        // only the local request and the first TxProcessor needs to drop table
-        // on Cassandra
-        bool drop_cass_table = is_local_req_ && (ccs.core_id_ == 0);
-
-        ccs.GetCatalog()->DropTable(
-            tokens[1], tokens[2], ccs.core_id_, drop_cass_table);
-
-        // It's OK to remove table in ccm at here, but to align with create
-        // table, we put the logic of removing table in ccm into
-        // catalog->DropTable.
-        // ccs.RemoveCcm(*table_name_);
-
-        res_->SetFinished();
-        return true;
-    }
-
-    void Set(const TableName *tname,
-             uint32_t node_group_id,
-             CcHandlerResult<Void> *res,
-             bool is_local_req)
-    {
-        table_name_ = tname;
-        node_group_id_ = node_group_id;
-        res_ = res;
-        is_local_req_ = is_local_req;
-    }
-
-    const std::string *GetFullTableName()
-    {
-        return table_name_;
-    }
-
-private:
-    uint32_t node_group_id_;
-    bool is_local_req_;
+    const TxKey *key_{nullptr};
+    const std::string *key_str_{nullptr};
+    std::unique_ptr<TxKey> decoded_key_{nullptr};
+    int64_t tx_term_{-1};
+    bool is_insert_{false};
+    /**
+     * @brief The pointer of the cc entry to which this request is directed. The
+     * pointer is set, when the request locates the cc entry but is blocked due
+     * to read-write conflicts in 2PL. After the request is unblocked and
+     * acquires the lock, the request's execution resumes without further lookup
+     * of the cc entry.
+     *
+     */
+    LruEntry *cce_ptr_{nullptr};
+    LockType lock_type_{LockType::WriteIntent};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, Void>
@@ -553,6 +486,133 @@ private:
     const TxRecord *payload_;
     const std::string *payload_str_;
     bool is_deleted_;
+};
+
+struct PostWriteAllCc : public TemplatedCcRequest<PostWriteAllCc, Void>
+{
+public:
+    PostWriteAllCc() = default;
+    PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
+    PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
+
+    void Set(const TableName *tname,
+             const TxKey *key,
+             uint32_t node_group_id,
+             uint64_t tx_number,
+             uint64_t ts,
+             TxRecord *rec,
+             DmlOperation dml_op,
+             CcHandlerResult<Void> *res,
+             PostWriteType commit_type)
+    {
+        table_name_ = tname;
+        key_ = key;
+        tx_number_ = tx_number;
+        node_group_id_ = node_group_id;
+        commit_ts_ = ts;
+        payload_ = rec;
+        payload_str_ = nullptr;
+        dml_op_ = dml_op;
+        res_ = res;
+        ccm_ = nullptr;
+        commit_type_ = commit_type;
+    }
+
+    void Set(const TableName *tname,
+             const std::string *key_str,
+             uint32_t node_group_id,
+             uint64_t tx_number,
+             uint64_t ts,
+             const std::string *rec,
+             DmlOperation dml_op,
+             CcHandlerResult<Void> *res,
+             PostWriteType commit_type)
+    {
+        table_name_ = tname;
+        key_str_ = key_str;
+        tx_number_ = tx_number;
+        node_group_id_ = node_group_id;
+        commit_ts_ = ts;
+        payload_ = nullptr;
+        payload_str_ = rec;
+        dml_op_ = dml_op;
+        res_ = res;
+        ccm_ = nullptr;
+        commit_type_ = commit_type;
+    }
+
+    uint64_t CommitTs() const
+    {
+        return commit_ts_;
+    }
+
+    TxRecord *Payload() const
+    {
+        return payload_;
+    }
+
+    const std::string *PayloadStr() const
+    {
+        return payload_str_;
+    }
+
+    DmlOperation DmlOp() const
+    {
+        return dml_op_;
+    }
+
+    const TxKey *Key() const
+    {
+        return key_;
+    }
+
+    const std::string *KeyStr() const
+    {
+        return key_str_;
+    }
+
+    const TxKey *DecodedKey() const
+    {
+        return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
+    }
+
+    void SetDecodedKey(std::unique_ptr<TxKey> decoded_key)
+    {
+        decoded_key_ = std::move(decoded_key);
+        key_ = decoded_key_.get();
+    }
+
+    const TxRecord *DecodedPayload() const
+    {
+        return decoded_payload_ == nullptr ? nullptr : decoded_payload_.get();
+    }
+
+    void SetDecodedPayload(std::unique_ptr<TxRecord> decoded_rec)
+    {
+        decoded_payload_ = std::move(decoded_rec);
+        payload_ = decoded_payload_.get();
+    }
+
+    PostWriteType CommitType() const
+    {
+        return commit_type_;
+    }
+
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
+private:
+    const TxKey *key_{nullptr};
+    const std::string *key_str_{nullptr};
+    std::unique_ptr<TxKey> decoded_key_{nullptr};
+    uint64_t commit_ts_{0};
+    TxRecord *payload_{nullptr};
+    const std::string *payload_str_{nullptr};
+    std::unique_ptr<TxRecord> decoded_payload_{nullptr};
+    DmlOperation dml_op_{DmlOperation::Update};
+    PostWriteType commit_type_;
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, std::vector<TxId>>
@@ -756,6 +816,11 @@ public:
     ReadType Type() const
     {
         return type_;
+    }
+
+    void SetReadType(ReadType type)
+    {
+        type_ = type;
     }
 
     void SetCcePtr(LruEntry *ptr)
@@ -1254,98 +1319,6 @@ private:
     bool finish_;
     std::mutex mux_;
     std::condition_variable cv_;
-};
-
-struct FindCatalogCC : public TemplatedCcRequest<FindCatalogCC, bool>
-{
-public:
-    FindCatalogCC() : catalog_content_(nullptr)
-    {
-    }
-
-    FindCatalogCC(const FindCatalogCC &rhs) = delete;
-    FindCatalogCC(FindCatalogCC &&rhs) = delete;
-
-    virtual ~FindCatalogCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        if (!ccs.AcquireTableReadIntention(*table_name_, this))
-        {
-            return false;
-        }
-
-        bool ret = ccs.FindCatalog(*table_name_, catalog_content_);
-
-        res_->SetValue(ret);
-        res_->SetFinished();
-        return true;
-    }
-
-    void Set(const TableName *tname,
-             std::string *catalog_content,
-             uint64_t tx_number,
-             CcHandlerResult<bool> *res)
-    {
-        table_name_ = tname;
-        catalog_content_ = catalog_content;
-        tx_number_ = tx_number;
-        res_ = res;
-    }
-
-    std::string *GetCatalogContent()
-    {
-        return catalog_content_;
-    }
-
-private:
-    std::string *catalog_content_;
-};
-
-struct CheckCatalogCC : public TemplatedCcRequest<CheckCatalogCC, bool>
-{
-public:
-    CheckCatalogCC() : source_version_(nullptr)
-    {
-    }
-
-    CheckCatalogCC(const CheckCatalogCC &rhs) = delete;
-    CheckCatalogCC(CheckCatalogCC &&rhs) = delete;
-
-    virtual ~CheckCatalogCC() = default;
-
-    virtual bool Execute(CcShard &ccs) override
-    {
-        if (!ccs.AcquireTableReadIntention(*table_name_, this))
-        {
-            return false;
-        }
-
-        bool ret = ccs.CheckCatalogVersion(*table_name_, *source_version_);
-
-        res_->SetValue(ret);
-        res_->SetFinished();
-        return true;
-    }
-
-    void Set(const TableName *tname,
-             std::string *source_version,
-             uint64_t tx_number,
-             CcHandlerResult<bool> *res)
-    {
-        table_name_ = tname;
-        source_version_ = source_version;
-        tx_number_ = tx_number;
-        res_ = res;
-    }
-
-    std::string *GetSourceVersion()
-    {
-        return source_version_;
-    }
-
-private:
-    std::string *source_version_;
 };
 
 struct ClearTxCc : public CcRequestBase

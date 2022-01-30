@@ -22,6 +22,21 @@ struct AcquireKeyResult
     std::atomic<int32_t> *remote_ack_cnt_;
 };
 
+struct AcquireAllResult
+{
+    uint64_t last_vali_ts_{1};
+    uint64_t commit_ts_{1};
+    int64_t node_term_{-1};
+    /**
+     * @brief The address of the cc entry that co-locates with the sending tx in
+     * the same core. The address is used to dedup the read intent/lock acquired
+     * from prior reads of the local cc entry.
+     *
+     */
+    CcEntryAddr local_cce_addr_;
+    std::atomic<int32_t> *remote_ack_cnt_{nullptr};
+};
+
 struct ReadKeyResult
 {
     TxRecord *rec_;
@@ -40,7 +55,6 @@ struct ScanOpenResult
         for (size_t nid = 0; nid < cc_node_cnt; ++nid)
         {
             cc_node_terms_[nid] = -1;
-            cc_node_terms_[nid] = 0;
         }
     }
 

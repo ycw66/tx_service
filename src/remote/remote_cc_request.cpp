@@ -108,137 +108,62 @@ void txservice::remote::RemoteAcquire::Acknowledge()
     hd_->SendMessage(req.src_node_id(), output_msg_);
 }
 
-txservice::remote::RemoteAcquireTableWriteLockCC::
-    RemoteAcquireTableWriteLockCC()
+txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
 {
     res_ = &cc_res_;
 
     output_msg_.set_type(
-        CcMessage::MessageType::
-            CcMessage_MessageType_AcquireTableWriteLockResponse);
+        CcMessage::MessageType::CcMessage_MessageType_AcquireAllResponse);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *res)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
 
-        AcquireTableWriteLockResponse *resp =
-            output_msg_.mutable_acquire_table_resp();
-        resp->set_error_code(cc_res_.ErrorCode());
+        AcquireAllResponse *resp = output_msg_.mutable_acquire_all_resp();
+        resp->set_error_code(res->ErrorCode());
+        resp->set_is_ack(false);
 
-        // set table write lock ccnode_id and its term.
-        resp->set_node_id(node_group_id_);
-        resp->set_term(node_term_);
+        if (!cc_res_.IsError())
+        {
+            const AcquireAllResult &acquire_all_res = cc_res_.Value();
 
-        const AcquireTableWriteLockRequest &req =
-            input_msg_->acquire_table_req();
+            resp->set_vali_ts(acquire_all_res.last_vali_ts_);
+            resp->set_commit_ts(acquire_all_res.commit_ts_);
+            resp->set_node_term(acquire_all_res.node_term_);
+        }
+
+        const AcquireAllRequest &req = input_msg_->acquire_all_req();
         hd_->SendMessage(req.src_node_id(), output_msg_);
-
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
-void txservice::remote::RemoteAcquireTableWriteLockCC::Set(
-    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt, int64_t node_term)
+void txservice::remote::RemoteAcquireAll::Set(
+    std::unique_ptr<CcMessage> input_msg)
 {
-    assert(input_msg->has_acquire_table_req());
-
-    res_->Reset();
-    res_->SetRefCnt(core_cnt);
-
-    output_msg_.clear_tx_number();
-    output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_table_resp();
-
-    const AcquireTableWriteLockRequest &req = input_msg->acquire_table_req();
-    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                    req.vec_idx());
-
-    table_name_ = &req.tablename();
-    tx_number_ = req.tx_number();
-    node_group_id_ = req.node_group_id();
-
-    unfinish_cnt_.store(core_cnt);
-
-    input_msg_ = std::move(input_msg);
-    node_term_ = node_term;
-
-    if (hd_ == nullptr)
-    {
-        hd_ = Sharder::Instance().GetCcStreamSender();
-    }
-}
-
-void txservice::remote::RemoteAcquireTableWriteLockCC::Free()
-{
-    uint32_t prior_val = unfinish_cnt_.fetch_sub(1);
-    if (prior_val == 1)
-    {
-        CcRequestBase::Free();
-    }
-}
-
-txservice::remote::RemoteReleaseTableWriteLock::RemoteReleaseTableWriteLock()
-{
-    res_ = &cc_res_;
-
-    output_msg_.set_type(
-        CcMessage::MessageType::
-            CcMessage_MessageType_ReleaseTableWriteLockResponse);
-
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-    {
-        output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_tx_term(input_msg_->tx_term());
-        output_msg_.set_handler_addr(input_msg_->handler_addr());
-
-        ReleaseTableWriteLockResponse *resp =
-            output_msg_.mutable_release_table_resp();
-        resp->set_error_code(cc_res_.ErrorCode());
-
-        const ReleaseTableWriteLockRequest &req =
-            input_msg_->release_table_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
-
-        hd_->RecycleCcMsg(std::move(input_msg_));
-    };
-}
-
-void txservice::remote::RemoteReleaseTableWriteLock::Free()
-{
-    uint32_t prior_val = unfinish_cnt_.fetch_sub(1);
-    if (prior_val == 1)
-    {
-        CcRequestBase::Free();
-    }
-}
-
-void txservice::remote::RemoteReleaseTableWriteLock::Set(
-    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
-{
-    assert(input_msg->has_release_table_req());
+    assert(input_msg->has_acquire_all_req());
 
     cc_res_.Reset();
-    cc_res_.SetRefCnt(core_cnt);
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_release_table_resp();
+    output_msg_.clear_acquire_all_resp();
 
-    const ReleaseTableWriteLockRequest &req = input_msg->release_table_req();
-    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                    req.vec_idx());
+    const AcquireAllRequest &req = input_msg->acquire_all_req();
+    LockType lk_type =
+        req.is_write_intent() ? LockType::WriteIntent : LockType::WriteLock;
 
-    ReleaseTableWriteLockCC::Set(&req.tablename(),
-                                 &txid_obj_,
-                                 req.tx_number(),
-                                 req.node_group_id(),
-                                 &cc_res_);
-
-    unfinish_cnt_.store(core_cnt);
+    AcquireAllCc::Set(&req.tablename(),
+                      &req.key(),
+                      req.node_group_id(),
+                      input_msg->tx_number(),
+                      input_msg->tx_term(),
+                      req.insert(),
+                      &cc_res_,
+                      CcStreamReceiver::ConvertProtocol(req.protocol()),
+                      lk_type);
 
     input_msg_ = std::move(input_msg);
 
@@ -248,128 +173,20 @@ void txservice::remote::RemoteReleaseTableWriteLock::Set(
     }
 }
 
-txservice::remote::RemoteCommitCreateTable::RemoteCommitCreateTable()
+void txservice::remote::RemoteAcquireAll::Acknowledge()
 {
-    res_ = &cc_res_;
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
 
-    output_msg_.set_type(CcMessage::MessageType::
-                             CcMessage_MessageType_CommitCreateTableResponse);
+    AcquireAllResponse *acquire_all_resp =
+        output_msg_.mutable_acquire_all_resp();
+    acquire_all_resp->set_is_ack(true);
+    acquire_all_resp->set_error_code(0);
+    acquire_all_resp->set_node_term(cc_res_.Value().node_term_);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-    {
-        output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_tx_term(input_msg_->tx_term());
-        output_msg_.set_handler_addr(input_msg_->handler_addr());
-
-        CommitCreateTableResponse *resp =
-            output_msg_.mutable_commit_create_table_resp();
-        resp->set_error_code(cc_res_.ErrorCode());
-
-        const CommitCreateTableRequest &req =
-            input_msg_->commit_create_table_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
-
-        hd_->RecycleCcMsg(std::move(input_msg_));
-    };
-}
-
-void txservice::remote::RemoteCommitCreateTable::Free()
-{
-    uint32_t prior_val = unfinish_cnt_.fetch_sub(1);
-    if (prior_val == 1)
-    {
-        CcRequestBase::Free();
-    }
-}
-
-void txservice::remote::RemoteCommitCreateTable::Set(
-    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
-{
-    assert(input_msg->has_commit_create_table_req());
-
-    cc_res_.Reset();
-    cc_res_.SetRefCnt(core_cnt);
-
-    output_msg_.clear_tx_number();
-    output_msg_.clear_handler_addr();
-
-    const CommitCreateTableRequest &req = input_msg->commit_create_table_req();
-
-    bool is_local_req = false;
-    CommitCreateTableCC::Set(&req.tablename(),
-                             req.catalog_str(),
-                             req.node_group_id(),
-                             &cc_res_,
-                             is_local_req);
-
-    unfinish_cnt_.store(core_cnt);
-
-    input_msg_ = std::move(input_msg);
-
-    if (hd_ == nullptr)
-    {
-        hd_ = Sharder::Instance().GetCcStreamSender();
-    }
-}
-
-txservice::remote::RemoteCommitDropTable::RemoteCommitDropTable()
-{
-    res_ = &cc_res_;
-
-    output_msg_.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CommitDropTableResponse);
-
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-    {
-        output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_tx_term(input_msg_->tx_term());
-        output_msg_.set_handler_addr(input_msg_->handler_addr());
-
-        CommitDropTableResponse *resp =
-            output_msg_.mutable_commit_drop_table_resp();
-        resp->set_error_code(cc_res_.ErrorCode());
-
-        const CommitDropTableRequest &req = input_msg_->commit_drop_table_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
-
-        hd_->RecycleCcMsg(std::move(input_msg_));
-    };
-}
-
-void txservice::remote::RemoteCommitDropTable::Free()
-{
-    uint32_t prior_val = unfinish_cnt_.fetch_sub(1);
-    if (prior_val == 1)
-    {
-        CcRequestBase::Free();
-    }
-}
-
-void txservice::remote::RemoteCommitDropTable::Set(
-    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
-{
-    assert(input_msg->has_commit_drop_table_req());
-
-    cc_res_.Reset();
-    cc_res_.SetRefCnt(core_cnt);
-
-    output_msg_.clear_tx_number();
-    output_msg_.clear_handler_addr();
-
-    const CommitDropTableRequest &req = input_msg->commit_drop_table_req();
-
-    bool is_local_req = false;
-    CommitDropTableCC::Set(
-        &req.tablename(), req.node_group_id(), &cc_res_, is_local_req);
-
-    unfinish_cnt_.store(core_cnt);
-
-    input_msg_ = std::move(input_msg);
-
-    if (hd_ == nullptr)
-    {
-        hd_ = Sharder::Instance().GetCcStreamSender();
-    }
+    const AcquireAllRequest &req = input_msg_->acquire_all_req();
+    hd_->SendMessage(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemotePostRead::RemotePostRead()
@@ -647,6 +464,67 @@ void txservice::remote::RemotePostWrite::Set(
                      rec_str,
                      post_commit.is_deleted(),
                      &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+
+        PostprocessResponse *resp = output_msg_.mutable_post_resp();
+        resp->set_error_code(res->ErrorCode());
+
+        const PostWriteAllRequest &req = input_msg_->post_write_all_req();
+        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemotePostWriteAll::Set(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_post_write_all_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
+
+    const PostWriteAllRequest &post_write_all = input_msg->post_write_all_req();
+
+    uint64_t commit_ts = post_write_all.commit_ts();
+    const std::string *rec_str =
+        commit_ts > 0 ? &post_write_all.record() : nullptr;
+    DmlOperation dml_op = post_write_all.is_deleted() ? DmlOperation::Delete
+                                                      : DmlOperation::Upsert;
+    PostWriteType write_type =
+        CcStreamReceiver::ConvertCommitType(post_write_all.commit_type());
+        
+    PostWriteAllCc::Set(&post_write_all.tablename(),
+                        &post_write_all.key(),
+                        post_write_all.node_group_id(),
+                        input_msg->tx_number(),
+                        commit_ts,
+                        rec_str,
+                        dml_op,
+                        &cc_res_,
+                        write_type);
 
     input_msg_ = std::move(input_msg);
 

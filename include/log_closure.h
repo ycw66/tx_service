@@ -6,6 +6,7 @@
 
 #include "../log_service/proto/raft_log.pb.h"
 #include "cc/cc_handler_result.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -44,17 +45,22 @@ public:
         }
     }
 
-    const ::txlog::LogRequest &LogReq() const
+    ::txlog::LogRequest &LogRequest()
     {
         return request_;
     }
 
-    ::txlog::LogRequest &MutableLogRequest()
+    const ::txlog::LogRequest &LogRequest() const
     {
         return request_;
     }
 
-    ::txlog::LogResponse &MutableLogResponse()
+    ::txlog::LogResponse &LogResponse()
+    {
+        return response_;
+    }
+
+    const ::txlog::LogResponse &LogResponse() const
     {
         return response_;
     }
@@ -67,8 +73,6 @@ public:
     void Reset()
     {
         cntl_.Reset();
-        request_.clear_write_log_request();
-        response_.clear_write_log_response();
     }
 
 private:

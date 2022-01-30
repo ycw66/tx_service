@@ -6,21 +6,31 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 
 LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
-                             Catalog *catalog)
-    : node_id_(node_id), timer_terminate_(false)
+                             CatalogFactory *catalog_factory,
+                             store::DataStoreWriteHandler *store_hd)
+    : store_hd_(store_hd),
+      node_id_(node_id),
+      timer_terminate_(false),
+      catalog_factory_(catalog_factory)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();
+    timer_thd_ = std::thread([this] { TimerRun(); });
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
         cc_shards_.emplace_back(std::make_unique<CcShard>(
-            thd_idx, core_cnt, ts_base, node_id, catalog));
+            thd_idx, core_cnt, ts_base, node_id, *this, catalog_factory_));
     }
+}
 
-    timer_thd_ = std::thread([this] { TimerRun(); });
+LocalCcShards::~LocalCcShards()
+{
+    timer_terminate_.store(true, std::memory_order_release);
+    timer_thd_.join();
+    cc_shards_.clear();
 }
 
 uint64_t LocalCcShards::ClockTs()
@@ -51,5 +61,110 @@ void LocalCcShards::TimerRun()
 
         std::this_thread::sleep_for(2s);
     }
+}
+
+std::pair<const TableSchema *, const TableSchema *>
+    *LocalCcShards::CreateCatalog(const std::string &table_name,
+                                  const std::string &catalog_image,
+                                  uint64_t commit_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+    auto catalog_it = table_catalogs_.try_emplace(table_name);
+    CatalogEntry &catalog_entry = catalog_it.first->second;
+
+    if (catalog_it.second)
+    {
+        // A new catalog entry is created in LocalCcShards.
+
+        if (!catalog_image.empty())
+        {
+            catalog_entry.schema_ = catalog_factory_->CreateTableSchema(
+                table_name, catalog_image, commit_ts);
+            catalog_entry.dirty_schema_ = nullptr;
+
+            catalog_entry.view_.first = catalog_entry.schema_.get();
+            catalog_entry.view_.second = nullptr;
+        }
+        else
+        {
+            catalog_entry.view_.first = nullptr;
+            catalog_entry.view_.second = nullptr;
+        }
+    }
+
+    return &catalog_entry.view_;
+}
+
+std::pair<const TableSchema *, const TableSchema *>
+    *LocalCcShards::CreateDirtyCatalog(const std::string &table_name,
+                                       const std::string &catalog_image,
+                                       uint64_t commit_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+    auto catalog_it = table_catalogs_.find(table_name);
+    if (catalog_it == table_catalogs_.end())
+    {
+        auto em_it = table_catalogs_.try_emplace(table_name);
+        catalog_it = em_it.first;
+    }
+
+    CatalogEntry &catalog_entry = catalog_it->second;
+    if (catalog_entry.dirty_ts_ < commit_ts)
+    {
+        // For idempotency, only installs the dirty version when the input ts is
+        // greater than the existing dirty version (which is always no less than
+        // the committed version).
+        catalog_entry.dirty_ts_ = commit_ts;
+        catalog_entry.dirty_schema_ =
+            catalog_image.size() == 0
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, catalog_image, commit_ts);
+        catalog_entry.view_.second = catalog_entry.dirty_schema_.get();
+    }
+
+    return &catalog_entry.view_;
+}
+
+std::pair<const TableSchema *, const TableSchema *>
+    *LocalCcShards::CommitDirtyCatalog(const std::string &table_name)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+    auto catalog_it = table_catalogs_.find(table_name);
+
+    if (catalog_it == table_catalogs_.end())
+    {
+        return nullptr;
+    }
+
+    CatalogEntry &catalog_entry = catalog_it->second;
+    // The dirty version has been committed before. For idempotency, do not turn
+    // the dirty version to the committed version again.
+    if (catalog_entry.ts_ >= catalog_entry.dirty_ts_)
+    {
+        return &catalog_entry.view_;
+    }
+
+    std::unique_ptr<TableSchema> old_schema = std::move(catalog_entry.schema_);
+    catalog_entry.schema_ = std::move(catalog_entry.dirty_schema_);
+    catalog_entry.dirty_schema_ = nullptr;
+    catalog_entry.ts_ = catalog_entry.dirty_ts_;
+
+    // The new schema is nullptr, when the table is dropped.
+    catalog_entry.view_.first = catalog_entry.schema_ == nullptr
+                                    ? nullptr
+                                    : catalog_entry.schema_.get();
+    catalog_entry.view_.second = nullptr;
+
+    return &catalog_entry.view_;
+}
+
+std::pair<const TableSchema *, const TableSchema *> *LocalCcShards::GetCatalog(
+    const std::string &table_name)
+{
+    std::shared_lock<std::shared_mutex> lk(catalog_mux_);
+    auto catalog_it = table_catalogs_.find(table_name);
+    return catalog_it == table_catalogs_.end() ? nullptr
+                                               : &catalog_it->second.view_;
 }
 }  // namespace txservice

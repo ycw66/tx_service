@@ -61,115 +61,92 @@ void txservice::LocalCcHandler::AcquireWrite(
     }
 }
 
-/*
-  Acquire table write lock on all the shards.
-  Queries like DDL statements need to acquire table level write lock
-  firstly to prevent concurrent DML queries.
- */
-void txservice::LocalCcHandler::AcquireTableWriteLock(
+void txservice::LocalCcHandler::AcquireWriteAll(
     const TableName &table_name,
-    const TxId &txid,
+    const TxKey &key,
+    NodeGroupId ng_id,
+    TxNumber txn,
     int64_t tx_term,
-    uint64_t tx_number,
-    CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hd_res)
+    bool is_insert,
+    CcHandlerResult<AcquireAllResult> &hres,
+    CcProtocol proto,
+    LockType lk_type)
 {
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-
-    // sends requests to all the local shards and remote nodes.
-    // expect to receive one response from each remote nodes and
-    // one response from each local shards.
-    uint32_t dependent_cnt = ng_cnt - 1 + cc_shards_.Count();
-    hd_res.SetRefCnt(dependent_cnt);
-
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.node_id_)
     {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
-        {
-            std::unordered_map<uint32_t, int64_t> &ng_term_map = hd_res.Value();
-
-            // record the node term when acquiring the table write lock.
-            // For ccnode with multiple ccshards, we only get the term
-            // once.
-            int64_t ng_term = Sharder::Instance().LeaderTerm(node_id);
-            if (ng_term < 0)
-            {
-                hd_res.SetError(-1);
-                continue;
-            }
-            ng_term_map.try_emplace(node_id, ng_term);
-
-            for (uint32_t core_id = 0; core_id < cc_shards_.Count(); ++core_id)
-            {
-                AcquireTableWriteLockCC *req =
-                    table_write_lock_pool.NextRequest();
-
-                req->Set(&table_name,
-                         &txid,
-                         tx_number,
-                         cc_shards_.node_id_,
-                         &hd_res);
-
-                cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
-            }
-        }
-        else
-        {
-            remote_hd_.AcquireTableWriteLock(cc_shards_.node_id_,
-                                             table_name,
-                                             txid,
-                                             tx_term,
-                                             tx_number,
-                                             ng_id,
-                                             hd_res);
-        }
+        hres.Value().remote_ack_cnt_ = nullptr;
+        AcquireAllCc *req = acquire_all_pool_.NextRequest();
+        req->Set(&table_name,
+                 &key,
+                 ng_id,
+                 txn,
+                 tx_term,
+                 is_insert,
+                 &hres,
+                 proto,
+                 lk_type);
+        // The request is dispatched to the first core and then passed to
+        // remaining cores consecutively.
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
+    }
+    else
+    {
+        remote_hd_.AcquireWriteAll(cc_shards_.node_id_,
+                                   table_name,
+                                   key,
+                                   ng_id,
+                                   txn,
+                                   tx_term,
+                                   is_insert,
+                                   hres,
+                                   proto,
+                                   lk_type);
     }
 }
 
-void txservice::LocalCcHandler::ReleaseTableWriteLock(
-    const TableName &table_name,
-    const TxId &txid,
-    int64_t tx_term,
-    uint64_t tx_number,
-    CcHandlerResult<Void> &hd_res)
+void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
+                                             const TxKey &key,
+                                             TxRecord &rec,
+                                             NodeGroupId ng_id,
+                                             uint64_t tx_number,
+                                             int64_t tx_term,
+                                             uint64_t commit_ts,
+                                             CcHandlerResult<Void> &hres,
+                                             DmlOperation dml_op,
+                                             PostWriteType post_write_type)
 {
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-
-    // sends requests to all the local shards and remote nodes.
-    // expect to receive one response from each remote nodes and
-    // one response from each local shards.
-    uint32_t dependent_cnt = ng_cnt - 1 + cc_shards_.Count();
-    hd_res.SetRefCnt(dependent_cnt);
-
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.node_id_)
     {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
-        {
-            for (uint32_t core_id = 0; core_id < cc_shards_.Count(); ++core_id)
-            {
-                ReleaseTableWriteLockCC *req =
-                    release_table_write_lock_pool.NextRequest();
+        PostWriteAllCc *req = postwrite_all_pool_.NextRequest();
+        req->Set(&table_name,
+                 &key,
+                 ng_id,
+                 tx_number,
+                 commit_ts,
+                 &rec,
+                 dml_op,
+                 &hres,
+                 post_write_type);
 
-                req->Set(&table_name,
-                         &txid,
-                         tx_number,
-                         cc_shards_.node_id_,
-                         &hd_res);
-
-                cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
-            }
-        }
-        else
-        {
-            remote_hd_.ReleaseTableWriteLock(cc_shards_.node_id_,
-                                             table_name,
-                                             txid,
-                                             tx_term,
-                                             tx_number,
-                                             ng_id,
-                                             hd_res);
-        }
+        // The request is dispatched to the first core and then passed to
+        // remaining cores consecutively.
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
+    }
+    else
+    {
+        remote_hd_.PostWriteAll(cc_shards_.node_id_,
+                                table_name,
+                                key,
+                                rec,
+                                ng_id,
+                                tx_number,
+                                tx_term,
+                                commit_ts,
+                                hres,
+                                dml_op,
+                                post_write_type);
     }
 }
 
@@ -242,106 +219,6 @@ void txservice::LocalCcHandler::PostRead(
                             cce_addr,
                             hres,
                             protocol);
-    }
-}
-
-/*
-  Postprocess of CREATE TABLE statement.
-  Persist table catalog and refresh monograph share on runtime
- */
-void txservice::LocalCcHandler::CommitCreateTable(
-    const TableName &table_name,
-    const unsigned char *catalog_image_,
-    size_t catalog_length_,
-    int64_t tx_term,
-    const TxId &txid,
-    uint64_t ts,
-    CcHandlerResult<Void> &hresult)
-{
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-
-    // sends requests to all the local shards and remote nodes.
-    // expect to receive one response from each remote nodes and
-    // one response from each local shards.
-    uint32_t dependent_cnt = ng_cnt - 1 + cc_shards_.Count();
-    hresult.SetRefCnt(dependent_cnt);
-    std::string catalog_str(
-        (char *) const_cast<unsigned char *>(catalog_image_), catalog_length_);
-
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
-    {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
-        {
-            for (uint32_t core_id = 0; core_id < cc_shards_.Count(); ++core_id)
-            {
-                CommitCreateTableCC *req =
-                    commit_create_table_pool.NextRequest();
-                // only local request is responsible for creating table
-                // in Cassandra
-                bool is_local_req = true;
-                req->Set(
-                    &table_name, catalog_str, node_id, &hresult, is_local_req);
-                cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
-            }
-        }
-        else
-        {
-            remote_hd_.CommitCreateTable(cc_shards_.node_id_,
-                                         table_name,
-                                         catalog_str,
-                                         tx_term,
-                                         txid,
-                                         ts,
-                                         ng_id,
-                                         hresult);
-        }
-    }
-}
-
-/*
-  Postprocess of DROP TABLE statement.
-  Delete table catalog and refresh monograph share on runtime
- */
-void txservice::LocalCcHandler::CommitDropTable(const TableName &table_name,
-                                                int64_t tx_term,
-                                                const TxId &txid,
-                                                uint64_t ts,
-                                                CcHandlerResult<Void> &hresult)
-{
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-
-    // sends requests to all the local shards and remote nodes.
-    // expect to receive one response from each remote nodes and
-    // one response from each local shards.
-    uint32_t dependent_cnt = ng_cnt - 1 + cc_shards_.Count();
-    hresult.SetRefCnt(dependent_cnt);
-
-    for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
-    {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_)
-        {
-            for (uint32_t core_id = 0; core_id < cc_shards_.Count(); ++core_id)
-            {
-                CommitDropTableCC *req = commit_drop_table_pool.NextRequest();
-                // only local request is responsible for dropping table
-                // in Cassandra
-                bool is_local_req = true;
-                req->Set(&table_name, node_id, &hresult, is_local_req);
-                cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
-            }
-        }
-        else
-        {
-            remote_hd_.CommitDropTable(cc_shards_.node_id_,
-                                       table_name,
-                                       tx_term,
-                                       txid,
-                                       ts,
-                                       ng_id,
-                                       hresult);
-        }
     }
 }
 
@@ -457,6 +334,59 @@ void txservice::LocalCcHandler::ReadOutside(
     }
 }
 
+void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
+                                          const TxKey &key,
+                                          TxRecord &record,
+                                          ReadType read_type,
+                                          uint64_t tx_number,
+                                          int64_t tx_term,
+                                          const uint64_t ts,
+                                          CcHandlerResult<ReadKeyResult> &hres,
+                                          IsolationLevel iso_level,
+                                          CcProtocol proto)
+{
+    hres.Value().rec_ = &record;
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
+    CcEntryAddr &cce_addr = hres.Value().cce_addr_;
+    cce_addr.SetNodeGroupId(cc_ng_id);
+    cce_addr.SetCce(0, -1);
+
+    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
+    int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+
+    if (term < 0)
+    {
+        // When a tx starts, the tx can only be bound to a native cc node who is
+        // the leader. Since a read local request is dispatched to the same
+        // shard to which the tx is bound, if the native cc node is not the
+        // leader now, returns an error.
+        hres.SetError(-1);
+        return;
+    }
+
+    ReadCc *read_req = read_pool.NextRequest();
+    read_req->Set(&table_name,
+                  &key,
+                  shard_code,
+                  &record,
+                  read_type,
+                  tx_number,
+                  tx_term,
+                  ts,
+                  &hres,
+                  iso_level,
+                  proto);
+
+    int8_t err_code = 0;
+    CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id, err_code);
+    // For read local requests, target cc maps should be initialized when the cc
+    // shard is initialized.
+    assert(ccm != nullptr);
+
+    ccm->Execute(*read_req);
+}
+
 void txservice::LocalCcHandler::ScanOpen(
     const TableName &table_name,
     ScanIndexType index_type,
@@ -481,8 +411,9 @@ void txservice::LocalCcHandler::ScanOpen(
     }
 
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    size_t core_cnt = cc_shards_.Count();
     // A scan sends requests to local cores and remote cc nodes.
-    uint32_t dependent_cnt = ng_cnt - 1 + cc_shards_.Count();
+    uint32_t dependent_cnt = ng_cnt - 1 + core_cnt;
     hd_res.SetRefCnt(dependent_cnt);
 
     ScanOpenResult &open_result = hd_res.Value();
@@ -517,7 +448,7 @@ void txservice::LocalCcHandler::ScanOpen(
                 continue;
             }
 
-            for (uint32_t core_id = 0; core_id < cc_shards_.Count(); ++core_id)
+            for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
             {
                 uint32_t shard_code = (ng_id << 10) + core_id;
                 ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
@@ -712,58 +643,6 @@ void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
     hres.SetFinished();
 }
 
-void txservice::LocalCcHandler::FindCatalogInCCShard(
-    const TableName &table_name,
-    std::string *catalog_content,
-    uint64_t tx_number,
-    CcHandlerResult<bool> &hres)
-{
-    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-
-    FindCatalogCC *req = commit_find_catalog_pool.NextRequest();
-    req->Set(&table_name, catalog_content, tx_number, &hres);
-
-    // Put the request in the queue if failed to get read intention.
-    if (!ccs.AcquireTableReadIntention(table_name, req))
-    {
-        return;
-    }
-
-    // FindCatalog immediately from local ccshard.
-    bool ret = ccs.FindCatalog(table_name, catalog_content);
-
-    hres.SetValue(ret);
-    hres.SetFinished();
-
-    req->Free();
-}
-
-void txservice::LocalCcHandler::CheckCatalogVersionInCCShard(
-    const TableName &table_name,
-    std::string *source_version,
-    uint64_t tx_number,
-    CcHandlerResult<bool> &hres)
-{
-    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-
-    CheckCatalogCC *req = commit_check_catalog_pool.NextRequest();
-    req->Set(&table_name, source_version, tx_number, &hres);
-
-    // Put the request in the queue if failed to get read intention.
-    if (!ccs.AcquireTableReadIntention(table_name, req))
-    {
-        return;
-    }
-
-    // Get CheckCatalogVersion immediately from local ccshard.
-    bool ret = ccs.CheckCatalogVersion(table_name, *source_version);
-
-    hres.SetValue(ret);
-    hres.SetFinished();
-
-    req->Free();
-}
-
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                             const std::string &fault_type,
                                             int64_t tx_term,
@@ -790,21 +669,15 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
     }
 }
 
-// release all the acquired table level locks for all the opened tables.
-void txservice::LocalCcHandler::ReleaseAllTableLocks(
-    std::unordered_set<std::string> opened_table_set,
-    uint64_t tx_number,
-    CcHandlerResult<bool> &hres)
+void txservice::LocalCcHandler::DataStoreUpsertTable(
+    const TableName &table_name,
+    const TableName &kv_table_name,
+    const TableSchema *schema,
+    bool is_deleted,
+    CcHandlerResult<Void> &hres)
 {
-    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-
-    for (const auto &elem : opened_table_set)
-    {
-        ccs.ReleaseAllTableLocks(elem, tx_number);
-    }
-
-    hres.SetValue(true);
-    hres.SetFinished();
+    cc_shards_.store_hd_->UpsertTable(
+        table_name, kv_table_name, schema, is_deleted, &hres);
 }
 
 /*

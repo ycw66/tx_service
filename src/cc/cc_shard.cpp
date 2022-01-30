@@ -1,11 +1,58 @@
 #include "cc/cc_shard.h"
 
+#include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
 #include "checkpointer.h"
 
 namespace txservice
 {
+CcShard::CcShard(uint16_t core_id,
+                 uint32_t core_cnt,
+                 uint64_t base_ts,
+                 uint32_t node_id,
+                 LocalCcShards &local_shards,
+                 CatalogFactory *catalog_factory)
+    : node_id_(node_id),
+      core_id_(core_id),
+      core_cnt_(core_cnt),
+      local_shards_(local_shards),
+      native_ccms_(),
+      failover_ccms_(),
+      cc_queue_(256),
+      req_buf_(),
+      tx_vec_(),
+      next_tx_idx_(0),
+      next_tx_ident_(0),
+      ts_base_(base_ts),
+      head_cce_(nullptr),
+      tail_cce_(nullptr),
+      size_(0),
+      ckpter_(nullptr),
+      processor_sleep_(false),
+      catalog_factory_(catalog_factory)
+{
+    tx_vec_.reserve(128);
+    for (int idx = 0; idx < 128; ++idx)
+    {
+        tx_vec_.emplace_back(idx);
+    }
+
+    head_cce_.lru_prev_ = nullptr;
+    head_cce_.lru_next_ = &tail_cce_;
+    tail_cce_.lru_prev_ = &head_cce_;
+    tail_cce_.lru_next_ = nullptr;
+
+    thd_token_.reserve((size_t) core_cnt + 1);
+    for (size_t idx = 0; idx < core_cnt; ++idx)
+    {
+        thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
+    }
+
+    native_ccms_.try_emplace(catalog_ccm_name,
+                             std::make_unique<CatalogCcMap>(this));
+}
+
 CcMap *CcShard::GetCcm(const TableName &table_name,
                        uint32_t node_group,
                        int8_t &error_code)
@@ -26,13 +73,6 @@ CcMap *CcShard::GetCcm(const TableName &table_name,
     }
     else
     {
-        auto native_table_it = native_ccms_.find(table_name);
-        if (native_table_it == native_ccms_.end())
-        {
-            error_code = 1;
-            return nullptr;
-        }
-
         auto table_it = failover_ccms_.try_emplace(table_name);
         std::unordered_map<uint32_t, CcMap::uptr> &ng_ccm =
             table_it.first->second;
@@ -44,6 +84,13 @@ CcMap *CcShard::GetCcm(const TableName &table_name,
         }
         else
         {
+            auto native_table_it = native_ccms_.find(table_name);
+            if (native_table_it == native_ccms_.end())
+            {
+                error_code = 1;
+                return nullptr;
+            }
+
             auto new_ccm_it = ng_ccm.try_emplace(
                 node_group, native_table_it->second->Clone());
             return new_ccm_it.first->second.get();
@@ -207,7 +254,6 @@ void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
 
     TxLockInfo &lk_info = tx_it->second;
     lk_info.cce_list_.erase(cce_ptr);
-
     if (lk_info.cce_list_.empty())
     {
         lock_holding_txs_.erase(tx_it);
@@ -302,5 +348,115 @@ size_t CcShard::Clean()
     }
 
     return free_cnt;
+}
+
+std::pair<const TableSchema *, const TableSchema *> *CcShard::CreateCatalog(
+    const TableName &table_name,
+    const std::string &catalog_image,
+    uint64_t commit_ts)
+{
+    return local_shards_.CreateCatalog(table_name, catalog_image, commit_ts);
+}
+
+std::pair<const TableSchema *, const TableSchema *>
+    *CcShard::CreateDirtyCatalog(const std::string &table_name,
+                                 const std::string &catalog_image,
+                                 uint64_t commit_ts)
+{
+    return local_shards_.CreateDirtyCatalog(
+        table_name, catalog_image, commit_ts);
+}
+
+std::pair<const TableSchema *, const TableSchema *>
+    *CcShard::CommitDirtyCatalog(const TableName &table_name)
+{
+    return local_shards_.CommitDirtyCatalog(table_name);
+}
+
+std::pair<const TableSchema *, const TableSchema *> *CcShard::GetCatalog(
+    const std::string &table_name)
+{
+    return local_shards_.GetCatalog(table_name);
+}
+
+void CcShard::FetchCatalog(const TableName &table_name,
+                           CcRequestBase *requester)
+{
+    auto tab_it =
+        fetch_catalog_reqs_.try_emplace(table_name, table_name, *this);
+    FetchCatalogCc &fetch_req = tab_it.first->second;
+    fetch_req.AddRequester(requester);
+
+    if (fetch_req.RequesterCount() == 1)
+    {
+        local_shards_.store_hd_->FetchTableCatalog(table_name, &fetch_req);
+    }
+}
+
+void CcShard::RemoveFetchRequest(const TableName &table_name)
+{
+    fetch_catalog_reqs_.erase(table_name);
+}
+
+void CcShard::CreatePkCcMap(const TableName &table_name,
+                            const TableSchema *table_schema,
+                            NodeGroupId ng_id)
+{
+    if (ng_id == node_id_)
+    {
+        native_ccms_.try_emplace(
+            table_name, catalog_factory_->CreatePkCcMap(table_schema, this));
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.try_emplace(table_name).first;
+        std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+            fail_ccm_it->second;
+        ccms.try_emplace(ng_id,
+                         catalog_factory_->CreatePkCcMap(table_schema, this));
+    }
+}
+
+void CcShard::CreateSkCcMap(const TableName &index_name,
+                            const TableSchema *table_schema,
+                            NodeGroupId ng_id)
+{
+    if (ng_id == node_id_)
+    {
+        native_ccms_.try_emplace(
+            index_name,
+            catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
+        std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+            fail_ccm_it->second;
+        ccms.try_emplace(
+            ng_id,
+            catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+    }
+}
+
+void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
+{
+    if (ng_id == node_id_)
+    {
+        native_ccms_.erase(table_name);
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.find(table_name);
+        if (fail_ccm_it != failover_ccms_.end())
+        {
+            std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+                fail_ccm_it->second;
+            ccms.erase(ng_id);
+            if (ccms.empty())
+            {
+                failover_ccms_.erase(fail_ccm_it);
+            }
+        }
+    }
 }
 }  // namespace txservice

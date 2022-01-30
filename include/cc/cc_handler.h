@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "catalog_factory.h"
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
 #include "ccm_scanner.h"
@@ -68,39 +69,24 @@ public:
      */
     virtual void AcquireWriteAll(const TableName &table_name,
                                  const TxKey &key,
-                                 const TxId &txid,
+                                 NodeGroupId ng_id,
+                                 TxNumber txn,
                                  int64_t tx_term,
-                                 uint64_t ts,
                                  bool is_insert,
-                                 CcHandlerResult<AcquireKeyResult> &hres,
-                                 CcProtocol proto) = 0;
+                                 CcHandlerResult<AcquireAllResult> &hres,
+                                 CcProtocol proto,
+                                 LockType lk_type) = 0;
 
-    /// <summary>
-    /// Acquire table level write lock.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="txid"></param>
-    /// <param name="tx_number"></param>
-    /// <param name="hres"></param>
-    virtual void AcquireTableWriteLock(
-        const TableName &table_name,
-        const TxId &txid,
-        int64_t tx_term,
-        uint64_t tx_number,
-        CcHandlerResult<std::unordered_map<uint32_t, int64_t>> &hres) = 0;
-
-    /// <summary>
-    /// Release table level write lock.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="txid"></param>
-    /// <param name="tx_number"></param>
-    /// <param name="hres"></param>
-    virtual void ReleaseTableWriteLock(const TableName &table_name,
-                                       const TxId &txid,
-                                       int64_t tx_term,
-                                       uint64_t tx_number,
-                                       CcHandlerResult<Void> &hres) = 0;
+    virtual void PostWriteAll(const TableName &table_name,
+                              const TxKey &key,
+                              TxRecord &rec,
+                              NodeGroupId ng_id,
+                              uint64_t tx_number,
+                              int64_t tx_term,
+                              uint64_t ts,
+                              CcHandlerResult<Void> &hres,
+                              DmlOperation dml_op,
+                              PostWriteType post_write_type) = 0;
 
     /**
      * @brief Post-processes a write key. Post-processing clears the write lock,
@@ -155,36 +141,6 @@ public:
                           CcHandlerResult<std::vector<TxId>> &hres,
                           CcProtocol protocol) = 0;
 
-    /// <summary>
-    /// PostProcess for create table.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="catalog_image_"></param>
-    /// <param name="catalog_length_"></param>
-    /// <param name="txid"></param>
-    /// <param name="ts"></param>
-    /// <param name="hresult"></param>
-    virtual void CommitCreateTable(const TableName &table_name,
-                                   const unsigned char *catalog_image_,
-                                   size_t catalog_length_,
-                                   int64_t tx_term,
-                                   const TxId &txid,
-                                   uint64_t ts,
-                                   CcHandlerResult<Void> &hresult) = 0;
-
-    /// <summary>
-    /// PostProcess for drop table.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="txid"></param>
-    /// <param name="ts"></param>
-    /// <param name="hresult"></param>
-    virtual void CommitDropTable(const TableName &table_name,
-                                 int64_t tx_term,
-                                 const TxId &txid,
-                                 uint64_t ts,
-                                 CcHandlerResult<Void> &hresult) = 0;
-
     /**
      * @brief Reads the input key and returns the key's record. The request puts
      * a read lock (for 2PL) or intention (for OCC/MVCC) on the key's cc entry,
@@ -232,6 +188,35 @@ public:
                              bool is_deleted,
                              const CcEntryAddr &cce_addr,
                              CcHandlerResult<ReadKeyResult> &hres) = 0;
+
+    /**
+     * @brief ReadLocal is used to read replicated cc maps, which contain a cc
+     * map replica in every shard. An optimization for ReadLocal is to execute
+     * the request directly without putting the request into the execution
+     * queue.
+     *
+     * @param table_name Table name of the input key
+     * @param key The key to be read
+     * @param rec Key's record to be filled
+     * @param read_type Read type
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param ts Start timestamp of the tx
+     * @param hres Result handler of the read request
+     * @param iso_level Isolation level
+     * @param proto Concurrency control (cc) protocol
+     */
+    virtual void ReadLocal(
+        const TableName &table_name,
+        const TxKey &key,
+        TxRecord &record,
+        ReadType read_type,
+        uint64_t tx_number,
+        int64_t tx_term,
+        const uint64_t ts,
+        CcHandlerResult<ReadKeyResult> &hres,
+        IsolationLevel iso_level = IsolationLevel::RepeatableRead,
+        CcProtocol proto = CcProtocol::Locking) = 0;
 
     virtual void ScanOpen(
         const TableName &table_name,
@@ -322,16 +307,6 @@ public:
                                  TxnStatus status,
                                  CcHandlerResult<Void> &) = 0;
 
-    virtual void FindCatalogInCCShard(const TableName &table_name,
-                                      std::string *catalog_content,
-                                      uint64_t tx_number,
-                                      CcHandlerResult<bool> &hres) = 0;
-
-    virtual void CheckCatalogVersionInCCShard(const TableName &table_name,
-                                              std::string *source_version,
-                                              uint64_t tx_number,
-                                              CcHandlerResult<bool> &hres) = 0;
-
     virtual void FaultInject(const std::string &fault_name,
                              const std::string &fault_type,
                              int64_t tx_term,
@@ -339,10 +314,11 @@ public:
                              int node_id,
                              CcHandlerResult<bool> &hres) = 0;
 
-    virtual void ReleaseAllTableLocks(
-        std::unordered_set<std::string> opened_table_set,
-        uint64_t tx_number,
-        CcHandlerResult<bool> &hres) = 0;
+    virtual void DataStoreUpsertTable(const TableName &table_name,
+                                      const TableName &kv_table_name,
+                                      const TableSchema *schema,
+                                      bool is_deleted,
+                                      CcHandlerResult<Void> &hres) = 0;
 
     virtual uint32_t GetNodeId() const = 0;
 };

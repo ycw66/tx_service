@@ -2,6 +2,7 @@
 
 #include <map>
 
+#include "cc/cc_req_base.h"
 #include "ccm_scanner.h"
 #include "tx_key.h"
 #include "type.h"
@@ -13,11 +14,12 @@ namespace remote
 struct RemoteScanOpen;
 struct RemoteScanNextBatch;
 struct RemoteReadOutside;
-struct RemoteAcquireTableWriteLockCC;
 }  // namespace remote
 
 struct AcquireCc;
+struct AcquireAllCc;
 struct PostWriteCc;
+struct PostWriteAllCc;
 struct PostReadCc;
 struct ReadCc;
 struct ScanCloseCc;
@@ -29,12 +31,6 @@ struct CommitSkCc;
 struct CkptUpdateCc;
 struct CkptTs;
 struct ReplayLogCc;
-struct AcquireTableWriteLockCC;
-struct ReleaseTableWriteLockCC;
-struct CommitCreateTableCC;
-struct CommitDropTableCC;
-struct FindCatalogCC;
-struct CheckCatalogCC;
 struct FaultInjectCC;
 
 class CcShard;
@@ -51,7 +47,9 @@ public:
     virtual ~CcMap() = default;
 
     virtual bool Execute(AcquireCc &req) = 0;
+    virtual bool Execute(AcquireAllCc &req) = 0;
     virtual bool Execute(PostWriteCc &req) = 0;
+    virtual bool Execute(PostWriteAllCc &req) = 0;
     virtual bool Execute(PostReadCc &req) = 0;
     virtual bool Execute(ReadCc &req) = 0;
     virtual bool Execute(ScanCloseCc &req) = 0;
@@ -63,13 +61,6 @@ public:
     virtual bool Execute(CkptScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
-    virtual bool Execute(AcquireTableWriteLockCC &req) = 0;
-    virtual bool Execute(remote::RemoteAcquireTableWriteLockCC &req) = 0;
-    virtual bool Execute(CommitCreateTableCC &req) = 0;
-    virtual bool Execute(ReleaseTableWriteLockCC &req) = 0;
-    virtual bool Execute(CommitDropTableCC &req) = 0;
-    virtual bool Execute(FindCatalogCC &req) = 0;
-    virtual bool Execute(CheckCatalogCC &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
 
     virtual std::unique_ptr<CcScanner> CreateScanner(
@@ -107,9 +98,19 @@ public:
     virtual TableType Type() const = 0;
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
-
     virtual std::unique_ptr<CcMap> Clone() const = 0;
 
     CcShard *const shard_;
+
+protected:
+    /**
+     * @brief After the input request is executed at the current shard, moves
+     * the request to another shard for execution.
+     *
+     * @param cc_req The cc request executed at the cc map.
+     * @param target_core_id The destination shard/core ID to which the request
+     * is moved.
+     */
+    void MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id);
 };
 }  // namespace txservice

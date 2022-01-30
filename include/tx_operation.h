@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog_key_record.h"
 #include "cc_handler.h"
 #include "log_closure.h"
 #include "tx_key.h"
@@ -27,6 +28,8 @@ public:
 
     ReadType read_type_{ReadType::Inside};
     CcHandlerResult<ReadKeyResult> cc_result_;
+    CcProtocol protocol_{CcProtocol::OCC};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
 };
 
 struct SetCommitTsOperation : TransactionOperation
@@ -78,54 +81,6 @@ public:
     std::atomic<int32_t> remote_ack_cnt_{0};
 };
 
-struct AcquireTableWriteLockOp : TransactionOperation
-{
-public:
-    AcquireTableWriteLockOp(TransactionExecution *txm) : cc_result_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<std::unordered_map<uint32_t, int64_t>> cc_result_;
-};
-
-struct ReleaseTableWriteLockOp : TransactionOperation
-{
-public:
-    ReleaseTableWriteLockOp(TransactionExecution *txm) : cc_result_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<Void> cc_result_;
-};
-
-struct FindCatalogInCCShardOp : TransactionOperation
-{
-public:
-    FindCatalogInCCShardOp(TransactionExecution *txm) : cc_result_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<bool> cc_result_;
-};
-
-struct CheckCatalogInCCShardOp : TransactionOperation
-{
-public:
-    CheckCatalogInCCShardOp(TransactionExecution *txm) : cc_result_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<bool> cc_result_;
-};
-
 struct FaultInjectOp : TransactionOperation
 {
 public:
@@ -136,33 +91,6 @@ public:
     void Forward(TransactionExecution *txm) override;
 
     CcHandlerResult<bool> cc_result_;
-};
-
-struct ReleaseAllTableLocksOp : TransactionOperation
-{
-public:
-    ReleaseAllTableLocksOp(TransactionExecution *txm) : cc_result_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<bool> cc_result_;
-};
-
-struct WriteDDLLogOp : TransactionOperation
-{
-public:
-    WriteDDLLogOp(TransactionExecution *txm)
-        : cc_result_(txm), log_closure_(&cc_result_)
-    {
-    }
-
-    void Reset();
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<Void> cc_result_;
-    LogClosure log_closure_;
 };
 
 struct PushConflictTxnCommitTsLowerBound : TransactionOperation
@@ -181,8 +109,8 @@ struct WriteToLog : TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    CcHandlerResult<Void> res_;
-    LogClosure log_closure_{&res_};
+    CcHandlerResult<Void> hd_result_;
+    LogClosure log_closure_{&hd_result_};
 };
 
 struct UpdateTxnStatus : TransactionOperation
@@ -205,17 +133,6 @@ struct PostProcessOp : TransactionOperation
     std::vector<CcHandlerResult<std::vector<TxId>>> read_results_;
     size_t acquire_write_cnt_{0};
     std::atomic<size_t> finish_cnt_{0};
-};
-
-struct PostProcessDDLOp : TransactionOperation
-{
-    PostProcessDDLOp(TransactionExecution *txm) : results_(txm)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<Void> results_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -267,6 +184,154 @@ struct ScanNextOperation : TransactionOperation
     CcHandlerResult<ScanNextResult> cc_result_;
     size_t alias_{0};
     CcScanner *scanner_{nullptr};
+};
+
+struct AcquireAllOp : public TransactionOperation
+{
+    AcquireAllOp(TransactionExecution *txm);
+    void Resize(size_t new_size);
+    void Reset(size_t node_cnt);
+    void Forward(TransactionExecution *txm) override;
+
+    std::vector<CcHandlerResult<AcquireAllResult>> hd_results_;
+    uint32_t upload_cnt_{0};
+    std::atomic<uint32_t> finish_cnt_{0};
+    std::atomic<uint32_t> fail_cnt_{0};
+    // Number of remote keys on which the upload operation needs to acquire
+    // write intentions/locks.
+    std::atomic<int32_t> remote_ack_cnt_{0};
+
+    const TableName *table_name_;
+    const TxKey *key_{nullptr};
+    LockType lk_type_{LockType::WriteIntent};
+    CcProtocol protocol_{CcProtocol::OCC};
+};
+
+struct PostWriteAllOp : public TransactionOperation
+{
+    PostWriteAllOp(TransactionExecution *txm);
+    void Reset(uint32_t ng_cnt);
+    void Resize(uint32_t ng_cnt);
+    void Forward(TransactionExecution *txm) override;
+
+    std::vector<CcHandlerResult<Void>> hd_results_;
+    size_t upload_cnt_{0};
+    std::atomic<size_t> finish_cnt_{0};
+
+    const TableName *table_name_{nullptr};
+    const TxKey *key_{nullptr};
+    TxRecord *rec_{nullptr};
+    DmlOperation dml_op_{DmlOperation::Upsert};
+    PostWriteType write_type_{PostWriteType::PrepareCommit};
+};
+
+struct DataStoreOp : public TransactionOperation
+{
+    DataStoreOp(TransactionExecution *txm);
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    CcHandlerResult<Void> result_;
+};
+
+struct DsUpsertTableOp : public DataStoreOp
+{
+    DsUpsertTableOp() = delete;
+    DsUpsertTableOp(const TableName *table_name,
+                    const TableName *kv_table_name,
+                    bool is_deleted,
+                    TransactionExecution *txm);
+
+    using DataStoreOp::Forward;
+
+    const TableName *table_name_;
+    const TableName *kv_table_name_;
+    const TableSchema *table_schema_;
+    bool is_deleted_;
+};
+
+struct SchemaOp : public TransactionOperation
+{
+    SchemaOp() = delete;
+    SchemaOp(const TableName &table_name,
+             const char *image_ptr,
+             size_t image_len);
+
+    CatalogKey table_key_;
+    CatalogRecord catalog_rec_;
+};
+
+struct UpsertTableOp : public SchemaOp
+{
+    UpsertTableOp() = delete;
+    UpsertTableOp(const TableName &table_name,
+                  const TableName &kv_table_name,
+                  const char *image_ptr,
+                  size_t len,
+                  bool is_deleted,
+                  TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+
+    bool is_deleted_{false};
+    /**
+     * @brief The current stage of this multi-stage schema operation.
+     *
+     */
+    TransactionOperation *op_{nullptr};
+    /**
+     * @brief Acquires write intents on the table's catalog in all nodes to
+     * prevent concurrent schema modifications.
+     *
+     */
+    AcquireAllOp acquire_all_intent_op_;
+    /**
+     * @brief Flushes the prepare log to the log service. The schema operation
+     * is guaranteed to succeed after this stage.
+     *
+     */
+    WriteToLog prepare_log_op_;
+    /**
+     * @brief Installs the dirty schema in the tx service and returns a local
+     * view (pointer) of it.
+     *
+     */
+    PostWriteAllOp post_all_intent_op_;
+    /**
+     * @brief Creates/deletes the data store table and persists/removes the
+     * binary representation of the catalog in the data store.
+     *
+     */
+    DsUpsertTableOp upsert_kv_table_op_;
+    /**
+     * @brief Upgrades acquired write intents to write locks in all nodes.
+     *
+     */
+    AcquireAllOp acquire_all_lock_op_;
+    /**
+     * @brief Flushes the commit log to the log service. The commit log confirms
+     * that the data store operation succeeds and does not need redo upon
+     * failures.
+     *
+     */
+    WriteToLog commit_log_op_;
+    /**
+     * @brief Removes write locks in all nodes. If the schema operation
+     * succeeds, also installs the new schema in all nodes.
+     *
+     */
+    PostWriteAllOp post_all_lock_op_;
+    /**
+     * @brief The last log operation that removes the schema record from the log
+     * state machine.
+     *
+     */
+    WriteToLog clean_log_op_;
+
+private:
+    void FlushPrepareLog(TransactionExecution *txm);
+    void FlushCommitLog(TransactionExecution *txm);
+    void FlushCleanLog(TransactionExecution *txm);
 };
 
 }  // namespace txservice

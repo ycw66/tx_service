@@ -158,15 +158,19 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const AcquireResponse &cc_res = msg->acquire_resp();
         const CceAddr_msg &cce_addr_res = cc_res.cce_addr();
+        AcquireKeyResult &acq_res = hd_res->Value();
 
         if (cc_res.error_code() != 0)
         {
+            if (acq_res.cce_addr_.Term() < 0)
+            {
+                acq_res.remote_ack_cnt_->fetch_sub(1);
+            }
+
             hd_res->SetError(cc_res.error_code());
         }
         else
         {
-            AcquireKeyResult &acq_res = hd_res->Value();
-
             if (acq_res.cce_addr_.Term() < 0)
             {
                 if (cce_addr_res.entry_ptr_case() ==
@@ -201,44 +205,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         msg_pool_.enqueue(std::move(msg));
         break;
     }
-    case CcMessage::MessageType::
-        CcMessage_MessageType_AcquireTableWriteLockRequest:
+    case CcMessage::MessageType::CcMessage_MessageType_AcquireAllRequest:
     {
-        RemoteAcquireTableWriteLockCC *acquire_table_req =
-            acquire_table_write_lock_pool.NextRequest();
-
-        // record the node term when acquiring the table write lock. For
-        // ccnode with multiple ccshards, we only get the term once.
-        // the node term is used by log service to indicate the state of node
-        // which holds the table lock.
-        int64_t ng_term =
-            Sharder::Instance().LeaderTerm(local_shards_.NodeId());
-        if (ng_term < 0)
-        {
-            acquire_table_req->Set(std::move(msg), 1, 0);
-            acquire_table_req->Result()->SetError(-1);
-        }
-        else
-        {
-            uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-
-            acquire_table_req->Set(std::move(msg), local_core_cnt, ng_term);
-
-            for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-            {
-                // The acquire table write lock request is directed to all local
-                // shards.
-                local_shards_.EnqueueCcRequest(core_id, acquire_table_req);
-            }
-        }
+        RemoteAcquireAll *acquire_all_req = acquire_all_pool_.NextRequest();
+        acquire_all_req->Set(std::move(msg));
+        local_shards_.EnqueueCcRequest(0, acquire_all_req);
         break;
     }
-    case CcMessage::MessageType::
-        CcMessage_MessageType_AcquireTableWriteLockResponse:
+    case CcMessage::MessageType::CcMessage_MessageType_AcquireAllResponse:
     {
-        assert(msg->has_acquire_table_resp());
-        CcHandlerResult<std::unordered_map<uint32_t, int64_t>> *hd_res =
-            nullptr;
+        assert(msg->has_acquire_all_resp());
+
+        CcHandlerResult<AcquireAllResult> *hd_res = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -250,75 +228,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res = reinterpret_cast<
-                CcHandlerResult<std::unordered_map<uint32_t, int64_t>> *>(
+            hd_res = reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
                 msg->handler_addr());
 
             if (hd_res->Txm()->TxNumber() != msg->tx_number())
             {
                 // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete
-                // tx. Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-        }
-
-        const AcquireTableWriteLockResponse &cc_res = msg->acquire_table_resp();
-
-        std::unordered_map<uint32_t, int64_t> &term_map = hd_res->Value();
-        term_map.try_emplace(cc_res.node_id(), cc_res.term());
-
-        if (cc_res.error_code() == 0)
-        {
-            hd_res->SetFinished();
-        }
-        else
-        {
-            hd_res->SetError(cc_res.error_code());
-        }
-
-        msg_pool_.enqueue(std::move(msg));
-        break;
-    }
-    case CcMessage::MessageType::
-        CcMessage_MessageType_ReleaseTableWriteLockRequest:
-    {
-        RemoteReleaseTableWriteLock *release_table_req =
-            release_table_write_lock_pool.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-        release_table_req->Set(std::move(msg), local_core_cnt);
-
-        for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-        {
-            // The release table write lock request is directed to all local
-            // shards.
-            local_shards_.EnqueueCcRequest(core_id, release_table_req);
-        }
-        break;
-    }
-    case CcMessage::MessageType::
-        CcMessage_MessageType_ReleaseTableWriteLockResponse:
-    {
-        assert(msg->has_release_table_resp());
-        CcHandlerResult<Void> *hd_res = nullptr;
-
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
-        int64_t tx_term = msg->tx_term();
-        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-        {
-            // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
-            break;
-        }
-        else
-        {
-            hd_res =
-                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
-            {
-                // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
@@ -326,130 +241,38 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
-        const ReleaseTableWriteLockResponse &cc_res = msg->release_table_resp();
+        const AcquireAllResponse &cc_res = msg->acquire_all_resp();
+        AcquireAllResult &acq_all_res = hd_res->Value();
 
-        if (cc_res.error_code() == 0)
+        if (cc_res.error_code() != 0)
         {
-            hd_res->SetFinished();
-        }
-        else
-        {
-            hd_res->SetError(cc_res.error_code());
-        }
-
-        msg_pool_.enqueue(std::move(msg));
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_CommitCreateTableRequest:
-    {
-        RemoteCommitCreateTable *commit_create_table_req =
-            commit_create_table_pool.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-        commit_create_table_req->Set(std::move(msg), local_core_cnt);
-
-        for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-        {
-            local_shards_.EnqueueCcRequest(core_id, commit_create_table_req);
-        }
-
-        break;
-    }
-    case CcMessage::MessageType::
-        CcMessage_MessageType_CommitCreateTableResponse:
-    {
-        assert(msg->has_commit_create_table_resp());
-
-        CcHandlerResult<Void> *hd_res = nullptr;
-
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
-        int64_t tx_term = msg->tx_term();
-        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-        {
-            // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
-            break;
-        }
-        else
-        {
-            hd_res =
-                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (acq_all_res.node_term_ < 0)
             {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                break;
+                acq_all_res.remote_ack_cnt_->fetch_sub(1);
             }
-        }
 
-        const CommitCreateTableResponse &cc_res =
-            msg->commit_create_table_resp();
-
-        if (cc_res.error_code() == 0)
-        {
-            hd_res->SetFinished();
-        }
-        else
-        {
             hd_res->SetError(cc_res.error_code());
         }
-
-        msg_pool_.enqueue(std::move(msg));
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_CommitDropTableRequest:
-    {
-        RemoteCommitDropTable *commit_drop_table_req =
-            commit_drop_table_pool.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-        commit_drop_table_req->Set(std::move(msg), local_core_cnt);
-
-        for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-        {
-            local_shards_.EnqueueCcRequest(core_id, commit_drop_table_req);
-        }
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_CommitDropTableResponse:
-    {
-        assert(msg->has_commit_drop_table_resp());
-
-        CcHandlerResult<Void> *hd_res = nullptr;
-
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
-        int64_t tx_term = msg->tx_term();
-        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-        {
-            // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
-            break;
-        }
         else
         {
-            hd_res =
-                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (acq_all_res.node_term_ < 0)
             {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                break;
+                acq_all_res.node_term_ = cc_res.node_term();
+                acq_all_res.remote_ack_cnt_->fetch_sub(1);
             }
-        }
 
-        const CommitDropTableResponse &cc_res = msg->commit_drop_table_resp();
-
-        if (cc_res.error_code() == 0)
-        {
-            hd_res->SetFinished();
-        }
-        else
-        {
-            hd_res->SetError(cc_res.error_code());
+            if (!cc_res.is_ack())
+            {
+                // For locking-based protocols, when the acquire request is
+                // blocked in a remote node, the remote node will send an
+                // acknowledgement message to notify the sending tx the cce
+                // address and the node's term. When the acquire request is
+                // unblocked, the response will send back the last validation ts
+                // of the key.
+                acq_all_res.last_vali_ts_ = cc_res.vali_ts();
+                acq_all_res.commit_ts_ = cc_res.commit_ts();
+                hd_res->SetFinished();
+            }
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -674,13 +497,13 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         post_commit->Ccm()->shard_->Enqueue(post_commit);
         break;
     }
-    // case CcMessage::MessageType::CcMessage_MessageType_PostDeleteRequest:
-    // {
-    //     RemotePostDelete *post_del = postdel_pool_.NextRequest();
-    //     post_del->Set(std::move(msg));
-    //     post_del->Ccm()->shard_->Enqueue(post_del);
-    //     break;
-    // }
+    case CcMessage::MessageType::CcMessage_MessageType_PostWriteAllRequest:
+    {
+        RemotePostWriteAll *post_write_all = post_write_all_pool_.NextRequest();
+        post_write_all->Set(std::move(msg));
+        local_shards_.EnqueueCcRequest(0, post_write_all);
+        break;
+    }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
         RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
@@ -977,6 +800,18 @@ CcProtocol CcStreamReceiver::ConvertProtocol(CcProtocolType proto)
     else
     {
         return CcProtocol::OCC;
+    }
+}
+
+PostWriteType CcStreamReceiver::ConvertCommitType(CommitType commit_type)
+{
+    if (commit_type == CommitType::PrepareCommit)
+    {
+        return PostWriteType::PrepareCommit;
+    }
+    else
+    {
+        return PostWriteType::PostCommit;
     }
 }
 }  // namespace remote
