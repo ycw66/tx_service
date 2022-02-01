@@ -89,6 +89,11 @@ const TableName &CatalogKey::Name() const
     return table_name_;
 }
 
+TableName &CatalogKey::Name()
+{
+    return table_name_;
+}
+
 CatalogRecord::CatalogRecord(const std::string &schema_blob)
     : schema_blob_(schema_blob)
 {

@@ -35,10 +35,7 @@ public:
     friend bool operator==(const CatalogKey &lhs, const CatalogKey &rhs);
     friend bool operator<(const CatalogKey &lhs, const CatalogKey &rhs);
     const TableName &Name() const;
-
-    void SetSchema(const Schema *sch)
-    {
-    }
+    TableName &Name();
 
 private:
     TableName table_name_;
