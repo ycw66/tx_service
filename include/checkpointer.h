@@ -200,7 +200,7 @@ public:
             {
                 cv_.wait_for(
                     lk,
-                    600s,
+                    10s,
                     [this]
                     { return status_ != Status::Active || request_ckpt_; });
             }

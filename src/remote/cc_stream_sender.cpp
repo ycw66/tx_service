@@ -28,7 +28,9 @@ void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
     msg_pool_.enqueue(std::move(msg));
 }
 
-bool CcStreamSender::SendMessage(uint32_t node_group_id, const CcMessage &msg)
+bool CcStreamSender::SendMessage(uint32_t node_group_id,
+                                 const CcMessage &msg,
+                                 bool resend)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
 
@@ -64,6 +66,14 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id, const CcMessage &msg)
         }
         else
         {
+            // for resend message, we have already reconnect the stream, if it
+            // still failed to send the message, it possibly means that the
+            // remote node is dead. We should skip resend the message again.
+            if (resend)
+            {
+                break;
+            }
+
             std::lock_guard<std::mutex> lk(outbound_mux_);
 
             // If the stream version is -1, a separate thread has notified
@@ -75,8 +85,15 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id, const CcMessage &msg)
             {
                 to_connect_nodes_.try_emplace(dest_node_id, stream_ver + 1);
                 stream_version.store(-1, std::memory_order_release);
-                out_cv_.notify_one();
             }
+
+            // put the failed message into the resend_message_list.
+            resend_message_list.emplace_back(
+                std::make_unique<ResendMessage>(node_group_id, msg));
+
+            // always wake up connector thread to either reconnect streams or
+            // resend messages.
+            out_cv_.notify_one();
 
             break;
         }
@@ -134,6 +151,14 @@ void CcStreamSender::ConnectStreams()
                 LOG(ERROR) << "Fail to connect the cc stream to node "
                            << outbound_channels_.at(nid).second;
             }
+        }
+
+        // resend the queued messages
+        auto deque_it = resend_message_list.begin();
+        while (deque_it != resend_message_list.end())
+        {
+            SendMessage((*deque_it)->node_group_id_, (*deque_it)->msg_);
+            deque_it = resend_message_list.erase(deque_it);
         }
 
         if (to_connect_nodes_.size() > 0)

@@ -1527,7 +1527,7 @@ bool TransactionExecution::IsTimeOut()
             // current time is greater than the prior one, the tx machine has
             // been stuck in this state for at least 2 seconds.
             state_clock_ = now_ts;
-            return false;
+            return true;
         }
     }
 
