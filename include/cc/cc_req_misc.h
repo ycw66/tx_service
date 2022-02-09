@@ -28,11 +28,17 @@ public:
         return catalog_image_;
     }
 
+    uint64_t &CommitTs()
+    {
+        return commit_ts;
+    }
+
     void SetFinish(RecordStatus status, int err);
 
 private:
     const TableName &table_name_;
     std::string catalog_image_;
+    uint64_t commit_ts;
     CcShard &ccs_;
     std::vector<CcRequestBase *> requesters_;
     RecordStatus status_;

@@ -71,6 +71,8 @@ public:
 
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
+
+                        ccm_->commit_ts = schema_view->version_ts_;
                     }
                     else
                     {
@@ -1364,11 +1366,11 @@ private:
     const uint32_t core_cnt_;
 };
 
-struct ReplayLogCc : public CcRequestBase
+struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 {
 public:
     ReplayLogCc(LogType log_type,
-                NodeGroupId ng_id,
+                uint32_t ng_id,
                 std::string &&table_name,
                 std::string_view &&blob,
                 uint64_t commit_ts,
@@ -1377,7 +1379,6 @@ public:
                 std::condition_variable &cv,
                 uint32_t &finish_cnt)
         : log_type_(log_type),
-          ng_id_(ng_id),
           table_name_str_(table_name),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
@@ -1386,8 +1387,11 @@ public:
           external_cv_(cv),
           finish_cnt_(finish_cnt)
     {
+        table_name_ = &table_name_str_;
+        node_group_id_ = ng_id;
         result_.SetRefCnt(core_cnt);
-        result_.post_lambda_ = [this](CcHandlerResult<int8_t> *res) {
+        result_.post_lambda_ = [this](CcHandlerResult<int8_t> *res)
+        {
             // Notifies the external caller--the log replay handler--that the
             // specified log record has been replayed in all cores of this node.
             std::lock_guard<std::mutex> lk(external_mux_);
@@ -1399,64 +1403,6 @@ public:
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
     ReplayLogCc(ReplayLogCc &&rhs) = delete;
 
-    bool Execute(CcShard &ccs) override
-    {
-        if (log_type_ == LogType::RECORD)
-        {
-            int8_t error_code = 0;
-            CcMap *ccm = ccs.GetCcm(table_name_str_, ng_id_, error_code);
-            if (error_code == -1)
-            {
-                // The specified node group in this node is not the leader. This
-                // is possible when the leader of the cc node group quickly
-                // transfers to another node, and this node has not finished
-                // replaying the log.
-                result_.SetError(-1);
-                return false;
-            }
-
-            assert(ccm != nullptr);
-            ccm->Execute(*this);
-        }
-        else if (log_type_ == LogType::CREATE_TABLE ||
-                 log_type_ == LogType::DROP_TABLE)
-        {
-            std::vector<std::string> tokens;
-            std::string token;
-            // full table name's format is "./dbname/tablename"
-            // token[1] is dbname, token[2] is table name given '/' as splitter
-            std::istringstream tokenStream(table_name_str_);
-            while (std::getline(tokenStream, token, '/'))
-            {
-                tokens.push_back(token);
-            }
-
-            // only the first TxProcessor needs to create or drop table on
-            // Cassandra.
-            bool manipulate_cass_table = ccs.core_id_ == 0;
-
-            // create or drop table in Cassandra.
-            if (log_type_ == LogType::CREATE_TABLE)
-            {
-                std::string catalog_str(log_blob_view_.data(),
-                                        log_blob_view_.length());
-                ccs.GetCatalog()->CreateTable(tokens[1],
-                                              tokens[2],
-                                              catalog_str,
-                                              ccs.core_id_,
-                                              manipulate_cass_table);
-            }
-            else
-            {
-                ccs.GetCatalog()->DropTable(
-                    tokens[1], tokens[2], ccs.core_id_, manipulate_cass_table);
-            }
-
-            SetFinish();
-        }
-        return false;
-    }
-
     void SetFinish()
     {
         result_.SetValue(0);
@@ -1465,7 +1411,6 @@ public:
 
 private:
     LogType log_type_;
-    NodeGroupId ng_id_;
     std::string table_name_str_;
     std::string_view log_blob_view_;
     uint64_t commit_ts_;

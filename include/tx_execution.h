@@ -216,7 +216,7 @@ private:
     void Process(AcquireAllOp &acq_all_op);
     void Process(PostWriteAllOp &post_write_all_op);
     void PostPostWriteAll();
-    void Process(WriteToLog &flush_log);
+    void Process(WriteToLogOp &flush_log);
     void PostDataStoreOp();
     void Process(DsUpsertTableOp &ds_upsert_table_op);
 
@@ -315,7 +315,7 @@ private:
     ValidateOperation validate_;
     UpdateTxnStatus update_txn_;
     PostProcessOp post_process_;
-    WriteToLog write_log_;
+    WriteToLogOp write_log_;
 
     // fault inject
     FaultInjectOp fault_inject_op;
@@ -324,7 +324,7 @@ private:
     friend struct ReadOutsideOperation;
     friend struct AcquireWriteOperation;
     friend struct SetCommitTsOperation;
-    friend struct WriteToLog;
+    friend struct WriteToLogOp;
     friend struct UpdateTxnStatus;
     friend struct ValidateOperation;
     friend struct InitTxnOperation;

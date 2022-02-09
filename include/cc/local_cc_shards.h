@@ -260,7 +260,7 @@ private:
             }
 
             assert(schema_view_.dirty_version_ts_ > schema_view_.version_ts_);
-            
+
             schema_ = std::move(dirty_schema_);
             schema_view_.schema_ = schema_ != nullptr ? schema_.get() : nullptr;
             schema_view_.version_ts_ = schema_view_.dirty_version_ts_;

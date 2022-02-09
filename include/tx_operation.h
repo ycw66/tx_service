@@ -103,9 +103,9 @@ private:
     TxId txid_;
 };
 
-struct WriteToLog : TransactionOperation
+struct WriteToLogOp : TransactionOperation
 {
-    WriteToLog(TransactionExecution *txm);
+    WriteToLogOp(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
@@ -290,7 +290,7 @@ struct UpsertTableOp : public SchemaOp
      * is guaranteed to succeed after this stage.
      *
      */
-    WriteToLog prepare_log_op_;
+    WriteToLogOp prepare_log_op_;
     /**
      * @brief Installs the dirty schema in the tx service and returns a local
      * view (pointer) of it.
@@ -314,7 +314,7 @@ struct UpsertTableOp : public SchemaOp
      * failures.
      *
      */
-    WriteToLog commit_log_op_;
+    WriteToLogOp commit_log_op_;
     /**
      * @brief Removes write locks in all nodes. If the schema operation
      * succeeds, also installs the new schema in all nodes.
@@ -326,7 +326,7 @@ struct UpsertTableOp : public SchemaOp
      * state machine.
      *
      */
-    WriteToLog clean_log_op_;
+    WriteToLogOp clean_log_op_;
 
 private:
     void FlushPrepareLog(TransactionExecution *txm);

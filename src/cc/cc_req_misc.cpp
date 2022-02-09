@@ -11,7 +11,7 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name, CcShard &ccs)
 
 bool FetchCatalogCc::Execute(CcShard &ccs)
 {
-    ccs.CreateCatalog(table_name_, catalog_image_, 1);
+    ccs.CreateCatalog(table_name_, catalog_image_, commit_ts);
 
     for (CcRequestBase *&req : requesters_)
     {

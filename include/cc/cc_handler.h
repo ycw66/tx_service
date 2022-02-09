@@ -318,6 +318,7 @@ public:
                                       const TableName &kv_table_name,
                                       const TableSchema *schema,
                                       bool is_deleted,
+                                      uint64_t commit_ts,
                                       CcHandlerResult<Void> &hres) = 0;
 
     virtual uint32_t GetNodeId() const = 0;

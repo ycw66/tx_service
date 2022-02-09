@@ -886,11 +886,12 @@ void TransactionExecution::WriteLog()
 
     auto shard_terms = log_rec->mutable_node_terms();
     shard_terms->clear();
-    auto shard_logs = log_rec->mutable_node_txn_logs();
+
+    auto data_log_msg = log_rec->mutable_log_content()->mutable_data_log();
+    auto shard_logs = data_log_msg->mutable_node_txn_logs();
     shard_logs->clear();
 
     assert(log_rec->node_terms_size() == 0);
-    assert(log_rec->node_txn_logs_size() == 0);
 
     const std::unordered_map<TableName, TableWriteSet> &wset =
         rw_set_.WriteSet();
@@ -953,16 +954,20 @@ void TransactionExecution::WriteLog()
         }
 
         // The log blob of a table in a node group is in the following format:
-        // (1) A 1-byte integer for the length of the table name, followed by
-        // (2) The string of the table name.
-        // (3) A 4-byte integer for the total length of serialized key-record
+        // (1) A 1-byte integer for the type of log: LogType::RECORD
+        // (2) A 1-byte integer for the length of the table name, followed by
+        // (3) The string of the table name.
+        // (4) A 4-byte integer for the total length of serialized key-record
         // pairs modified by the tx in the node group.
-        // (4) A sequence of modified records. Each record is encoded as
+        // (5) A sequence of modified records. Each record is encoded as
         // follows:
         //   (a) The serialized key
         //   (b) A 1-byte flag to indicate if the record is normal, deleted or
         //   void.
         //   (c) The serialized record if the record is normal.
+        uint8_t log_type = static_cast<uint8_t>(LogType::RECORD);
+        const char *ptr = reinterpret_cast<const char *>(&log_type);
+        log_ng_blob->append(ptr, sizeof(uint8_t));
         for (const auto &[table_name, rec_vec] : table_rec_set)
         {
             uint8_t tabname_len = table_name.length();
@@ -1020,7 +1025,7 @@ void TransactionExecution::WriteLog()
 
 void TransactionExecution::PostWriteLog()
 {
-    WriteToLog *log_op = static_cast<WriteToLog *>(state_stack_.back());
+    WriteToLogOp *log_op = static_cast<WriteToLogOp *>(state_stack_.back());
     state_stack_.pop_back();
 
     if (state_stack_.empty())
@@ -1295,7 +1300,7 @@ void TransactionExecution::PostPostWriteAll()
     Forward();
 }
 
-void TransactionExecution::Process(WriteToLog &flush_log)
+void TransactionExecution::Process(WriteToLogOp &flush_log)
 {
     state_stack_.push_back(&flush_log);
     flush_log.Reset();
@@ -1329,6 +1334,7 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
                                   *ds_upsert_table_op.kv_table_name_,
                                   ds_upsert_table_op.table_schema_,
                                   ds_upsert_table_op.is_deleted_,
+                                  commit_ts_,
                                   ds_upsert_table_op.result_);
 }
 

@@ -393,11 +393,11 @@ void PushConflictTxnCommitTsLowerBound::Reset(TxId txn_id)
     txid_ = txn_id;
 }
 
-WriteToLog::WriteToLog(TransactionExecution *txm) : hd_result_(txm)
+WriteToLogOp::WriteToLogOp(TransactionExecution *txm) : hd_result_(txm)
 {
 }
 
-void WriteToLog::Forward(TransactionExecution *txm)
+void WriteToLogOp::Forward(TransactionExecution *txm)
 {
     if (hd_result_.IsFinished())
     {
@@ -405,7 +405,7 @@ void WriteToLog::Forward(TransactionExecution *txm)
     }
 }
 
-void WriteToLog::Reset()
+void WriteToLogOp::Reset()
 {
     hd_result_.Reset();
     log_closure_.Reset();

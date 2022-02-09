@@ -101,6 +101,7 @@ public:
     virtual std::unique_ptr<CcMap> Clone() const = 0;
 
     CcShard *const shard_;
+    uint64_t commit_ts;
 
 protected:
     /**
