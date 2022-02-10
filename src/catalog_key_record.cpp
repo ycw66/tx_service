@@ -153,14 +153,12 @@ std::string CatalogRecord::ToString() const
     return std::string();
 }
 
-const std::pair<const TableSchema *, const TableSchema *>
-    *CatalogRecord::SchemaView() const
+const TableSchemaView *CatalogRecord::SchemaView() const
 {
     return view_;
 }
 
-void CatalogRecord::SetSchemaView(
-    std::pair<const TableSchema *, const TableSchema *> *view)
+void CatalogRecord::SetSchemaView(const TableSchemaView *view)
 {
     view_ = view;
 }

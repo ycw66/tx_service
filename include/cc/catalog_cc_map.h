@@ -93,13 +93,12 @@ public:
                     req.SetDecodedPayload(std::move(decoded_rec));
                 }
 
-                std::pair<const TableSchema *, const TableSchema *>
-                    *schema_pair =
-                        shard_->CreateDirtyCatalog(table_key->Name(),
-                                                   schema_rec->SchemaBlob(),
-                                                   req.CommitTs());
+                const TableSchemaView *schema_view =
+                    shard_->CreateDirtyCatalog(table_key->Name(),
+                                               schema_rec->SchemaBlob(),
+                                               req.CommitTs());
 
-                schema_rec->SetSchemaView(schema_pair);
+                schema_rec->SetSchemaView(schema_view);
             }
             else
             {
@@ -156,26 +155,39 @@ public:
         // map(s) at this shard.
         if (req.CommitType() == PostWriteType::PostCommit)
         {
-            const TableSchema *old_schema = schema_rec->SchemaView()->first;
-            const TableSchema *new_schema = schema_rec->SchemaView()->second;
+            const TableSchemaView *schema_view = schema_rec->SchemaView();
+            const TableSchema *old_schema = schema_view->schema_;
+            const TableSchema *new_schema = schema_view->dirty_schema_;
 
             if (new_schema == nullptr)
             {
-                assert(old_schema != nullptr);
+                // A remote tx is allowed to acquire write intents/locks and
+                // drop a table, even if the table's schema has not been
+                // initialized at this node. The earlier acquiring-write-intent
+                // request creates a schema cc entry in the catalog cc map and a
+                // node-level schema view. The version timestamp of the schema
+                // is 0, if the schema is uninitialized (null). Or, the current
+                // schema must not be null.
+                assert(schema_view->version_ts_ == 0 || old_schema != nullptr);
 
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
                 shard_->DropCcm(table_key->Name(), req.NodeGroupId());
 
-                std::vector<TableName> index_names = old_schema->IndexNames();
-                for (const TableName &index_name : index_names)
+                if (old_schema != nullptr)
                 {
-                    shard_->DropCcm(index_name, req.NodeGroupId());
+                    std::vector<TableName> index_names =
+                        old_schema->IndexNames();
+                    for (const TableName &index_name : index_names)
+                    {
+                        shard_->DropCcm(index_name, req.NodeGroupId());
+                    }
                 }
             }
             else if (old_schema == nullptr)
             {
-                assert(new_schema != nullptr);
+                assert(schema_view->dirty_version_ts_ > 0 &&
+                       new_schema != nullptr);
 
                 // This is a CREATE TABLE statement. Creates the cc maps
                 // associated with the table in the final commit step.
@@ -236,7 +248,7 @@ public:
 
         if (req.Type() == ReadType::OutsideNormal)
         {
-            std::pair<const TableSchema *, const TableSchema *> *schema_view =
+            const TableSchemaView *schema_view =
                 shard_->GetCatalog(table_key->Name());
 
             if (schema_view == nullptr)
@@ -248,7 +260,7 @@ public:
             }
             schema_rec->SetSchemaView(schema_view);
 
-            const TableSchema *curr_schema = schema_view->first;
+            const TableSchema *curr_schema = schema_view->schema_;
             if (curr_schema != nullptr)
             {
                 shard_->CreatePkCcMap(

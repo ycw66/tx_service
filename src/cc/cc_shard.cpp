@@ -153,7 +153,7 @@ TEntry &CcShard::NewTx()
     {
         uint32_t old_size = (uint32_t) tx_vec_.size();
         // Increases the capacity of the tx vector.
-        uint32_t new_size = (uint32_t) (tx_vec_.size() * 1.5);
+        uint32_t new_size = (uint32_t)(tx_vec_.size() * 1.5);
         tx_vec_.reserve(new_size);
 
         for (uint32_t idx = old_size; idx < new_size; ++idx)
@@ -350,31 +350,28 @@ size_t CcShard::Clean()
     return free_cnt;
 }
 
-std::pair<const TableSchema *, const TableSchema *> *CcShard::CreateCatalog(
-    const TableName &table_name,
-    const std::string &catalog_image,
-    uint64_t commit_ts)
+const TableSchemaView *CcShard::CreateCatalog(const TableName &table_name,
+                                              const std::string &catalog_image,
+                                              uint64_t commit_ts)
 {
     return local_shards_.CreateCatalog(table_name, catalog_image, commit_ts);
 }
 
-std::pair<const TableSchema *, const TableSchema *>
-    *CcShard::CreateDirtyCatalog(const std::string &table_name,
-                                 const std::string &catalog_image,
-                                 uint64_t commit_ts)
+const TableSchemaView *CcShard::CreateDirtyCatalog(
+    const std::string &table_name,
+    const std::string &catalog_image,
+    uint64_t commit_ts)
 {
     return local_shards_.CreateDirtyCatalog(
         table_name, catalog_image, commit_ts);
 }
 
-std::pair<const TableSchema *, const TableSchema *>
-    *CcShard::CommitDirtyCatalog(const TableName &table_name)
+const TableSchemaView *CcShard::CommitDirtyCatalog(const TableName &table_name)
 {
     return local_shards_.CommitDirtyCatalog(table_name);
 }
 
-std::pair<const TableSchema *, const TableSchema *> *CcShard::GetCatalog(
-    const std::string &table_name)
+const TableSchemaView *CcShard::GetCatalog(const std::string &table_name)
 {
     return local_shards_.GetCatalog(table_name);
 }

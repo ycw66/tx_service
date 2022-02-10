@@ -7,6 +7,7 @@
 
 #include "catalog.h"
 #include "catalog_factory.h"
+#include "catalog_key_record.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
 #include "sk_cc_map.h"
@@ -191,21 +192,17 @@ public:
 
     static uint64_t ClockTs();
 
-    std::pair<const TableSchema *, const TableSchema *> *CreateCatalog(
-        const std::string &table_name,
-        const std::string &catalog_image,
-        uint64_t commit_ts);
+    const TableSchemaView *CreateCatalog(const std::string &table_name,
+                                         const std::string &catalog_image,
+                                         uint64_t commit_ts);
 
-    std::pair<const TableSchema *, const TableSchema *> *CreateDirtyCatalog(
-        const std::string &table_name,
-        const std::string &catalog_image,
-        uint64_t commit_ts);
+    const TableSchemaView *CreateDirtyCatalog(const std::string &table_name,
+                                              const std::string &catalog_image,
+                                              uint64_t commit_ts);
 
-    std::pair<const TableSchema *, const TableSchema *> *CommitDirtyCatalog(
-        const std::string &table_name);
+    const TableSchemaView *CommitDirtyCatalog(const std::string &table_name);
 
-    std::pair<const TableSchema *, const TableSchema *> *GetCatalog(
-        const std::string &table_name);
+    const TableSchemaView *GetCatalog(const std::string &table_name);
 
     store::DataStoreWriteHandler *const store_hd_;
 
@@ -230,13 +227,55 @@ private:
     {
         CatalogEntry() = default;
 
+        void InitSchema(std::unique_ptr<TableSchema> schema,
+                        uint64_t version_ts_)
+        {
+            assert(version_ts_ > 0);
+
+            schema_ = std::move(schema);
+            dirty_schema_ = nullptr;
+            schema_view_.schema_ = schema_ != nullptr ? schema_.get() : nullptr;
+            schema_view_.version_ts_ = version_ts_;
+            schema_view_.dirty_schema_ = nullptr;
+            schema_view_.dirty_version_ts_ = 0;
+        }
+
+        void SetDirtySchema(std::unique_ptr<TableSchema> dirty_schema,
+                            uint64_t dirty_version_ts)
+        {
+            assert(dirty_version_ts > 0);
+            assert(dirty_version_ts > schema_view_.version_ts_);
+
+            dirty_schema_ = std::move(dirty_schema);
+            schema_view_.dirty_schema_ =
+                dirty_schema_ != nullptr ? dirty_schema_.get() : nullptr;
+            schema_view_.dirty_version_ts_ = dirty_version_ts;
+        }
+
+        void CommitDirtySchema()
+        {
+            if (schema_view_.dirty_version_ts_ == 0)
+            {
+                return;
+            }
+
+            assert(schema_view_.dirty_version_ts_ > schema_view_.version_ts_);
+            
+            schema_ = std::move(dirty_schema_);
+            schema_view_.schema_ = schema_ != nullptr ? schema_.get() : nullptr;
+            schema_view_.version_ts_ = schema_view_.dirty_version_ts_;
+            schema_view_.dirty_schema_ = nullptr;
+            schema_view_.dirty_version_ts_ = 0;
+        }
+
+        const TableSchemaView *SchemaView() const
+        {
+            return &schema_view_;
+        }
+
         std::unique_ptr<TableSchema> schema_{nullptr};
         std::unique_ptr<TableSchema> dirty_schema_{nullptr};
-        std::pair<const TableSchema *, const TableSchema *> view_{nullptr,
-                                                                  nullptr};
-
-        uint64_t ts_{0};
-        uint64_t dirty_ts_{0};
+        TableSchemaView schema_view_;
     };
 
     CatalogFactory *const catalog_factory_;

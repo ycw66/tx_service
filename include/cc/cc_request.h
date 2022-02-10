@@ -50,12 +50,12 @@ public:
 
             if (ccm_ == nullptr)
             {
-                std::pair<const TableSchema *, const TableSchema *>
-                    *schema_view = ccs.GetCatalog(*table_name_);
+                const TableSchemaView *schema_view =
+                    ccs.GetCatalog(*table_name_);
 
                 if (schema_view != nullptr)
                 {
-                    const TableSchema *curr_schema = schema_view->first;
+                    const TableSchema *curr_schema = schema_view->schema_;
                     if (curr_schema != nullptr)
                     {
                         ccs.CreatePkCcMap(
@@ -1387,8 +1387,7 @@ public:
           finish_cnt_(finish_cnt)
     {
         result_.SetRefCnt(core_cnt);
-        result_.post_lambda_ = [this](CcHandlerResult<int8_t> *res)
-        {
+        result_.post_lambda_ = [this](CcHandlerResult<int8_t> *res) {
             // Notifies the external caller--the log replay handler--that the
             // specified log record has been replayed in all cores of this node.
             std::lock_guard<std::mutex> lk(external_mux_);

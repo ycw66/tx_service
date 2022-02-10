@@ -9,6 +9,7 @@
 
 #include "catalog.h"
 #include "catalog_factory.h"
+#include "catalog_key_record.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_req_base.h"
@@ -266,21 +267,17 @@ public:
         entry->ckpt_next_ = nullptr;
     }
 
-    std::pair<const TableSchema *, const TableSchema *> *CreateCatalog(
-        const TableName &table_name,
-        const std::string &catalog_image,
-        uint64_t commit_ts);
+    const TableSchemaView *CreateCatalog(const TableName &table_name,
+                                         const std::string &catalog_image,
+                                         uint64_t commit_ts);
 
-    std::pair<const TableSchema *, const TableSchema *> *CreateDirtyCatalog(
-        const TableName &table_name,
-        const std::string &catalog_image,
-        uint64_t commit_ts);
+    const TableSchemaView *CreateDirtyCatalog(const TableName &table_name,
+                                              const std::string &catalog_image,
+                                              uint64_t commit_ts);
 
-    std::pair<const TableSchema *, const TableSchema *> *CommitDirtyCatalog(
-        const TableName &table_name);
+    const TableSchemaView *CommitDirtyCatalog(const TableName &table_name);
 
-    std::pair<const TableSchema *, const TableSchema *> *GetCatalog(
-        const TableName &table_name);
+    const TableSchemaView *GetCatalog(const TableName &table_name);
 
     /**
      * @brief Fetches the table's catalog from the data store and temporarily
