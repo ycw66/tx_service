@@ -198,6 +198,15 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         }
         else
         {
+            // mark log replay finish only when all the ReplayLogCc requests
+            // finished.
+            {
+                std::unique_lock<std::mutex> lk(mux);
+                cv.wait(lk,
+                        [&finish_log_cnt, &cc_req_vec]
+                        { return finish_log_cnt == cc_req_vec.size(); });
+            }
+
             // receive finish message from one of log groups
             const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
             uint32_t lg_id = finish_msg.log_group_id();

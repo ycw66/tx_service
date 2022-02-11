@@ -1674,9 +1674,10 @@ public:
             // if relay record's commit_ts is smaller than ccmap's commit_ts,
             // this record is generated before the latest schema of the table
             // and hence should skip the replay process.
-            if (req.commit_ts_ < commit_ts)
+            if (req.commit_ts_ < commit_ts_)
             {
-                return true;
+                req.SetFinish();
+                return false;
             }
 
             while (offset < log_blob.size())
@@ -1741,10 +1742,8 @@ public:
                     }
                 }
             }
-
-            req.SetFinish();
-            return true;
         }
+        req.SetFinish();
         return false;
     }
 

@@ -72,7 +72,7 @@ public:
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
 
-                        ccm_->commit_ts = schema_view->version_ts_;
+                        ccm_->commit_ts_ = schema_view->version_ts_;
                     }
                     else
                     {
