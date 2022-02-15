@@ -8,13 +8,104 @@
 
 namespace txservice
 {
+
+struct VoidKey : public TxKey
+{
+    bool operator==(const TxKey &rhs) const override
+    {
+        if (const VoidKey *other_ptr = static_cast<const VoidKey *>(&rhs))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    bool operator<(const TxKey &rhs) const override
+    {
+        return false;
+    }
+
+    size_t Hash() const override
+    {
+        return 0;
+    }
+
+    void Serialize(std::vector<char> &buf, size_t &offset) const override
+    {
+    }
+
+    void Serialize(std::string &str) const override
+    {
+    }
+
+    void Deserialize(const char *buf,
+                     size_t &offset,
+                     const txservice::Schema *key_schema) override
+    {
+    }
+
+    TxKey::Uptr Clone() const override
+    {
+        return std::make_unique<VoidKey>(*this);
+    }
+
+    std::string ToString() const override
+    {
+        return std::string("");
+    }
+
+    size_t MemUsage() const override
+    {
+        return 0;
+    }
+};
+
+template <typename SkT, typename PkT>
+struct SkRecord : public TxRecord
+{
+    void Serialize(std::vector<char> &buf, size_t &offset) const override
+    {
+    }
+
+    void Serialize(std::string &str) const override
+    {
+    }
+
+    void Deserialize(const char *buf, size_t &offset) override
+    {
+    }
+
+    TxRecord::Uptr Clone() const override
+    {
+        return std::make_unique<SkRecord>(*this);
+    }
+
+    void Copy(const TxRecord &rhs) override
+    {
+        const SkRecord &typed_rhs = static_cast<const SkRecord &>(rhs);
+
+        sk_ = typed_rhs.sk_;
+        pk_ = typed_rhs.pk_;
+    }
+
+    std::string ToString() const override
+    {
+        return std::string("");
+    }
+
+    size_t MemUsage() const override
+    {
+        return 2 * sizeof(nullptr);
+    }
+
+    const SkT *sk_;
+    const PkT *pk_;
+};
+
 template <typename SkT, typename PkT>
 class SkCcMap : public CcMap
 {
 public:
-    using KeyPair = std::pair<SkT, PkT>;
-    using KeyPtrPair = std::pair<const SkT *, const PkT *>;
-
     SkCcMap() = delete;
     SkCcMap(const SkCcMap &rhs) = delete;
     SkCcMap(SkCcMap &&rhs) = delete;
@@ -29,11 +120,11 @@ public:
           compound_schema_(sk_schema, pk_schema)
     {
         neg_inf_.key_ = nullptr;
-        neg_inf_.payload_.first = NegativeInfinity<SkT>::Instance();
-        neg_inf_.payload_.second = NegativeInfinity<PkT>::Instance();
+        neg_inf_.payload_.sk_ = NegativeInfinity<SkT>::Instance();
+        neg_inf_.payload_.pk_ = NegativeInfinity<PkT>::Instance();
         pos_inf_.key_ = nullptr;
-        pos_inf_.payload_.first = PositiveInfinity<SkT>::Instance();
-        pos_inf_.payload_.second = PositiveInfinity<PkT>::Instance();
+        pos_inf_.payload_.sk_ = PositiveInfinity<SkT>::Instance();
+        pos_inf_.payload_.pk_ = PositiveInfinity<PkT>::Instance();
 
         neg_inf_.map_next_ = &pos_inf_;
         pos_inf_.map_prev_ = &neg_inf_;
@@ -88,7 +179,7 @@ public:
         assert(req.Type() == ReadType::OutsideNormal);
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
-        CcEntry<KeyPair, KeyPtrPair> *cce_ptr = nullptr;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
 
         if (req.Key() != nullptr)
         {
@@ -160,7 +251,7 @@ public:
 
         if (req.direct_ == ScanDirection::Forward)
         {
-            CcEntry<KeyPair, KeyPtrPair> *floor_cce =
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *floor_cce =
                 look_sk == NegativeInfinity<SkT>::Instance()
                     ? &neg_inf_
                     : Floor(*look_sk, req.direct_, req.inclusive_);
@@ -170,7 +261,7 @@ public:
                 typed_cache->AddScanTuple();
 
             if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                *look_sk == *floor_cce->payload_.first)
+                *look_sk == *floor_cce->payload_.sk_)
             {
                 // The forward scan's starting point is inclusive and matches a
                 // cc entry's key. The scan starts from this cc entry,
@@ -185,7 +276,7 @@ public:
                 ScanGap(floor_cce, scan_tuple, req.node_group_id_, term);
             }
 
-            CcEntry<KeyPair, KeyPtrPair> *cce = floor_cce->map_next_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = floor_cce->map_next_;
             while (cce != &pos_inf_ && !typed_cache->Full())
             {
                 scan_tuple = typed_cache->AddScanTuple();
@@ -195,7 +286,7 @@ public:
         }
         else
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce =
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
                 look_sk == PositiveInfinity<SkT>::Instance()
                     ? pos_inf_.map_prev_
                     : Floor(*look_sk, req.direct_, req.inclusive_);
@@ -206,7 +297,7 @@ public:
             // key. If the starting point is inclusive, the scan includes the
             // entry's key. If the point is exclusive, the scan starts from the
             // prior entry, including both the key and the gap.
-            if (cce != &neg_inf_ && *look_sk == *cce->payload_.first)
+            if (cce != &neg_inf_ && *look_sk == *cce->payload_.sk_)
             {
                 if (req.inclusive_)
                 {
@@ -256,8 +347,8 @@ public:
 
         assert(typed_cache->Full());
 
-        CcEntry<KeyPair, KeyPtrPair> *prior_cce =
-            reinterpret_cast<CcEntry<KeyPair, KeyPtrPair> *>(
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce =
+            reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 typed_cache->Last()->cce_addr_.CcePtr());
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
@@ -265,7 +356,7 @@ public:
 
         if (direction == ScanDirection::Forward)
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce = prior_cce->map_next_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_next_;
             while (cce != &pos_inf_ && !typed_cache->Full())
             {
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
@@ -276,7 +367,7 @@ public:
         }
         else
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce = prior_cce->map_prev_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_prev_;
             while (cce != nullptr && !typed_cache->Full())
             {
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
@@ -315,7 +406,7 @@ public:
 
         if (req.direct_ == ScanDirection::Forward)
         {
-            CcEntry<KeyPair, KeyPtrPair> *floor_cce = nullptr;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *floor_cce = nullptr;
 
             if (req.key_type_ == KeyType::NegativeInf)
             {
@@ -335,7 +426,7 @@ public:
             remote::ScanTuple_msg *tuple = cache.at(0);
 
             if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                look_sk == *floor_cce->payload_.first)
+                look_sk == *floor_cce->payload_.sk_)
             {
                 // The scan's starting point is inclusive and matches a cc
                 // entry's key. The scan start from this cc entry,
@@ -351,7 +442,7 @@ public:
             }
 
             size_t idx = 1;
-            CcEntry<KeyPair, KeyPtrPair> *cce = floor_cce->map_next_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = floor_cce->map_next_;
             while (cce != &pos_inf_ && idx < cache.size())
             {
                 tuple = cache.at(idx);
@@ -364,7 +455,7 @@ public:
         }
         else
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce = nullptr;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
 
             if (req.key_type_ == KeyType::PostiveInf)
             {
@@ -386,7 +477,7 @@ public:
             // key. If the starting point is inclusive, the scan includes the
             // entry's key. If the point is exclusive, the scan starts from the
             // prior entry, including its both the key and the gap.
-            if (cce != &neg_inf_ && look_sk == *cce->payload_.first)
+            if (cce != &neg_inf_ && look_sk == *cce->payload_.sk_)
             {
                 if (req.inclusive_)
                 {
@@ -428,8 +519,8 @@ public:
             return true;
         }
 
-        CcEntry<KeyPair, KeyPtrPair> *prior_cce =
-            reinterpret_cast<CcEntry<KeyPair, KeyPtrPair> *>(
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce =
+            reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.prior_cce_addr_);
 
         ScanDirection direction = req.direct_;
@@ -437,7 +528,7 @@ public:
         size_t idx = 0;
         if (direction == ScanDirection::Forward)
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce = prior_cce->map_next_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_next_;
             while (cce != &pos_inf_ && idx < req.scan_cache_.size())
             {
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
@@ -448,7 +539,7 @@ public:
         }
         else
         {
-            CcEntry<KeyPair, KeyPtrPair> *cce = prior_cce->map_prev_;
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_prev_;
             while (cce != nullptr && idx < req.scan_cache_.size())
             {
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
@@ -482,7 +573,7 @@ public:
             return true;
         }
 
-        CcEntry<KeyPair, KeyPtrPair> *cce = nullptr;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
 
         if (req.skey_ != nullptr)
         {
@@ -541,8 +632,8 @@ public:
     {
         LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
                                                         : req.start_entry_;
-        CcEntry<KeyPair, KeyPtrPair> *cce =
-            static_cast<CcEntry<KeyPair, KeyPtrPair> *>(lru_cce);
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
+            static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(lru_cce);
 
         size_t cnt = 0;
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
@@ -569,13 +660,14 @@ public:
                 // checkpoint list.
                 ++cnt;
                 LruEntry *next = cce->ckpt_next_;
-                CcShard::DetachCkpt(cce);
-                cce = static_cast<CcEntry<KeyPair, KeyPtrPair> *>(next);
+                cce->parent_map_->shard_->DetachCkpt(cce);
+                cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(next);
                 continue;
             }
 
             ++cnt;
-            cce = static_cast<CcEntry<KeyPair, KeyPtrPair> *>(cce->ckpt_next_);
+            cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                cce->ckpt_next_);
         }
 
         if (cce == &pos_inf_)
@@ -622,22 +714,29 @@ public:
 
     void Clean(LruEntry *remove_entry) override
     {
-        CcEntry<KeyPair, KeyPtrPair> *cce =
-            static_cast<CcEntry<KeyPair, KeyPtrPair> *>(remove_entry);
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
+            static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(remove_entry);
 
-        CcEntry<KeyPair, KeyPtrPair> *prev_cce = cce->map_prev_;
-        CcEntry<KeyPair, KeyPtrPair> *next_cce = cce->map_next_;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prev_cce = cce->map_prev_;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *next_cce = cce->map_next_;
 
-        if (*prev_cce->payload_.first == *cce->payload_.first ||
-            *cce->payload_.first == *next_cce->payload_.first)
+        if (*prev_cce->payload_.sk_ == *cce->payload_.sk_ ||
+            *cce->payload_.sk_ == *next_cce->payload_.sk_)
         {
-            sk_index_.at(*cce->payload_.first).erase(*cce->payload_.second);
+            sk_index_.at(*cce->payload_.sk_).erase(*cce->payload_.pk_);
+            // delete secondary map of sk_index_
+            shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
+            shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
         }
         else
         {
             // The (sk,pk) pair is the last entry of this sk group. Removes the
             // sk from the index.
-            sk_index_.erase(*cce->payload_.first);
+            sk_index_.erase(*cce->payload_.sk_);
+            // delete sk_index_
+            shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
+            shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
+            shard_->mem_usage_ -= cce->payload_.sk_->MemUsage();
         }
     }
 
@@ -646,12 +745,13 @@ public:
                    const TxKey *&pk,
                    bool &is_deleted) const override
     {
-        const CcEntry<KeyPair, KeyPtrPair> *cce =
-            static_cast<const CcEntry<KeyPair, KeyPtrPair> *>(lru_entry);
+        const CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
+            static_cast<const CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                lru_entry);
 
-        const KeyPtrPair &key_pair = cce->payload_ckpt_.first;
-        sk = key_pair.first;
-        pk = key_pair.second;
+        const SkRecord<SkT, PkT> &sk_record = cce->payload_ckpt_.first;
+        sk = sk_record.sk_;
+        pk = sk_record.pk_;
         is_deleted = cce->payload_ckpt_.second;
     }
 
@@ -675,16 +775,16 @@ public:
      */
     size_t VerifyOrdering() override
     {
-        CcEntry<KeyPair, KeyPtrPair> *cce_prev = nullptr;
-        CcEntry<KeyPair, KeyPtrPair> *cce = neg_inf_.map_next_;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_prev = nullptr;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = neg_inf_.map_next_;
         assert(cce != nullptr);
         size_t cnt = 0;
         while (cce != &pos_inf_)
         {
             assert(cce_prev == nullptr ||
-                   *cce_prev->payload_.first < *cce->payload_.first ||
-                   *cce_prev->payload_.first == *cce->payload_.first &&
-                       *cce_prev->payload_.second < *cce->payload_.second);
+                   *cce_prev->payload_.sk_ < *cce->payload_.sk_ ||
+                   *cce_prev->payload_.sk_ == *cce->payload_.sk_ &&
+                       *cce_prev->payload_.pk_ < *cce->payload_.pk_);
             cce_prev = cce;
             cce = cce->map_next_;
             ++cnt;
@@ -702,22 +802,22 @@ public:
     }
 
 private:
-    void ScanKey(CcEntry<KeyPair, KeyPtrPair> *cce,
+    void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
                  bool include_gap,
                  uint32_t ng_id,
                  int64_t term) const
     {
         SecondaryKey<SkT, PkT> &sk = tuple->Key();
-        sk.SKey() = *cce->payload_.first;
-        sk.PKey() = *cce->payload_.second;
+        sk.SKey() = *cce->payload_.sk_;
+        sk.PKey() = *cce->payload_.pk_;
         tuple->rec_status_ = cce->payload_status_;
         tuple->key_ts_ = cce->commit_ts_;
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
     }
 
-    void ScanKey(CcEntry<KeyPair, KeyPtrPair> *cce,
+    void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  remote::ScanTuple_msg *tuple,
                  bool include_gap,
                  int64_t term) const
@@ -726,9 +826,9 @@ private:
         std::string &key_blob = *tuple->mutable_key();
 
         // Serializes the secondary key
-        cce->payload_.first->Serialize(key_blob);
+        cce->payload_.sk_->Serialize(key_blob);
         // Serializes the primary key
-        cce->payload_.second->Serialize(key_blob);
+        cce->payload_.pk_->Serialize(key_blob);
 
         switch (cce->payload_status_)
         {
@@ -766,7 +866,7 @@ private:
         // the sender side when the sender receives the response.
     }
 
-    void ScanGap(CcEntry<KeyPair, KeyPtrPair> *cce,
+    void ScanGap(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
                  uint32_t ng_id,
                  int64_t term) const
@@ -776,7 +876,7 @@ private:
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
     }
 
-    void ScanGap(CcEntry<KeyPair, KeyPtrPair> *cce,
+    void ScanGap(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  remote::ScanTuple_msg *tuple,
                  int64_t term) const
     {
@@ -791,14 +891,15 @@ private:
         // the sender side when the sender receives the response.
     }
 
-    CcEntry<KeyPair, KeyPtrPair> *FindEmplace(const SkT &sk,
-                                              const PkT &pk,
-                                              uint64_t ts)
+    CcEntry<VoidKey, SkRecord<SkT, PkT>> *FindEmplace(const SkT &sk,
+                                                      const PkT &pk,
+                                                      uint64_t ts)
     {
         auto sk_it = sk_index_.lower_bound(sk);
 
-        std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> *pk_group = nullptr;
-        typename std::map<PkT, CcEntry<KeyPair, KeyPtrPair>>::iterator pk_it;
+        std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> *pk_group = nullptr;
+        typename std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>::iterator
+            pk_it;
 
         if (sk_it != sk_index_.end() && sk_it->first == sk)
         {
@@ -812,24 +913,25 @@ private:
         }
 
         /*
-        * 
-        * When the program reaches here:
-        * 1) it's a cache miss for sk;
-        * 2) it's a cache hit for sk but cache miss for pk.
-        * 
-        * After Clean() two situations require extra consideration:
-        * either the cache hit sk map is deleted,
-        * or some pk elements within the cache hit sk map are deleted.
-        * 
-        * For situation 1:
-        * Recheck sk_it in case the iterator may change during Clean().
-        * 
-        * For situation 2:
-        * If the cache hit sk is not cleaned, recheck sk_it, and reset pk_group accordingly, then recheck pk_it in case the iterator may change during Clean()
-        * If the cache hit sk is cleaned, recheck sk_it, and reset pk_group to nullptr.
-        * 
-        */
-
+         *
+         * When the program reaches here:
+         * 1) it's a cache miss for sk;
+         * 2) it's a cache hit for sk but cache miss for pk.
+         *
+         * After Clean() two situations require extra consideration:
+         * either the cache hit sk map is deleted,
+         * or some pk elements within the cache hit sk map are deleted.
+         *
+         * For situation 1:
+         * Recheck sk_it in case the iterator may change during Clean().
+         *
+         * For situation 2:
+         * If the cache hit sk is not cleaned, recheck sk_it, and reset pk_group
+         * accordingly, then recheck pk_it in case the iterator may change
+         * during Clean() If the cache hit sk is cleaned, recheck sk_it, and
+         * reset pk_group to nullptr.
+         *
+         */
 
         if (shard_->Full())
         {
@@ -853,7 +955,6 @@ private:
             {
                 pk_group = nullptr;
             }
-
         }
 
         if (pk_group == nullptr)
@@ -864,6 +965,7 @@ private:
                                            std::piecewise_construct,
                                            std::forward_as_tuple(sk),
                                            std::forward_as_tuple());
+            shard_->mem_usage_ += sk.MemUsage();
             pk_group = &sk_it->second;
             pk_it = pk_group->begin();
             assert(pk_it == pk_group->end());
@@ -873,15 +975,17 @@ private:
                                        std::piecewise_construct,
                                        std::forward_as_tuple(pk),
                                        std::forward_as_tuple(this));
-
-        CcEntry<KeyPair, KeyPtrPair> *prev_cce = nullptr, *next_cce = nullptr,
-                                     *new_cce = nullptr;
+        shard_->mem_usage_ += pk.MemUsage();
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prev_cce = nullptr,
+                                             *next_cce = nullptr,
+                                             *new_cce = nullptr;
 
         new_cce = &pk_it->second;
-        // The key of the cc entry of the secondary index is pseudo.
+        shard_->mem_usage_ += new_cce->GetCcEntryMemUsage();
+        // The key of the cc entry of the secondary index is pseudo(VoidKey).
         new_cce->key_ = nullptr;
-        new_cce->payload_.first = &sk_it->first;
-        new_cce->payload_.second = &pk_it->first;
+        new_cce->payload_.sk_ = &sk_it->first;
+        new_cce->payload_.pk_ = &pk_it->first;
 
         if (pk_it == pk_group->begin())
         {
@@ -898,8 +1002,8 @@ private:
             else
             {
                 --sk_it;
-                std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> &prior_pk_group =
-                    sk_it->second;
+                std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>
+                    &prior_pk_group = sk_it->second;
                 prev_cce = &prior_pk_group.rbegin()->second;
                 ++sk_it;
             }
@@ -929,8 +1033,8 @@ private:
             }
             else
             {
-                std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> &next_pk_group =
-                    sk_it->second;
+                std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>
+                    &next_pk_group = sk_it->second;
                 next_cce = &next_pk_group.begin()->second;
             }
         }
@@ -948,9 +1052,9 @@ private:
         return new_cce;
     }
 
-    CcEntry<KeyPair, KeyPtrPair> *Floor(const SkT &sk,
-                                        ScanDirection direction,
-                                        bool inclusive)
+    CcEntry<VoidKey, SkRecord<SkT, PkT>> *Floor(const SkT &sk,
+                                                ScanDirection direction,
+                                                bool inclusive)
     {
         if (sk_index_.size() == 0)
         {
@@ -963,17 +1067,17 @@ private:
         {
             // When the search sk is greater than all the keys in the index, the
             // floor entry is the last index entry.
-            std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> &last_pk_group =
+            std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> &last_pk_group =
                 sk_index_.rbegin()->second;
 
             return &last_pk_group.rbegin()->second;
         }
 
-        CcEntry<KeyPair, KeyPtrPair> *floor_cce = nullptr;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *floor_cce = nullptr;
 
         if (sk_it->first == sk)
         {
-            std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> &pk_group =
+            std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> &pk_group =
                 sk_it->second;
 
             if (direction == ScanDirection::Forward && inclusive)
@@ -1004,7 +1108,7 @@ private:
 
             --sk_it;
 
-            std::map<PkT, CcEntry<KeyPair, KeyPtrPair>> &pk_group =
+            std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> &pk_group =
                 sk_it->second;
             floor_cce = &pk_group.rbegin()->second;
         }
@@ -1012,8 +1116,9 @@ private:
         return floor_cce;
     }
 
-    std::map<SkT, std::map<PkT, CcEntry<KeyPair, KeyPtrPair>>> sk_index_;
-    CcEntry<KeyPair, KeyPtrPair> neg_inf_, pos_inf_;
+    std::map<SkT, std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+        sk_index_;
+    CcEntry<VoidKey, SkRecord<SkT, PkT>> neg_inf_, pos_inf_;
     const SkSchema compound_schema_;
 };
 }  // namespace txservice

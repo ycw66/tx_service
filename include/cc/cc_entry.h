@@ -65,6 +65,11 @@ public:
 
     LruEntry(CcMap *parent);
 
+    virtual size_t GetCcEntryMemUsage() const
+    {
+        return 0;
+    }
+
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
      * lock, no gap lock and not 'dirty' entry (entry which has been
@@ -92,6 +97,9 @@ public:
 
     uint64_t gap_commit_ts_{1};
     uint64_t gap_last_vali_ts_{1};
+
+    // Accumulated size of key-value pairs committed since last checkpoint.
+    size_t estimate_ccentry_log_size_{0};
 
     // The timestamp when this record was last flushed to the data store. Unlike
     // other fields that are read/modified via a single thread, this field is
@@ -130,6 +138,37 @@ public:
           map_prev_(nullptr),
           map_next_(nullptr)
     {
+    }
+
+    size_t GetCcEntryMemUsage() const override
+    {
+        size_t mem_usage_ = 0;
+        size_t ptr_size = sizeof(nullptr);
+
+        // LruEntry field members:
+        // size of lru_prev_, lru_next_, ckpt_prev_, ckpt_next_, parent_map_
+        mem_usage_ += 5 * ptr_size;
+        // two NonBlockingLocks
+        mem_usage_ += key_lock_.MemUsage() + gap_lock_.MemUsage();
+        // size of commit_ts_, last_vali_ts_, gap_commit_ts_, gap_last_vali_ts_
+        // and ckpt_ts_
+        mem_usage_ += 5 * sizeof(uint64_t);
+
+        // CcEntry field members:
+        // size of pointer and KeyT
+        mem_usage_ += ptr_size + key_->MemUsage();
+        // size of ValueT
+        mem_usage_ += payload_.MemUsage();
+        mem_usage_ += sizeof(RecordStatus);
+        // size of insert_intention_set_, not used yet
+        // mem_usage_ += sizeof(insert_intention_set_) +
+        //               insert_intention_set_.size() * 2 * ptr_size;
+        // size of payload_ckpt_
+        mem_usage_ += payload_.MemUsage() + sizeof(bool);
+        // size of map_prev_, map_next_
+        mem_usage_ += 2 * ptr_size;
+
+        return mem_usage_;
     }
 
     const KeyT *key_;

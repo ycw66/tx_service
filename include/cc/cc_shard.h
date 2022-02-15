@@ -60,10 +60,10 @@ struct TxLockInfo
 class CcShard
 {
 public:
-    // Maximal number of keys a cc map can host. Once the cc map reaches the
-    // cap, the cleaning logic is invoked to remove old, unused, checkpointed cc
-    // entries from the cc map.
-    static constexpr uint64_t capSize = 100000000;
+    // TODO put these variables into a configuration file
+    static constexpr double cap_memusage_percentage = 1;
+    static constexpr size_t total_memory = MB(500);
+    static constexpr size_t log_size_limit = MB(1);
 
     CcShard() = delete;
     CcShard(const CcShard &other) = delete;
@@ -96,7 +96,8 @@ public:
 
     bool Full() const
     {
-        return size_ >= CcShard::capSize;
+        return mem_usage_ >=
+               CcShard::cap_memusage_percentage * CcShard::total_memory;
     }
 
     /**
@@ -157,6 +158,8 @@ public:
     TEntry *LocateTx(TxNumber tx_number);
 
     size_t Clean();
+
+    void NotifyCkpt();
 
     /**
      * @brief Get the number of ccentries in this ccshard
@@ -257,7 +260,7 @@ public:
      * @brief detach the entry from checkpoint link list.
      *
      */
-    static void DetachCkpt(LruEntry *entry)
+    void DetachCkpt(LruEntry *entry)
     {
         LruEntry *prev = entry->ckpt_prev_;
         LruEntry *post = entry->ckpt_next_;
@@ -265,6 +268,9 @@ public:
         post->ckpt_prev_ = prev;
         entry->ckpt_prev_ = nullptr;
         entry->ckpt_next_ = nullptr;
+
+        estimate_ccshard_log_size_ -= entry->estimate_ccentry_log_size_;
+        entry->estimate_ccentry_log_size_ = 0;
     }
 
     const TableSchemaView *CreateCatalog(const TableName &table_name,
@@ -303,10 +309,28 @@ public:
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 
+    void UpdateEstimateLogSize(LruEntry *new_cce,
+                               size_t &key_size,
+                               size_t &payload_size)
+    {
+        new_cce->estimate_ccentry_log_size_ += key_size + payload_size;
+        estimate_ccshard_log_size_ += key_size + payload_size;
+
+        if (estimate_ccshard_log_size_ >= log_size_limit)
+        {
+            NotifyCkpt();
+        }
+    }
+
     const uint32_t node_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
     LocalCcShards &local_shards_;
+
+    // memory usage of all the CcShard in LocalCcShards?
+    size_t mem_usage_{0};
+    // estimate size: Key + Value
+    size_t estimate_ccshard_log_size_{0};
 
 private:
     /**

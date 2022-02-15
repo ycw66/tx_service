@@ -1527,11 +1527,23 @@ bool TransactionExecution::IsTimeOut()
     {
         state_forward_cnt_ = 0;
         uint64_t now_ts = LocalCcShards::ClockTs();
-        if (now_ts > state_clock_)
+        using namespace std::chrono_literals;
+        // TODO remove this hard code 4 seconds
+        uint64_t duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(4s).count();
+        if (now_ts - state_clock_ > duration)
         {
             // The local clock is advanced in roughly 2 seconds. So, if the
-            // current time is greater than the prior one, the tx machine has
-            // been stuck in this state for at least 2 seconds.
+            // current time is greater than the prior one by at least 4
+            // seconds(local clock advances at least two times), then we can
+            // confirm the tx machine has been stuck in this state for at least
+            // 2 seconds.
+            //
+            // local clock(s):      0          2          4
+            //                |----------|----------|----------|
+            //                          ^            ^
+            // current time:          prior         now
+            //
             state_clock_ = now_ts;
             return true;
         }

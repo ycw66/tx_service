@@ -84,12 +84,31 @@ public:
     bool HasWriteLock() const;
 
     TxNumber WriteIntentTx() const;
-    
+
     bool HasWriteIntent() const;
 
     void ClearTx(TxNumber tx_number, CcShard *ccs);
 
     const std::unordered_set<TxNumber> &ReadLocks() const;
+
+    size_t MemUsage() const
+    {
+        size_t mem_size_ = 0;
+        size_t ptr_size = sizeof(uint64_t);
+
+        mem_size_ += sizeof(read_intentions_) +
+                     read_intentions_.size() * sizeof(TxNumber);
+        mem_size_ +=
+            sizeof(read_locks_) + read_locks_.size() * sizeof(TxNumber);
+        mem_size_ += sizeof(write_lock_tx_);
+        mem_size_ += sizeof(is_write_lock_empty_);
+        mem_size_ += sizeof(write_intent_tx_);
+        mem_size_ += sizeof(is_write_intent_empty_);
+        mem_size_ += blocking_queue_.MemUsage() +
+                     blocking_queue_.Capacity() * sizeof(LockQueueEntry);
+
+        return mem_size_;
+    }
 
 private:
     struct LockQueueEntry

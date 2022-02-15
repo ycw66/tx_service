@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <iostream>
 #include <thread>
 #include <vector>
 
@@ -7,6 +9,8 @@
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "store/data_store_handler.h"
+
+using namespace std::chrono;
 
 namespace txservice
 {
@@ -78,32 +82,31 @@ public:
         return cass_name;
     }
 
-    void Ckpt(int id)
+    void Ckpt()
     {
         if (local_shards_.Count() == 0 || store_hd_ == nullptr)
         {
             return;
         }
 
-        // FIXME: If checkpoint interval is large and workload is bulk insert,
-        // the memory usage of cce_buf vector would be large.
         std::vector<LruEntry *> cce_buf;
-        cce_buf.reserve(1000000);
+        cce_buf.reserve(10000);
+
+        size_t shard_cnt = local_shards_.cc_shards_.size();
+        CkptTsCc ckpt_req(shard_cnt);
+
+        // find minimum ckpt_ts from all the ccshard in parallel. ckpt_ts is the
+        // minimum timestamp minus 1 among all the active transactions,
+        // thus it's safe to flush all the entries smaller or equal to
+        // this timestamp.
+        for (auto &ccs : local_shards_.cc_shards_)
+        {
+            ccs->Enqueue(&ckpt_req);
+        }
+        ckpt_req.Wait();
 
         uint64_t ckpt_ts = UINT64_MAX;
-        CkptTsCc ckpt_ts_cc(id);
-
-        // find minimum ckpt_ts from all the ccshard.  ckpt_ts is the minimum
-        // timestamp minus 1 among all the active transactions, thus it's safe
-        // to flush all the entries smaller or equal to this timestamp.
-        // TODO: find ckpt_ts in parallel.
-        for (const auto &ccs : local_shards_.cc_shards_)
-        {
-            ckpt_ts_cc.Reset();
-            ccs->Enqueue(&ckpt_ts_cc);
-            ckpt_ts_cc.Wait();
-            ckpt_ts = std::min(ckpt_ts, ckpt_ts_cc.GetCkptTs());
-        }
+        ckpt_ts = ckpt_req.GetCkptTs();
 
         assert(ckpt_ts >= last_ckpt_ts_);
 
@@ -112,7 +115,7 @@ public:
             return;
         }
 
-        const CcShard &shard = *local_shards_.cc_shards_.at(0);
+        const CcShard &shard = *local_shards_.cc_shards_[0];
         bool flushed = false;
 
         // iteratate all the tables and execute CkptScanCc requests on each
@@ -128,6 +131,7 @@ public:
             cce_buf.clear();
 
             CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, cce_buf);
+
             for (auto &ccs : local_shards_.cc_shards_)
             {
                 ckpt_scan_cc.Reset(ccs->node_id_);
@@ -146,7 +150,7 @@ public:
                 }
             }
 
-            if (cce_buf.size() > 0)
+            if (!cce_buf.empty())
             {
                 // Flushes to the data store
                 bool ckpt_ret = false;
@@ -168,8 +172,8 @@ public:
                         GetCassTablename(table_name), cce_buf, sk_schema);
                 }
 
-                // if flush to data store succeeds, update the ckpt_ts for each
-                // entries in ccmap.
+                // if flush to data store succeeds, update the ckpt_ts for
+                // each entries in ccmap.
                 if (ckpt_ret)
                 {
                     for (LruEntry *&entry : cce_buf)
@@ -178,6 +182,13 @@ public:
                                               std::memory_order_release);
                     }
                     flushed = true;
+
+                    std::cout << "finish checkpoint, cce_buf.size(): "
+                              << cce_buf.size() << std::endl;
+                }
+                else
+                {
+                    std::cout << "ckpt fails" << std::endl;
                 }
             }
         }
@@ -191,7 +202,6 @@ public:
     void Run()
     {
         using namespace std::chrono_literals;
-        int id = 0;
 
         std::unique_lock<std::mutex> lk(mux_);
         while (status_ == Status::Active)
@@ -200,17 +210,16 @@ public:
             {
                 cv_.wait_for(
                     lk,
-                    10s,
+                    100000s,
                     [this]
                     { return status_ != Status::Active || request_ckpt_; });
             }
 
             lk.unlock();
-            Ckpt(id);
+            Ckpt();
             lk.lock();
 
             request_ckpt_ = false;
-            ++id;
         }
 
         status_ = Status::Terminated;
@@ -218,8 +227,9 @@ public:
     }
 
     /**
-     * @brief Called by TxProcessor thread to notify checkpointer thread to do
-     * checkpoint if there is no freeable entries to be kicked out from ccmap.
+     * @brief Called by TxProcessor thread to notify checkpointer thread
+     * to do checkpoint if there is no freeable entries to be kicked out
+     * from ccmap.
      */
     void Notify()
     {
@@ -242,11 +252,11 @@ public:
         }
         cv_.notify_one();
 
-        // The checkpoint worker is terminated, when the tx service is going to
-        // be shut down. The checkpoint worker flushes one more time unflushed
-        // records to the data store, before exiting. The caller of this method,
-        // i.e., the destructor of the tx service, is blocked until last
-        // flushing finishes.
+        // The checkpoint worker is terminated, when the tx service is
+        // going to be shut down. The checkpoint worker flushes one more
+        // time unflushed records to the data store, before exiting. The
+        // caller of this method, i.e., the destructor of the tx
+        // service, is blocked until last flushing finishes.
         std::unique_lock<std::mutex> lk(mux_);
         cv_.wait(lk, [this] { return status_ == Status::Terminated; });
     }

@@ -968,19 +968,30 @@ public:
 struct CkptTsCc : public CcRequestBase
 {
 public:
-    CkptTsCc(int id)
-        : ckpt_ts_(UINT64_MAX), mux_(), cv_(), finish_(true), id_(id)
+    CkptTsCc(size_t shard_cnt)
+        : ckpt_ts_(UINT64_MAX),
+          mux_(),
+          cv_(),
+          finish_cnt_(0),
+          shard_cnt_(shard_cnt)
     {
     }
 
+    CkptTsCc() = delete;
+    CkptTsCc(const CkptTsCc &) = delete;
+    CkptTsCc(CkptTsCc &&) = delete;
+
     bool Execute(CcShard &ccs) override
     {
-        ckpt_ts_ = ccs.ActiveTxMinTs();
-
         std::unique_lock<std::mutex> lk(mux_);
-        assert(finish_ == false);
-        finish_ = true;
-        cv_.notify_one();
+        ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs());
+
+        assert(finish_cnt_ < shard_cnt_);
+        ++finish_cnt_;
+        if (finish_cnt_ == shard_cnt_)
+        {
+            cv_.notify_one();
+        }
 
         // return false since CkptTsCc is not reused and does not need to call
         // CcRequestBase::Free
@@ -990,18 +1001,7 @@ public:
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        if (!finish_)
-        {
-            cv_.wait(lk, [this] { return finish_; });
-        }
-    }
-
-    void Reset()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        assert(finish_ == true);
-        finish_ = false;
-        ckpt_ts_ = UINT64_MAX;
+        cv_.wait(lk, [this] { return finish_cnt_ == shard_cnt_; });
     }
 
     uint64_t GetCkptTs() const
@@ -1013,8 +1013,8 @@ private:
     uint64_t ckpt_ts_;
     std::mutex mux_;
     std::condition_variable cv_;
-    bool finish_;
-    std::atomic<int> id_;
+    size_t finish_cnt_;
+    size_t shard_cnt_;
 };
 
 struct CkptScanCc : public CcRequestBase

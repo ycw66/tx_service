@@ -39,6 +39,11 @@ public:
         return KeyType::Normal;
     }
 
+    virtual size_t MemUsage() const
+    {
+        return 0;
+    }
+
     static size_t HashCode(const TxKey &sk, const TxKey &pk)
     {
         size_t hash = 17;

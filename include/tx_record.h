@@ -42,6 +42,11 @@ struct TxRecord
     virtual TxRecord::Uptr Clone() const = 0;
     virtual void Copy(const TxRecord &rhs) = 0;
     virtual std::string ToString() const = 0;
+
+    virtual size_t MemUsage() const
+    {
+        return 0;
+    }
 };
 
 template <typename... Types>

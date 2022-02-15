@@ -342,12 +342,20 @@ size_t CcShard::Clean()
 
     // notify the checkpointer thread to do checkpoint if there is not freeable
     // entries to be kicked out from ccmap.
-    if (free_cnt == 0 && ckpter_ != nullptr)
+    if (free_cnt == 0)
     {
-        ckpter_->Notify();
+        NotifyCkpt();
     }
 
     return free_cnt;
+}
+
+void CcShard::NotifyCkpt()
+{
+    if (ckpter_ != nullptr)
+    {
+        ckpter_->Notify();
+    }
 }
 
 const TableSchemaView *CcShard::CreateCatalog(const TableName &table_name,
@@ -456,4 +464,5 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
         }
     }
 }
+
 }  // namespace txservice

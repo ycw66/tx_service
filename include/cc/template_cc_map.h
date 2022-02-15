@@ -307,6 +307,7 @@ public:
                 assert(ite != prior_cce.insert_intention_set_.end());
                 assert(ite->second->tx_id_.TxNumber() == txn);
 
+                shard_->mem_usage_ -= new_cce->payload_.MemUsage();
                 if (payload_str == nullptr)
                 {
                     new_cce->payload_ = *commit_val;
@@ -316,6 +317,7 @@ public:
                     size_t offset = 0;
                     new_cce->payload_.Deserialize(payload_str->data(), offset);
                 }
+                shard_->mem_usage_ += new_cce->payload_.MemUsage();
                 new_cce->payload_status_ = RecordStatus::Normal;
 
                 ++ite;
@@ -346,6 +348,11 @@ public:
                     new_cce->ckpt_next_ = &pos_inf_;
                     pos_inf_.ckpt_prev_ = new_cce;
                 }
+
+                size_t key_size = new_cce->key_->MemUsage();
+                size_t payload_size = new_cce->payload_.MemUsage();
+                new_cce->parent_map_->shard_->UpdateEstimateLogSize(
+                    new_cce, key_size, payload_size);
             }
 
             req.Result()->SetFinished();
@@ -372,6 +379,7 @@ public:
             {
                 cce.commit_ts_ = commit_ts;
 
+                shard_->mem_usage_ -= cce.payload_.MemUsage();
                 if (payload_str == nullptr && !is_del)
                 {
                     cce.payload_ = *commit_val;
@@ -381,6 +389,7 @@ public:
                     size_t offset = 0;
                     cce.payload_.Deserialize(payload_str->data(), offset);
                 }
+                shard_->mem_usage_ += cce.payload_.MemUsage();
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
 
@@ -394,6 +403,11 @@ public:
                     cce.ckpt_next_ = &pos_inf_;
                     pos_inf_.ckpt_prev_ = &cce;
                 }
+
+                size_t key_size = cce.key_->MemUsage();
+                size_t payload_size = cce.payload_.MemUsage();
+                cce.parent_map_->shard_->UpdateEstimateLogSize(
+                    &cce, key_size, payload_size);
             }
 
             req.Result()->SetFinished();
@@ -1631,7 +1645,7 @@ public:
                 // checkpoint list.
                 ++cnt;
                 LruEntry *next = cce->ckpt_next_;
-                CcShard::DetachCkpt(cce);
+                shard_->DetachCkpt(cce);
                 cce = static_cast<CcEntry<KeyT, ValueT> *>(next);
                 continue;
             }
@@ -1790,6 +1804,8 @@ public:
         prior->map_next_ = next;
         next->map_prev_ = prior;
 
+        shard_->mem_usage_ -= cc_entry->GetCcEntryMemUsage();
+
         ccm_.erase(*cc_entry->key_);
     }
 
@@ -1833,6 +1849,7 @@ protected:
         auto lb_it = ccm_.lower_bound(key);
         if (lb_it != ccm_.end() && lb_it->first == key)
         {
+            shard_->UpdateLruList(&lb_it->second);
             return &lb_it->second;
         }
 
@@ -1879,6 +1896,9 @@ protected:
         next_cce->map_prev_ = new_cce_ptr;
 
         shard_->UpdateLruList(new_cce_ptr);
+
+        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
+
         return new_cce_ptr;
     }
 
@@ -1930,6 +1950,9 @@ protected:
         }
 
         shard_->UpdateLruList(new_cce_ptr);
+
+        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
+
         return new_cce_ptr;
     }
 

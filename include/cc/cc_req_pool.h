@@ -140,6 +140,16 @@ public:
         return cnt_;
     }
 
+    size_t Capacity() const
+    {
+        return capacity_;
+    }
+
+    size_t MemUsage() const
+    {
+        return (sizeof(CircularQueue) + capacity_ * sizeof(T));
+    }
+
 private:
     std::unique_ptr<T[]> vec_;
     size_t head_;
