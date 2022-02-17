@@ -11,8 +11,23 @@ namespace txservice
 {
 class TransactionExecution;
 
+/**
+ * @brief CcHandlerResultBase is the base class of CcHandlerResult of different
+ * operators which provides SetError and SetFinished API.
+ *
+ */
+class CcHandlerResultBase
+{
+public:
+    virtual ~CcHandlerResultBase() = default;
+    virtual void SetError(int8_t err_code) = 0;
+    virtual void SetFinished() = 0;
+    virtual bool IsFinished() const = 0;
+    virtual bool IsError() const = 0;
+};
+
 template <typename T>
-class CcHandlerResult
+class CcHandlerResult : public CcHandlerResultBase
 {
 public:
     CcHandlerResult(const TransactionExecution *txm) : result_(), txm_(txm)
@@ -43,12 +58,12 @@ public:
         return *this;
     }
 
-    bool IsFinished() const
+    bool IsFinished() const override
     {
         return is_finished_.load(std::memory_order_acquire);
     }
 
-    bool IsError() const
+    bool IsError() const override
     {
         return error_code_.load(std::memory_order_acquire) != 0;
     }
@@ -69,7 +84,7 @@ public:
         ref_cnted_ = false;
     }
 
-    void SetFinished()
+    void SetFinished() override
     {
         if (ref_cnted_)
         {
@@ -99,7 +114,7 @@ public:
         }
     }
 
-    void SetError(int8_t err_code)
+    void SetError(int8_t err_code) override
     {
         int8_t no_error = 0;
         error_code_.compare_exchange_strong(

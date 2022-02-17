@@ -150,22 +150,28 @@ struct ScanOpenOperation : TransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     void Set(const TableName *table_name,
+             ScanIndexType index_type,
              const TxKey *key,
              bool inclusive,
-             ScanDirection direction)
+             ScanDirection direction,
+             bool is_ckpt_delta)
     {
         table_name_ = table_name;
+        index_type_ = index_type;
         start_key_ = key;
         inclusive_ = inclusive;
         direction_ = direction;
+        is_ckpt_delta_ = is_ckpt_delta;
     }
 
     CcHandlerResult<ScanOpenResult> cc_result_;
 
     const TableName *table_name_{nullptr};
+    ScanIndexType index_type_{ScanIndexType::Primary};
     const TxKey *start_key_{nullptr};
     bool inclusive_{true};
     ScanDirection direction_{ScanDirection::Forward};
+    bool is_ckpt_delta_{false};
 };
 
 struct ScanNextOperation : TransactionOperation

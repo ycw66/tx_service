@@ -244,7 +244,12 @@ void TransactionExecution::ScanOpen(const TableName &table_name,
     state_stack_.push_back(&scan_open_);
     scan_open_.cc_result_.Reset();
 
-    scan_open_.Set(&table_name, &start_key, inclusive, direction);
+    scan_open_.Set(&table_name,
+                   index_type,
+                   &start_key,
+                   inclusive,
+                   direction,
+                   is_ckpt_delta);
 
     handler->ScanOpen(table_name,
                       index_type,
@@ -1455,6 +1460,8 @@ void TransactionExecution::Process(FaultInjectRequest &fi_req)
 void TransactionExecution::Begin(uint64_t start_ts)
 {
     state_stack_.push_back(&init_txn_);
+
+    init_txn_.Reset();
 
     commit_ts_ = 0;
     commit_ts_bound_ = start_ts;

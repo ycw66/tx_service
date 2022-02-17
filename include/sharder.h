@@ -14,6 +14,9 @@
 
 namespace txservice
 {
+#define GET_CCNODE_RPC_PORT(port) port + 1
+#define GET_LOG_REPLAY_RPC_PORT(port) port + 3
+
 class LocalCcShards;
 
 /**
@@ -118,6 +121,15 @@ public:
     void UpdateLeader(uint32_t ng_id);
 
     /**
+     * @brief NotifyNewLeaderStart rpc will send the node_id of the new leader
+     * to each node. Update the leader cache without referring to braft service.
+     *
+     * @param ng_id The cc node group ID.
+     * @param node_id The node_id of leader.
+     */
+    void UpdateLeader(uint32_t ng_id, uint32_t node_id);
+
+    /**
      * @brief Processes the RPC that transfers the leader of the specified cc
      * node group to the preferred cc node.
      *
@@ -160,6 +172,11 @@ public:
     remote::CcStreamSender *GetCcStreamSender()
     {
         return cc_stream_sender_ != nullptr ? cc_stream_sender_.get() : nullptr;
+    }
+
+    uint32_t GetNodeCount()
+    {
+        return ips_.size();
     }
 
 private:

@@ -54,12 +54,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ConvertProtocol(proto));
 
-    bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::AcquireWriteAll(
@@ -101,12 +96,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
         acq_all->set_is_write_intent(false);
     }
 
-    bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(node_group_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
@@ -153,12 +143,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_is_deleted(is_deleted);
 
-    bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostWriteAll(
@@ -213,12 +198,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     CommitType commit_type = ConvertPostWriteType(post_write_type);
     post_write_all->set_commit_type(commit_type);
 
-    bool success = stream_sender_.SendMessage(ng_id, send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(ng_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostRead(
@@ -251,12 +231,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_gap_ts(gap_ts);
     vali->set_protocol(ConvertProtocol(protocol));
 
-    bool success = stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::Read(
@@ -314,12 +289,7 @@ void txservice::remote::RemoteCcHandler::Read(
 
     read->set_ts(ts);
 
-    bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
 }
 
 /*
@@ -409,12 +379,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_protocol(ConvertProtocol(proto));
     scan_open->set_ckpt(is_ckpt);
 
-    bool success = stream_sender_.SendMessage(node_group_id, send_msg);
-
-    if (!success)
-    {
-        hd_res.SetError(-1);
-    }
+    stream_sender_.SendMessage(node_group_id, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::ScanNext(
@@ -451,12 +416,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_protocol(ConvertProtocol(proto));
     scan_next->set_ckpt(is_ckpt);
 
-    bool success = stream_sender_.SendMessage(ng_id, send_msg);
-
-    if (!success)
-    {
-        hd_res.SetError(-1);
-    }
+    stream_sender_.SendMessage(ng_id, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
@@ -497,12 +457,7 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     commit_sk->set_ts(ts);
     commit_sk->set_is_deleted(is_delete);
 
-    bool success = stream_sender_.SendMessage(key_shard_code >> 10, send_msg);
-
-    if (!success)
-    {
-        hd_res.SetError(-1);
-    }
+    stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::FaultInject(
@@ -527,12 +482,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     fi_req->set_fault_name(fault_name);
     fi_req->set_fault_type(fault_type);
 
-    bool success = stream_sender_.SendMessage(node_id, send_msg);
-
-    if (!success)
-    {
-        hres.SetError(-1);
-    }
+    stream_sender_.SendMessage(node_id, send_msg, &hres);
 }
 
 txservice::remote::IsolationType

@@ -30,6 +30,7 @@ void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
 
 bool CcStreamSender::SendMessage(uint32_t node_group_id,
                                  const CcMessage &msg,
+                                 CcHandlerResultBase *res,
                                  bool resend)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
@@ -38,6 +39,12 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
 
     if (stream_it == outbound_streams_.end())
     {
+        // SendMessage error return -1 to indicate the request needs retry.
+        if (res != nullptr)
+        {
+            res->SetError(-1);
+        }
+
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
                    << dest_node_id;
         return false;
@@ -48,6 +55,11 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
     if (stream_ver < 0)
     {
         // The stream is invalid, when the stream version is less than 0.
+        // SendMessage error return -1 to indicate the request needs retry.
+        if (res != nullptr)
+        {
+            res->SetError(-1);
+        }
         return false;
     }
 
@@ -71,6 +83,12 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
             // remote node is dead. We should skip resend the message again.
             if (resend)
             {
+                // SendMessage error return -1 to indicate the request needs
+                // retry.
+                if (res != nullptr)
+                {
+                    res->SetError(-1);
+                }
                 break;
             }
 
@@ -88,8 +106,8 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
             }
 
             // put the failed message into the resend_message_list.
-            resend_message_list.emplace_back(
-                std::make_unique<ResendMessage>(node_group_id, msg));
+            resend_message_list_.enqueue(
+                std::make_unique<ResendMessage>(node_group_id, msg, res));
 
             // always wake up connector thread to either reconnect streams or
             // resend messages.
@@ -153,13 +171,22 @@ void CcStreamSender::ConnectStreams()
             }
         }
 
-        // resend the queued messages
-        auto deque_it = resend_message_list.begin();
-        while (deque_it != resend_message_list.end())
+        // release lock before resend queued messages.
+        lk.unlock();
+        ResendMessage::Uptr messages[100];
+        while (!resend_message_list_.is_empty())
         {
-            SendMessage((*deque_it)->node_group_id_, (*deque_it)->msg_);
-            deque_it = resend_message_list.erase(deque_it);
+            size_t msg_cnt =
+                resend_message_list_.try_dequeue_bulk(messages, 100);
+            for (size_t i = 0; i < msg_cnt; ++i)
+            {
+                SendMessage(messages[i]->node_group_id_,
+                            messages[i]->msg_,
+                            messages[i]->res_,
+                            true);
+            }
         }
+        lk.lock();
 
         if (to_connect_nodes_.size() > 0)
         {

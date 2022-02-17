@@ -34,6 +34,16 @@ message CheckTxStatusResponse {
 	TxStatus tx_status = 1;
 }
 
+// New leader notify its node_id to other nodes.
+message NotifyNewLeaderStartRequest {
+  uint32 ng_id = 1;
+  uint32 node_id = 2;
+}
+
+message NotifyNewLeaderStartResponse {
+  bool error = 1;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -41,6 +51,7 @@ service CcStreamService {
 service CcRpcService {
 	rpc Transfer(TransferRequest) returns (TransferResponse);
 	rpc CheckTxStatus(CheckTxStatusRequest) returns (CheckTxStatusResponse);
+	rpc NotifyNewLeaderStart(NotifyNewLeaderStartRequest) returns (NotifyNewLeaderStartResponse);
 }
 
 message TxId_msg {

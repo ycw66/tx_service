@@ -8,6 +8,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "cc/cc_handler_result.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 
@@ -25,13 +26,16 @@ struct ResendMessage
 public:
     using Uptr = std::unique_ptr<ResendMessage>;
     ResendMessage();
-    ResendMessage(uint32_t node_group_id, CcMessage msg)
-        : node_group_id_(node_group_id), msg_(msg)
+    ResendMessage(uint32_t node_group_id,
+                  const CcMessage &msg,
+                  CcHandlerResultBase *res)
+        : node_group_id_(node_group_id), msg_(msg), res_(res)
     {
     }
 
     uint32_t node_group_id_;
     CcMessage msg_;
+    CcHandlerResultBase *res_;
 };
 
 class CcStreamSender
@@ -44,6 +48,7 @@ public:
     void RecycleCcMsg(std::unique_ptr<CcMessage> msg);
     bool SendMessage(uint32_t node_group_id,
                      const CcMessage &msg,
+                     CcHandlerResultBase *res = nullptr,
                      bool resend = false);
     void AddRemoteNode(uint32_t node_id, const std::string &ip, uint16_t port);
 
@@ -65,7 +70,7 @@ private:
                        std::pair<brpc::StreamId, std::atomic<int64_t>>>
         outbound_streams_;
     std::unordered_map<uint32_t, int64_t> to_connect_nodes_;
-    std::deque<ResendMessage::Uptr> resend_message_list;
+    moodycamel::ConcurrentQueue<ResendMessage::Uptr> resend_message_list_;
 
     // The background thread that establishes cc streams to remote nodes.
     std::thread connect_thd_;

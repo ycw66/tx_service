@@ -109,6 +109,7 @@ int Sharder::Init(const std::string &path)
         cc_nodes_.try_emplace(
             cc_group_id,
             std::make_unique<fault::CcNode>(cc_group_id,
+                                            node_id_,
                                             ips_.at(node_id_),
                                             ports_.at(node_id_) + 1,
                                             group_ips,
@@ -163,7 +164,8 @@ int Sharder::Init(const std::string &path)
     }
 
     // Initializes the Raft service that listens on the port of local_port + 1.
-    if (braft::add_service(&cc_node_server_, ports_.at(node_id_) + 1) != 0)
+    if (braft::add_service(&cc_node_server_,
+                           GET_CCNODE_RPC_PORT(ports_.at(node_id_))) != 0)
     {
         LOG(ERROR) << "Fail to add the Raft service for cc nodes.";
         return -1;
@@ -177,7 +179,8 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    if (cc_node_server_.Start(ports_.at(node_id_) + 1, NULL) != 0)
+    if (cc_node_server_.Start(GET_CCNODE_RPC_PORT(ports_.at(node_id_)), NULL) !=
+        0)
     {
         LOG(FATAL) << "Fail to start the cc node server.";
         return -1;
@@ -202,7 +205,8 @@ int Sharder::Init(const std::string &path)
 
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
-    if (log_replay_server_.Start(ports_.at(node_id_) + 3, nullptr) != 0)
+    if (log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(ports_.at(node_id_)),
+                                 nullptr) != 0)
     {
         LOG(FATAL) << "Fail to start the log replay server.";
         return -1;
@@ -284,7 +288,8 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     uint32_t nid = ng_id;
     for (size_t idx = 0; idx < rep_group_cnt; ++idx)
     {
-        if (ips_.at(nid) == leader_ip_str && ports_.at(nid) + 1 == leader_port)
+        if (ips_.at(nid) == leader_ip_str &&
+            GET_CCNODE_RPC_PORT(ports_.at(nid)) == leader_port)
         {
             ng_leader_cache_.at(ng_id).store(nid, std::memory_order_release);
             break;
@@ -301,6 +306,10 @@ void Sharder::UpdateLeader(uint32_t ng_id)
             ++nid;
         }
     }
+}
+void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
+{
+    ng_leader_cache_.at(ng_id).store(node_id, std::memory_order_release);
 }
 
 void Sharder::FinishLogReplay(uint32_t cc_ng_id, uint32_t log_group_id)

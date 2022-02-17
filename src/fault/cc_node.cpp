@@ -5,6 +5,7 @@
 namespace txservice::fault
 {
 CcNode::CcNode(const uint32_t ng_id,
+               const uint32_t node_id,
                const std::string &ip,
                const uint16_t port,
                const std::vector<std::string> &ng_ips,
@@ -13,6 +14,7 @@ CcNode::CcNode(const uint32_t ng_id,
                LocalCcShards &local_shards,
                uint32_t log_group_cnt)
     : ng_id_(ng_id),
+      node_id_(node_id),
       ip_(ip),
       port_(port),
       ng_ips_(ng_ips),
@@ -167,6 +169,71 @@ void CcNode::RecoverTx(uint64_t tx_number,
     }
 }
 
+/**
+ * @brief Notify all the nodes that the node_id of the new leader in node
+ * group leader_ng_id, and request these nodes to update their leader cache.
+ *
+ * @param leader_ng_id
+ * @param leader_node_id
+ */
+void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
+                                  uint32_t leader_node_id)
+{
+    uint32_t node_id;
+    std::string node_ip;
+    uint16_t node_port;
+
+    uint32_t node_count = Sharder::Instance().GetNodeCount();
+
+    for (node_id = 0; node_id < node_count; node_id++)
+    {
+        if (node_id == leader_node_id)
+        {
+            Sharder::Instance().UpdateLeader(leader_ng_id, leader_node_id);
+            continue;
+        }
+
+        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
+
+        brpc::Channel channel;
+        if (channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        {
+            // Fails to establish the channel to the tx node. Silently
+            // returns. The tx will be recovered again by next
+            // conflicting tx.
+            LOG(ERROR) << "Fail to init the channel to the leader of ng#"
+                       << leader_ng_id << " for tx lock recovery.";
+            continue;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+        remote::NotifyNewLeaderStartRequest req;
+        req.set_ng_id(leader_ng_id);
+        req.set_node_id(leader_node_id);
+        remote::NotifyNewLeaderStartResponse res;
+        res.set_error(false);
+
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(-1);
+        stub.NotifyNewLeaderStart(&cntl, &req, &res, nullptr);
+
+        // Retry is not needed at here, the remote nodes will also refresh their
+        // leader caches passively.
+        if (cntl.Failed())
+        {
+            LOG(ERROR) << "Fail the NotifyNewLeaderStart RPC of ng"
+                       << leader_ng_id << ". Error code: " << cntl.ErrorCode()
+                       << ". Msg: " << cntl.ErrorText();
+        }
+        else if (res.error())
+        {
+            LOG(ERROR) << "Fail to notify the new leader of ng" << leader_ng_id
+                       << " to remote node id:" << node_id;
+        }
+    }
+}
+
 void CcNode::on_leader_start(int64_t term)
 {
     candidate_leader_term_ = term;
@@ -179,6 +246,8 @@ void CcNode::on_leader_start(int64_t term)
     // after it receives log records from all log groups.
     recovery_hd_ = std::make_unique<fault::CcNodeRecoveryAgent>(
         ng_id_, term, ip_, port_ + 2, local_cc_shards_);
+
+    NotifyNewLeaderStart(ng_id_, node_id_);
 }
 
 void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)

@@ -32,6 +32,11 @@ public:
                        CheckTxStatusResponse *response,
                        ::google::protobuf::Closure *done) override;
 
+    void NotifyNewLeaderStart(::google::protobuf::RpcController *controller,
+                              const NotifyNewLeaderStartRequest *request,
+                              NotifyNewLeaderStartResponse *response,
+                              ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

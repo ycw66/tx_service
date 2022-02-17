@@ -35,6 +35,7 @@ public:
     static const uint16_t rep_group_cnt = 3;
 
     explicit CcNode(const uint32_t ng_id,
+                    const uint32_t node_id,
                     const std::string &ip,
                     const uint16_t port,
                     const std::vector<std::string> &ng_ips,
@@ -80,6 +81,8 @@ private:
         return node_options;
     }
 
+    void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
+
     void on_apply(braft::Iterator &iter) override
     {
     }
@@ -110,7 +113,10 @@ private:
 
     void on_start_following(const ::braft::LeaderChangeContext &ctx) override;
 
+    // CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;
+    // CcNode is located on node: node_id_.
+    const uint32_t node_id_;
     const std::string ip_;
     const uint16_t port_;
     // The offset of this cc node in the cc node group. By default, the first

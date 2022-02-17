@@ -80,5 +80,28 @@ void CcNodeService::CheckTxStatus(::google::protobuf::RpcController *controller,
     }
 }
 
+/**
+ * @brief RPC NotifyNewLeaderStart update the leader cache on the Sharder
+ * without referring to the braft service.
+ */
+void CcNodeService::NotifyNewLeaderStart(
+    ::google::protobuf::RpcController *controller,
+    const NotifyNewLeaderStartRequest *request,
+    NotifyNewLeaderStartResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // This object helps you to call done->Run() in RAII style. If you need
+    // to process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    uint32_t ng_id = request->ng_id();
+    uint32_t node_id = request->node_id();
+
+    // update the leader cache directly.
+    Sharder::Instance().UpdateLeader(ng_id, node_id);
+
+    response->set_error(false);
+}
+
 }  // namespace remote
 }  // namespace txservice
