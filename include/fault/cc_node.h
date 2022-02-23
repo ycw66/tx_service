@@ -63,7 +63,7 @@ public:
         return leader_term_.load(std::memory_order_acquire);
     }
 
-    void FinishLogGroupReplay(uint32_t log_group_id);
+    void FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term);
 
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
@@ -134,7 +134,14 @@ private:
 
     LocalCcShards &local_cc_shards_;
     std::unique_ptr<CcNodeRecoveryAgent> recovery_hd_;
+
+    // recovered_log_groups_ records the log groups which have finished the
+    // recovery.
     std::unordered_set<uint32_t> recovered_log_groups_;
+    // recovery_mux_ is used to protect recovered_log_groups_, since it will be
+    // updated by replay thread and raft service thread concurrently.
+    std::mutex recovery_mux_;
+
     uint32_t log_group_cnt_;
 };
 }  // namespace txservice::fault

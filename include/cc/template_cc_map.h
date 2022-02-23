@@ -1623,12 +1623,6 @@ public:
         size_t cnt = 0;
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
-            // The checkpoint ts should be smaller than the ts when an ongoing
-            // tx acquired the write intention. Or, there is a possibility that
-            // the ongoing tx commits prior to the checkpoint.
-            assert(!cce->key_lock_.HasWriteLock() ||
-                   req.ckpt_ts_ <= cce->last_vali_ts_);
-
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {

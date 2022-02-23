@@ -312,7 +312,9 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
     ng_leader_cache_.at(ng_id).store(node_id, std::memory_order_release);
 }
 
-void Sharder::FinishLogReplay(uint32_t cc_ng_id, uint32_t log_group_id)
+void Sharder::FinishLogReplay(uint32_t cc_ng_id,
+                              int64_t cc_ng_term,
+                              uint32_t log_group_id)
 {
     auto ng_it = cc_nodes_.find(cc_ng_id);
     if (ng_it == cc_nodes_.end())
@@ -320,7 +322,7 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id, uint32_t log_group_id)
         return;
     }
 
-    ng_it->second->FinishLogGroupReplay(log_group_id);
+    ng_it->second->FinishLogGroupReplay(log_group_id, cc_ng_term);
 }
 
 void Sharder::RecoverTx(uint64_t tx_number,

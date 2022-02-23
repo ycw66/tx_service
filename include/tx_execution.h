@@ -16,21 +16,17 @@
 namespace txservice
 {
 struct TxRequest;
-struct BeginRequest;
-struct ReadRequest;
-struct ReadOutsideRequest;
-struct ScanOpenRequest;
-struct ScanNextRequest;
-struct ScanCloseRequest;
-struct UpsertRequest;
-struct CommitRequest;
-struct AbortRequest;
-struct CreateTableRequest;
-struct UpsertTableRequest;
-struct DropTableRequest;
-struct FetchCatalogRequest;
-struct CheckCatalogVersionRequest;
-struct FaultInjectRequest;
+struct InitTxRequest;
+struct ReadTxRequest;
+struct ReadOutsideTxRequest;
+struct ScanOpenTxRequest;
+struct ScanNextTxRequest;
+struct ScanCloseTxRequest;
+struct UpsertTxRequest;
+struct CommitTxRequest;
+struct AbortTxRequest;
+struct UpsertTableTxRequest;
+struct FaultInjectTxRequest;
 
 class TransactionExecution
 {
@@ -81,17 +77,17 @@ public:
     /**
      * @brief BeginRequest specifies the isolation level and cc protocol.
      */
-    void Process(BeginRequest &begin_req);
-    void Process(ReadRequest &read_req);
-    void Process(ReadOutsideRequest &read_outside_req);
-    void Process(ScanOpenRequest &scan_open_req);
-    void Process(ScanNextRequest &scan_next_req);
-    void Process(ScanCloseRequest &scan_close_req);
-    void Process(UpsertRequest &upsert_req);
-    void Process(CommitRequest &commit_req);
-    void Process(AbortRequest &abort_req);
-    void Process(UpsertTableRequest &req);
-    void Process(FaultInjectRequest &fi_req);
+    void ProcessTxRequest(InitTxRequest &begin_req);
+    void ProcessTxRequest(ReadTxRequest &read_req);
+    void ProcessTxRequest(ReadOutsideTxRequest &read_outside_req);
+    void ProcessTxRequest(ScanOpenTxRequest &scan_open_req);
+    void ProcessTxRequest(ScanNextTxRequest &scan_next_req);
+    void ProcessTxRequest(ScanCloseTxRequest &scan_close_req);
+    void ProcessTxRequest(UpsertTxRequest &upsert_req);
+    void ProcessTxRequest(CommitTxRequest &commit_req);
+    void ProcessTxRequest(AbortTxRequest &abort_req);
+    void ProcessTxRequest(UpsertTableTxRequest &req);
+    void ProcessTxRequest(FaultInjectTxRequest &fi_req);
 
     /**
      * Interface for storage engine runtime.
@@ -128,40 +124,48 @@ private:
      */
     void Forward();
 
-    void Begin(uint64_t start_ts = 0);
-
-    void Read(const TableName &table_name,
-              const TxKey &key,
-              TxRecord &record,
-              ReadType read_type = ReadType::Inside);
-
-    void ReadOutside(TxRecord &record, bool is_deleted);
+    void PushOperation(TransactionOperation *op, int retry_num = RETRY_NUM);
 
     /**
-     * @brief Reads the specified key from the local cc map to which this tx is
-     * bound. This API is used for reading cc maps replicated in all shards. A
-     * typical use case of ReadLocal is to read and start concurrency control of
-     * a table catalog.
-     *
-     * @param table_name The table name
-     * @param key The key to read
-     * @param record The record to which the key's content is copied.
-     * @param read_type The read type
+     * Process Operations.
+     * The TxRequest is responsible for putting the corresponding operations
+     * into state_stack. The first Forward call will start to process these
+     * operations.
      */
-    void ReadLocal(const TableName &table_name,
-                   const TxKey &key,
-                   TxRecord &record,
-                   ReadType read_type);
 
-    void ScanOpen(const TableName &table_name,
-                  ScanIndexType indx_type,
-                  const TxKey &start_key,
-                  bool inclusive = true,
-                  ScanDirection direction = ScanDirection::Forward,
-                  bool is_ckpt_delta = false);
+    void Process(InitTxnOperation &init_txn);
+    void PostProcess(InitTxnOperation &init_txn);
+    void Process(ReadOperation &read);
+    void PostProcess(ReadOperation &read);
+    void Process(ScanOpenOperation &scan_open);
+    void PostProcess(ScanOpenOperation &scan_open);
+    void Process(ScanNextOperation &scan_next);
+    void PostProcess(ScanNextOperation &scan_next);
+    void Process(AcquireWriteOperation &acquire_write);
+    void PostProcess(AcquireWriteOperation &acquire_write);
+    void Process(SetCommitTsOperation &set_ts);
+    void PostProcess(SetCommitTsOperation &set_ts);
+    void Process(ValidateOperation &validate);
+    void PostProcess(ValidateOperation &validate);
+    void Process(UpdateTxnStatus &update_txn);
+    void PostProcess(UpdateTxnStatus &update_txn);
+    void Process(PostProcessOp &post_process);
+    void PostProcess(PostProcessOp &post_process);
+    void Process(WriteToLogOp &write_log);
+    void PostProcess(WriteToLogOp &write_log);
+    void Process(FaultInjectOp &fault_inject_op);
+    void PostProcess(FaultInjectOp &fault_inject_op);
 
-    void ScanNext(size_t alias);
+    void Process(AcquireAllOp &acq_all_op);
+    void PostProcess(AcquireAllOp &acq_all_op);
+    void Process(PostWriteAllOp &post_write_all_op);
+    void PostProcess(PostWriteAllOp &post_write_all_op);
 
+    void Process(DsUpsertTableOp &ds_upsert_table_op);
+    void PostProcess(DsUpsertTableOp &ds_upsert_table_op);
+
+    // Process TxRequests without Operations. These TxRequests can be executed
+    // immediately without using CcRequests.
     void ScanClose(size_t alias, const TxKey &end_key);
 
     void Update(const TableName &table_name,
@@ -185,42 +189,11 @@ private:
                 SecondaryKeys *skeys = nullptr);
 
     void Commit();
-
     void Abort();
 
-    void RequestFinish(bool succeed);
+    void FillDataLog(WriteToLogOp &write_log);
 
-    void PostBegin();
-    void PostRead();
-    void PostScanOpen();
-    void PostScanNext();
-    void PostScanClose();
-    void AcquireWrite();
-    void PostAcquireWrite();
-    void SetTs();
-    void PostSetTs();
-    void Vali();
-    void PostVali();
-    void WriteLog();
-    void PostWriteLog();
-    void SetTxStatus();
-    void PostSetTxStatus();
-    void PostProcess(size_t read_intention_size, size_t write_intention_size);
-    void PostPostProcess();
-    void PostAcquireAll();
-    // release all the table level lock for this transaction.
-    void FaultInject(const std::string &fault_name,
-                     const std::string &fault_type,
-                     int node_id);
-
-    void Process(AcquireAllOp &acq_all_op);
-    void Process(PostWriteAllOp &post_write_all_op);
-    void PostPostWriteAll();
-    void Process(WriteToLogOp &flush_log);
-    void PostDataStoreOp();
-    void Process(DsUpsertTableOp &ds_upsert_table_op);
-
-    bool IsTimeOut();
+    bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
 
     enum struct DDLType
@@ -316,10 +289,12 @@ private:
     UpdateTxnStatus update_txn_;
     PostProcessOp post_process_;
     WriteToLogOp write_log_;
+    SleepOperation sleep_op_;
 
     // fault inject
-    FaultInjectOp fault_inject_op;
+    FaultInjectOp fault_inject_op_;
 
+    friend struct TransactionOperation;
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;
     friend struct AcquireWriteOperation;
@@ -335,7 +310,8 @@ private:
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;
     friend struct UpsertTableOp;
-    friend struct DataStoreOp;
+    friend struct DsUpsertTableOp;
+    friend struct SleepOperation;
     friend class TxProcessor;
 };
 }  // namespace txservice

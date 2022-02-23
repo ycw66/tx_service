@@ -153,7 +153,9 @@ public:
      * @param log_group_id The ID of the log group from which committed log
      * records have been shipped.
      */
-    void FinishLogReplay(uint32_t cc_ng_id, uint32_t log_group_id);
+    void FinishLogReplay(uint32_t cc_ng_id,
+                         int64_t cc_ng_term,
+                         uint32_t log_group_id);
 
     /**
      * @brief Recovers the input orphan lock held for an extended period of

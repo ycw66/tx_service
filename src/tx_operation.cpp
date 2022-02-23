@@ -25,18 +25,50 @@ public:
     };
 };
 
-ReadOperation::ReadOperation(TransactionExecution *txm) : cc_result_(txm)
+/**
+ * @brief Re-process the failed operation if the error code is -1, which
+ * indicated a term change or send message failure. Retry at most RETRY_NUM
+ * number of times. The first retry waits 0 secs, the second one waits 2
+ * seconds, the third one waits 4 seconds and so on.
+ *
+ */
+void TransactionOperation::ReRunOp(TransactionExecution *txm)
+{
+    if (retry_num_ <= 0)
+    {
+        return;
+    }
+
+    // sleep for a while and then execute the new operation.
+    // sleep time is based on retry_num_.
+    txm->sleep_op_.sleep_secs_ = (RETRY_NUM - retry_num_) * 2;
+    is_running_ = false;
+    retry_num_--;
+
+    // put sleep operation on top of the stack.
+    txm->PushOperation(&txm->sleep_op_);
+    txm->StartTiming();
+}
+
+ReadOperation::ReadOperation(TransactionExecution *txm) : hd_result_(txm)
 {
 }
 
 void ReadOperation::Reset()
 {
-    cc_result_.Reset();
+    hd_result_.Reset();
 }
 
 void ReadOperation::Forward(TransactionExecution *txm)
 {
-    const CcEntryAddr &cce_addr = cc_result_.Value().cce_addr_;
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
 
     if (cce_addr.Term() < 0 && txm->IsTimeOut())
     {
@@ -47,19 +79,28 @@ void ReadOperation::Forward(TransactionExecution *txm)
         // set, the tx has not received any response or acknowledgement from the
         // key's cc node group. The read request is forced to be errored upon
         // timeout.
-        cc_result_.ForceError();
-        txm->PostRead();
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
     }
-    else if (cc_result_.IsFinished())
+    else if (hd_result_.IsFinished())
     {
-        if (cc_result_.ErrorCode() == -1)
+        if (hd_result_.ErrorCode() == -1)
         {
             // The read request was directed to a non-leader node. Updates the
-            // leader cache.
-            Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+            // leader cache. Sine UpdateLeader() is a sync call, we only do it
+            // when re-run the operation fails.
+            if (retry_num_ == 0)
+            {
+                Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
         }
 
-        txm->PostRead();
+        txm->PostProcess(*this);
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
     // arbitrarily long after the read request is acknowledged, we still need
@@ -136,6 +177,13 @@ void AcquireWriteOperation::Resize(size_t new_size)
 
 void AcquireWriteOperation::Forward(TransactionExecution *txm)
 {
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     if (remote_ack_cnt_.load(std::memory_order_acquire) > 0)
     {
         bool time_out = txm->IsTimeOut();
@@ -175,6 +223,12 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                 // acquire request from the blocking queue in the remote node.
                 if (!hd_result.IsError())
                 {
+                    WriteSetEntry &write_entry =
+                        *acquire_write_entries_.at(idx);
+                    // Assigns to the write entry the cc entry address obtained
+                    // in the acquire phase.
+                    write_entry.cce_addr_ = cce_addr;
+
                     // Only tx's under repeatable read or serializability have
                     // non-empty read sets.
                     uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
@@ -191,10 +245,15 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                 }
             }
 
-            txm->PostAcquireWrite();
+            txm->PostProcess(*this);
+            return;
         }
     }
-    else if (finish_cnt_.load() == acquire_write_cnt_)
+
+    // For case remote_ack_cnt_ > 0, we should also check whether we have gotten
+    // enough finish_cnt_. For example, remote node is dead and SendMessage
+    // fails.
+    if (finish_cnt_.load() == acquire_write_cnt_)
     {
         // TODO: for locking-based protocols, though the tx may be blocked
         // arbitrarily long, after all acquire requests are acknowledged, we
@@ -226,34 +285,51 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
             }
             else if (results_.at(idx).ErrorCode() == -1)
             {
-                auto find_it = outdated_node_set.find(addr.NodeGroupId());
-                if (find_it == outdated_node_set.end())
+                if (retry_num_ == 0)
                 {
-                    Sharder::Instance().UpdateLeader(addr.NodeGroupId());
-                    outdated_node_set.emplace(addr.NodeGroupId());
+                    auto find_it = outdated_node_set.find(addr.NodeGroupId());
+                    if (find_it == outdated_node_set.end())
+                    {
+                        Sharder::Instance().UpdateLeader(addr.NodeGroupId());
+                        outdated_node_set.emplace(addr.NodeGroupId());
+                    }
+                }
+                else if (retry_num_ > 0)
+                {
+                    ReRunOp(txm);
+                    return;
                 }
             }
         }
 
-        txm->PostAcquireWrite();
+        txm->PostProcess(*this);
     }
+    return;
 }
 
 SetCommitTsOperation::SetCommitTsOperation(TransactionExecution *txm)
-    : result_of_set_commit_ts_(txm)
+    : hd_result_(txm)
 {
 }
 
 void SetCommitTsOperation::Reset()
 {
-    result_of_set_commit_ts_.Reset();
+    hd_result_.Reset();
 }
 
 void SetCommitTsOperation::Forward(TransactionExecution *txm)
 {
-    if (result_of_set_commit_ts_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
     {
-        txm->PostSetTs();
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    // SetCommitTsOperation is a local call, should always succeeds.
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
     }
 }
 
@@ -320,6 +396,13 @@ void ValidateOperation::Resize(size_t new_size)
 
 void ValidateOperation::Forward(TransactionExecution *txm)
 {
+    // start the state machine if running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     size_t finish_cnt = finish_cnt_.load(std::memory_order_acquire);
 
     if (finish_cnt < vali_cnt_ && txm->IsTimeOut())
@@ -340,7 +423,7 @@ void ValidateOperation::Forward(TransactionExecution *txm)
             }
         }
 
-        txm->PostVali();
+        txm->PostProcess(*this);
     }
     else if (finish_cnt == vali_cnt_)
     {
@@ -371,20 +454,11 @@ void ValidateOperation::Forward(TransactionExecution *txm)
             }
         }
 
-        txm->PostVali();
+        // validation cannot re-run since the remote locks of the readset are
+        // lost during auto-failover, we should abort the transaction if remote
+        // node, which contains read entries, is dead.
+        txm->PostProcess(*this);
     }
-}
-
-PushConflictTxnCommitTsLowerBound::PushConflictTxnCommitTsLowerBound(
-    TransactionExecution *txm)
-    : result_of_update_commit_lower_bound_(txm)
-{
-}
-
-void PushConflictTxnCommitTsLowerBound::Reset(TxId txn_id)
-{
-    result_of_update_commit_lower_bound_.Reset();
-    txid_ = txn_id;
 }
 
 WriteToLogOp::WriteToLogOp(TransactionExecution *txm) : hd_result_(txm)
@@ -393,57 +467,90 @@ WriteToLogOp::WriteToLogOp(TransactionExecution *txm) : hd_result_(txm)
 
 void WriteToLogOp::Forward(TransactionExecution *txm)
 {
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     if (hd_result_.IsFinished())
     {
-        txm->PostWriteLog();
+        if (hd_result_.IsError())
+        {
+            if (retry_num_ > 0)
+            {
+                // log group doesn't support active refresh the leader cache
+                // yet, hence we refresh leader for every failed WriteToLogOp.
+                txm->txlog_->RefreshLeader(log_group_id_);
+                ReRunOp(txm);
+                return;
+            }
+        }
+        txm->PostProcess(*this);
     }
 }
 
 void WriteToLogOp::Reset()
 {
+    log_group_id_ = 0;
     hd_result_.Reset();
     log_closure_.Reset();
 }
 
-UpdateTxnStatus::UpdateTxnStatus(TransactionExecution *txm) : res_(txm)
+UpdateTxnStatus::UpdateTxnStatus(TransactionExecution *txm) : hd_result_(txm)
 {
 }
 
 void UpdateTxnStatus::Reset()
 {
-    res_.Reset();
+    hd_result_.Reset();
 }
 
 void UpdateTxnStatus::Forward(TransactionExecution *txm)
 {
-    if (res_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
     {
-        if (res_.IsError())
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.IsError())
         {
             // Updating the tx's status should never fail.
-            txm->PostSetTxStatus();
+            txm->PostProcess(*this);
         }
         else
         {
-            txm->PostSetTxStatus();
+            txm->PostProcess(*this);
         }
     }
 }
 
-InitTxnOperation::InitTxnOperation(TransactionExecution *txm) : result_(txm)
+InitTxnOperation::InitTxnOperation(TransactionExecution *txm) : hd_result_(txm)
 {
 }
 
 void InitTxnOperation::Reset()
 {
-    result_.Reset();
+    hd_result_.Reset();
 }
 
 void InitTxnOperation::Forward(TransactionExecution *txm)
 {
-    if (result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
     {
-        txm->PostBegin();
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
     }
 }
 
@@ -525,95 +632,160 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     if (finish_cnt_.load(std::memory_order_acquire) == acquire_write_cnt_ ||
         txm->IsTimeOut())
     {
         // Post-processing does not retry. A failed request leaves an orphan
         // lock/intent, which are recovered separately.
-        txm->PostPostProcess();
+        txm->PostProcess(*this);
     }
+}
+
+FaultInjectOp::FaultInjectOp(TransactionExecution *txm) : hd_result_(txm)
+{
+}
+
+void FaultInjectOp::Reset()
+{
+    hd_result_.Reset();
 }
 
 void FaultInjectOp::Forward(TransactionExecution *txm)
 {
-    if (cc_result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
     {
-        if (cc_result_.Value() == true)
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.Value() == true)
         {
-            txm->RequestFinish(true);
+            succeed_ = true;
+            txm->PostProcess(*this);
         }
         else
         {
-            txm->RequestFinish(false);
+            succeed_ = false;
+            txm->PostProcess(*this);
         }
     }
 }
 
 ScanOpenOperation::ScanOpenOperation(TransactionExecution *txm)
-    : cc_result_(txm)
+    : hd_result_(txm)
 {
+}
+
+void ScanOpenOperation::Reset()
+{
+    hd_result_.Reset();
 }
 
 void ScanOpenOperation::Forward(TransactionExecution *txm)
 {
-    if (!cc_result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (!hd_result_.IsFinished())
     {
         bool time_out = txm->IsTimeOut();
 
         if (time_out)
         {
-            cc_result_.ForceError();
+            hd_result_.ForceError();
             // TODO: So far we do not store scanned keys in the tx's scan set.
             // In future, we need ScanOpenResult to check which cc nodes have
             // returned and to release scan locks in these cc nodes in
             // post-processing.
-            txm->PostScanOpen();
+            txm->PostProcess(*this);
         }
     }
     else
     {
-        // Error code -1 indicates send message failed or term changed. After
-        // failover
-        if (cc_result_.ErrorCode() == -1)
+        // Error code -1 indicates send message failed or term changed.
+        if (hd_result_.ErrorCode() == -1 && retry_num_ > 0)
         {
-            Sharder::Instance().UpdateLeaders();
+            if (retry_num_ == 0)
+            {
+                Sharder::Instance().UpdateLeaders();
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
         }
-
-        txm->PostScanOpen();
+        else
+        {
+            txm->PostProcess(*this);
+        }
     }
+}
+
+ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
+    : hd_result_(txm)
+{
 }
 
 void ScanNextOperation::Reset()
 {
-    cc_result_.Reset();
+    hd_result_.Reset();
     scanner_ = nullptr;
     alias_ = 0;
 }
 
-ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
-    : cc_result_(txm)
-{
-}
-
 void ScanNextOperation::Forward(TransactionExecution *txm)
 {
-    if (!cc_result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (!hd_result_.IsFinished())
     {
         bool time_out = txm->IsTimeOut();
         if (time_out)
         {
-            cc_result_.ForceError();
-            txm->PostScanNext();
+            hd_result_.ForceError();
+            txm->PostProcess(*this);
         }
     }
     else
     {
-        if (cc_result_.ErrorCode() == -1)
+        // Error code -1 indicates send message failed or term changed.
+        if (hd_result_.ErrorCode() == -1)
         {
-            Sharder::Instance().UpdateLeader(cc_result_.Value().node_group_id_);
+            if (retry_num_ == 0)
+            {
+                Sharder::Instance().UpdateLeader(
+                    hd_result_.Value().node_group_id_);
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
         }
-
-        txm->PostScanNext();
+        else
+        {
+            txm->PostProcess(*this);
+        }
     }
 }
 
@@ -672,6 +844,13 @@ void AcquireAllOp::Reset(size_t node_cnt)
 
 void AcquireAllOp::Forward(TransactionExecution *txm)
 {
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     if (remote_ack_cnt_.load(std::memory_order_acquire) > 0)
     {
         bool time_out = txm->IsTimeOut();
@@ -696,7 +875,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                 }
             }
 
-            txm->PostAcquireAll();
+            txm->PostProcess(*this);
         }
     }
     else if (finish_cnt_.load() == upload_cnt_)
@@ -709,7 +888,15 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         {
             if (hd_results_[nid].ErrorCode() == -1)
             {
-                Sharder::Instance().UpdateLeader(nid);
+                if (retry_num_ == 0)
+                {
+                    Sharder::Instance().UpdateLeader(nid);
+                }
+                else if (retry_num_ > 0)
+                {
+                    ReRunOp(txm);
+                    return;
+                }
             }
         }
 
@@ -726,7 +913,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             }
         }
 
-        txm->PostAcquireAll();
+        txm->PostProcess(*this);
     }
 }
 
@@ -766,9 +953,16 @@ void PostWriteAllOp::Resize(uint32_t ng_cnt)
 
 void PostWriteAllOp::Forward(TransactionExecution *txm)
 {
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
     if (finish_cnt_.load(std::memory_order_acquire) == upload_cnt_)
     {
-        txm->PostPostWriteAll();
+        txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
@@ -776,24 +970,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
         {
             hd_results_[idx].ForceError();
         }
-        txm->PostPostWriteAll();
-    }
-}
-
-DataStoreOp::DataStoreOp(TransactionExecution *txm) : result_(txm)
-{
-}
-
-void DataStoreOp::Reset()
-{
-    result_.Reset();
-}
-
-void DataStoreOp::Forward(TransactionExecution *txm)
-{
-    if (result_.IsFinished())
-    {
-        txm->PostDataStoreOp();
+        txm->PostProcess(*this);
     }
 }
 
@@ -801,11 +978,31 @@ DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
                                  const TableName *kv_table_name,
                                  bool is_deleted,
                                  TransactionExecution *txm)
-    : DataStoreOp(txm),
-      table_name_(table_name),
+    : table_name_(table_name),
       kv_table_name_(kv_table_name),
-      is_deleted_(is_deleted)
+      is_deleted_(is_deleted),
+      hd_result_(txm)
 {
+}
+
+void DsUpsertTableOp::Reset()
+{
+    hd_result_.Reset();
+}
+
+void DsUpsertTableOp::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        is_running_ = true;
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
 }
 
 SchemaOp::SchemaOp(const TableName &table_name,
@@ -899,7 +1096,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->commit_ts_ = std::max(txm->commit_ts_, ts);
         }
 
-        FlushPrepareLog(txm);
+        op_ = &prepare_log_op_;
+        FillPrepareLog(txm);
+        txm->Process(prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
     {
@@ -959,7 +1158,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &upsert_kv_table_op_)
     {
-        if (upsert_kv_table_op_.result_.IsError())
+        if (upsert_kv_table_op_.hd_result_.IsError())
         {
             // The data store operation failed. Retry the operation.
             txm->Process(upsert_kv_table_op_);
@@ -968,7 +1167,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             // For DROP TABLE statements, the data store operation happens after
             // the commit log is flushed and is the second to the last step.
-            FlushCleanLog(txm);
+            op_ = &clean_log_op_;
+            FillCleanLog(txm);
+            txm->Process(clean_log_op_);
         }
         else
         {
@@ -986,7 +1187,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            FlushCommitLog(txm);
+            op_ = &commit_log_op_;
+            FillCommitLog(txm);
+            txm->Process(commit_log_op_);
         }
     }
     else if (op_ == &commit_log_op_)
@@ -1054,7 +1257,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                FlushCleanLog(txm);
+                op_ = &clean_log_op_;
+                FillCleanLog(txm);
+                txm->Process(clean_log_op_);
             }
         }
     }
@@ -1074,9 +1279,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
 }
 
-void UpsertTableOp::FlushPrepareLog(TransactionExecution *txm)
+void UpsertTableOp::FillPrepareLog(TransactionExecution *txm)
 {
-    op_ = &prepare_log_op_;
+    prepare_log_op_.log_type_ = TxLogType::PREPARE;
 
     prepare_log_op_.log_closure_.LogResponse()
         .mutable_write_log_response()
@@ -1111,13 +1316,11 @@ void UpsertTableOp::FlushPrepareLog(TransactionExecution *txm)
         node_terms[nid] =
             acquire_all_intent_op_.hd_results_[nid].Value().node_term_;
     }
-
-    txm->Process(prepare_log_op_);
 }
 
-void UpsertTableOp::FlushCommitLog(TransactionExecution *txm)
+void UpsertTableOp::FillCommitLog(TransactionExecution *txm)
 {
-    op_ = &commit_log_op_;
+    commit_log_op_.log_type_ = TxLogType::COMMIT;
 
     commit_log_op_.log_closure_.LogResponse()
         .mutable_write_log_response()
@@ -1144,13 +1347,11 @@ void UpsertTableOp::FlushCommitLog(TransactionExecution *txm)
     // locks. So, there is no need to check the liveness of write locks when
     // flushing the commit log.
     commit_log_rec->mutable_node_terms()->clear();
-
-    txm->Process(commit_log_op_);
 }
 
-void UpsertTableOp::FlushCleanLog(TransactionExecution *txm)
+void UpsertTableOp::FillCleanLog(TransactionExecution *txm)
 {
-    op_ = &clean_log_op_;
+    clean_log_op_.log_type_ = TxLogType::CLEAN;
 
     clean_log_op_.log_closure_.LogResponse()
         .mutable_write_log_response()
@@ -1164,7 +1365,24 @@ void UpsertTableOp::FlushCleanLog(TransactionExecution *txm)
     clean_schema_msg->set_table_name(table_key_.Name());
     clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     clean_log_rec->mutable_node_terms()->clear();
-
-    txm->Process(clean_log_op_);
 }
+
+SleepOperation::SleepOperation(TransactionExecution *txm)
+{
+}
+
+void SleepOperation::Forward(TransactionExecution *txm)
+{
+    // forward of sleep op will check whether the sleep time reached. Note that
+    // we cannot use sleep_for API since the TxProcessor thread cannot be
+    // blocked. Instead we use the TimeOut interface to simulate sleep. It may
+    // not be accurate, but retry logic is not sensitive to it.
+    if (txm->IsTimeOut(sleep_secs_))
+    {
+        // pop the sleep op and re-execute the last failed op.
+        txm->state_stack_.pop_back();
+        txm->Forward();
+    }
+}
+
 }  // namespace txservice

@@ -141,11 +141,26 @@ int CcNode::TransferLeader()
     return -1;
 }
 
-void CcNode::FinishLogGroupReplay(uint32_t log_group_id)
+void CcNode::FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term)
 {
+    // recovery_mux_ is used to protect recovered_log_groups_, since raft
+    // service thread will also modify it concurrently.
+    std::lock_guard<std::mutex> lk(recovery_mux_);
+
+    // ignore the FinishReplayMsg whose ng_term is smaller than the current
+    // candidate_leader_term_.
+    if (candidate_leader_term_ > ng_term)
+    {
+        return;
+    }
+
     auto lg_it = recovered_log_groups_.emplace(log_group_id);
     if (lg_it.second && recovered_log_groups_.size() == log_group_cnt_)
     {
+        // reset the recovered_log_groups_ since we have finished the log replay
+        // work for the current term.
+        recovered_log_groups_.clear();
+
         leader_term_.store(candidate_leader_term_, std::memory_order_release);
         LOG(INFO) << "The leader of cc node group #" << ng_id_
                   << " with the term " << candidate_leader_term_
@@ -236,7 +251,17 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
 
 void CcNode::on_leader_start(int64_t term)
 {
-    candidate_leader_term_ = term;
+    {
+        // replay thread and leader election thread may update
+        // candidate_leader_term_ and recovered_log_groups_ concurrently.
+        std::lock_guard<std::mutex> lk(recovery_mux_);
+
+        candidate_leader_term_ = term;
+
+        // new leader will send ReplayLog request to logservice to replay logs.
+        // It should reset the recovered_log_groups_ ahead.
+        recovered_log_groups_.clear();
+    }
 
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " becomes the leader of ng" << ng_id_ << ". Term: " << term;
@@ -254,8 +279,6 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
 {
     LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng"
               << ng_id_ << ", term: " << ctx.term();
-
-    recovered_log_groups_.clear();
 
     leader_term_.store(-1, std::memory_order_release);
 

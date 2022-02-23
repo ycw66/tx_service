@@ -71,6 +71,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
         if (msg.has_log_record())
         {
+            continue;
             const ::txlog::ReplayRecordMsg &log_rec = msg.log_record();
             uint64_t commit_ts = log_rec.commit_ts();
             const std::string &blob = log_rec.log_blob();
@@ -211,8 +212,11 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
             uint32_t lg_id = finish_msg.log_group_id();
             uint32_t cc_ng_id = finish_msg.cc_node_group_id();
+            int64_t cc_ng_term = finish_msg.cc_node_group_term();
 
-            Sharder::Instance().FinishLogReplay(cc_ng_id, lg_id);
+            LOG(DEBUG) << "Receive ReplayFinishMsg cc node group id:"
+                       << cc_ng_id << "log group id:" << lg_id;
+            Sharder::Instance().FinishLogReplay(cc_ng_id, cc_ng_term, lg_id);
         }
     }
 

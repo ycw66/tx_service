@@ -11,11 +11,39 @@
 namespace txservice
 {
 class TransactionExecution;
+struct ReadTxRequest;
+struct ReadOutsideTxRequest;
+struct ScanOpenTxRequest;
+struct ScanNextTxRequest;
+
+#define RETRY_NUM 4
+
+enum class TxLogType
+{
+    DATA,
+    PREPARE,
+    COMMIT,
+    CLEAN
+};
 
 struct TransactionOperation
 {
+    TransactionOperation()
+    {
+    }
     virtual ~TransactionOperation() = default;
     virtual void Forward(TransactionExecution *txm) = 0;
+
+    /**
+     * @brief If operation fails since remote node dies, auto-failover will
+     * elect a new leader and recover the dead node group. Re-run the operator
+     * automatically to avoid client to re-run the whole query.
+     *
+     */
+    void ReRunOp(TransactionExecution *txm);
+
+    int retry_num_{RETRY_NUM};
+    bool is_running_{false};
 };
 
 struct ReadOperation : TransactionOperation
@@ -27,9 +55,11 @@ public:
     void Forward(TransactionExecution *txm) override;
 
     ReadType read_type_{ReadType::Inside};
-    CcHandlerResult<ReadKeyResult> cc_result_;
     CcProtocol protocol_{CcProtocol::OCC};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    ReadTxRequest *read_tx_req_{nullptr};
+    ReadOutsideTxRequest *read_outside_tx_req_{nullptr};
+    CcHandlerResult<ReadKeyResult> hd_result_;
 };
 
 struct SetCommitTsOperation : TransactionOperation
@@ -39,7 +69,7 @@ public:
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcHandlerResult<uint64_t> result_of_set_commit_ts_;
+    CcHandlerResult<uint64_t> hd_result_;
 };
 
 struct ValidateOperation : TransactionOperation
@@ -84,23 +114,26 @@ public:
 struct FaultInjectOp : TransactionOperation
 {
 public:
-    FaultInjectOp(TransactionExecution *txm) : cc_result_(txm)
+    FaultInjectOp(TransactionExecution *txm);
+
+    void Set(const std::string &fault_name,
+             const std::string &fault_type,
+             int node_id)
     {
+        fault_name_ = fault_name;
+        fault_type_ = fault_type;
+        node_id_ = node_id;
+        succeed_ = false;
     }
 
+    void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcHandlerResult<bool> cc_result_;
-};
-
-struct PushConflictTxnCommitTsLowerBound : TransactionOperation
-{
-    PushConflictTxnCommitTsLowerBound(TransactionExecution *txm);
-    void Reset(TxId txn_id);
-
-private:
-    CcHandlerResult<uint64_t> result_of_update_commit_lower_bound_;
-    TxId txid_;
+    std::string fault_name_;
+    std::string fault_type_;
+    int node_id_;
+    bool succeed_;
+    CcHandlerResult<bool> hd_result_;
 };
 
 struct WriteToLogOp : TransactionOperation
@@ -109,6 +142,8 @@ struct WriteToLogOp : TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
+    TxLogType log_type_{TxLogType::DATA};
+    uint32_t log_group_id_{0};
     CcHandlerResult<Void> hd_result_;
     LogClosure log_closure_{&hd_result_};
 };
@@ -119,7 +154,7 @@ struct UpdateTxnStatus : TransactionOperation
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcHandlerResult<Void> res_;
+    CcHandlerResult<Void> hd_result_;
 };
 
 struct PostProcessOp : TransactionOperation
@@ -132,6 +167,8 @@ struct PostProcessOp : TransactionOperation
     std::vector<CcHandlerResult<Void>> write_results_;
     std::vector<CcHandlerResult<std::vector<TxId>>> read_results_;
     size_t acquire_write_cnt_{0};
+    size_t read_intention_size_{0};
+    size_t write_intention_size_{0};
     std::atomic<size_t> finish_cnt_{0};
 };
 
@@ -141,7 +178,7 @@ struct InitTxnOperation : TransactionOperation
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcHandlerResult<InitTxResult> result_;
+    CcHandlerResult<InitTxResult> hd_result_;
 };
 
 struct ScanOpenOperation : TransactionOperation
@@ -164,7 +201,9 @@ struct ScanOpenOperation : TransactionOperation
         is_ckpt_delta_ = is_ckpt_delta;
     }
 
-    CcHandlerResult<ScanOpenResult> cc_result_;
+    void Reset();
+
+    CcHandlerResult<ScanOpenResult> hd_result_;
 
     const TableName *table_name_{nullptr};
     ScanIndexType index_type_{ScanIndexType::Primary};
@@ -172,6 +211,7 @@ struct ScanOpenOperation : TransactionOperation
     bool inclusive_{true};
     ScanDirection direction_{ScanDirection::Forward};
     bool is_ckpt_delta_{false};
+    ScanOpenTxRequest *tx_req_{nullptr};
 };
 
 struct ScanNextOperation : TransactionOperation
@@ -187,9 +227,10 @@ struct ScanNextOperation : TransactionOperation
 
     void Reset();
 
-    CcHandlerResult<ScanNextResult> cc_result_;
+    CcHandlerResult<ScanNextResult> hd_result_;
     size_t alias_{0};
     CcScanner *scanner_{nullptr};
+    ScanNextTxRequest *tx_req_{nullptr};
 };
 
 struct AcquireAllOp : public TransactionOperation
@@ -207,7 +248,7 @@ struct AcquireAllOp : public TransactionOperation
     // write intentions/locks.
     std::atomic<int32_t> remote_ack_cnt_{0};
 
-    const TableName *table_name_;
+    const TableName *table_name_{nullptr};
     const TxKey *key_{nullptr};
     LockType lk_type_{LockType::WriteIntent};
     CcProtocol protocol_{CcProtocol::OCC};
@@ -231,16 +272,7 @@ struct PostWriteAllOp : public TransactionOperation
     PostWriteType write_type_{PostWriteType::PrepareCommit};
 };
 
-struct DataStoreOp : public TransactionOperation
-{
-    DataStoreOp(TransactionExecution *txm);
-    void Reset();
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<Void> result_;
-};
-
-struct DsUpsertTableOp : public DataStoreOp
+struct DsUpsertTableOp : public TransactionOperation
 {
     DsUpsertTableOp() = delete;
     DsUpsertTableOp(const TableName *table_name,
@@ -248,12 +280,14 @@ struct DsUpsertTableOp : public DataStoreOp
                     bool is_deleted,
                     TransactionExecution *txm);
 
-    using DataStoreOp::Forward;
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
 
-    const TableName *table_name_;
-    const TableName *kv_table_name_;
-    const TableSchema *table_schema_;
-    bool is_deleted_;
+    const TableName *table_name_{nullptr};
+    const TableName *kv_table_name_{nullptr};
+    const TableSchema *table_schema_{nullptr};
+    bool is_deleted_{false};
+    CcHandlerResult<Void> hd_result_;
 };
 
 struct SchemaOp : public TransactionOperation
@@ -335,9 +369,18 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp clean_log_op_;
 
 private:
-    void FlushPrepareLog(TransactionExecution *txm);
-    void FlushCommitLog(TransactionExecution *txm);
-    void FlushCleanLog(TransactionExecution *txm);
+    void FillPrepareLog(TransactionExecution *txm);
+    void FillCommitLog(TransactionExecution *txm);
+    void FillCleanLog(TransactionExecution *txm);
 };
 
+struct SleepOperation : TransactionOperation
+{
+public:
+    SleepOperation(TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+
+    int sleep_secs_{0};
+};
 }  // namespace txservice

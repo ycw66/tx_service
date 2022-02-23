@@ -23,7 +23,7 @@ public:
 template <typename Subtype, typename T>
 struct TemplateTxRequest : TxRequest
 {
-    TemplateTxRequest() : cc_result_()
+    TemplateTxRequest() : tx_result_()
     {
     }
 
@@ -31,45 +31,45 @@ struct TemplateTxRequest : TxRequest
 
     void Process(TransactionExecution *txm) override
     {
-        txm->Process(static_cast<Subtype &>(*this));
+        txm->ProcessTxRequest(static_cast<Subtype &>(*this));
         return;
     }
 
     bool Finish()
     {
-        return cc_result_.Status() != TxResultStatus::Unknown;
+        return tx_result_.Status() != TxResultStatus::Unknown;
     }
 
     bool IsError() const
     {
-        return cc_result_.IsError();
+        return tx_result_.IsError();
     }
 
     void Wait()
     {
-        cc_result_.Wait();
+        tx_result_.Wait();
     }
 
     const T &Result() const
     {
-        return cc_result_.Value();
+        return tx_result_.Value();
     }
 
     void Reset()
     {
-        cc_result_.Reset();
+        tx_result_.Reset();
     }
 
 protected:
-    TxResult<T> cc_result_;
+    TxResult<T> tx_result_;
 
     friend class TransactionExecution;
 };
 
-struct BeginRequest : public TemplateTxRequest<BeginRequest, Void>
+struct InitTxRequest : public TemplateTxRequest<InitTxRequest, Void>
 {
-    BeginRequest(IsolationLevel level = IsolationLevel::ReadCommitted,
-                 CcProtocol proto = CcProtocol::OCC)
+    InitTxRequest(IsolationLevel level = IsolationLevel::ReadCommitted,
+                  CcProtocol proto = CcProtocol::OCC)
         : iso_level_(level), protocol_(proto)
     {
     }
@@ -78,14 +78,14 @@ struct BeginRequest : public TemplateTxRequest<BeginRequest, Void>
     CcProtocol protocol_{CcProtocol::OCC};
 };
 
-struct ReadRequest : public TemplateTxRequest<ReadRequest, RecordStatus>
+struct ReadTxRequest : public TemplateTxRequest<ReadTxRequest, RecordStatus>
 {
 public:
-    ReadRequest(const TableName *tab_name = nullptr,
-                const TxKey *key = nullptr,
-                TxRecord *rec = nullptr,
-                ReadType type = ReadType::Inside,
-                bool read_local = false)
+    ReadTxRequest(const TableName *tab_name = nullptr,
+                  const TxKey *key = nullptr,
+                  TxRecord *rec = nullptr,
+                  ReadType type = ReadType::Inside,
+                  bool read_local = false)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
@@ -114,11 +114,11 @@ public:
     bool read_local_;
 };
 
-struct ReadOutsideRequest
-    : public TemplateTxRequest<ReadOutsideRequest, RecordStatus>
+struct ReadOutsideTxRequest
+    : public TemplateTxRequest<ReadOutsideTxRequest, RecordStatus>
 {
 public:
-    ReadOutsideRequest(TxRecord &rec, bool is_deleted)
+    ReadOutsideTxRequest(TxRecord &rec, bool is_deleted)
         : rec_(rec), is_deleted_(is_deleted)
     {
     }
@@ -127,13 +127,13 @@ public:
     bool is_deleted_;
 };
 
-struct UpsertRequest : public TemplateTxRequest<UpsertRequest, Void>
+struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 {
-    UpsertRequest(const TableName *tab_name,
-                  TxKey *key,
-                  TxRecord *rec,
-                  SecondaryKeys *sks = nullptr,
-                  bool is_del = false)
+    UpsertTxRequest(const TableName *tab_name,
+                    TxKey *key,
+                    TxRecord *rec,
+                    SecondaryKeys *sks = nullptr,
+                    bool is_del = false)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
@@ -142,11 +142,11 @@ struct UpsertRequest : public TemplateTxRequest<UpsertRequest, Void>
     {
     }
 
-    UpsertRequest(const TableName *tab_name,
-                  TxKey::Uptr key,
-                  TxRecord::Uptr rec,
-                  SecondaryKeys *sks = nullptr,
-                  bool is_del = false)
+    UpsertTxRequest(const TableName *tab_name,
+                    TxKey::Uptr key,
+                    TxRecord::Uptr rec,
+                    SecondaryKeys *sks = nullptr,
+                    bool is_del = false)
         : tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
@@ -162,14 +162,14 @@ struct UpsertRequest : public TemplateTxRequest<UpsertRequest, Void>
     bool is_delete_;
 };
 
-struct ScanOpenRequest : public TemplateTxRequest<ScanOpenRequest, size_t>
+struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
-    ScanOpenRequest(const TableName *tabname,
-                    ScanIndexType index_type,
-                    const TxKey *start_key,
-                    bool inclusive = true,
-                    ScanDirection direction = ScanDirection::Forward,
-                    bool is_ckpt = false)
+    ScanOpenTxRequest(const TableName *tabname,
+                      ScanIndexType index_type,
+                      const TxKey *start_key,
+                      bool inclusive = true,
+                      ScanDirection direction = ScanDirection::Forward,
+                      bool is_ckpt = false)
         : tab_name_(tabname),
           indx_type_(index_type),
           start_key_(start_key),
@@ -187,20 +187,21 @@ struct ScanOpenRequest : public TemplateTxRequest<ScanOpenRequest, size_t>
     bool is_ckpt_delta_;
 };
 
-struct ScanNextRequest : public TemplateTxRequest<
-                             ScanNextRequest,
-                             std::tuple<const TxKey *, const TxRecord *, bool>>
+struct ScanNextTxRequest
+    : public TemplateTxRequest<
+          ScanNextTxRequest,
+          std::tuple<const TxKey *, const TxRecord *, bool>>
 {
-    ScanNextRequest(size_t alias) : alias_(alias)
+    ScanNextTxRequest(size_t alias) : alias_(alias)
     {
     }
 
     size_t alias_;
 };
 
-struct ScanCloseRequest : public TemplateTxRequest<ScanCloseRequest, Void>
+struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
-    ScanCloseRequest(size_t alias, TxKey *end_key)
+    ScanCloseTxRequest(size_t alias, TxKey *end_key)
         : alias_(alias), end_key_(end_key)
     {
     }
@@ -209,23 +210,24 @@ struct ScanCloseRequest : public TemplateTxRequest<ScanCloseRequest, Void>
     TxKeyContainer end_key_;
 };
 
-struct AbortRequest : public TemplateTxRequest<AbortRequest, bool>
+struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>
 {
-    AbortRequest() = default;
+    AbortTxRequest() = default;
 };
 
-struct CommitRequest : public TemplateTxRequest<CommitRequest, bool>
+struct CommitTxRequest : public TemplateTxRequest<CommitTxRequest, bool>
 {
-    CommitRequest() = default;
+    CommitTxRequest() = default;
 };
 
-struct UpsertTableRequest : public TemplateTxRequest<UpsertTableRequest, bool>
+struct UpsertTableTxRequest
+    : public TemplateTxRequest<UpsertTableTxRequest, bool>
 {
-    UpsertTableRequest(const TableName *table_name,
-                       const TableName *kv_table_name,
-                       const char *catalog_image,
-                       size_t catalog_len,
-                       bool is_deleted)
+    UpsertTableTxRequest(const TableName *table_name,
+                         const TableName *kv_table_name,
+                         const char *catalog_image,
+                         size_t catalog_len,
+                         bool is_deleted)
         : table_name_(table_name),
           kv_table_name_(kv_table_name),
           catalog_image_(catalog_image),
@@ -241,11 +243,12 @@ struct UpsertTableRequest : public TemplateTxRequest<UpsertTableRequest, bool>
     bool is_deleted_;
 };
 
-struct FaultInjectRequest : public TemplateTxRequest<FaultInjectRequest, bool>
+struct FaultInjectTxRequest
+    : public TemplateTxRequest<FaultInjectTxRequest, bool>
 {
-    FaultInjectRequest(const std::string &fault_name,
-                       const std::string &fault_type,
-                       int node_id)
+    FaultInjectTxRequest(const std::string &fault_name,
+                         const std::string &fault_type,
+                         int node_id)
         : fault_name_(fault_name), fault_type_(fault_type), node_id_(node_id)
     {
     }
