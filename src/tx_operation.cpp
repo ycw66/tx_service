@@ -64,7 +64,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -180,7 +179,6 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -322,7 +320,6 @@ void SetCommitTsOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -399,7 +396,6 @@ void ValidateOperation::Forward(TransactionExecution *txm)
     // start the state machine if running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -470,7 +466,6 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -512,7 +507,6 @@ void UpdateTxnStatus::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -544,7 +538,6 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -635,7 +628,6 @@ void PostProcessOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -662,7 +654,6 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -696,7 +687,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -753,7 +743,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -847,7 +836,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -956,7 +944,6 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -995,7 +982,6 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        is_running_ = true;
         txm->Process(*this);
     }
 
@@ -1059,6 +1045,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     if (op_ == nullptr)
     {
         op_ = &acquire_all_intent_op_;
+        txm->PushOperation(&acquire_all_intent_op_);
         txm->Process(acquire_all_intent_op_);
     }
     else if (op_ == &acquire_all_intent_op_)
@@ -1074,6 +1061,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->commit_ts_ = 0;
             // Moves to the last operation that removes all write intents/locks.
             op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
             return;
         }
@@ -1098,6 +1086,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         op_ = &prepare_log_op_;
         FillPrepareLog(txm);
+        txm->PushOperation(&prepare_log_op_);
         txm->Process(prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
@@ -1111,11 +1100,13 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->commit_ts_ = 0;
             // Moves to the last operation that removes all write intents/locks.
             op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
         else
         {
             op_ = &post_all_intent_op_;
+            txm->PushOperation(&post_all_intent_op_);
             txm->Process(post_all_intent_op_);
         }
     }
@@ -1136,6 +1127,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // After the prepare log is flushed, the schema op is guaranteed to
             // succeed and can only roll forward. Retry this step to install the
             // dirty schema in the tx service.
+            txm->PushOperation(&post_all_intent_op_);
             txm->Process(post_all_intent_op_);
         }
         else if (is_deleted_)
@@ -1143,6 +1135,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // For DROP TABLE operations, the data store operation of deleting
             // the k-v table happens after the commit log is flushed.
             op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
         }
         else
@@ -1153,6 +1146,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // view (pointer) of the committed and dirty schema.
             upsert_kv_table_op_.table_schema_ =
                 catalog_rec_.SchemaView()->dirty_schema_;
+            txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }
     }
@@ -1161,6 +1155,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
             // The data store operation failed. Retry the operation.
+            txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }
         else if (is_deleted_)
@@ -1169,11 +1164,13 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // the commit log is flushed and is the second to the last step.
             op_ = &clean_log_op_;
             FillCleanLog(txm);
+            txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
         else
         {
             op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
         }
     }
@@ -1183,12 +1180,14 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             // Fails to acquire the write lock. The schema operation can only
             // roll forward after flushing the prepare log. Retries the request.
+            txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
         }
         else
         {
             op_ = &commit_log_op_;
             FillCommitLog(txm);
+            txm->PushOperation(&commit_log_op_);
             txm->Process(commit_log_op_);
         }
     }
@@ -1197,11 +1196,13 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (commit_log_op_.hd_result_.IsError())
         {
             // Fails to flush the commit log. Retries the operation.
+            txm->PushOperation(&commit_log_op_);
             txm->Process(commit_log_op_);
         }
         else
         {
             op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
     }
@@ -1234,6 +1235,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // After the prepare log is flushed, the schema op is guaranteed to
             // succeed and can only roll forward. Retry this step to install the
             // committed schema and remove write locks.
+            txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
         else
@@ -1253,12 +1255,14 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             {
                 op_ = &upsert_kv_table_op_;
                 upsert_kv_table_op_.table_schema_ = nullptr;
+                txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
             else
             {
                 op_ = &clean_log_op_;
                 FillCleanLog(txm);
+                txm->PushOperation(&clean_log_op_);
                 txm->Process(clean_log_op_);
             }
         }
@@ -1267,6 +1271,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (clean_log_op_.hd_result_.IsError())
         {
+            txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
         else
