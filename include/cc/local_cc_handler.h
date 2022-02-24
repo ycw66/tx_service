@@ -226,7 +226,6 @@ public:
                      CcHandlerResult<bool> &hres) override;
 
     void DataStoreUpsertTable(const TableName &table_name,
-                              const TableName &kv_table_name,
                               const TableSchema *schema,
                               bool is_deleted,
                               uint64_t commit_ts,

@@ -276,7 +276,6 @@ struct DsUpsertTableOp : public TransactionOperation
 {
     DsUpsertTableOp() = delete;
     DsUpsertTableOp(const TableName *table_name,
-                    const TableName *kv_table_name,
                     bool is_deleted,
                     TransactionExecution *txm);
 
@@ -284,7 +283,6 @@ struct DsUpsertTableOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{nullptr};
-    const TableName *kv_table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
     bool is_deleted_{false};
     CcHandlerResult<Void> hd_result_;
@@ -305,7 +303,6 @@ struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
     UpsertTableOp(const TableName &table_name,
-                  const TableName &kv_table_name,
                   const char *image_ptr,
                   size_t len,
                   bool is_deleted,

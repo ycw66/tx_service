@@ -259,7 +259,6 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     bool_resp_ = &req.tx_result_;
 
     schema_op_ = std::make_unique<UpsertTableOp>(*req.table_name_,
-                                                 *req.kv_table_name_,
                                                  req.catalog_image_,
                                                  req.catalog_length_,
                                                  req.is_deleted_,
@@ -1518,7 +1517,6 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
     handler->DataStoreUpsertTable(*ds_upsert_table_op.table_name_,
-                                  *ds_upsert_table_op.kv_table_name_,
                                   ds_upsert_table_op.table_schema_,
                                   ds_upsert_table_op.is_deleted_,
                                   commit_ts_,
@@ -1543,7 +1541,6 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
                          txid_,
                          fault_inject_op_.node_id_,
                          fault_inject_op_.hd_result_);
-
     return;
 }
 

@@ -9,6 +9,7 @@
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "store/data_store_handler.h"
+#include "util.h"
 
 using namespace std::chrono;
 
@@ -52,34 +53,6 @@ public:
             thd_.join();
             status_ = Status::Terminated;
         }*/
-    }
-
-    /*
-     * Get Cassandra the table name.
-     *
-     * Input table name format: ./dbname/tablename
-     * Cassandra table name format: dbname___tablename
-     */
-    std::string GetCassTablename(const std::string &name)
-    {
-        std::vector<std::string> tokens;
-        std::string token;
-        // full table name's format is "./dbname/tablename"
-        // token[1] is dbname, token[2] is table name given '/' as splitter
-        std::istringstream tokenStream(name);
-        while (std::getline(tokenStream, token, '/'))
-        {
-            tokens.push_back(token);
-        }
-
-        std::string cass_name;
-        cass_name.append(tokens[1]);
-        // use three underscore as delimiter of mariadb database name and table
-        // name in cassandra table name.
-        cass_name.append("___");
-        cass_name.append(tokens[2]);
-
-        return cass_name;
     }
 
     void Ckpt()
@@ -159,7 +132,7 @@ public:
                 {
                     const Schema *key_schema = ccm->KeySchema();
                     const Schema *rec_schema = ccm->RecordSchema();
-                    ckpt_ret = store_hd_->PutAll(GetCassTablename(table_name),
+                    ckpt_ret = store_hd_->PutAll(table_name,
                                                  cce_buf,
                                                  key_schema,
                                                  rec_schema);
@@ -168,8 +141,9 @@ public:
                 {
                     const SkSchema *sk_schema =
                         static_cast<const SkSchema *>(ccm->KeySchema());
-                    ckpt_ret = store_hd_->PutSkAll(
-                        GetCassTablename(table_name), cce_buf, sk_schema);
+                    ckpt_ret = store_hd_->PutSkAll(table_name,
+                                                   cce_buf,
+                                                   sk_schema);
                 }
 
                 // if flush to data store succeeds, update the ckpt_ts for

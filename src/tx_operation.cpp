@@ -962,11 +962,9 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
 }
 
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
-                                 const TableName *kv_table_name,
                                  bool is_deleted,
                                  TransactionExecution *txm)
     : table_name_(table_name),
-      kv_table_name_(kv_table_name),
       is_deleted_(is_deleted),
       hd_result_(txm)
 {
@@ -999,7 +997,6 @@ SchemaOp::SchemaOp(const TableName &table_name,
 }
 
 UpsertTableOp::UpsertTableOp(const TableName &table_name,
-                             const TableName &kv_table_name,
                              const char *image_ptr,
                              size_t len,
                              bool is_deleted,
@@ -1009,7 +1006,7 @@ UpsertTableOp::UpsertTableOp(const TableName &table_name,
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
       post_all_intent_op_(txm),
-      upsert_kv_table_op_(&table_name, &kv_table_name, is_deleted, txm),
+      upsert_kv_table_op_(&table_name, is_deleted, txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       post_all_lock_op_(txm),

@@ -224,12 +224,10 @@ struct UpsertTableTxRequest
     : public TemplateTxRequest<UpsertTableTxRequest, bool>
 {
     UpsertTableTxRequest(const TableName *table_name,
-                         const TableName *kv_table_name,
                          const char *catalog_image,
                          size_t catalog_len,
                          bool is_deleted)
         : table_name_(table_name),
-          kv_table_name_(kv_table_name),
           catalog_image_(catalog_image),
           catalog_length_(catalog_len),
           is_deleted_(is_deleted)
@@ -237,7 +235,6 @@ struct UpsertTableTxRequest
     }
 
     const TableName *table_name_;
-    const TableName *kv_table_name_;
     const char *catalog_image_;
     size_t catalog_length_;
     bool is_deleted_;

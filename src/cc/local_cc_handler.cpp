@@ -671,14 +671,13 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 
 void txservice::LocalCcHandler::DataStoreUpsertTable(
     const TableName &table_name,
-    const TableName &kv_table_name,
     const TableSchema *schema,
     bool is_deleted,
     uint64_t commit_ts,
     CcHandlerResult<Void> &hres)
 {
     cc_shards_.store_hd_->UpsertTable(
-        table_name, kv_table_name, schema, is_deleted, commit_ts, &hres);
+        table_name, schema, is_deleted, commit_ts, &hres);
 }
 
 /*
