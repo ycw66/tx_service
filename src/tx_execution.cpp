@@ -342,6 +342,7 @@ void TransactionExecution::Process(ReadOperation &read)
             read.read_type_ = read_type;
             read.iso_level_ = IsolationLevel::RepeatableRead;
             read.protocol_ = CcProtocol::Locking;
+
             handler->ReadLocal(table_name,
                                key,
                                rec,
@@ -361,11 +362,15 @@ void TransactionExecution::Process(ReadOperation &read)
             {
                 if (write->op_ == DmlOperation::Delete)
                 {
+                    state_stack_.pop_back();
+                    assert(state_stack_.empty());
                     rec_resp_->Finish(RecordStatus::Deleted);
                 }
                 else
                 {
                     rec.Copy(*write->rec_.get());
+                    state_stack_.pop_back();
+                    assert(state_stack_.empty());
                     rec_resp_->Finish(RecordStatus::Normal);
                 }
                 return;
@@ -377,6 +382,8 @@ void TransactionExecution::Process(ReadOperation &read)
                 rw_set_.cache_rec_ != nullptr)
             {
                 rec.Copy(*rw_set_.cache_rec_);
+                state_stack_.pop_back();
+                assert(state_stack_.empty());
                 rec_resp_->Finish(RecordStatus::Normal);
                 return;
             }
