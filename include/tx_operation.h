@@ -369,6 +369,7 @@ private:
     void FillPrepareLog(TransactionExecution *txm);
     void FillCommitLog(TransactionExecution *txm);
     void FillCleanLog(TransactionExecution *txm);
+    void ForceToFinish(TransactionExecution *txm);
 };
 
 struct SleepOperation : TransactionOperation

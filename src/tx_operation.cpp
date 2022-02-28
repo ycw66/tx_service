@@ -791,6 +791,13 @@ AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
             if (hres->IsError())
             {
                 fail_cnt_.fetch_add(1);
+
+                const AcquireAllResult &acq_result = hres->Value();
+                if (acq_result.node_term_ < 0 &&
+                    acq_result.remote_ack_cnt_ != nullptr)
+                {
+                    remote_ack_cnt_.fetch_sub(1);
+                }
             }
 
             finish_cnt_.fetch_add(1);
@@ -815,6 +822,13 @@ void AcquireAllOp::Resize(size_t new_size)
                 if (hres->IsError())
                 {
                     fail_cnt_.fetch_add(1);
+
+                    const AcquireAllResult &acq_result = hres->Value();
+                    if (acq_result.node_term_ < 0 &&
+                        acq_result.remote_ack_cnt_ != nullptr)
+                    {
+                        remote_ack_cnt_.fetch_sub(1);
+                    }
                 }
                 finish_cnt_.fetch_add(1);
             };
@@ -848,9 +862,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             // At least one remote acquire request has not received
             // acknowledgement and the upload phase has timed out. Forces
             // un-acknowledged requests to finish with an error.
-            for (size_t idx = 0; idx < upload_cnt_; ++idx)
+            for (size_t nid = 0; nid < upload_cnt_; ++nid)
             {
-                CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[idx];
+                CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[nid];
                 const AcquireAllResult &acquire_res = hd_result.Value();
 
                 uint64_t ts = std::max(acquire_res.commit_ts_ + 1,
@@ -859,7 +873,19 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
                 if (acquire_res.node_term_ < 0)
                 {
-                    hd_result.ForceError();
+                    bool success = hd_result.ForceError();
+                    if (success || hd_result.ErrorCode() == -1)
+                    {
+                        if (retry_num_ == 0)
+                        {
+                            Sharder::Instance().UpdateLeader(nid);
+                        }
+                        else if (retry_num_ > 0)
+                        {
+                            ReRunOp(txm);
+                            return;
+                        }
+                    }
                 }
             }
 
@@ -872,22 +898,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         // arbitrarily long, after all acquire requests are acknowledged, we
         // still need to periodically check liveness of the remote node.
 
-        for (size_t nid = 0; nid < upload_cnt_; ++nid)
-        {
-            if (hd_results_[nid].ErrorCode() == -1)
-            {
-                if (retry_num_ == 0)
-                {
-                    Sharder::Instance().UpdateLeader(nid);
-                }
-                else if (retry_num_ > 0)
-                {
-                    ReRunOp(txm);
-                    return;
-                }
-            }
-        }
-
         if (fail_cnt_.load(std::memory_order_acquire) == 0)
         {
             for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -897,7 +907,25 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                                        acquire_res.last_vali_ts_ + 1);
                 txm->commit_ts_bound_ = std::max(txm->commit_ts_bound_, ts);
 
-                assert(acquire_res.node_term_ > 0);
+                assert(acquire_res.node_term_ >= 0);
+            }
+        }
+        else
+        {
+            for (size_t nid = 0; nid < upload_cnt_; ++nid)
+            {
+                if (hd_results_[nid].ErrorCode() == -1)
+                {
+                    if (retry_num_ == 0)
+                    {
+                        Sharder::Instance().UpdateLeader(nid);
+                    }
+                    else if (retry_num_ > 0)
+                    {
+                        ReRunOp(txm);
+                        return;
+                    }
+                }
             }
         }
 
@@ -949,13 +977,41 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
 
     if (finish_cnt_.load(std::memory_order_acquire) == upload_cnt_)
     {
+        for (size_t nid = 0; nid < upload_cnt_; ++nid)
+        {
+            if (hd_results_[nid].ErrorCode() == -1)
+            {
+                if (retry_num_ == 0)
+                {
+                    Sharder::Instance().UpdateLeader(nid);
+                }
+                else if (retry_num_ > 0)
+                {
+                    ReRunOp(txm);
+                    return;
+                }
+            }
+        }
+
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
-        for (size_t idx = 0; idx < upload_cnt_; ++idx)
+        for (size_t nid = 0; nid < upload_cnt_; ++nid)
         {
-            hd_results_[idx].ForceError();
+            bool success = hd_results_[nid].ForceError();
+            if (success || hd_results_[nid].ErrorCode() == -1)
+            {
+                if (retry_num_ == 0)
+                {
+                    Sharder::Instance().UpdateLeader(nid);
+                }
+                else if (retry_num_ > 0)
+                {
+                    ReRunOp(txm);
+                    return;
+                }
+            }
         }
         txm->PostProcess(*this);
     }
@@ -964,9 +1020,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
                                  bool is_deleted,
                                  TransactionExecution *txm)
-    : table_name_(table_name),
-      is_deleted_(is_deleted),
-      hd_result_(txm)
+    : table_name_(table_name), is_deleted_(is_deleted), hd_result_(txm)
 {
 }
 
@@ -1123,9 +1177,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             // After the prepare log is flushed, the schema op is guaranteed to
             // succeed and can only roll forward. Retry this step to install the
-            // dirty schema in the tx service.
-            txm->PushOperation(&post_all_intent_op_);
-            txm->Process(post_all_intent_op_);
+            // dirty schema in the tx service, unless the tx node is not the
+            // leader anymore.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                txm->PushOperation(&post_all_intent_op_);
+                txm->Process(post_all_intent_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else if (is_deleted_)
         {
@@ -1151,9 +1214,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
-            // The data store operation failed. Retry the operation.
-            txm->PushOperation(&upsert_kv_table_op_);
-            txm->Process(upsert_kv_table_op_);
+            // The data store operation failed. Retry the operation if the tx
+            // node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                txm->PushOperation(&upsert_kv_table_op_);
+                txm->Process(upsert_kv_table_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else if (is_deleted_)
         {
@@ -1176,9 +1248,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_acquire) > 0)
         {
             // Fails to acquire the write lock. The schema operation can only
-            // roll forward after flushing the prepare log. Retries the request.
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
+            // roll forward after flushing the prepare log. Retries the request
+            // if the tx node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -1192,9 +1273,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // Fails to flush the commit log. Retries the operation.
-            txm->PushOperation(&commit_log_op_);
-            txm->Process(commit_log_op_);
+            // Fails to flush the commit log. Retries the operation if the tx
+            // node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -1231,9 +1321,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             // After the prepare log is flushed, the schema op is guaranteed to
             // succeed and can only roll forward. Retry this step to install the
-            // committed schema and remove write locks.
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            // committed schema and remove write locks, if the tx node is still
+            // the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -1243,7 +1342,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // As a result, the tx will not try to release the read lock of the
             // schema when committing.
             const CcEntryAddr &schema_entry_addr =
-                acquire_all_lock_op_.hd_results_[txm->txid_.GetNodeId()]
+                acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
                     .Value()
                     .local_cce_addr_;
             txm->rw_set_.DedupRead(schema_entry_addr);
@@ -1266,10 +1365,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &clean_log_op_)
     {
-        if (clean_log_op_.hd_result_.IsError())
+        if (clean_log_op_.hd_result_.IsError() &&
+            Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                txm->tx_term_))
         {
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
+        }
+        else if (txm->tx_status_ == TxnStatus::Recovering)
+        {
+            txm->Reset();
+            // Setting the tx's status to finished signals that this tx state
+            // machine can be recycled for a new tx.
+            txm->tx_status_.store(TxnStatus::Finished,
+                                  std::memory_order_release);
         }
         else
         {
@@ -1295,7 +1404,7 @@ void UpsertTableOp::FillPrepareLog(TransactionExecution *txm)
     prepare_log_rec->set_txn_number(txm->tx_number_);
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
 
-    auto prepare_schema_msg =
+    ::txlog::SchemaOpMessage *prepare_schema_msg =
         prepare_log_rec->mutable_log_content()->mutable_schema_log();
     prepare_schema_msg->set_table_name(table_key_.Name());
 
@@ -1361,12 +1470,21 @@ void UpsertTableOp::FillCleanLog(TransactionExecution *txm)
 
     ::txlog::WriteLogRequest *clean_log_rec =
         clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
+
+    clean_log_rec->set_txn_number(txm->tx_number_);
+
     ::txlog::SchemaOpMessage *clean_schema_msg =
         clean_log_rec->mutable_log_content()->mutable_schema_log();
 
-    clean_schema_msg->set_table_name(table_key_.Name());
     clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     clean_log_rec->mutable_node_terms()->clear();
+}
+
+void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
+{
+    clean_log_op_.hd_result_.SetFinished();
+    op_ = &clean_log_op_;
+    Forward(txm);
 }
 
 SleepOperation::SleepOperation(TransactionExecution *txm)

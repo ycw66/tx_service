@@ -10,6 +10,7 @@
 #include "catalog_key_record.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
+#include "raft_log.pb.h"
 #include "sk_cc_map.h"
 #include "table_lock.h"
 #include "template_cc_map.h"
@@ -22,6 +23,7 @@ class RemoteCcHandler;
 };
 
 class Checkpointer;
+class TxService;
 
 class LocalCcShards
 {
@@ -29,7 +31,8 @@ public:
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
                   CatalogFactory *catalog_factory = nullptr,
-                  store::DataStoreWriteHandler *store_hd = nullptr);
+                  store::DataStoreWriteHandler *store_hd = nullptr,
+                  TxService *tx_service = nullptr);
 
     ~LocalCcShards();
 
@@ -204,6 +207,11 @@ public:
 
     const TableSchemaView *GetCatalog(const std::string &table_name);
 
+    void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
+                                uint64_t txn,
+                                int64_t tx_term,
+                                uint64_t commit_ts);
+
     store::DataStoreWriteHandler *const store_hd_;
 
 private:
@@ -228,44 +236,56 @@ private:
         CatalogEntry() = default;
 
         void InitSchema(std::unique_ptr<TableSchema> schema,
-                        uint64_t version_ts_)
+                        uint64_t version_ts)
         {
-            assert(version_ts_ > 0);
+            assert(version_ts > 0);
 
-            schema_ = std::move(schema);
-            dirty_schema_ = nullptr;
-            schema_view_.schema_ = schema_ != nullptr ? schema_.get() : nullptr;
-            schema_view_.version_ts_ = version_ts_;
-            schema_view_.dirty_schema_ = nullptr;
-            schema_view_.dirty_version_ts_ = 0;
+            if (schema_view_.version_ts_ < version_ts)
+            {
+                schema_ = std::move(schema);
+                schema_view_.schema_ =
+                    schema_ != nullptr ? schema_.get() : nullptr;
+                schema_view_.version_ts_ = version_ts;
+            }
+
+            if (schema_view_.dirty_version_ts_ <= version_ts)
+            {
+                dirty_schema_ = nullptr;
+                schema_view_.dirty_schema_ = nullptr;
+                schema_view_.dirty_version_ts_ = 0;
+            }
         }
 
         void SetDirtySchema(std::unique_ptr<TableSchema> dirty_schema,
                             uint64_t dirty_version_ts)
         {
-            assert(dirty_version_ts > 0);
-            assert(dirty_version_ts > schema_view_.version_ts_);
-
-            dirty_schema_ = std::move(dirty_schema);
-            schema_view_.dirty_schema_ =
-                dirty_schema_ != nullptr ? dirty_schema_.get() : nullptr;
-            schema_view_.dirty_version_ts_ = dirty_version_ts;
+            if (dirty_version_ts > schema_view_.dirty_version_ts_ &&
+                dirty_version_ts > schema_view_.version_ts_)
+            {
+                dirty_schema_ = std::move(dirty_schema);
+                schema_view_.dirty_schema_ =
+                    dirty_schema_ != nullptr ? dirty_schema_.get() : nullptr;
+                schema_view_.dirty_version_ts_ = dirty_version_ts;
+            }
         }
 
         void CommitDirtySchema()
         {
-            if (schema_view_.dirty_version_ts_ == 0)
+            if (schema_view_.dirty_version_ts_ > schema_view_.version_ts_)
             {
-                return;
+                schema_ = std::move(dirty_schema_);
+                schema_view_.schema_ =
+                    schema_ != nullptr ? schema_.get() : nullptr;
+                schema_view_.version_ts_ = schema_view_.dirty_version_ts_;
+                schema_view_.dirty_schema_ = nullptr;
+                schema_view_.dirty_version_ts_ = 0;
             }
-
-            assert(schema_view_.dirty_version_ts_ > schema_view_.version_ts_);
-
-            schema_ = std::move(dirty_schema_);
-            schema_view_.schema_ = schema_ != nullptr ? schema_.get() : nullptr;
-            schema_view_.version_ts_ = schema_view_.dirty_version_ts_;
-            schema_view_.dirty_schema_ = nullptr;
-            schema_view_.dirty_version_ts_ = 0;
+            else
+            {
+                dirty_schema_ = nullptr;
+                schema_view_.dirty_schema_ = nullptr;
+                schema_view_.dirty_version_ts_ = 0;
+            }
         }
 
         const TableSchemaView *SchemaView() const
@@ -281,6 +301,8 @@ private:
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, CatalogEntry> table_catalogs_;
     std::shared_mutex catalog_mux_;
+
+    TxService *tx_service_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

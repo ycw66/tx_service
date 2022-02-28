@@ -162,7 +162,7 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term)
         recovered_log_groups_.clear();
 
         leader_term_.store(candidate_leader_term_, std::memory_order_release);
-        LOG(INFO) << "The leader of cc node group #" << ng_id_
+        LOG(INFO) << "The leader of cc node group ng#" << ng_id_
                   << " with the term " << candidate_leader_term_
                   << " has been recovered.";
     }
@@ -264,7 +264,7 @@ void CcNode::on_leader_start(int64_t term)
     }
 
     LOG(INFO) << "CC node " << ip_ << ":" << port_
-              << " becomes the leader of ng" << ng_id_ << ". Term: " << term;
+              << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
 
     // A log notify handler starts a background thread that notifies all log
     // groups the new leader's term. The cc node becomes the real leader, only
@@ -281,6 +281,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
               << ng_id_ << ", term: " << ctx.term();
 
     leader_term_.store(-1, std::memory_order_release);
+    candidate_leader_term_ = -1;
 
     // when preferred leader is actually a follower, e.g. caused by a
     // failover, it will send the TransferRequest to the current leader

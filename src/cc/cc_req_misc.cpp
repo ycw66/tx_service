@@ -11,7 +11,22 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name, CcShard &ccs)
 
 bool FetchCatalogCc::Execute(CcShard &ccs)
 {
-    ccs.CreateCatalog(table_name_, catalog_image_, commit_ts);
+    if (status_ == RecordStatus::Normal)
+    {
+        assert(commit_ts_ > 0);
+        ccs.CreateCatalog(table_name_, catalog_image_, commit_ts_);
+    }
+    else if (status_ == RecordStatus::Deleted)
+    {
+        assert(catalog_image_.empty());
+        ccs.CreateCatalog(table_name_, catalog_image_, ccs.Now());
+    }
+    else
+    {
+        // Timestamp being 0 means that there is an error when fetching from the
+        // data store and the catalog status is unknown.
+        ccs.CreateCatalog(table_name_, catalog_image_, 0);
+    }
 
     for (CcRequestBase *&req : requesters_)
     {

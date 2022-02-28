@@ -403,43 +403,47 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
     fetch_catalog_reqs_.erase(table_name);
 }
 
-void CcShard::CreatePkCcMap(const TableName &table_name,
-                            const TableSchema *table_schema,
-                            NodeGroupId ng_id)
+CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
+                              const TableSchema *table_schema,
+                              NodeGroupId ng_id)
 {
     if (ng_id == node_id_)
     {
-        native_ccms_.try_emplace(
+        auto ccm_it = native_ccms_.try_emplace(
             table_name, catalog_factory_->CreatePkCcMap(table_schema, this));
+        return ccm_it.first->second.get();
     }
     else
     {
         auto fail_ccm_it = failover_ccms_.try_emplace(table_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        ccms.try_emplace(ng_id,
-                         catalog_factory_->CreatePkCcMap(table_schema, this));
+        auto ccm_it = ccms.try_emplace(
+            ng_id, catalog_factory_->CreatePkCcMap(table_schema, this));
+        return ccm_it.first->second.get();
     }
 }
 
-void CcShard::CreateSkCcMap(const TableName &index_name,
-                            const TableSchema *table_schema,
-                            NodeGroupId ng_id)
+CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
+                              const TableSchema *table_schema,
+                              NodeGroupId ng_id)
 {
     if (ng_id == node_id_)
     {
-        native_ccms_.try_emplace(
+        auto ccm_it = native_ccms_.try_emplace(
             index_name,
             catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+        return ccm_it.first->second.get();
     }
     else
     {
         auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        ccms.try_emplace(
+        auto ccm_it = ccms.try_emplace(
             ng_id,
             catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+        return ccm_it.first->second.get();
     }
 }
 

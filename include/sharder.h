@@ -104,6 +104,8 @@ public:
      */
     int64_t LeaderTerm(uint32_t ng_id) const;
 
+    int64_t CandidateLeaderTerm(uint32_t ng_id) const;
+
     /**
      * @brief Updates the leader cache of all cc node groups.
      *
@@ -193,6 +195,11 @@ public:
         return ips_.size();
     }
 
+    uint32_t NodeId() const
+    {
+        return node_id_;
+    }
+
 private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,
@@ -244,7 +251,6 @@ private:
     // The service that provides sync RPCs to remote nodes, i.e., leader
     // transfer and checking tx status.
     std::unique_ptr<remote::CcNodeService> cc_node_service_;
-    bool replicated_;
 
     // The RPC server that listens on the port of local_port+3 and serves the
     // log replay service.

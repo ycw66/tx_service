@@ -2,12 +2,14 @@
 
 #include <unordered_map>
 
+#include "../log_service/proto/raft_log.pb.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
-#include "cc/cc_request.h"
-#include "cc/non_blocking_lock.h"
-#include "cc/template_cc_map.h"
+#include "cc_request.h"
+#include "local_cc_shards.h"
+#include "non_blocking_lock.h"
 #include "sharder.h"
+#include "template_cc_map.h"
 
 namespace txservice
 {
@@ -23,6 +25,11 @@ public:
     }
 
     using TemplateCcMap::Execute;
+
+    std::unique_ptr<CcMap> Clone() const override
+    {
+        return std::make_unique<CatalogCcMap>(shard_);
+    }
 
     bool Execute(PostWriteAllCc &req) override
     {
@@ -150,12 +157,13 @@ public:
         }
 
         assert(schema_rec->SchemaView() != nullptr);
+        const TableSchemaView *schema_view = schema_rec->SchemaView();
 
         // When the request commits the schema operation, modifies the cc
         // map(s) at this shard.
-        if (req.CommitType() == PostWriteType::PostCommit)
+        if (req.CommitType() == PostWriteType::PostCommit &&
+            schema_view->dirty_version_ts_ > 0)
         {
-            const TableSchemaView *schema_view = schema_rec->SchemaView();
             const TableSchema *old_schema = schema_view->schema_;
             const TableSchema *new_schema = schema_view->dirty_schema_;
 
@@ -210,7 +218,8 @@ public:
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&
-            shard_->core_id_ == shard_->core_cnt_ - 1)
+            shard_->core_id_ == shard_->core_cnt_ - 1 &&
+            schema_view->dirty_version_ts_ > 0)
         {
             shard_->CommitDirtyCatalog(table_key->Name());
         }
@@ -276,6 +285,102 @@ public:
         }
 
         return TemplateCcMap::Execute(req);
+    }
+
+    bool Execute(ReplayLogCc &req) override
+    {
+        int64_t ng_term =
+            Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(-1);
+            return false;
+        }
+
+        ::txlog::SchemaOpMessage schema_op_msg;
+        const std::string_view &content = req.LogContentView();
+        schema_op_msg.ParseFromArray(content.data(), content.length());
+
+        const TableSchemaView *schema_view = nullptr;
+        if (shard_->core_id_ == 0)
+        {
+            if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                             SchemaOpMessage_Stage_CommitSchema)
+            {
+                uint64_t commit_ts = req.CommitTs();
+                assert(commit_ts > 0);
+
+                schema_view =
+                    shard_->CreateCatalog(schema_op_msg.table_name(),
+                                          schema_op_msg.catalog_blob(),
+                                          commit_ts);
+
+                const TableSchema *committed_schema = schema_view->schema_;
+                if (committed_schema != nullptr)
+                {
+                    shard_->CreatePkCcMap(schema_op_msg.table_name(),
+                                          committed_schema,
+                                          req.NodeGroupId());
+
+                    std::vector<TableName> index_names =
+                        committed_schema->IndexNames();
+                    for (const TableName &index_name : index_names)
+                    {
+                        shard_->CreateSkCcMap(
+                            index_name, committed_schema, req.NodeGroupId());
+                    }
+                }
+            }
+            else
+            {
+                schema_view =
+                    shard_->CreateDirtyCatalog(schema_op_msg.table_name(),
+                                               schema_op_msg.catalog_blob(),
+                                               req.CommitTs());
+            }
+        }
+        else
+        {
+            schema_view = shard_->GetCatalog(schema_op_msg.table_name());
+        }
+
+        CatalogKey table_key(schema_op_msg.table_name());
+        CcEntry<CatalogKey, CatalogRecord> *cce =
+            FindEmplace(table_key, req.CommitTs());
+
+        if (schema_op_msg.stage() !=
+            ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema)
+        {
+            bool success = cce->key_lock_.AcquireWriteLock(
+                &req, ng_term, CcProtocol::Locking);
+
+            // When a cc node recovers, no one should be holding read locks. So,
+            // the acquire operation should always succeed.
+            // TODO: when a cc node steps down as the leader, should clear the
+            // node group's cc maps.
+            assert(success);
+        }
+        cce->payload_.SetSchemaView(schema_view);
+
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            req.SetFinish();
+
+            uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+
+            if (tx_node_id == req.NodeGroupId())
+            {
+                shard_->local_shards_.CreateSchemaRecoveryTx(
+                    schema_op_msg, req.Txn(), ng_term, req.CommitTs());
+            }
+        }
+
+        return false;
     }
 };
 }  // namespace txservice

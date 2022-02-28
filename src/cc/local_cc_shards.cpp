@@ -1,5 +1,8 @@
 #include "cc/local_cc_shards.h"
 
+#include "tx_execution.h"
+#include "tx_service.h"
+
 namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
@@ -7,11 +10,13 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
                              CatalogFactory *catalog_factory,
-                             store::DataStoreWriteHandler *store_hd)
+                             store::DataStoreWriteHandler *store_hd,
+                             TxService *tx_service)
     : store_hd_(store_hd),
       node_id_(node_id),
       timer_terminate_(false),
-      catalog_factory_(catalog_factory)
+      catalog_factory_(catalog_factory),
+      tx_service_(tx_service)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -81,6 +86,21 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
                                         table_name, catalog_image, commit_ts),
             commit_ts);
     }
+    else
+    {
+        const TableSchemaView *schema_view = catalog_entry.SchemaView();
+        // If the input schema version is greater than the existing one,
+        // replaces the existing schemaw with the new one.
+        if (schema_view->version_ts_ < commit_ts)
+        {
+            catalog_entry.InitSchema(
+                catalog_image.empty()
+                    ? nullptr
+                    : catalog_factory_->CreateTableSchema(
+                          table_name, catalog_image, commit_ts),
+                commit_ts);
+        }
+    }
 
     return catalog_entry.SchemaView();
 }
@@ -138,5 +158,15 @@ const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name)
     return catalog_it == table_catalogs_.end()
                ? nullptr
                : catalog_it->second.SchemaView();
+}
+
+void LocalCcShards::CreateSchemaRecoveryTx(
+    const ::txlog::SchemaOpMessage &schema_op_msg,
+    uint64_t txn,
+    int64_t tx_term,
+    uint64_t commit_ts)
+{
+    TransactionExecution *txm = tx_service_->NewTx();
+    txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
 }
 }  // namespace txservice

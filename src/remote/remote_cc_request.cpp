@@ -515,7 +515,7 @@ void txservice::remote::RemotePostWriteAll::Set(
                                                       : DmlOperation::Upsert;
     PostWriteType write_type =
         CcStreamReceiver::ConvertCommitType(post_write_all.commit_type());
-        
+
     PostWriteAllCc::Set(&post_write_all.tablename(),
                         &post_write_all.key(),
                         post_write_all.node_group_id(),

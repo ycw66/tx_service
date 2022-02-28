@@ -260,7 +260,7 @@ public:
               std::vector<uint16_t> *ports = nullptr,
               store::DataStoreWriteHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr)
-        : local_cc_shards_(node_id, core_cnt, catalog_factory, store_hd),
+        : local_cc_shards_(node_id, core_cnt, catalog_factory, store_hd, this),
           ckpt_(local_cc_shards_, store_hd)
     {
         pool_.reserve(core_cnt);

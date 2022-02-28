@@ -83,13 +83,13 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
         msg.ParseFromZeroCopyStream(&wrapper);
 
+        uint32_t cc_ng_id = msg.cc_node_group_id();
+        int64_t cc_ng_term = msg.cc_node_group_term();
         if (msg.has_log_record())
         {
-            continue;
             const ::txlog::ReplayRecordMsg &log_rec = msg.log_record();
             uint64_t commit_ts = log_rec.commit_ts();
             const std::string &blob = log_rec.log_blob();
-            uint32_t cc_node_group_id = log_rec.cc_node_group_id();
 
             size_t offset = 0;
 
@@ -100,121 +100,49 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     *reinterpret_cast<const uint8_t *>(blob.data());
                 offset += sizeof(uint8_t);
 
-                if (log_type == static_cast<uint8_t>(LogType::CREATE_TABLE))
-                {
-                    // 1-byte integer for the length of the table name
-                    uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
-                        blob.data() + offset);
-                    offset += sizeof(uint8_t);
+                assert(log_type == static_cast<uint8_t>(LogType::RECORD));
 
-                    // Table name string
-                    std::string table_name(blob.data() + offset,
-                                           table_name_len);
-                    offset += table_name_len;
+                // 1-byte integer for the length of the table name
+                uint8_t table_name_len =
+                    *reinterpret_cast<const uint8_t *>(blob.data() + offset);
+                offset += sizeof(uint8_t);
 
-                    // 4-byte integer for the length of the catalog
-                    uint32_t catalog_len = *reinterpret_cast<const uint32_t *>(
-                        blob.data() + offset);
-                    offset += sizeof(uint32_t);
+                // Table name string
+                std::string_view table_name_view(blob.data() + offset,
+                                                 table_name_len);
+                offset += table_name_len;
 
-                    std::unique_ptr<ReplayLogCc> &cc_req =
-                        cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                            LogType::CREATE_TABLE,
-                            cc_node_group_id,
-                            std::move(table_name),
-                            std::string_view(blob.data() + offset, catalog_len),
-                            commit_ts,
-                            local_shards_.Count(),
-                            mux,
-                            cv,
-                            finish_log_cnt));
+                // 4-byte integer for the length of the serialized
+                // records from the table
+                uint32_t kv_len =
+                    *reinterpret_cast<const uint32_t *>(blob.data() + offset);
+                offset += sizeof(uint32_t);
 
-                    for (uint32_t core_id = 0; core_id < local_shards_.Count();
-                         ++core_id)
-                    {
-                        local_shards_.EnqueueCcRequest(core_id, cc_req.get());
-                    }
+                std::unique_ptr<ReplayLogCc> &cc_req =
+                    cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+                        cc_ng_id,
+                        table_name_view,
+                        std::string_view(blob.data() + offset, kv_len),
+                        commit_ts,
+                        0,
+                        mux,
+                        cv,
+                        finish_log_cnt));
 
-                    offset += catalog_len;
-                }
-                else if (log_type == static_cast<uint8_t>(LogType::DROP_TABLE))
-                {
-                    // 1-byte integer for the length of the table name
-                    uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
-                        blob.data() + offset);
-                    offset += sizeof(uint8_t);
+                // Enqueues the replay request to the first local shard. The
+                // shard will deserialize the log record and only insert the
+                // records belonging to its cc map. The replay request is then
+                // moved to remaining shards one after another and is replayed
+                // at individual shards separately.
+                local_shards_.EnqueueCcRequest(0, cc_req.get());
 
-                    // Table name string
-                    std::string table_name(blob.data() + offset,
-                                           table_name_len);
-                    offset += table_name_len;
-
-                    std::unique_ptr<ReplayLogCc> &cc_req =
-                        cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                            LogType::DROP_TABLE,
-                            cc_node_group_id,
-                            std::move(table_name),
-                            std::string_view(blob.data(), 0),
-                            commit_ts,
-                            local_shards_.Count(),
-                            mux,
-                            cv,
-                            finish_log_cnt));
-
-                    for (uint32_t core_id = 0; core_id < local_shards_.Count();
-                         ++core_id)
-                    {
-                        local_shards_.EnqueueCcRequest(core_id, cc_req.get());
-                    }
-                }
-                else if (log_type == static_cast<uint8_t>(LogType::RECORD))
-                {
-                    // 1-byte integer for the length of the table name
-                    uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
-                        blob.data() + offset);
-                    offset += sizeof(uint8_t);
-
-                    // Table name string
-                    std::string table_name(blob.data() + offset,
-                                           table_name_len);
-                    offset += table_name_len;
-
-                    // 4-byte integer for the length of the serialized
-                    // records from the table
-                    uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
-                        blob.data() + offset);
-                    offset += sizeof(uint32_t);
-
-                    std::unique_ptr<ReplayLogCc> &cc_req =
-                        cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                            LogType::RECORD,
-                            cc_node_group_id,
-                            std::move(table_name),
-                            std::string_view(blob.data() + offset, kv_len),
-                            commit_ts,
-                            local_shards_.Count(),
-                            mux,
-                            cv,
-                            finish_log_cnt));
-
-                    // Enqueues the replay request to all local shards. Each
-                    // local shard will deserialize the same log record
-                    // independently and only inserts the records belonging
-                    // to it to its cc map.
-                    for (uint32_t core_id = 0; core_id < local_shards_.Count();
-                         ++core_id)
-                    {
-                        local_shards_.EnqueueCcRequest(core_id, cc_req.get());
-                    }
-
-                    offset += kv_len;
-                }
+                offset += kv_len;
             }
         }
-        else
+        else if (msg.has_finish())
         {
-            // mark log replay finish only when all the ReplayLogCc requests
-            // finished.
+            // mark log replay finish only when all preceding ReplayLogCc
+            // requests finished.
             {
                 std::unique_lock<std::mutex> lk(mux);
                 cv.wait(lk,
@@ -225,12 +153,35 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             // receive finish message from one of log groups
             const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
             uint32_t lg_id = finish_msg.log_group_id();
-            uint32_t cc_ng_id = finish_msg.cc_node_group_id();
-            int64_t cc_ng_term = finish_msg.cc_node_group_term();
-
-            LOG(DEBUG) << "Receive ReplayFinishMsg cc node group id:"
-                       << cc_ng_id << "log group id:" << lg_id;
             Sharder::Instance().FinishLogReplay(cc_ng_id, cc_ng_term, lg_id);
+        }
+        else if (msg.has_schema_op())
+        {
+            const ::txlog::ReplaySchemaMsg &schema_op_msg = msg.schema_op();
+            const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
+            std::string_view catalog_table_name_view(catalog_ccm_name);
+
+            std::unique_ptr<ReplayLogCc> &cc_req =
+                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+                    cc_ng_id,
+                    catalog_table_name_view,
+                    std::string_view(schema_op_blob.data(),
+                                     schema_op_blob.length()),
+                    schema_op_msg.commit_ts(),
+                    schema_op_msg.txn(),
+                    mux,
+                    cv,
+                    finish_log_cnt));
+
+            assert(finish_log_cnt == 0);
+            local_shards_.EnqueueCcRequest(0, cc_req.get());
+
+            // For every schema operation, waits for it to be recovered at all
+            // shards before moving to the next replay request.
+            std::unique_lock<std::mutex> lk(mux);
+            cv.wait(lk,
+                    [&finish_log_cnt, &cc_req_vec]
+                    { return finish_log_cnt == cc_req_vec.size(); });
         }
     }
 

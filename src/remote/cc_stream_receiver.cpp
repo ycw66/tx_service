@@ -246,11 +246,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            if (acq_all_res.node_term_ < 0)
-            {
-                acq_all_res.remote_ack_cnt_->fetch_sub(1);
-            }
-
             hd_res->SetError(cc_res.error_code());
         }
         else

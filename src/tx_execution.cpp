@@ -44,8 +44,8 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       update_txn_(this),
       post_process_(this),
       write_log_(this),
-      fault_inject_op_(this),
-      sleep_op_(this)
+      sleep_op_(this),
+      fault_inject_op_(this)
 {
 }
 
@@ -85,6 +85,59 @@ bool TransactionExecution::Idle() const
 uint64_t TransactionExecution::TxNumber() const
 {
     return tx_number_.load(std::memory_order_acquire);
+}
+
+uint32_t TransactionExecution::TxCcNodeId() const
+{
+    return (tx_number_.load(std::memory_order_relaxed) >> 32L) >> 10;
+}
+
+void TransactionExecution::RecoverSchemaTx(
+    const ::txlog::SchemaOpMessage &schema_op,
+    uint64_t txn,
+    int64_t tx_term,
+    uint64_t commit_ts)
+{
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    tx_number_.store(txn, std::memory_order_relaxed);
+    tx_term_ = tx_term;
+    commit_ts_ = commit_ts;
+
+    switch (schema_op.schema_op_case())
+    {
+    case ::txlog::SchemaOpMessage::kTableOp:
+    {
+        const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
+
+        std::unique_ptr<UpsertTableOp> table_op =
+            std::make_unique<UpsertTableOp>(schema_op.table_name(),
+                                            schema_op.catalog_blob().data(),
+                                            schema_op.catalog_blob().length(),
+                                            table_msg.is_deleted(),
+                                            this);
+
+        if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
+                                     SchemaOpMessage_Stage_PrepareSchema)
+        {
+            table_op->prepare_log_op_.hd_result_.SetFinished();
+            table_op->op_ = &table_op->prepare_log_op_;
+        }
+        else
+        {
+            assert(schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
+                                            SchemaOpMessage_Stage_CommitSchema);
+            table_op->commit_log_op_.hd_result_.SetFinished();
+            table_op->op_ = &table_op->commit_log_op_;
+        }
+
+        schema_op_ = std::move(table_op);
+        state_stack_.push_back(schema_op_.get());
+        break;
+    }
+    default:
+        tx_status_.store(TxnStatus::Finished);
+        break;
+    }
 }
 
 void TransactionExecution::Forward()
@@ -1220,7 +1273,8 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     // Note that node_id calculated from global core ID should always be equal
     // to the actual ccshard node id. But from txservice layer's view, only txid
     // is available. Txservice get txid from the bottom layer (ccshard).
-    write_log.log_group_id_ = txlog_->GetLogGroupId(txid_.GetNodeId());
+    uint32_t tx_cc_node_id = TxCcNodeId();
+    write_log.log_group_id_ = txlog_->GetLogGroupId(tx_cc_node_id);
     txlog_->WriteLog(write_log.log_group_id_,
                      write_log.log_closure_.Controller(),
                      write_log.log_closure_.LogRequest(),

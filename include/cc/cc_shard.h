@@ -76,7 +76,7 @@ public:
             CatalogFactory *catalog_factory);
 
     /**
-     * @brief Returns the cc map in this node given the table name and the cc
+     * @brief Returns the cc map at this shard given the table name and the cc
      * node group.
      *
      * @param table_name The table name.
@@ -299,13 +299,13 @@ public:
 
     void RemoveFetchRequest(const TableName &table_name);
 
-    void CreatePkCcMap(const TableName &table_name,
-                       const TableSchema *table_schema,
-                       NodeGroupId ng_id);
+    CcMap *CreatePkCcMap(const TableName &table_name,
+                         const TableSchema *table_schema,
+                         NodeGroupId ng_id);
 
-    void CreateSkCcMap(const TableName &index_name,
-                       const TableSchema *table_schema,
-                       NodeGroupId ng_id);
+    CcMap *CreateSkCcMap(const TableName &index_name,
+                         const TableSchema *table_schema,
+                         NodeGroupId ng_id);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 

@@ -30,7 +30,7 @@ public:
 
     uint64_t &CommitTs()
     {
-        return commit_ts;
+        return commit_ts_;
     }
 
     void SetFinish(RecordStatus status, int err);
@@ -38,7 +38,7 @@ public:
 private:
     const TableName &table_name_;
     std::string catalog_image_;
-    uint64_t commit_ts;
+    uint64_t commit_ts_;
     CcShard &ccs_;
     std::vector<CcRequestBase *> requesters_;
     RecordStatus status_;

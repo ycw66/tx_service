@@ -1,5 +1,7 @@
 #include "sharder.h"
 
+#include "tx_service.h"
+
 namespace txservice
 {
 Sharder::Sharder(uint32_t node_id,
@@ -27,13 +29,10 @@ Sharder::Sharder(uint32_t node_id,
             ports_.emplace_back(ports->at(ng_id));
             ng_leader_cache_.try_emplace(ng_id, ng_id);
         }
-
-        replicated_ = true;
     }
     else
     {
         ng_leader_cache_.try_emplace(0, 0);
-        replicated_ = false;
     }
 
     if (log_agent_ != nullptr)
@@ -244,11 +243,6 @@ bool Sharder::CheckLeaderTerm(uint32_t ng_id, int64_t term) const
 
 int64_t Sharder::LeaderTerm(uint32_t ng_id) const
 {
-    if (!replicated_)
-    {
-        return 0;
-    }
-
     auto find_it = cc_nodes_.find(ng_id);
     if (find_it == cc_nodes_.end())
     {
@@ -257,6 +251,18 @@ int64_t Sharder::LeaderTerm(uint32_t ng_id) const
 
     const fault::CcNode &cc_node = *find_it->second;
     return cc_node.Term();
+}
+
+int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
+{
+    auto find_it = cc_nodes_.find(ng_id);
+    if (find_it == cc_nodes_.end())
+    {
+        return -1;
+    }
+
+    const fault::CcNode &cc_node = *find_it->second;
+    return cc_node.CandidateTerm();
 }
 
 void Sharder::UpdateLeaders()
@@ -346,8 +352,8 @@ void Sharder::RecoverTx(uint64_t tx_number,
     auto cc_ng_it = cc_nodes_.find(cc_ng_id);
     if (cc_ng_it == cc_nodes_.end())
     {
-        LOG(ERROR) << "RecoverTx(): the specified cc node group does not "
-                      "exist in this node.";
+        LOG(ERROR) << "RecoverTx(): the specified cc node group ng#" << cc_ng_id
+                   << " does not exist at this node.";
         return;
     }
 

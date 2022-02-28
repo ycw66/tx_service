@@ -50,47 +50,45 @@ public:
 
             if (ccm_ == nullptr)
             {
-                const TableSchemaView *schema_view =
-                    ccs.GetCatalog(*table_name_);
+                const TableSchemaView *schema_view = InitCcm(ccs);
 
                 if (schema_view != nullptr)
                 {
-                    const TableSchema *curr_schema = schema_view->schema_;
-                    if (curr_schema != nullptr)
+                    if (schema_view->version_ts_ == 0)
                     {
-                        ccs.CreatePkCcMap(
-                            *table_name_, curr_schema, node_group_id_);
-
-                        std::vector<TableName> index_names =
-                            curr_schema->IndexNames();
-                        for (const TableName &index_name : index_names)
-                        {
-                            ccs.CreateSkCcMap(
-                                index_name, curr_schema, node_group_id_);
-                        }
-
+                        // The schema view is initialized but the current schema
+                        // is unset (version_ts is 0). This means that there is
+                        // an error when read the catalog from the data store.
+                        // Returns the request with an error.
+                        res_->SetError(100);
+                        return true;
+                    }
+                    else if (schema_view->schema_ != nullptr)
+                    {
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
-
-                        ccm_->commit_ts_ = schema_view->version_ts_;
                     }
                     else
                     {
                         // The local node (LocalCcShards) contains a schema
                         // instance, which indicates that the table has been
-                        // dropped. Returns the request with an error.
+                        // dropped (the schema pointer is null). Other than
+                        // replay log requests, cc requests should never reach
+                        // here, because before cc requests are sent, query
+                        // compilation reads the table schema and acquires a
+                        // read lock on it. If the table does not exist, the
+                        // query never enters the execution phase. If the table
+                        // exists during compilation, the table cannot be
+                        // dropped since then.
                         res_->SetError(100);
                         return true;
                     }
                 }
                 else
                 {
-                    // The local node does not contain the table's schema
-                    // instance. The FetchCatalog() method will send an async
-                    // request toward the data store to fetch the catalog. After
-                    // fetching is finished, this cc request is re-enqueued for
-                    // re-execution.
-                    ccs.FetchCatalog(*table_name_, this);
+                    // The table's schema is not available yet. Cannot
+                    // initialize the cc map. The request will be re-executed
+                    // after the schema is fetched from the data store.
                     return false;
                 }
             }
@@ -122,10 +120,54 @@ public:
     }
 
 protected:
-    CcHandlerResult<ResultType> *res_;
-    const TableName *table_name_;
-    CcMap *ccm_;
-    uint32_t node_group_id_;
+    /**
+     * @brief Initializes the request's target cc map, if the table
+     * schema is available and indicates that the table exists. Sends an async
+     * request to fetch the schema from the data store, if the schema is not
+     * cached locally.
+     *
+     * @return const TableSchemaView* The pointer to the schema view of the
+     * request's target cc map. Null, if the schema is not cached at the node
+     * level.
+     */
+    const TableSchemaView *InitCcm(CcShard &ccs)
+    {
+        const TableSchemaView *schema_view = ccs.GetCatalog(*table_name_);
+
+        if (schema_view != nullptr)
+        {
+            const TableSchema *curr_schema = schema_view->schema_;
+            if (curr_schema != nullptr && schema_view->version_ts_ > 0)
+            {
+                CcMap *pk_ccm = ccs.CreatePkCcMap(
+                    *table_name_, curr_schema, node_group_id_);
+                pk_ccm->commit_ts_ = schema_view->version_ts_;
+
+                std::vector<TableName> index_names = curr_schema->IndexNames();
+                for (const TableName &index_name : index_names)
+                {
+                    CcMap *sk_ccm = ccs.CreateSkCcMap(
+                        index_name, curr_schema, node_group_id_);
+                    sk_ccm->commit_ts_ = schema_view->version_ts_;
+                }
+            }
+        }
+        else
+        {
+            // The local node does not contain the table's schema instance. The
+            // FetchCatalog() method sends an async request toward the data
+            // store to fetch the catalog. After fetching is finished, this cc
+            // request is re-enqueued for re-execution.
+            ccs.FetchCatalog(*table_name_, this);
+        }
+
+        return schema_view;
+    }
+
+    CcHandlerResult<ResultType> *res_{nullptr};
+    const TableName *table_name_{nullptr};
+    CcMap *ccm_{nullptr};
+    uint32_t node_group_id_{0};
 };
 
 struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>
@@ -1369,17 +1411,15 @@ private:
 struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 {
 public:
-    ReplayLogCc(LogType log_type,
-                uint32_t ng_id,
-                std::string &&table_name,
+    ReplayLogCc(uint32_t ng_id,
+                const std::string_view &table_name_view,
                 std::string_view &&blob,
                 uint64_t commit_ts,
-                uint32_t core_cnt,
+                uint64_t txn,
                 std::mutex &mux,
                 std::condition_variable &cv,
                 uint32_t &finish_cnt)
-        : log_type_(log_type),
-          table_name_str_(table_name),
+        : table_name_str_(table_name_view),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
           result_(nullptr),
@@ -1389,8 +1429,10 @@ public:
     {
         table_name_ = &table_name_str_;
         node_group_id_ = ng_id;
-        result_.SetRefCnt(core_cnt);
-        result_.post_lambda_ = [this](CcHandlerResult<int8_t> *res)
+        tx_number_ = txn;
+        res_ = &result_;
+
+        result_.post_lambda_ = [this](CcHandlerResult<Void> *res)
         {
             // Notifies the external caller--the log replay handler--that the
             // specified log record has been replayed in all cores of this node.
@@ -1403,27 +1445,90 @@ public:
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
     ReplayLogCc(ReplayLogCc &&rhs) = delete;
 
+    bool Execute(CcShard &ccs) override
+    {
+        int8_t error_code = 0;
+
+        if (ccm_ == nullptr)
+        {
+            assert(table_name_ != nullptr);
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_, error_code);
+
+            if (ccm_ == nullptr)
+            {
+                const TableSchemaView *schema_view = InitCcm(ccs);
+
+                if (schema_view != nullptr)
+                {
+                    if (schema_view->version_ts_ == 0)
+                    {
+                        // The schema view is initialized but the current schema
+                        // is unset (version_ts is 0). This means that there is
+                        // an error when reading the catalog from the data
+                        // store. Returns the request with an error.
+                        res_->SetError(100);
+                        return false;
+                    }
+                    else if (schema_view->schema_ != nullptr)
+                    {
+                        ccm_ = ccs.GetCcm(
+                            *table_name_, node_group_id_, error_code);
+                    }
+                    else
+                    {
+                        // The table is dropped. Skips replaying the log for
+                        // this cc map.
+                        res_->SetFinished();
+                        return false;
+                    }
+                }
+                else
+                {
+                    // The table's schema is not available yet. Cannot
+                    // initialize the cc map. The request will be re-executed
+                    // after the schema is fetched from the data store.
+                    return false;
+                }
+            }
+        }
+
+        assert(ccm_ != nullptr);
+        return ccm_->Execute(*this);
+    }
+
     void SetFinish()
     {
-        result_.SetValue(0);
         result_.SetFinished();
     }
 
+    const std::string_view &LogContentView() const
+    {
+        return log_blob_view_;
+    }
+
+    uint64_t CommitTs() const
+    {
+        return commit_ts_;
+    }
+
+    uint64_t Txn() const
+    {
+        return tx_number_;
+    }
+
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
 private:
-    LogType log_type_;
     std::string table_name_str_;
     std::string_view log_blob_view_;
     uint64_t commit_ts_;
-    CcHandlerResult<int8_t> result_;
+    CcHandlerResult<Void> result_;
     std::mutex &external_mux_;
     std::condition_variable &external_cv_;
     uint32_t &finish_cnt_;
-
-    template <typename KeyT, typename ValueT>
-    friend class TemplateCcMap;
-
-    template <typename SkT, typename PkT>
-    friend class SkCcMap;
 };
 
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>

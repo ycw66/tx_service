@@ -104,6 +104,13 @@ public:
      */
     uint64_t TxNumber() const;
 
+    uint32_t TxCcNodeId() const;
+
+    void RecoverSchemaTx(const ::txlog::SchemaOpMessage &schema_op,
+                         uint64_t txn,
+                         int64_t tx_term,
+                         uint64_t commit_ts);
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to

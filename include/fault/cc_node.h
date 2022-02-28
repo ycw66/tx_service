@@ -64,6 +64,10 @@ public:
     }
 
     void FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term);
+    int64_t CandidateTerm() const
+    {
+        return candidate_leader_term_;
+    }
 
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,

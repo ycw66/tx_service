@@ -29,15 +29,25 @@ enum class TxnStatus
     Ongoing = 0,
     Committed,
     Aborted,
-    // After the runtime sends the commit command, the tx starts committing.
-    // From this point forward, the tx runs toward the end, either committed or
-    // aborted, and cannot be interrupted by the upper runtime, e.g., the user
-    // closes the connection to the runtime. This status marks the period
-    // between when the tx starts committing and when the tx's fate is finalized
-    // (committed or aborted).
+    /**
+     * @brief A tx starts committing after receiving the commit comand from
+     * query runtime. From this point forward, the tx runs toward the end,
+     * either committed or aborted, and cannot be interrupted, e.g., the user
+     * closes the connection to the runtime. This status marks the period
+     * between when the tx starts committing and when the tx's fate is finalized
+     * (committed or aborted).
+     *
+     */
     Committing,
     // transaction is finished and can be recycled.
-    Finished
+    Finished,
+    /**
+     * @brief A tx in the recovering state resumes execution of unfinished,
+     * multi-stage operations that are guaranteed to succeed. Example operations
+     * include schema evolution and range splitting and merging.
+     *
+     */
+    Recovering
 };
 
 using TableName = std::string;

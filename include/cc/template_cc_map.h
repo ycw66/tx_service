@@ -234,7 +234,7 @@ public:
                     // lock's blocking queue.
 
                     uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-                    if (tx_node != shard_->node_id_)
+                    if (tx_node != req.NodeGroupId())
                     {
                         // If the acquire request comes from a remote node,
                         // sends acknowledgement to the sender when the request
@@ -675,7 +675,7 @@ public:
                     // lock's blocking queue.
 
                     uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-                    if (tx_node != shard_->node_id_)
+                    if (tx_node != req.NodeGroupId())
                     {
                         req.Result()->Value().node_term_ = ng_term;
                         // If the request comes from a remote node, sends
@@ -696,7 +696,8 @@ public:
 
     bool Execute(PostWriteAllCc &req) override
     {
-        if (Sharder::Instance().LeaderTerm(req.NodeGroupId()) < 0)
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
@@ -1106,7 +1107,7 @@ public:
                     if (!lock_success)
                     {
                         uint32_t tx_node = (txn >> 32L) >> 10;
-                        if (tx_node != shard_->node_id_)
+                        if (tx_node != req.NodeGroupId())
                         {
                             // If the read request comes from a remote node,
                             // sends acknowledgement to the sender when the
@@ -1670,88 +1671,95 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
-        if (req.log_type_ == LogType::RECORD)
-        {
-            KeyT key;
-            // A psuedo record that is used to deserialize and move forward the
-            // record that is not sharded to the core.
-            ValueT rec;
-            size_t offset = 0;
-            const std::string_view &log_blob = req.log_blob_view_;
+        KeyT key;
+        // A psuedo record that is used to deserialize and move forward the
+        // record that is not sharded to the core.
+        ValueT rec;
+        size_t offset = 0;
+        const std::string_view &log_blob = req.LogContentView();
 
-            // if relay record's commit_ts is smaller than ccmap's commit_ts,
-            // this record is generated before the latest schema of the table
-            // and hence should skip the replay process.
-            if (req.commit_ts_ < commit_ts_)
+        // If the log record's commit ts is smaller than that of the cc map,
+        // this record is generated before the latest schema of the table and
+        // hence should skip the replay process.
+        if (req.CommitTs() < commit_ts_)
+        {
+            req.SetFinish();
+            return false;
+        }
+
+        while (offset < log_blob.size())
+        {
+            key.Deserialize(log_blob.data(), offset, key_schema_);
+            uint8_t delete_flag =
+                *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
+            offset += sizeof(uint8_t);
+
+            uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
+            uint16_t core_id = (shard_code & 0x3FF) % shard_->core_cnt_;
+            if (core_id != shard_->core_id_)
             {
-                req.SetFinish();
-                return false;
+                // Skips the the key in the log record that is not sharded
+                // to this core.
+                if (delete_flag == 0)
+                {
+                    rec.Deserialize(log_blob.data(), offset);
+                }
+                continue;
             }
 
-            while (offset < log_blob.size())
+            CcEntry<KeyT, ValueT> *cce = FindEmplace(key, req.CommitTs());
+            assert(cce != nullptr);
+
+            if (cce->commit_ts_ >= req.CommitTs())
             {
-                key.Deserialize(log_blob.data(), offset, key_schema_);
-                uint8_t delete_flag = *reinterpret_cast<const uint8_t *>(
-                    log_blob.data() + offset);
-                offset += sizeof(uint8_t);
-
-                uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
-                uint16_t core_id = (shard_code & 0x3FF) % shard_->core_cnt_;
-                if (core_id != shard_->core_id_)
+                // If the key exists in the cc map and its commit ts is
+                // greater than that of the log record, skips installing the
+                // log record in the cc map and moves to the next key in the
+                // log record.
+                if (delete_flag == 0)
                 {
-                    // Skips the the key in the log record that is not sharded
-                    // to this core.
-                    if (delete_flag == 0)
-                    {
-                        rec.Deserialize(log_blob.data(), offset);
-                    }
-                    continue;
+                    rec.Deserialize(log_blob.data(), offset);
                 }
-
-                CcEntry<KeyT, ValueT> *cce = FindEmplace(key, req.commit_ts_);
-                assert(cce != nullptr);
-
-                if (cce->commit_ts_ >= req.commit_ts_)
+            }
+            else
+            {
+                if (delete_flag == 0)
                 {
-                    // If the key exists in the cc map and its commit ts is
-                    // greater than that of the log record, skips installing the
-                    // log record in the cc map and moves to the next key in the
-                    // log record.
-                    if (delete_flag == 0)
-                    {
-                        rec.Deserialize(log_blob.data(), offset);
-                    }
+                    cce->payload_.Deserialize(log_blob.data(), offset);
+                    cce->payload_status_ = RecordStatus::Normal;
                 }
                 else
                 {
-                    if (delete_flag == 0)
-                    {
-                        cce->payload_.Deserialize(log_blob.data(), offset);
-                        cce->payload_status_ = RecordStatus::Normal;
-                    }
-                    else
-                    {
-                        cce->payload_status_ = RecordStatus::Deleted;
-                    }
-                    cce->commit_ts_ = req.commit_ts_;
+                    cce->payload_status_ = RecordStatus::Deleted;
+                }
+                cce->commit_ts_ = req.CommitTs();
 
-                    if (cce->key_lock_.HasWriteLock())
-                    {
-                        // If the record in the log has a commit ts greater than
-                        // that of the cc entry and the cc entry has a write
-                        // lock, the lock's owner must be the tx that commits
-                        // the log record. TODO: it is safer if we ship the tx
-                        // ID with the recovering message and match it against
-                        // the lock holder.
-                        TxNumber txn = cce->key_lock_.WriteLockTx();
-                        cce->key_lock_.ReleaseWriteLock(txn, shard_);
-                        shard_->DeleteLockHolidngTx(txn, cce);
-                        // cce->key_lock_.ClearTx(txn);
-                    }
+                if (cce->key_lock_.HasWriteLock())
+                {
+                    // If the record in the log has a commit ts greater than
+                    // that of the cc entry and the cc entry has a write
+                    // lock, the lock's owner must be the tx that commits
+                    // the log record. TODO: it is safer if we ship the tx
+                    // ID with the recovering message and match it against
+                    // the lock holder.
+                    TxNumber txn = cce->key_lock_.WriteLockTx();
+                    cce->key_lock_.ReleaseWriteLock(txn, shard_);
+                    shard_->DeleteLockHolidngTx(txn, cce);
+                    // cce->key_lock_.ClearTx(txn);
                 }
             }
         }
-        req.SetFinish();
+
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            req.SetFinish();
+        }
+
         return false;
     }
 

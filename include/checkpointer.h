@@ -132,18 +132,15 @@ public:
                 {
                     const Schema *key_schema = ccm->KeySchema();
                     const Schema *rec_schema = ccm->RecordSchema();
-                    ckpt_ret = store_hd_->PutAll(table_name,
-                                                 cce_buf,
-                                                 key_schema,
-                                                 rec_schema);
+                    ckpt_ret = store_hd_->PutAll(
+                        table_name, cce_buf, key_schema, rec_schema);
                 }
                 else
                 {
                     const SkSchema *sk_schema =
                         static_cast<const SkSchema *>(ccm->KeySchema());
-                    ckpt_ret = store_hd_->PutSkAll(table_name,
-                                                   cce_buf,
-                                                   sk_schema);
+                    ckpt_ret =
+                        store_hd_->PutSkAll(table_name, cce_buf, sk_schema);
                 }
 
                 // if flush to data store succeeds, update the ckpt_ts for
@@ -156,13 +153,6 @@ public:
                                               std::memory_order_release);
                     }
                     flushed = true;
-
-                    std::cout << "finish checkpoint, cce_buf.size(): "
-                              << cce_buf.size() << std::endl;
-                }
-                else
-                {
-                    std::cout << "ckpt fails" << std::endl;
                 }
             }
         }
