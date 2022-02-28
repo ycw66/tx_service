@@ -51,6 +51,20 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
     inbound_streams_.emplace(stream_socket);
 }
 
+void ReplayService::UpdateLogGroupLeader(
+    ::google::protobuf::RpcController *controller,
+    const ::txlog::LogLeaderUpdateRequest *request,
+    ::txlog::LogLeaderUpdateResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    uint32_t lg_id = request->lg_id();
+    uint32_t idx = request->lg_idx();
+    Sharder::Instance().UpdateLogGroupLeader(lg_id, idx);
+    response->set_error(false);
+    LOG(INFO) << "Update log group:" << lg_id << " leader to index:" << idx;
+}
+
 int ReplayService::on_received_messages(brpc::StreamId stream_id,
                                         butil::IOBuf *const messages[],
                                         size_t size)

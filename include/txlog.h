@@ -26,6 +26,9 @@ class TxLog
 {
 public:
     virtual ~TxLog() = default;
+    virtual void SetLogGroupLeaderIdxs(
+        std::vector<std::unique_ptr<std::atomic_uint32_t>>
+            *lg_leader_idx_vct) = 0;
 
     // Persists and replicates a log record in the specified log group.
     virtual void WriteLog(uint32_t log_group_id,

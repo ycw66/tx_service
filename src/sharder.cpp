@@ -35,6 +35,19 @@ Sharder::Sharder(uint32_t node_id,
         ng_leader_cache_.try_emplace(0, 0);
         replicated_ = false;
     }
+
+    if (log_agent_ != nullptr)
+    {
+        for (uint32_t i = 0; i < log_agent_->LogGroupCount(); i++)
+        {
+            // idx = 0, default value, it will refresh when change leader or
+            // call LogAgent::RefreshLeader
+            lg_leader_idx_vct_.push_back(
+                std::make_unique<std::atomic_uint32_t>(0));
+        }
+
+        log_agent_->SetLogGroupLeaderIdxs(&lg_leader_idx_vct_);
+    }
 }
 
 void Sharder::Shutdown()

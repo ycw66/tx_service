@@ -34,6 +34,11 @@ public:
                  ::txlog::LogReplayConnectResponse *response,
                  ::google::protobuf::Closure *done) override;
 
+    void UpdateLogGroupLeader(::google::protobuf::RpcController *controller,
+                              const ::txlog::LogLeaderUpdateRequest *request,
+                              ::txlog::LogLeaderUpdateResponse *response,
+                              ::google::protobuf::Closure *done) override;
+
     int on_received_messages(brpc::StreamId stream_id,
                              butil::IOBuf *const messages[],
                              size_t size) override;

@@ -130,6 +130,18 @@ public:
     void UpdateLeader(uint32_t ng_id, uint32_t node_id);
 
     /**
+     * @brief Update the log group's leader node id when the log group leader
+     * changed.
+     *
+     * @param lg_id The log group ID.
+     * @param node_id The index of leader in log group.
+     */
+    void UpdateLogGroupLeader(uint32_t lg_id, uint32_t idx)
+    {
+        lg_leader_idx_vct_[lg_id]->store(idx, std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Processes the RPC that transfers the leader of the specified cc
      * node group to the preferred cc node.
      *
@@ -200,6 +212,9 @@ private:
     uint32_t node_id_;
     std::vector<std::string> ips_;
     std::vector<uint16_t> ports_;
+    // save the newest log group leader index, it will be update by rpc call
+    // LogReplayService or LogAgent::RefreshLeader when the leader was changed
+    std::vector<std::unique_ptr<std::atomic_uint32_t>> lg_leader_idx_vct_;
     // we have one raft group for each logical shard(specified by ip & port)
     // each group's current leader is stored in ng_leader_cache_.
     std::unordered_map<uint32_t, std::atomic<uint32_t>> ng_leader_cache_;

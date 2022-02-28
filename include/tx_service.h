@@ -266,16 +266,16 @@ public:
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
 
+        Sharder::Instance(
+            node_id, ips, ports, &local_cc_shards_, std::move(log_hd));
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
             pool_.emplace_back(std::make_unique<TxProcessor>(
                 thd_idx,
                 local_cc_shards_,
-                log_hd == nullptr ? nullptr : log_hd->Clone()));
+                Sharder::Instance().GetLogAgent()));
         }
 
-        Sharder::Instance(
-            node_id, ips, ports, &local_cc_shards_, std::move(log_hd));
         Sharder::Instance().Init(local_path);
     }
 
