@@ -274,7 +274,7 @@ message CommitSkRequest {
 message FaultInjectRequest {
   uint32 src_node_id = 1;
   string fault_name = 2;
-  string fault_type = 3;
+  string fault_paras = 3;
 }
 
 message FaultInjectResponse {

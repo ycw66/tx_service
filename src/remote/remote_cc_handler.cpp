@@ -464,7 +464,7 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
 void txservice::remote::RemoteCcHandler::FaultInject(
     uint32_t src_node_id,
     const std::string &fault_name,
-    const std::string &fault_type,
+    const std::string &fault_paras,
     int64_t tx_term,
     const TxId &txid,
     int node_id,
@@ -481,7 +481,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     FaultInjectRequest *fi_req = send_msg.mutable_fault_inject_req();
     fi_req->set_src_node_id(src_node_id);
     fi_req->set_fault_name(fault_name);
-    fi_req->set_fault_type(fault_type);
+    fi_req->set_fault_paras(fault_paras);
 
     stream_sender_.SendMessage(node_id, send_msg, &hres);
 }

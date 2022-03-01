@@ -117,12 +117,12 @@ public:
     FaultInjectOp(TransactionExecution *txm);
 
     void Set(const std::string &fault_name,
-             const std::string &fault_type,
-             int node_id)
+             const std::string &fault_paras,
+             std::vector<int> vct_node_id)
     {
         fault_name_ = fault_name;
-        fault_type_ = fault_type;
-        node_id_ = node_id;
+        fault_paras_ = fault_paras;
+        vct_node_id_ = vct_node_id;
         succeed_ = false;
     }
 
@@ -130,8 +130,8 @@ public:
     void Forward(TransactionExecution *txm) override;
 
     std::string fault_name_;
-    std::string fault_type_;
-    int node_id_;
+    std::string fault_paras_;
+    std::vector<int> vct_node_id_;
     bool succeed_;
     CcHandlerResult<bool> hd_result_;
 };

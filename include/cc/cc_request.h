@@ -1534,7 +1534,7 @@ private:
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>
 {
 public:
-    FaultInjectCC() : fault_name_(nullptr), fault_type_(nullptr)
+    FaultInjectCC() : fault_name_(nullptr), fault_paras_(nullptr)
     {
     }
 
@@ -1546,17 +1546,17 @@ public:
     virtual bool Execute(CcShard &ccs) override
     {
         FaultInject::Instance().InjectFault(
-            *fault_name_, *fault_type_, "", "", 0, 0);
+            *fault_name_, *fault_paras_);
         res_->SetFinished();
         return true;
     }
 
     void Set(const std::string *fault_name,
-             const std::string *fault_type,
+             const std::string *fault_paras,
              CcHandlerResult<bool> *res)
     {
         fault_name_ = fault_name;
-        fault_type_ = fault_type;
+        fault_paras_ = fault_paras;
         res_ = res;
     }
 
@@ -1565,13 +1565,13 @@ public:
         return fault_name_;
     }
 
-    const std::string *FaultType() const
+    const std::string *FaultParas() const
     {
-        return fault_type_;
+        return fault_paras_;
     }
 
 private:
     const std::string *fault_name_;
-    const std::string *fault_type_;
+    const std::string *fault_paras_;
 };
 }  // namespace txservice

@@ -244,14 +244,15 @@ struct FaultInjectTxRequest
     : public TemplateTxRequest<FaultInjectTxRequest, bool>
 {
     FaultInjectTxRequest(const std::string &fault_name,
-                         const std::string &fault_type,
-                         int node_id)
-        : fault_name_(fault_name), fault_type_(fault_type), node_id_(node_id)
+                         const std::string &fault_paras,
+                         std::vector<int> &vct_node_id)
+        : fault_name_(fault_name), fault_paras_(fault_paras)
     {
+        vct_node_id_.swap(vct_node_id);
     }
 
     const std::string fault_name_;
-    const std::string fault_type_;
-    int node_id_;
+    const std::string fault_paras_;
+    std::vector<int> vct_node_id_;
 };
 }  // namespace txservice

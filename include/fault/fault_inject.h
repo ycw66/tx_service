@@ -8,22 +8,14 @@
 #include "fault/cc_node.h"
 #include "txlog.h"
 
+using namespace std;
+
 namespace txservice
 {
-static std::vector<std::string> type_name_to_enum_vec{"SLEEP",
-                                                      "ERROR",
-                                                      "FATAL",
-                                                      "PANIC",
-                                                      "INFI_LOOP",
-                                                      "SUSPEND",
-                                                      "RESUME",
-                                                      "SKIP",
-                                                      "RESET",
-                                                      "STATUS",
-                                                      "WAIT_UNTIL_TRIGGER"};
-enum struct FaultType
+enum struct FaultAction
 {
-    SLEEP = 0,
+    UNKNOWN = 0,
+    SLEEP,
     ERROR,
     FATAL,
     PANIC,
@@ -33,44 +25,100 @@ enum struct FaultType
     SKIP,
     RESET,
     STATUS,
-    WAIT_UNTIL_TRIGGER
+    WAIT_UNTIL_TRIGGER,
+    REMOTE
 };
+static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
+    {"UNKNOWN", FaultAction::UNKNOWN},
+    {"SLEEP", FaultAction::SLEEP},
+    {"ERROR", FaultAction::ERROR},
+    {"FATAL", FaultAction::FATAL},
+    {"PANIC", FaultAction::PANIC},
+    {"INFI_LOOP", FaultAction::INFI_LOOP},
+    {"SUSPEND", FaultAction::SUSPEND},
+    {"RESUME", FaultAction::RESUME},
+    {"SKIP", FaultAction::SKIP},
+    {"RESET", FaultAction::RESET},
+    {"STATUS", FaultAction::STATUS},
+    {"WAIT_UNTIL_TRIGGER", FaultAction::WAIT_UNTIL_TRIGGER},
+    {"REMOTE", FaultAction::REMOTE}};
 
 class FaultEntry
 {
 public:
-    FaultEntry()
+    FaultEntry(std::string fault_name, string paras) : fault_name_(fault_name)
     {
+        // Parse parameters
+        size_t pos1 = 0;
+        while (pos1 < paras.size())
+        {
+            size_t pos2 = paras.find(';', pos1);
+            if (pos2 == string::npos)
+                pos2 = paras.size();
+            else if (paras.find('<', pos1) < pos2)
+            {
+                // To parse remote action and ensure to get entire key value
+                pos2 = paras.find('>', pos1);
+                if (pos2 == string::npos)
+                {
+                    LOG(ERROR) << "Error parameters for fault inject: name="
+                               << fault_name << ", parameters=" << paras;
+                    abort();
+                }
+                pos2 = paras.find(';', pos2);
+                if (pos2 == string::npos)
+                    pos2 = paras.size();
+            }
+
+            // Split key and value
+            string sbs = paras.substr(pos1, pos2 - pos1);
+            size_t pos3 = sbs.find('=');
+            assert(pos3 != string::npos);
+            string key = sbs.substr(0, pos3);
+            string val = sbs.substr(pos3 + 1);
+
+            if (key.compare("db_name") == 0)
+            {
+                database_name_ = val;
+            }
+            else if (key.compare("table_name") == 0)
+            {
+                table_name_ = val;
+            }
+            else if (key.compare("start_strike") == 0)
+            {
+                start_strike_ = stoi(val);
+            }
+            else if (key.compare("end_strike") == 0)
+            {
+                end_strike_ = stoi(val);
+            }
+            else if (key.compare("action") == 0)
+            {
+                vctAction_.push_back(val);
+            }
+            else
+            {
+                map_para_.emplace(key, val);
+            }
+
+            pos1 = pos2 + 1;
+        }
     }
 
     ~FaultEntry()
     {
     }
 
-    void Set(std::string fault_name,
-             FaultType fault_type,
-             std::string database_name,
-             std::string table_name,
-             int start_occurrence,
-             int end_occurrence)
-    {
-        fault_name_ = fault_name;
-        fault_type_ = fault_type;
-        database_name_ = database_name;
-        table_name_ = table_name;
-        start_occurrence_ = start_occurrence;
-        end_occurrence_ = end_occurrence;
-        num_times_triggered_ = 0;
-    }
-
     std::string fault_name_;
-    FaultType fault_type_;
+    std::unordered_map<std::string, std::string> map_para_;
+    std::vector<std::string> vctAction_;
     // advanced field, not used yet.
     std::string database_name_;
     std::string table_name_;
-    int start_occurrence_;
-    int end_occurrence_;
-    int num_times_triggered_;
+    int start_strike_ = -1;
+    int end_strike_ = -1;
+    int count_strike_ = 0;
 };
 
 class FaultInject
@@ -82,17 +130,30 @@ public:
         return instance_;
     }
 
-    void TriggerFaultIfSet(std::string fault_name,
-                           std::string database_name,
-                           std::string table_name)
+    static FaultEntry *Entry(std::string fault_name)
     {
-        FaultEntry local_fentry;
+        FaultInject &fi = Instance();
+        std::lock_guard<std::mutex> lk(fi.mux_);
+        auto iter = fi.injected_fault_map_.find(fault_name);
+        if (iter != fi.injected_fault_map_.end())
+        {
+            return &iter->second;
+        }
+        else
+        {
+            return nullptr;
+        }
+    }
+
+    void TriggerAction(std::string fault_name)
+    {
+        FaultEntry *entry;
         {
             std::lock_guard<std::mutex> lk(mux_);
             auto iter = injected_fault_map_.find(fault_name);
             if (iter != injected_fault_map_.end())
             {
-                local_fentry = iter->second;
+                entry = &iter->second;
             }
             else
             {
@@ -100,41 +161,27 @@ public:
             }
         }
 
-        switch (local_fentry.fault_type_)
-        {
-        case FaultType::PANIC:
-            kill(getpid(), SIGKILL);
-            break;
-        default:
-            break;
-        }
-        return;
+        TriggerAction(entry);
     }
 
-    void InjectFault(std::string fault_name,
-                     std::string fault_type,
-                     std::string database_name,
-                     std::string table_name,
-                     int start_occurrence,
-                     int end_occurrence)
+    void TriggerAction(FaultEntry *entry);
+    void InjectFault(std::string fault_name, std::string paras)
     {
-        FaultEntry fentry;
-        FaultType fault_enum_type;
-        uint32_t i;
-
-        for (i = 0; i < type_name_to_enum_vec.size(); i++)
+        // To remove the pointed fault inject.
+        if (paras.compare("remove") == 0)
         {
-            if (fault_type == type_name_to_enum_vec[i])
-                fault_enum_type = (FaultType) i;
+            std::lock_guard<std::mutex> lk(mux_);
+            injected_fault_map_.erase(fault_name);
+            return;
         }
 
-        fentry.Set(fault_name,
-                   fault_enum_type,
-                   database_name,
-                   table_name,
-                   start_occurrence,
-                   end_occurrence);
-
+        FaultEntry fentry(fault_name, paras);
+        if (fault_name.compare("at_once") == 0)
+        {
+            // If fault name equal "at_once", run it at once
+            TriggerAction(&fentry);
+        }
+        else
         {
             std::lock_guard<std::mutex> lk(mux_);
             injected_fault_map_.try_emplace(fault_name, fentry);
@@ -155,11 +202,17 @@ private:
     std::mutex mux_;
 };
 
-#ifdef FAULT_INJECTOR
-#define SIMPLE_FAULT_INJECTOR(FaultName) \
-    FaultInject::Instance().TriggerFaultIfSet(FaultName, "", "")
+#if !defined(DBUG_OFF) && !defined(_lint)
+#define ACTION_FAULT_INJECTOR(FaultName) \
+    FaultInject::Instance().TriggerAction(FaultName)
+#define CODE_FAULT_INJECTOR(FaultName, code)               \
+    {                                                      \
+        FaultEntry *entry = FaultInject::Entry(FaultName); \
+        if (entry != nullptr)                              \
+            code;                                          \
+    }
 #else
-#define SIMPLE_FAULT_INJECTOR(FaultName)
+#define DEFAULT_FAULT_INJECTOR(FaultName)
+#define CODE_FAULT_INJECTOR(FaultName, code)
 #endif
-
 }  // namespace txservice

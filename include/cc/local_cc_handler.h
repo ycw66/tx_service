@@ -219,10 +219,10 @@ public:
                          CcHandlerResult<Void> &hres) override;
 
     void FaultInject(const std::string &fault_name,
-                     const std::string &fault_type,
+                     const std::string &fault_paras,
                      int64_t tx_term,
                      const TxId &txid,
-                     int node_id,
+                     vector<int> &vct_node_id,
                      CcHandlerResult<bool> &hres) override;
 
     void DataStoreUpsertTable(const TableName &table_name,

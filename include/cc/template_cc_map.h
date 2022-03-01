@@ -1033,8 +1033,6 @@ public:
     {
         auto hd_res = req.Result();
 
-        SIMPLE_FAULT_INJECTOR("monograph_read_panic_ccnode0");
-
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 

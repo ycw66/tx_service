@@ -308,10 +308,10 @@ public:
                                  CcHandlerResult<Void> &) = 0;
 
     virtual void FaultInject(const std::string &fault_name,
-                             const std::string &fault_type,
+                             const std::string &fault_paras,
                              int64_t tx_term,
                              const TxId &txid,
-                             int node_id,
+                             std::vector<int> &vct_node_id,
                              CcHandlerResult<bool> &hres) = 0;
 
     virtual void DataStoreUpsertTable(const TableName &table_name,

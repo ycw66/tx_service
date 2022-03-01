@@ -327,7 +327,7 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
     bool_resp_->Reset();
 
     fault_inject_op_.Set(
-        fi_req.fault_name_, fi_req.fault_type_, fi_req.node_id_);
+        fi_req.fault_name_, fi_req.fault_paras_, fi_req.vct_node_id_);
     PushOperation(&fault_inject_op_);
     Process(fault_inject_op_);
 }
@@ -1126,6 +1126,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
 void TransactionExecution::FillDataLog(WriteToLogOp &write_log)
 {
     write_log.log_type_ = TxLogType::DATA;
+    ACTION_FAULT_INJECTOR("before_write_log");
 
     write_log.log_closure_.LogResponse()
         .mutable_write_log_response()
@@ -1280,6 +1281,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
                      write_log.log_closure_.LogRequest(),
                      write_log.log_closure_.LogResponse(),
                      write_log.log_closure_);
+    ACTION_FAULT_INJECTOR("after_write_log");
 }
 
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
@@ -1597,10 +1599,10 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
     fault_inject_op_.is_running_ = true;
 
     handler->FaultInject(fault_inject_op_.fault_name_,
-                         fault_inject_op_.fault_type_,
+                         fault_inject_op_.fault_paras_,
                          tx_term_,
                          txid_,
-                         fault_inject_op_.node_id_,
+                         fault_inject_op_.vct_node_id_,
                          fault_inject_op_.hd_result_);
     return;
 }

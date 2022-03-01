@@ -41,6 +41,7 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
             resp_addr->set_term(addr.Term());
         }
 
+        ACTION_FAULT_INJECTOR("remote_acquire_before_sendmessage");
         const AcquireRequest &req = input_msg_->acquire_req();
         hd_->SendMessage(req.src_node_id(), output_msg_);
 
@@ -873,7 +874,7 @@ void txservice::remote::RemoteFaultInjectCC::Set(
 
     const FaultInjectRequest &req = input_msg->fault_inject_req();
 
-    FaultInjectCC::Set(&req.fault_name(), &req.fault_type(), &cc_res_);
+    FaultInjectCC::Set(&req.fault_name(), &req.fault_paras(), &cc_res_);
 
     input_msg_ = std::move(input_msg);
 

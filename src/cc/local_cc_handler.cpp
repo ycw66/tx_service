@@ -644,28 +644,43 @@ void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
 }
 
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
-                                            const std::string &fault_type,
+                                            const std::string &fault_paras,
                                             int64_t tx_term,
                                             const TxId &txid,
-                                            int node_id,
+                                            std::vector<int> &vct_node_id,
                                             CcHandlerResult<bool> &hres)
 {
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_id);
-    if (dest_node_id == cc_shards_.node_id_)
+    if (vct_node_id.size() == 0)
+        vct_node_id.push_back(cc_shards_.node_id_);
+    else if (vct_node_id[0] == -1)
     {
-        FaultInjectCC *req = fault_inject_pool.NextRequest();
-        req->Set(&fault_name, &fault_type, &hres);
-        cc_shards_.EnqueueCcRequest(0, req);
+        vct_node_id.clear();
+        for (int i = 0; i < (int) Sharder::Instance().NodeGroupCount(); i++)
+        {
+            vct_node_id.push_back(i);
+        }
     }
-    else
+
+    hres.SetRefCnt(vct_node_id.size());
+    for (int id : vct_node_id)
     {
-        remote_hd_.FaultInject(cc_shards_.node_id_,
-                               fault_name,
-                               fault_type,
-                               tx_term,
-                               txid,
-                               node_id,
-                               hres);
+        uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(id);
+        if (dest_node_id == cc_shards_.node_id_)
+        {
+            FaultInjectCC *req = fault_inject_pool.NextRequest();
+            req->Set(&fault_name, &fault_paras, &hres);
+            cc_shards_.EnqueueCcRequest(0, req);
+        }
+        else
+        {
+            remote_hd_.FaultInject(cc_shards_.node_id_,
+                                   fault_name,
+                                   fault_paras,
+                                   tx_term,
+                                   txid,
+                                   id,
+                                   hres);
+        }
     }
 }
 
