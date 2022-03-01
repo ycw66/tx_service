@@ -783,6 +783,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
 AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
 {
     hd_results_.reserve(8);
+    retry_num_ = 1;
 
     for (size_t idx = 0; idx < 8; ++idx)
     {
@@ -938,6 +939,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm)
 {
     hd_results_.reserve(8);
+    retry_num_ = 1;
 
     for (size_t idx = 0; idx < 8; ++idx)
     {
@@ -1062,7 +1064,7 @@ UpsertTableOp::UpsertTableOp(const TableName &table_name,
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
       post_all_intent_op_(txm),
-      upsert_kv_table_op_(&table_name, is_deleted, txm),
+      upsert_kv_table_op_(&table_key_.Name(), is_deleted, txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       post_all_lock_op_(txm),

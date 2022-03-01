@@ -275,9 +275,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ValidateRequest:
     {
-        RemotePostRead *vali_req = postread_pool_.NextRequest();
-        vali_req->Set(std::move(msg));
-        vali_req->Ccm()->shard_->Enqueue(vali_req);
+        assert(msg->has_validate_req());
+
+        const ValidateRequest &req = msg->validate_req();
+        const CceAddr_msg &cce_addr = req.cce_addr();
+
+        if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(),
+                                                 cce_addr.term()))
+        {
+            CcMessage return_msg;
+            return_msg.set_tx_number(msg->tx_number());
+            return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_tx_term(msg->tx_term());
+
+            ValidateResponse *resp = return_msg.mutable_validate_resp();
+            resp->set_error_code(1);
+
+            CcStreamSender *cc_stream_sender =
+                Sharder::Instance().GetCcStreamSender();
+
+            cc_stream_sender->SendMessage(req.src_node_id(), return_msg);
+            msg_pool_.enqueue(std::move(msg));
+        }
+        else
+        {
+            RemotePostRead *vali_req = postread_pool_.NextRequest();
+            vali_req->Set(std::move(msg));
+            vali_req->Ccm()->shard_->Enqueue(vali_req);
+        }
+
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ValidateResponse:
@@ -487,9 +513,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostCommitRequest:
     {
-        RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
-        post_commit->Set(std::move(msg));
-        post_commit->Ccm()->shard_->Enqueue(post_commit);
+        assert(msg->has_postcommit_req());
+
+        const PostCommitRequest &post_commit = msg->postcommit_req();
+        const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
+
+        if (!Sharder::Instance().CheckLeaderTerm(post_commit.node_group_id(),
+                                                 cce_addr_msg.term()))
+        {
+            CcMessage return_msg;
+            return_msg.set_tx_number(msg->tx_number());
+            return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_tx_term(msg->tx_term());
+
+            PostprocessResponse *resp = return_msg.mutable_post_resp();
+            resp->set_error_code(1);
+
+            CcStreamSender *cc_stream_sender =
+                Sharder::Instance().GetCcStreamSender();
+            cc_stream_sender->SendMessage(post_commit.src_node_id(),
+                                          return_msg);
+            msg_pool_.enqueue(std::move(msg));
+        }
+        else
+        {
+            RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
+            post_commit->Set(std::move(msg));
+            post_commit->Ccm()->shard_->Enqueue(post_commit);
+        }
+
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostWriteAllRequest:

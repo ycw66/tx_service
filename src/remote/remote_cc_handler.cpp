@@ -166,7 +166,6 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
     send_msg.set_tx_term(tx_term);
-    LOG(INFO) << "Send post write all, tx term: " << tx_term;
 
     PostWriteAllRequest *post_write_all = send_msg.mutable_post_write_all_req();
     post_write_all->set_src_node_id(src_node_id);
