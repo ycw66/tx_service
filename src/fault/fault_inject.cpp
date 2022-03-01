@@ -72,7 +72,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
             retval = sigsuspend(&new_mask);
             fprintf(
                 stderr, "sigsuspend returned %d errno %d \n", retval, errno);
-            assert(FALSE); /* With full signal mask, we should never return
+            assert(false); /* With full signal mask, we should never return
                               here. */
             break;
         }
