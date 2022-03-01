@@ -62,8 +62,20 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         switch (fa)
         {
         case FaultAction::PANIC:
-            abort();
+        {
+            int retval;
+            sigset_t new_mask;
+            sigfillset(&new_mask);
+
+            retval = kill(getpid(), SIGKILL);
+            assert(retval == 0);
+            retval = sigsuspend(&new_mask);
+            fprintf(
+                stderr, "sigsuspend returned %d errno %d \n", retval, errno);
+            assert(FALSE); /* With full signal mask, we should never return
+                              here. */
             break;
+        }
         case FaultAction::SLEEP:
         {
             int secs = 1;

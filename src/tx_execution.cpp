@@ -1248,7 +1248,8 @@ void TransactionExecution::FillDataLog(WriteToLogOp &write_log)
                 log_ng_blob->append(reinterpret_cast<const char *>(&rec_flag),
                                     1);
 
-                if (wset_entry->rec_.get() != nullptr)
+                if (wset_entry->op_ != DmlOperation::Delete &&
+                    wset_entry->rec_.get() != nullptr)
                 {
                     // A secondary index entry has no payload.
                     wset_entry->rec_.get()->Serialize(*log_ng_blob);

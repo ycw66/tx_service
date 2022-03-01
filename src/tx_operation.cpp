@@ -115,7 +115,8 @@ AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
     {
         auto &res = results_.emplace_back(txm);
 
-        res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres) {
+        res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
+        {
             if (hres->IsError())
             {
                 fail_cnt_.fetch_add(1);
@@ -157,7 +158,8 @@ void AcquireWriteOperation::Resize(size_t new_size)
             // machine.
             auto &res = results_.emplace_back(results_.at(0).Txm());
 
-            res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres) {
+            res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
+            {
                 if (hres->IsError())
                 {
                     // error_.store(true);
@@ -335,7 +337,8 @@ ValidateOperation::ValidateOperation(TransactionExecution *txm)
     for (size_t idx = 0; idx < 16; ++idx)
     {
         auto &res = results_.emplace_back(txm);
-        res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *hres) {
+        res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *hres)
+        {
             if (hres->IsError())
             {
                 error_.store(true);
@@ -375,15 +378,15 @@ void ValidateOperation::Resize(size_t new_size)
             // machine.
             auto &res = results_.emplace_back(results_.at(0).Txm());
 
-            res.post_lambda_ =
-                [this](CcHandlerResult<std::vector<TxId>> *hres) {
-                    if (hres->IsError())
-                    {
-                        error_.store(true);
-                    }
+            res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *hres)
+            {
+                if (hres->IsError())
+                {
+                    error_.store(true);
+                }
 
-                    finish_cnt_.fetch_add(1);
-                };
+                finish_cnt_.fetch_add(1);
+            };
         }
     }
 }
@@ -480,6 +483,7 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             }
         }
         ACTION_FAULT_INJECTOR("write_log_finished");
+
         txm->PostProcess(*this);
     }
 }
@@ -555,18 +559,16 @@ PostProcessOp::PostProcessOp(TransactionExecution *txm)
         CcHandlerResult<std::vector<TxId>> &res =
             read_results_.emplace_back(txm);
 
-        res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *) {
-            finish_cnt_.fetch_add(1);
-        };
+        res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
+        { finish_cnt_.fetch_add(1); };
     }
 
     for (size_t idx = 0; idx < 8; ++idx)
     {
         CcHandlerResult<Void> &res = write_results_.emplace_back(txm);
 
-        res.post_lambda_ = [this](CcHandlerResult<Void> *) {
-            finish_cnt_.fetch_add(1);
-        };
+        res.post_lambda_ = [this](CcHandlerResult<Void> *)
+        { finish_cnt_.fetch_add(1); };
     }
 }
 
@@ -596,9 +598,8 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
         for (size_t idx = read_old_size; idx < read_cnt; ++idx)
         {
             auto &res = read_results_.emplace_back(read_results_[0].Txm());
-            res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *) {
-                finish_cnt_.fetch_add(1);
-            };
+            res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
+            { finish_cnt_.fetch_add(1); };
         }
     }
 
@@ -618,9 +619,8 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
         for (size_t idx = write_old_size; idx < write_cnt; ++idx)
         {
             auto &res = write_results_.emplace_back(write_results_[0].Txm());
-            res.post_lambda_ = [this](CcHandlerResult<Void> *) {
-                finish_cnt_.fetch_add(1);
-            };
+            res.post_lambda_ = [this](CcHandlerResult<Void> *)
+            { finish_cnt_.fetch_add(1); };
         }
     }
 }
@@ -788,7 +788,8 @@ AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
     {
         auto &res = hd_results_.emplace_back(txm);
 
-        res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres) {
+        res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres)
+        {
             if (hres->IsError())
             {
                 fail_cnt_.fetch_add(1);
@@ -818,7 +819,8 @@ void AcquireAllOp::Resize(size_t new_size)
             // machine.
             auto &res = hd_results_.emplace_back(hd_results_.at(0).Txm());
 
-            res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres) {
+            res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres)
+            {
                 if (hres->IsError())
                 {
                     fail_cnt_.fetch_add(1);
@@ -941,9 +943,8 @@ PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm)
     {
         CcHandlerResult<Void> &res = hd_results_.emplace_back(txm);
 
-        res.post_lambda_ = [this](CcHandlerResult<Void> *) {
-            finish_cnt_.fetch_add(1);
-        };
+        res.post_lambda_ = [this](CcHandlerResult<Void> *)
+        { finish_cnt_.fetch_add(1); };
     }
 }
 
@@ -962,9 +963,8 @@ void PostWriteAllOp::Resize(uint32_t ng_cnt)
         for (size_t idx = old_size; idx < ng_cnt; ++idx)
         {
             auto &res = hd_results_.emplace_back(hd_results_[0].Txm());
-            res.post_lambda_ = [this](CcHandlerResult<Void> *) {
-                finish_cnt_.fetch_add(1);
-            };
+            res.post_lambda_ = [this](CcHandlerResult<Void> *)
+            { finish_cnt_.fetch_add(1); };
         }
     }
 }
