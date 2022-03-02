@@ -163,6 +163,15 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
 
     if (dest_node_id == cc_shards_.node_id_)
     {
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id, cce_addr.Term()))
+        {
+            // Term mismatch means this PostWrite is failovered to the current
+            // node, and locks are already lost during failover hence no need to
+            // release the lock again.
+            hres.SetFinished();
+            return;
+        }
+
         PostWriteCc *req = postwrite_pool.NextRequest();
         req->Set(&cce_addr, tx_number, commit_ts, record, is_deleted, &hres);
         const LruEntry *lru_entry =
@@ -199,6 +208,15 @@ void txservice::LocalCcHandler::PostRead(
 
     if (dest_node_id == cc_shards_.node_id_)
     {
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id, cce_addr.Term()))
+        {
+            // Term mismatch means this PostRead is failovered to the current
+            // node, and locks are already lost during failover hence validation
+            // can only return error and transaction needs to be aborted.
+            hres.SetError(-1);
+            return;
+        }
+
         PostReadCc *req = postread_pool_.NextRequest();
         req->Set(
             &cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres, protocol);
