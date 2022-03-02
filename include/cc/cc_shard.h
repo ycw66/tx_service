@@ -243,7 +243,13 @@ public:
             uint64_t max_ts = std::max(tsb, clock_ts);
             ts_base_.compare_exchange_strong(tsb, max_ts);
 
-            return max_ts;
+            // need to return max_ts - 1 at here, since lock_holding_txs_'s
+            // timestamp is read from ts_base_ which could be the same as
+            // max_ts. max_ts is possible to be assigned to last_ckpt_ts, while
+            // the next ckpt_ts could be read from lock_holding_txs_. Hence it
+            // would be possible to trigger assert(ckpt_ts >= last_ckpt_ts_); if
+            // we return max_ts directly.
+            return max_ts - 1;
         }
         else
         {
