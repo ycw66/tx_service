@@ -73,6 +73,8 @@ public:
     void Reset()
     {
         cntl_.Reset();
+        // request should not reset since the log request could be resend.
+        response_.Clear();
     }
 
 private:

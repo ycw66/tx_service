@@ -198,7 +198,7 @@ private:
     void Commit();
     void Abort();
 
-    void FillDataLog(WriteToLogOp &write_log);
+    void FillDataLogRequest(WriteToLogOp &write_log);
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();

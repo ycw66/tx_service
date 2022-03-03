@@ -1111,7 +1111,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
     else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
     {
-        FillDataLog(write_log_);
+        FillDataLogRequest(write_log_);
         PushOperation(&write_log_);
         Process(write_log_);
     }
@@ -1123,14 +1123,12 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
 }
 
-void TransactionExecution::FillDataLog(WriteToLogOp &write_log)
+void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 {
     write_log.log_type_ = TxLogType::DATA;
     ACTION_FAULT_INJECTOR("before_write_log");
 
-    write_log.log_closure_.LogResponse()
-        .mutable_write_log_response()
-        ->clear_redirect();
+    write_log.log_closure_.LogRequest().Clear();
 
     ::txlog::LogRequest &log_req = write_log.log_closure_.LogRequest();
     ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();

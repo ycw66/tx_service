@@ -366,9 +366,9 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp clean_log_op_;
 
 private:
-    void FillPrepareLog(TransactionExecution *txm);
-    void FillCommitLog(TransactionExecution *txm);
-    void FillCleanLog(TransactionExecution *txm);
+    void FillPrepareLogRequest(TransactionExecution *txm);
+    void FillCommitLogRequest(TransactionExecution *txm);
+    void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
 };
 

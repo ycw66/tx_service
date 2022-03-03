@@ -1140,7 +1140,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
 
         op_ = &prepare_log_op_;
-        FillPrepareLog(txm);
+        FillPrepareLogRequest(txm);
         txm->PushOperation(&prepare_log_op_);
         txm->Process(prepare_log_op_);
     }
@@ -1236,7 +1236,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // For DROP TABLE statements, the data store operation happens after
             // the commit log is flushed and is the second to the last step.
             op_ = &clean_log_op_;
-            FillCleanLog(txm);
+            FillCleanLogRequest(txm);
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
@@ -1268,7 +1268,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else
         {
             op_ = &commit_log_op_;
-            FillCommitLog(txm);
+            FillCommitLogRequest(txm);
             txm->PushOperation(&commit_log_op_);
             txm->Process(commit_log_op_);
         }
@@ -1361,7 +1361,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             else
             {
                 op_ = &clean_log_op_;
-                FillCleanLog(txm);
+                FillCleanLogRequest(txm);
                 txm->PushOperation(&clean_log_op_);
                 txm->Process(clean_log_op_);
             }
@@ -1394,13 +1394,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
 }
 
-void UpsertTableOp::FillPrepareLog(TransactionExecution *txm)
+void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
 {
     prepare_log_op_.log_type_ = TxLogType::PREPARE;
 
-    prepare_log_op_.log_closure_.LogResponse()
-        .mutable_write_log_response()
-        ->clear_redirect();
+    prepare_log_op_.log_closure_.LogRequest().Clear();
 
     ::txlog::WriteLogRequest *prepare_log_rec =
         prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
@@ -1433,13 +1431,11 @@ void UpsertTableOp::FillPrepareLog(TransactionExecution *txm)
     }
 }
 
-void UpsertTableOp::FillCommitLog(TransactionExecution *txm)
+void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
 {
     commit_log_op_.log_type_ = TxLogType::COMMIT;
 
-    commit_log_op_.log_closure_.LogResponse()
-        .mutable_write_log_response()
-        ->clear_redirect();
+    commit_log_op_.log_closure_.LogRequest().Clear();
 
     ::txlog::WriteLogRequest *commit_log_rec =
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
@@ -1464,13 +1460,11 @@ void UpsertTableOp::FillCommitLog(TransactionExecution *txm)
     commit_log_rec->mutable_node_terms()->clear();
 }
 
-void UpsertTableOp::FillCleanLog(TransactionExecution *txm)
+void UpsertTableOp::FillCleanLogRequest(TransactionExecution *txm)
 {
     clean_log_op_.log_type_ = TxLogType::CLEAN;
 
-    clean_log_op_.log_closure_.LogResponse()
-        .mutable_write_log_response()
-        ->clear_redirect();
+    clean_log_op_.log_closure_.LogRequest().Clear();
 
     ::txlog::WriteLogRequest *clean_log_rec =
         clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
