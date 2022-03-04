@@ -32,6 +32,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       bool_resp_(nullptr),
       kvp_resp_(nullptr),
       uint64_resp_(nullptr),
+      detailed_error_msg_(""),
       next_req_(nullptr),
       protocol_(proto),
       init_txn_(this),
@@ -67,6 +68,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     bool_resp_ = nullptr;
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
+    detailed_error_msg_ = "";
     next_req_.store(nullptr);
     protocol_ = proto;
     schema_op_ = nullptr;
@@ -85,6 +87,15 @@ bool TransactionExecution::Idle() const
 uint64_t TransactionExecution::TxNumber() const
 {
     return tx_number_.load(std::memory_order_acquire);
+}
+
+std::string TransactionExecution::GetErrorMessage() const
+{
+    return detailed_error_msg_;
+}
+void TransactionExecution::SetErrorMessage(const std::string &err_msg)
+{
+    detailed_error_msg_ = err_msg;
 }
 
 uint32_t TransactionExecution::TxCcNodeId() const
@@ -998,6 +1009,7 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 
     if (acquire_write.fail_cnt_.load(std::memory_order_acquire) > 0)
     {
+        SetErrorMessage("Transaction abort: failed to acquire write lock.");
         Abort();
     }
     else
@@ -1037,6 +1049,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
 
     if (set_ts.hd_result_.IsError())
     {
+        SetErrorMessage("Transaction abort: failed to set commit timestamp.");
         Abort();
     }
     else
@@ -1107,6 +1120,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
 
     if (validate.error_.load(std::memory_order_acquire))
     {
+        SetErrorMessage("Transaction abort: validation failed.");
         Abort();
     }
     else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
@@ -1292,6 +1306,7 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
     {
         if (log_op->hd_result_.IsError())
         {
+            SetErrorMessage("Transaction abort: failed to write log.");
             tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
         }
         else

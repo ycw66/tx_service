@@ -111,6 +111,10 @@ public:
                          int64_t tx_term,
                          uint64_t commit_ts);
 
+    std::string GetErrorMessage() const;
+
+    void SetErrorMessage(const std::string &err_msg);
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to
@@ -274,6 +278,10 @@ private:
     TxResult<std::tuple<const TxKey *, const TxRecord *, bool>> *kvp_resp_;
     // Scan open result
     TxResult<size_t> *uint64_resp_;
+
+    // detailed error message which indicates why does the transaction failed.
+    // For example, during write log phase or validation phase.
+    std::string detailed_error_msg_;
 
     // next_req_ is used to exchange request between runtime and TxProcessor.
     std::atomic<TxRequest *> next_req_;

@@ -726,7 +726,9 @@ public:
         {
             payload = static_cast<const ValueT *>(rec);
         }
-        else
+        // commit_ts = 0 means transaction failed (e.g. failed at prepare
+        // phase), we have nothing to upload, only need to release write intent.
+        else if (req.CommitTs() > 0)
         {
             const std::string *payload_str = req.PayloadStr();
             assert(payload_str != nullptr);

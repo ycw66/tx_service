@@ -1155,12 +1155,23 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->commit_ts_ = 0;
             // Moves to the last operation that removes all write intents/locks.
             op_ = &post_all_lock_op_;
+
+            if (is_deleted_)
+            {
+                txm->SetErrorMessage("Drop table failed at prepare phase.");
+            }
+            else
+            {
+                txm->SetErrorMessage("Create table failed at prepare phase.");
+            }
+
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
         else
         {
             op_ = &post_all_intent_op_;
+
             txm->PushOperation(&post_all_intent_op_);
             txm->Process(post_all_intent_op_);
         }
@@ -1191,6 +1202,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                txm->SetErrorMessage(
+                    "Transaction failed due to the transaction node is no "
+                    "longer the raft leader.");
                 ForceToFinish(txm);
             }
         }
@@ -1228,6 +1242,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                txm->SetErrorMessage(
+                    "Transaction failed due to the transaction node is no "
+                    "longer the raft leader.");
                 ForceToFinish(txm);
             }
         }
@@ -1262,6 +1279,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                txm->SetErrorMessage(
+                    "Transaction failed due to the transaction node is no "
+                    "longer the raft leader.");
                 ForceToFinish(txm);
             }
         }
@@ -1287,12 +1307,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                txm->SetErrorMessage(
+                    "Transaction failed due to the transaction node is no "
+                    "longer the raft leader.");
                 ForceToFinish(txm);
             }
         }
         else
         {
             op_ = &post_all_lock_op_;
+
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
@@ -1335,6 +1359,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                txm->SetErrorMessage(
+                    "Transaction failed due to the transaction node is no "
+                    "longer the raft leader.");
                 ForceToFinish(txm);
             }
         }
