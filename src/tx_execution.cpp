@@ -1064,6 +1064,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         {
             if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
             {
+                FillDataLogRequest(write_log_);
                 PushOperation(&write_log_);
                 Process(write_log_);
             }
