@@ -273,7 +273,9 @@ void CcShard::CheckRecoverTx(TxNumber txn,
 
     using namespace std::chrono_literals;
     constexpr uint64_t ts_gap =
-        std::chrono::duration_cast<std::chrono::seconds>(5s).count();
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds(5))
+            .count();
     uint64_t now_ts = Now();
 
     // If the tx has been holding a lock/intention for an extended period of

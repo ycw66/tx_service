@@ -390,7 +390,7 @@ public:
         return cce_ptr_;
     }
 
-    LockType LkType() const
+    LockType GetLockType() const
     {
         return lock_type_;
     }
@@ -675,7 +675,8 @@ public:
              uint64_t key_ts,
              uint64_t gap_ts,
              CcHandlerResult<std::vector<TxId>> *res,
-             CcProtocol protocol)
+             CcProtocol protocol,
+             LockType lock_type)
     {
         cce_addr_ = addr;
         tx_number_ = tx_number;
@@ -684,6 +685,7 @@ public:
         gap_ts_ = gap_ts;
         res_ = res;
         proto_ = protocol;
+        lock_type_ = lock_type;
         res->Value().clear();
 
         const LruEntry *lru_entry =
@@ -713,11 +715,22 @@ public:
         return gap_ts_;
     }
 
+    LockType GetLockType() const
+    {
+        return lock_type_;
+    }
+
+    void SetLockType(LockType lock_type)
+    {
+        lock_type_ = lock_type;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
     uint64_t key_ts_;
     uint64_t gap_ts_;
+    LockType lock_type_;
 };
 
 struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
@@ -729,7 +742,8 @@ public:
           rec_(nullptr),
           rec_str_(nullptr),
           ts_(0),
-          type_(ReadType::Inside)
+          type_(ReadType::Inside),
+          lock_type_(LockType::ReadLock)
     {
     }
 
@@ -746,7 +760,8 @@ public:
              uint64_t ts,
              CcHandlerResult<ReadKeyResult> *res,
              IsolationLevel iso_level,
-             CcProtocol proto)
+             CcProtocol proto,
+             LockType lock_type)
     {
         key_ = key;
         key_str_ = nullptr;
@@ -760,6 +775,7 @@ public:
         ts_ = ts;
         proto_ = proto;
         isolation_level_ = iso_level;
+        lock_type_ = lock_type;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -789,7 +805,8 @@ public:
              uint64_t ts,
              CcHandlerResult<ReadKeyResult> *res,
              IsolationLevel iso_level,
-             CcProtocol proto)
+             CcProtocol proto,
+             LockType lock_type)
     {
         key_ = nullptr;
         key_str_ = key_str;
@@ -803,6 +820,7 @@ public:
         ts_ = ts;
         proto_ = proto;
         isolation_level_ = iso_level;
+        lock_type_ = lock_type;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -862,9 +880,19 @@ public:
         return type_;
     }
 
+    LockType GetLockType() const
+    {
+        return lock_type_;
+    }
+
     void SetReadType(ReadType type)
     {
         type_ = type;
+    }
+
+    void SetLockType(LockType lock_type)
+    {
+        lock_type_ = lock_type;
     }
 
     void SetCcePtr(LruEntry *ptr)
@@ -886,6 +914,7 @@ private:
     int64_t tx_term_;
     uint64_t ts_;
     ReadType type_;
+    LockType lock_type_;
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
     // blocked due to conflicts in 2PL. After the request is unblocked and
@@ -913,6 +942,7 @@ public:
              CcHandlerResult<ScanOpenResult> *open_res,
              IsolationLevel iso_level,
              CcProtocol proto,
+             LockType lock_type,
              bool is_delta)
     {
         table_name_ = tn;
@@ -928,6 +958,7 @@ public:
         res_ = open_res;
         iso_level_ = iso_level;
         proto_ = proto;
+        lock_type_ = lock_type;
         ccm_ = nullptr;
         is_ckpt_delta_ = is_delta;
     }
@@ -941,6 +972,7 @@ private:
     ScanCache *scan_cache_{nullptr};
     int64_t term_{-1};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    LockType lock_type_{LockType::ReadLock};
     bool is_ckpt_delta_{false};
 
     template <typename KeyT, typename ValueT>
@@ -962,6 +994,7 @@ public:
              CcHandlerResult<ScanNextResult> *next_res,
              IsolationLevel iso_level,
              CcProtocol proto,
+             LockType lock_type,
              bool is_delta)
     {
         node_group_id_ = ng_id;
@@ -974,6 +1007,7 @@ public:
         res_ = next_res;
         iso_level_ = iso_level;
         proto_ = proto;
+        lock_type_ = lock_type;
         is_ckpt_delta_ = is_delta;
     }
 
@@ -981,6 +1015,8 @@ private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    LockType lock_type_{LockType::ReadLock};
+
     bool is_ckpt_delta_{false};
 
     template <typename KeyT, typename ValueT>
@@ -1545,8 +1581,7 @@ public:
 
     virtual bool Execute(CcShard &ccs) override
     {
-        FaultInject::Instance().InjectFault(
-            *fault_name_, *fault_paras_);
+        FaultInject::Instance().InjectFault(*fault_name_, *fault_paras_);
         res_->SetFinished();
         return true;
     }

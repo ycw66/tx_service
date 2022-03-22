@@ -7,6 +7,7 @@
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_req_result.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -66,7 +67,7 @@ protected:
     friend class TransactionExecution;
 };
 
-struct InitTxRequest : public TemplateTxRequest<InitTxRequest, Void>
+struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
 {
     InitTxRequest(IsolationLevel level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC)
@@ -85,11 +86,13 @@ public:
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
                   ReadType type = ReadType::Inside,
+                  LockType lock_type = LockType::ReadLock,
                   bool read_local = false)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
           type_(type),
+          lock_type_(lock_type),
           read_local_(read_local)
     {
     }
@@ -98,12 +101,14 @@ public:
              const TxKey *key,
              TxRecord *rec,
              ReadType type,
+             LockType lock_type = LockType::ReadLock,
              bool read_local = false)
     {
         tab_name_ = tab_name;
         key_ = key;
         rec_ = rec;
         type_ = type;
+        lock_type_ = lock_type;
         read_local_ = read_local;
     }
 
@@ -111,6 +116,7 @@ public:
     const TxKey *key_;
     TxRecord *rec_;
     ReadType type_;
+    LockType lock_type_;
     bool read_local_;
 };
 

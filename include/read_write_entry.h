@@ -47,8 +47,8 @@ struct WriteSetEntry
 struct ReadSetEntry
 {
     ReadSetEntry() = delete;
-    ReadSetEntry(uint64_t ts, CcProtocol proto)
-        : version_ts_(ts), protocol_(proto)
+    ReadSetEntry(uint64_t ts, CcProtocol proto, LockType lock_type)
+        : version_ts_(ts), protocol_(proto), lock_type_(lock_type)
     {
     }
 
@@ -64,6 +64,8 @@ struct ReadSetEntry
      *
      */
     CcProtocol protocol_;
+    // TODO: compact protocol and lock type to save memory.
+    LockType lock_type_;
 };
 
 struct ScanSetEntry

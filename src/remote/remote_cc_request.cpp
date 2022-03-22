@@ -153,8 +153,6 @@ void txservice::remote::RemoteAcquireAll::Set(
     output_msg_.clear_acquire_all_resp();
 
     const AcquireAllRequest &req = input_msg->acquire_all_req();
-    LockType lk_type =
-        req.is_write_intent() ? LockType::WriteIntent : LockType::WriteLock;
 
     AcquireAllCc::Set(&req.tablename(),
                       &req.key(),
@@ -164,7 +162,7 @@ void txservice::remote::RemoteAcquireAll::Set(
                       req.insert(),
                       &cc_res_,
                       CcStreamReceiver::ConvertProtocol(req.protocol()),
-                      lk_type);
+                      CcStreamReceiver::ConvertLockType(req.lock_type()));
 
     input_msg_ = std::move(input_msg);
 
@@ -245,7 +243,8 @@ void txservice::remote::RemotePostRead::Set(
                     req.key_ts(),
                     req.gap_ts(),
                     &cc_res_,
-                    CcStreamReceiver::ConvertProtocol(req.protocol()));
+                    CcStreamReceiver::ConvertProtocol(req.protocol()),
+                    CcStreamReceiver::ConvertLockType(req.lock_type()));
 
     input_msg_ = std::move(input_msg);
 
@@ -349,7 +348,8 @@ void txservice::remote::RemoteRead::Set(std::unique_ptr<CcMessage> input_msg)
                     req.ts(),
                     &cc_res_,
                     CcStreamReceiver::ConvertIsolation(req.iso_level()),
-                    CcStreamReceiver::ConvertProtocol(req.protocol()));
+                    CcStreamReceiver::ConvertProtocol(req.protocol()),
+                    CcStreamReceiver::ConvertLockType(req.lock_type()));
     }
     else
     {
@@ -369,7 +369,8 @@ void txservice::remote::RemoteRead::Set(std::unique_ptr<CcMessage> input_msg)
                     req.ts(),
                     &cc_res_,
                     CcStreamReceiver::ConvertIsolation(req.iso_level()),
-                    CcStreamReceiver::ConvertProtocol(req.protocol()));
+                    CcStreamReceiver::ConvertProtocol(req.protocol()),
+                    CcStreamReceiver::ConvertLockType(req.lock_type()));
     }
 
     input_msg_ = std::move(input_msg);

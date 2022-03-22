@@ -565,12 +565,12 @@ public:
             bool lock_success = false;
             if (!resume)
             {
-                if (req.LkType() == LockType::WriteIntent)
+                if (req.GetLockType() == LockType::WriteIntent)
                 {
                     lock_success = cc_entry.key_lock_.AcquireWriteIntent(
                         &req, tx_term, req.Protocol());
                 }
-                else if (req.LkType() == LockType::WriteLock)
+                else if (req.GetLockType() == LockType::WriteLock)
                 {
                     lock_success = cc_entry.key_lock_.AcquireWriteLock(
                         &req, tx_term, req.Protocol());
@@ -623,14 +623,14 @@ public:
             }
             else
             {
-                if (req.LkType() == LockType::WriteIntent &&
+                if (req.GetLockType() == LockType::WriteIntent &&
                     cc_entry.key_lock_.HasWriteLock())
                 {
                     shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
                                            req.NodeGroupId(),
                                            ng_term);
                 }
-                else if (req.LkType() == LockType::WriteLock)
+                else if (req.GetLockType() == LockType::WriteLock)
                 {
                     const std::unordered_set<TxNumber> &read_locks =
                         cc_entry.key_lock_.ReadLocks();
@@ -1023,8 +1023,12 @@ public:
             // forward immediately.
             hd_res->SetFinished();
 
-            cc_entry.key_lock_.ReleaseReadLock(txn, shard_);
-            cc_entry.gap_lock_.ReleaseReadLock(txn, shard_);
+            // ReadCc may use different lock type when acquiring the lock, for
+            // example, select for update would acquire write intent. As a
+            // result, we should also release the corresponding lock/intent as
+            // well.
+            cc_entry.key_lock_.ReleaseLock(txn, shard_, req.GetLockType());
+            cc_entry.gap_lock_.ReleaseLock(txn, shard_, req.GetLockType());
         }
 
         shard_->DeleteLockHolidngTx(txn, &cc_entry);
@@ -1101,8 +1105,9 @@ public:
                 // from being kicked out from the cc map.
                 if (req.Protocol() == CcProtocol::Locking)
                 {
-                    bool lock_success =
-                        cce->key_lock_.AcquireReadLock(&req, tx_term);
+                    bool lock_success = false;
+                    lock_success = cce->key_lock_.AcquireLock(
+                        &req, tx_term, CcProtocol::Locking, req.GetLockType());
 
                     if (!lock_success)
                     {

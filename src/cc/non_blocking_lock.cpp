@@ -1,158 +1,300 @@
 #include "cc/non_blocking_lock.h"
 
+#include <butil/logging.h>
+
 #include <cassert>
 
 #include "cc/cc_shard.h"
 
 namespace txservice
 {
+/**
+ * @brief Upgrade write lock or write intent.
+ * 1. release low level lock for write lock or write intent for the same
+ * tx_number.
+ * 2. acquire the desired write lock/intent.
+ * 3. read lock and read intent have no upgrade logic since they don't have low
+ * level locks.
+ *
+ */
+void NonBlockingLock::UpgradeLock(TxNumber tx_number, LockType lock_type)
+{
+    // write lock needs to upgrade write intent as well.
+    if (lock_type == LockType::WriteLock)
+    {
+        is_write_lock_empty_ = false;
+        write_lock_tx_ = tx_number;
+        if (!is_write_intent_empty_ && write_intent_tx_ == tx_number)
+        {
+            // there is at most one write intent, if the owner is current tx,
+            // release the write intent.
+            is_write_intent_empty_ = true;
+            write_intent_tx_ = 0;
+        }
+    }
+    else if (lock_type == LockType::WriteIntent)
+    {
+        is_write_intent_empty_ = false;
+        write_intent_tx_ = tx_number;
+    }
+
+    // both write lock and write intent needs to upgrade read lock and read
+    // intention.
+    if (read_intentions_.size() > 0)
+    {
+        read_intentions_.erase(tx_number);
+    }
+    if (read_locks_.size() > 0)
+    {
+        read_locks_.erase(tx_number);
+    }
+}
+
+/**
+ * @brief Re-execute the queued request when some locks are released.
+ */
+void NonBlockingLock::ExecuteQueuedRequest(const LockQueueEntry &queue_head,
+                                           CcShard *ccs)
+{
+    bool is_free = queue_head.req_->Execute(*ccs);
+    if (is_free)
+    {
+        // Blocked cc requests are not in the cc processing queue and
+        // hence needs to be freed here.
+        queue_head.req_->Free();
+    }
+    blocking_queue_.Dequeue();
+}
+
+/**
+ * @brief Try to pop the requests from queue and re-execute the requests if
+ * there is no conflict.
+ */
+void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
+{
+    while (blocking_queue_.Size() > 0)
+    {
+        const LockQueueEntry &queue_head = blocking_queue_.Peek();
+        TxNumber queued_txn = queue_head.req_->Txn();
+        if (queue_head.lk_type_ == LockType::WriteLock)
+        {
+            if (NoWriteLockConflict(queued_txn) &&
+                NoWriteIntentConflict(queued_txn) &&
+                NoReadLockConflict(queued_txn))
+            {
+                UpgradeLock(queued_txn, LockType::WriteLock);
+
+                // re-execute the head request in the queue.
+                ExecuteQueuedRequest(queue_head, ccs);
+            }
+            else
+            {
+                // stop poping request from queue when hitting conflict.
+                return;
+            }
+        }
+        else if (queue_head.lk_type_ == LockType::WriteIntent)
+        {
+            if (NoWriteLockConflict(queued_txn) &&
+                NoWriteIntentConflict(queued_txn))
+            {
+                UpgradeLock(queued_txn, LockType::WriteIntent);
+
+                // re-execute the head request in the queue.
+                ExecuteQueuedRequest(queue_head, ccs);
+            }
+            else
+            {
+                // stop poping request from queue when hitting conflict.
+                return;
+            }
+        }
+        else if (queue_head.lk_type_ == LockType::ReadLock)
+        {
+            if (NoWriteLockConflict(queued_txn))
+            {
+                read_locks_.emplace(queue_head.req_->Txn());
+                // re-execute the head request in the queue.
+                ExecuteQueuedRequest(queue_head, ccs);
+            }
+            else
+            {
+                // stop poping request from queue when hitting conflict.
+                return;
+            }
+        }
+        else
+        {
+            return;
+        }
+    }
+}
+
+bool NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
+                                  int64_t tx_term,
+                                  CcProtocol protocol,
+                                  LockType lock_type)
+{
+    if (lock_type == LockType::ReadLock)
+    {
+        return AcquireReadLock(cc_req, tx_term);
+    }
+    else if (lock_type == LockType::WriteIntent)
+    {
+        return AcquireWriteIntent(cc_req, tx_term, protocol);
+    }
+    else if (lock_type == LockType::WriteLock)
+    {
+        return AcquireWriteLock(cc_req, tx_term, protocol);
+    }
+    else if (lock_type == LockType::ReadIntent)
+    {
+        return AcquireReadIntent(cc_req->Txn());
+    }
+}
+
+void NonBlockingLock::ReleaseLock(TxNumber tx_number,
+                                  CcShard *ccs,
+                                  LockType lock_type)
+{
+    if (lock_type == LockType::ReadLock)
+    {
+        ReleaseReadLock(tx_number, ccs);
+    }
+    else if (lock_type == LockType::WriteIntent)
+    {
+        ReleaseWriteIntent(tx_number, ccs);
+    }
+    else if (lock_type == LockType::WriteLock)
+    {
+        ReleaseWriteLock(tx_number, ccs);
+    }
+    else if (lock_type == LockType::ReadIntent)
+    {
+        ReleaseReadIntent(tx_number);
+    }
+}
+
+/**
+ * @brief Acquire the write lock on this object (i.e. ccentry). The algorithm
+ * is as follows:
+ * 1. fast path if the lock is already held.
+ * 1. list non conflict case: no write lock conflict, no write intent conflict
+ * and no read lock conflict.
+ * 2. upgrade low-level locks/intents if lock succeeds.
+ * 3. put the request into blocking queue under LOCKING protocol.
+ *
+ * @param cc_req: lock request.
+ * @param tx_term: term of ccnode group where the transaction resides.
+ * @param protocol: OCC or LOCKING.
+ * @return true: lock succeeds.
+ * @return false: lock failed.
+ */
 bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
                                        int64_t tx_term,
                                        CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
 
-    if (is_write_lock_empty_ && is_write_intent_empty_)
+    // fast path for lock is already held.
+    if (write_lock_tx_ == tx_number)
     {
-        if (read_locks_.empty())
-        {
-            write_lock_tx_ = tx_number;
-            is_write_lock_empty_ = false;
-            // Upgrades the read intention, if there is any, to the write
-            // lock.
-            if (protocol == CcProtocol::OCC)
-            {
-                read_intentions_.erase(tx_number);
-            }
-            return true;
-        }
-        else if (read_locks_.size() == 1 && *read_locks_.begin() == tx_number)
-        {
-            // Upgrades the read lock to the write lock.
-            read_locks_.erase(read_locks_.begin());
-            write_lock_tx_ = tx_number;
-            is_write_lock_empty_ = false;
-            return true;
-        }
-        else if (protocol == CcProtocol::OCC)
-        {
-            // OCC/MVCC protocols are non-blocking. So, if the write
-            // conflicts with one or more read locks, gives up acquiring the
-            // write lock without entering into the blocking queue.
-            return false;
-        }
-    }
-    else if (!is_write_lock_empty_ && write_lock_tx_ == tx_number)
-    {
-        // The tx has acquired the write lock and tries to acquire the same
-        // lock again.
         return true;
     }
-    else if (!is_write_intent_empty_ && write_intent_tx_ == tx_number &&
-             read_locks_.empty())
+
+    // lock succeeds if there is no conflict.
+    if (NoWriteLockConflict(tx_number) && NoWriteIntentConflict(tx_number) &&
+        NoReadLockConflict(tx_number))
     {
-        // The tx has acquired the write intent and tries to upgrade the intent
-        // to a lock. Upgrade is successful if there is no read lock.
-        write_intent_tx_ = 0;
-        is_write_intent_empty_ = true;
-        write_lock_tx_ = tx_number;
-        is_write_lock_empty_ = false;
+        UpgradeLock(tx_number, LockType::WriteLock);
 
         return true;
     }
-    else if (protocol == CcProtocol::OCC)
+    else
     {
-        // Conflicts with an existing write lock or write intent. For OCC/MVCC
-        // protocols, the tx gives up and aborts immediately.
+        // lock fails.
+        if (protocol == CcProtocol::Locking)
+        {
+            // block the request by putting it into the blocking queue.
+            blocking_queue_.Enqueue(
+                LockQueueEntry(cc_req, LockType::WriteLock, tx_term));
+        }
+        // OCC doesn't enqueue request.
         return false;
     }
-
-    // Read-write or write-write conflicts. Blocks the request by putting it
-    // into the blocking queue.
-    blocking_queue_.Enqueue(
-        LockQueueEntry(cc_req, LockType::WriteLock, tx_term));
-    // Upgrades the read lock, if there is any.
-    read_locks_.erase(tx_number);
-    return false;
 }
 
+/**
+ * @brief Acquire the read lock on this object (i.e. ccentry). The algorithm
+ * is as follows:
+ * 1. fast path is that the lock is already held.
+ * 2. acquire succeeds if write_lock is empty and (a. the blocking queue is
+ * empty or b. the head of queue is write intent since write intent is not
+ * conflict with read lock).
+ * 3. put the request into blocking queue if lock fails.
+ *
+ * @param cc_req: lock request.
+ * @param tx_term: term of ccnode group where the transaction resides.
+ * @return true: lock succeeds.
+ * @return false: lock failed, push request into blocking.
+ */
 bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req, int64_t tx_term)
 {
-    TxNumber txn = cc_req->Txn();
+    TxNumber tx_number = cc_req->Txn();
 
-    // In theory, a tx should not acquire a read lock after acquiring a write
-    // lock.
-
-    if (is_write_lock_empty_)
+    // fast path for lock is already held.
+    if (read_locks_.find(tx_number) != read_locks_.end() ||
+        (!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
+        (!is_write_lock_empty_ && write_lock_tx_ == tx_number))
     {
-        if (read_locks_.find(txn) != read_locks_.end())
-        {
-            return true;
-        }
-        else if (!is_write_intent_empty_ && write_intent_tx_ == txn)
-        {
-            return true;
-        }
-        else if (blocking_queue_.Size() == 0 ||
-                 blocking_queue_.Peek().lk_type_ == LockType::WriteIntent)
-        {
-            // A read lock request succeeds if there is no read-write conflict.
-            // It is also blocked when there is a write lock request being
-            // blocked, to prevent starvation. In theory, this calls for a scan
-            // of the blocking queue. We employ a simple alternative approach:
-            // if the head of the blocking queue is a write intent request,
-            // which is blocked because of the conflict with the existing write
-            // intent, the read lock request is allowed to proceed without
-            // worrying starvation. Read lock requests will start getting
-            // blocked once the write lock request "enters the scene".
-            read_locks_.emplace(txn);
-            return true;
-        }
-        else
-        {
-            assert(blocking_queue_.Peek().lk_type_ == LockType::WriteLock);
-        }
-    }
-    else if (write_lock_tx_ == txn)
-    {
-        // The tx has acquired the write lock and tries to acquire the read lock
-        // again. In theory, this should never happen.
         return true;
     }
 
-    // The read lock request is blocked when there is a write lock. It is
-    // too blocked when where is no conflict, but there is a write lock
-    // request in the blocking queue. To prevent starvation, the read lock
-    // request is enqueued after the write request.
-    blocking_queue_.Enqueue(
-        LockQueueEntry(cc_req, LockType::ReadLock, tx_term));
-    return false;
+    // read lock dones't conflict with write intent in blocking queue.
+    bool no_blocking_queue_conflict =
+        blocking_queue_.Size() == 0 ||
+        blocking_queue_.Peek().lk_type_ == LockType::WriteIntent;
+
+    if (NoWriteLockConflict(tx_number) && no_blocking_queue_conflict)
+    {
+        // acquire read lock succeeds
+        read_locks_.emplace(tx_number);
+        return true;
+    }
+    else
+    {
+        // protocol must be LOCKING, since tx under OCC never acquires read
+        // locks.
+        blocking_queue_.Enqueue(
+            LockQueueEntry(cc_req, LockType::ReadLock, tx_term));
+        return false;
+    }
 }
 
+/**
+ * @brief Release the read lock on this object (i.e. ccentry).
+ *
+ * @param tx_number
+ * @param ccs
+ */
 void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
 {
     size_t removed_cnt = read_locks_.erase(tx_number);
 
-    if (removed_cnt > 0 && read_locks_.empty() && blocking_queue_.Size() > 0 &&
-        is_write_intent_empty_)
+    if (removed_cnt == 0)
     {
-        const LockQueueEntry &queue_head = blocking_queue_.Peek();
-        // Read locks only block write locks. If someone is in the blocking
-        // queue, it must be a write lock request.
-        assert(queue_head.lk_type_ == LockType::WriteLock);
-        write_lock_tx_ = queue_head.req_->Txn();
-        is_write_lock_empty_ = false;
-        bool is_free = queue_head.req_->Execute(*ccs);
-        if (is_free)
-        {
-            // Blocked cc requests are not in the cc processing queue and hence
-            // needs to be freed here.
-            queue_head.req_->Free();
-        }
-        blocking_queue_.Dequeue();
+        return;
     }
+
+    TryPopBlockingQueue(ccs);
 }
 
+/**
+ * @brief Release the write lock on this object (i.e. ccentry).
+ *
+ * @param tx_number
+ * @param ccs
+ */
 void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
 {
     if (is_write_lock_empty_ || write_lock_tx_ != tx_number)
@@ -160,126 +302,73 @@ void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
         return;
     }
 
+    // release the write lock.
     write_lock_tx_ = 0;
     is_write_lock_empty_ = true;
 
-    while (blocking_queue_.Size() > 0)
-    {
-        const LockQueueEntry &queue_head = blocking_queue_.Peek();
-        if (queue_head.lk_type_ == LockType::ReadLock)
-        {
-            assert(read_locks_.empty());
-
-            read_locks_.emplace(queue_head.req_->Txn());
-            bool is_free = queue_head.req_->Execute(*ccs);
-            if (is_free)
-            {
-                // Blocked cc requests are not in the cc processing queue and
-                // hence needs to be freed here.
-                queue_head.req_->Free();
-            }
-            blocking_queue_.Dequeue();
-        }
-        else if (queue_head.lk_type_ == LockType::WriteIntent)
-        {
-            write_intent_tx_ = queue_head.req_->Txn();
-            is_write_intent_empty_ = false;
-
-            bool is_free = queue_head.req_->Execute(*ccs);
-            if (is_free)
-            {
-                // Blocked cc requests are not in the cc processing queue and
-                // hence needs to be freed here.
-                queue_head.req_->Free();
-            }
-            blocking_queue_.Dequeue();
-        }
-        else if (queue_head.lk_type_ == LockType::WriteLock)
-        {
-            if (!is_write_intent_empty_ || !is_write_lock_empty_ ||
-                !read_locks_.empty())
-            {
-                break;
-            }
-
-            write_lock_tx_ = queue_head.req_->Txn();
-            is_write_lock_empty_ = false;
-
-            bool is_free = queue_head.req_->Execute(*ccs);
-            if (is_free)
-            {
-                // Blocked cc requests are not in the cc processing queue and
-                // hence needs to be freed here.
-                queue_head.req_->Free();
-            }
-            blocking_queue_.Dequeue();
-            break;
-        }
-    }
+    TryPopBlockingQueue(ccs);
 }
 
+/**
+ * @brief Acquire the write intent on this object (i.e. ccentry). The
+ * algorithm is as follows:
+ * 1. fast path if lock is already held.
+ * 2. acquire succeeds if no conflict write intent or write lock on this
+ * object and lock owner is not the current tx and blocking queue is empty.
+ * 3. upgrade low-level locks/intents if succeeds.
+ * 4. return true if acquire succeeds. return false if acquire fails. For
+ * LOCKING protocol, put the request into blocking queue.
+ *
+ * @param cc_req: lock request.
+ * @param tx_term: term of ccnode group where the transaction resides.
+ * @param protocol: OCC or LOCKING.
+ * @return true: lock succeeds.
+ * @return false: lock failed, push request into blocking for LOCKING
+ * protocol. return directly for OCC protocol.
+ */
 bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
                                          int64_t tx_term,
                                          CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
 
-    if (is_write_lock_empty_ && is_write_intent_empty_)
-    {
-        if (read_locks_.erase(tx_number) > 0)
-        {
-            // A write intent is a special read lock in that it does not block
-            // reads but only block write locks and intents. If the tx already
-            // holds a read lock, "upgrades" it to the write intent.
-            is_write_intent_empty_ = false;
-            write_intent_tx_ = tx_number;
-            return true;
-        }
-        else if (blocking_queue_.Size() == 0)
-        {
-            // A write intent does not conflict with read locks. But existing
-            // read locks, if there are any, block write lock requests. To be
-            // fair, if there is a write lock request in the blocking queue,
-            // blocks this write intent request as well.
-            is_write_intent_empty_ = false;
-            write_intent_tx_ = tx_number;
-            if (protocol == CcProtocol::OCC)
-            {
-                read_intentions_.erase(tx_number);
-            }
-            return true;
-        }
-        else
-        {
-            // Since read locks only block write lock requests, if the blocking
-            // queue is not empty, the head of the blocking queue must be a
-            // write lock request.
-            assert(blocking_queue_.Peek().lk_type_ == LockType::WriteLock);
-        }
-    }
-    else if (!is_write_lock_empty_ && write_lock_tx_ == tx_number)
+    // fast path for lock is already held.
+    if ((!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
+        (!is_write_lock_empty_ && write_lock_tx_ == tx_number))
     {
         return true;
     }
-    else if (!is_write_intent_empty_ && write_intent_tx_ == tx_number)
+    // lock succeeds if:
+    // 1. no conflict write intent or write locks
+    // 2. blocking queue is empty which is used to avoid the starvation of
+    // queued write lock.
+    else if (NoWriteIntentConflict(tx_number) &&
+             NoWriteLockConflict(tx_number) && blocking_queue_.Size() == 0)
     {
-        // The tx has acquired the write intent and tries to acquire the same
-        // intent again.
+        UpgradeLock(tx_number, LockType::WriteIntent);
+
         return true;
     }
-    else if (protocol == CcProtocol::OCC)
+    // lock fails case.
+    else
     {
-        // Conflicts with an existing write lock or intent. For OCC/MVCC
-        // protocols, gives up acquiring.
+        if (protocol == CcProtocol::Locking)
+        {
+            // block the request by putting it into the blocking queue.
+            blocking_queue_.Enqueue(
+                LockQueueEntry(cc_req, LockType::WriteIntent, tx_term));
+        }
+        // OCC doesn't enqueue request.
         return false;
     }
-
-    blocking_queue_.Enqueue(
-        LockQueueEntry(cc_req, LockType::WriteIntent, tx_term));
-    read_locks_.erase(tx_number);
-    return false;
 }
 
+/**
+ * @brief Release the write intent on this object (i.e. ccentry).
+ *
+ * @param tx_number
+ * @param ccs
+ */
 void NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
 {
     if (is_write_intent_empty_ || write_intent_tx_ != tx_number)
@@ -287,44 +376,14 @@ void NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
         return;
     }
 
+    // release the write intent.
     write_intent_tx_ = 0;
     is_write_intent_empty_ = true;
 
-    if (blocking_queue_.Size() > 0)
-    {
-        const LockQueueEntry &queue_head = blocking_queue_.Peek();
-        // When someone is holding a write intent, since the write intent does
-        // not block reads, the first request in the blocking queue must be a
-        // write.
-        assert(queue_head.lk_type_ == LockType::WriteIntent ||
-               queue_head.lk_type_ == LockType::WriteLock);
-        if (queue_head.lk_type_ == LockType::WriteIntent)
-        {
-            write_intent_tx_ = queue_head.req_->Txn();
-            is_write_intent_empty_ = false;
-            bool is_free = queue_head.req_->Execute(*ccs);
-            if (is_free)
-            {
-                queue_head.req_->Free();
-            }
-            blocking_queue_.Dequeue();
-        }
-        else if (queue_head.lk_type_ == LockType::WriteLock &&
-                 read_locks_.empty())
-        {
-            write_lock_tx_ = queue_head.req_->Txn();
-            is_write_lock_empty_ = false;
-            bool is_free = queue_head.req_->Execute(*ccs);
-            if (is_free)
-            {
-                queue_head.req_->Free();
-            }
-            blocking_queue_.Dequeue();
-        }
-    }
+    TryPopBlockingQueue(ccs);
 }
 
-void NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
+bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 {
     read_intentions_.emplace(tx_number);
 }

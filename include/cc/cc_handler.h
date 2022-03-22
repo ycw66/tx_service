@@ -139,7 +139,8 @@ public:
                           uint64_t commit_ts,
                           const CcEntryAddr &ccentry_addr,
                           CcHandlerResult<std::vector<TxId>> &hres,
-                          CcProtocol protocol) = 0;
+                          CcProtocol protocol,
+                          LockType lock_type) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts
@@ -169,7 +170,8 @@ public:
                       const uint64_t ts,
                       CcHandlerResult<ReadKeyResult> &hres,
                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-                      CcProtocol proto = CcProtocol::OCC) = 0;
+                      CcProtocol proto = CcProtocol::OCC,
+                      LockType lock_type = LockType::ReadLock) = 0;
 
     /**
      * @brief Brings the previously-read key's record into the cc map for
@@ -216,7 +218,8 @@ public:
         const uint64_t ts,
         CcHandlerResult<ReadKeyResult> &hres,
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
-        CcProtocol proto = CcProtocol::Locking) = 0;
+        CcProtocol proto = CcProtocol::Locking,
+        LockType lock_type = LockType::ReadLock) = 0;
 
     virtual void ScanOpen(
         const TableName &table_name,
@@ -230,6 +233,7 @@ public:
         ScanDirection direction = ScanDirection::Forward,
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
         CcProtocol proto = CcProtocol::OCC,
+        LockType lock_type = LockType::ReadLock,
         bool is_ckpt = false) = 0;
 
     virtual void ScanNextBatch(
@@ -239,12 +243,14 @@ public:
         CcScanner &scanner,
         CcHandlerResult<ScanNextResult> &hd_res,
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-        CcProtocol proto = CcProtocol::OCC) = 0;
+        CcProtocol proto = CcProtocol::OCC,
+        LockType lock_type = LockType::ReadLock) = 0;
 
     virtual void ScanClose(size_t alias,
                            const TxKey &end_key,
                            bool inclusive,
-                           CcProtocol proto = CcProtocol::OCC) = 0;
+                           CcProtocol proto = CcProtocol::OCC,
+                           LockType lock_type = LockType::ReadLock) = 0;
 
     virtual void UploadRecord(const TableName &table_name,
                               const TxKey &key,

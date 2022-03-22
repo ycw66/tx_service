@@ -72,7 +72,8 @@ public:
                   uint64_t commit_ts,
                   const CcEntryAddr &cce_addr,
                   CcHandlerResult<std::vector<TxId>> &hres,
-                  CcProtocol protocol);
+                  CcProtocol protocol,
+                  LockType lock_type);
 
     void Read(uint32_t src_node_id,
               const TableName &table_name,
@@ -85,7 +86,8 @@ public:
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-              CcProtocol proto = CcProtocol::OCC);
+              CcProtocol proto = CcProtocol::OCC,
+              LockType lock_type = LockType::ReadLock);
 
     void ReadOutside(int64_t tx_term,
                      const TxRecord &record,
@@ -105,6 +107,7 @@ public:
                   ScanDirection direction = ScanDirection::Forward,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
+                  LockType lock_type = LockType::ReadLock,
                   bool is_ckpt = false);
 
     void ScanNext(uint32_t src_node_id,
@@ -116,13 +119,15 @@ public:
                   CcHandlerResult<ScanNextResult> &hd_res,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
+                  LockType lock_type = LockType::ReadLock,
                   bool is_ckpt = false);
 
     void ScanClose(const TableName &table_name,
                    size_t alias,
                    const TxKey &end_key,
                    bool inclusive,
-                   CcProtocol proto = CcProtocol::OCC)
+                   CcProtocol proto = CcProtocol::OCC,
+                   LockType lock_type = LockType::ReadLock)
     {
     }
 
@@ -167,6 +172,7 @@ public:
 private:
     static IsolationType ConvertIsolation(IsolationLevel iso_level);
     static CcProtocolType ConvertProtocol(CcProtocol proto);
+    static CcLockType ConvertLockType(LockType lock_type);
     static CommitType ConvertPostWriteType(PostWriteType write_type);
 
     CcStreamSender &stream_sender_;

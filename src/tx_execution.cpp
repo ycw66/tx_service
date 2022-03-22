@@ -230,8 +230,8 @@ void TransactionExecution::PushOperation(TransactionOperation *op,
 
 void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
 {
-    void_resp_ = &init_txn_req.tx_result_;
-    void_resp_->Reset();
+    uint64_resp_ = &init_txn_req.tx_result_;
+    uint64_resp_->Reset();
     iso_level_ = init_txn_req.iso_level_;
     protocol_ = init_txn_req.protocol_;
 
@@ -361,7 +361,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     if (init_txn.hd_result_.IsError())
     {
         state_stack_.clear();
-        void_resp_->FinishError();
+        uint64_resp_->FinishError();
         // transaction can be recycled and put into free list.
         tx_status_.store(TxnStatus::Finished, std::memory_order_release);
         Reset();
@@ -374,7 +374,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     commit_ts_bound_ = init_result.start_ts_;
     tx_term_ = init_result.term_;
     state_stack_.pop_back();
-    void_resp_->Finish(void_);
+    uint64_resp_->Finish(tx_number_.load(std::memory_order_acquire));
 }
 
 /**
@@ -392,6 +392,7 @@ void TransactionExecution::Process(ReadOperation &read)
         const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
         ReadType read_type = read.read_tx_req_->type_;
+        read.lock_type_ = read.read_tx_req_->lock_type_;
 
         // Reads the specified key from the local cc map to which this tx is
         // bound. This API is used for reading cc maps replicated in all shards.
@@ -416,7 +417,8 @@ void TransactionExecution::Process(ReadOperation &read)
                                commit_ts_,
                                read.hd_result_,
                                IsolationLevel::RepeatableRead,
-                               CcProtocol::Locking);
+                               CcProtocol::Locking,
+                               read.lock_type_);
         }
         else
         {
@@ -469,7 +471,8 @@ void TransactionExecution::Process(ReadOperation &read)
                           commit_ts_,
                           read.hd_result_,
                           iso_level_,
-                          protocol_);
+                          protocol_,
+                          read.lock_type_);
 
             StartTiming();
 
@@ -521,7 +524,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             rw_set_.AddRead(read_res.cce_addr_,
                             read_res.ts_,
                             read_.protocol_,
-                            read_.read_type_);
+                            read_.read_type_,
+                            read_.lock_type_);
         }
 
         if (read_.read_type_ == ReadType::Inside &&
@@ -570,6 +574,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                       direction,
                       iso_level_,
                       protocol_,
+                      LockType::ReadLock,
                       is_ckpt_delta);
 
     StartTiming();
@@ -644,7 +649,8 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                                scanner,
                                scan_next.hd_result_,
                                iso_level_,
-                               protocol_);
+                               protocol_,
+                               LockType::ReadLock);
     }
     else
     {
@@ -1103,7 +1109,8 @@ void TransactionExecution::Process(ValidateOperation &validate)
                           commit_ts_,
                           cce_addr,
                           hres,
-                          read_entry.protocol_);
+                          read_entry.protocol_,
+                          read_entry.lock_type_);
 
         ++offset;
     }
@@ -1491,7 +1498,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                               0,
                               read_it->first,
                               hres,
-                              read_it->second.protocol_);
+                              read_it->second.protocol_,
+                              read_it->second.lock_type_);
         }
     }
 

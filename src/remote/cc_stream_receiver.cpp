@@ -850,6 +850,30 @@ CcProtocol CcStreamReceiver::ConvertProtocol(CcProtocolType proto)
     }
 }
 
+LockType CcStreamReceiver::ConvertLockType(CcLockType lock_type)
+{
+    if (lock_type == CcLockType::NoLock)
+    {
+        return LockType::NoLock;
+    }
+    else if (lock_type == CcLockType::ReadIntent)
+    {
+        return LockType::ReadIntent;
+    }
+    else if (lock_type == CcLockType::ReadLock)
+    {
+        return LockType::ReadLock;
+    }
+    else if (lock_type == CcLockType::WriteIntent)
+    {
+        return LockType::WriteIntent;
+    }
+    else
+    {
+        return LockType::WriteLock;
+    }
+}
+
 PostWriteType CcStreamReceiver::ConvertCommitType(CommitType commit_type)
 {
     if (commit_type == CommitType::PrepareCommit)

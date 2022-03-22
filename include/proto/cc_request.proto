@@ -80,6 +80,14 @@ enum CcProtocolType {
 	Locking = 1;
 }
 
+enum CcLockType {
+	NoLock = 0;
+	ReadIntent = 1;
+	WriteIntent = 2;
+	ReadLock = 3;
+	WriteLock = 4;
+}
+
 enum CommitType {
 	PrepareCommit = 0;
 	PostCommit = 1;
@@ -112,7 +120,7 @@ message AcquireAllRequest {
 	uint32 node_group_id = 4;
 	bool insert = 5;
 	CcProtocolType protocol = 6;
-	bool is_write_intent = 7;
+	CcLockType lock_type = 7;
 }
 
 message AcquireAllResponse {
@@ -132,6 +140,7 @@ message ValidateRequest {
 	uint64 key_ts = 5;
 	uint64 gap_ts = 6;
 	CcProtocolType protocol = 7;
+	CcLockType lock_type = 8;
 }
 
 message ValidateResponse {
@@ -158,6 +167,7 @@ message ReadRequest {
 	uint64 ts = 7;
 	IsolationType iso_level = 8;
 	CcProtocolType protocol = 9;
+	CcLockType lock_type = 10;
 }
 
 message ReadResponse {
@@ -231,6 +241,7 @@ message ScanOpenRequest {
 	bool ckpt = 10;
 	IsolationType iso_level = 11;
 	CcProtocolType protocol = 12;
+	CcLockType lock_type = 13;
 }
 
 message ScanCache_msg {
@@ -253,6 +264,7 @@ message ScanNextRequest {
 	bool ckpt = 7;
 	IsolationType iso_level = 8;
 	CcProtocolType protocol = 9;
+	CcLockType lock_type = 10;
 }
 
 message ScanNextResponse {

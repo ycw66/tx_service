@@ -57,6 +57,7 @@ public:
     ReadType read_type_{ReadType::Inside};
     CcProtocol protocol_{CcProtocol::OCC};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    LockType lock_type_{LockType::ReadLock};
     ReadTxRequest *read_tx_req_{nullptr};
     ReadOutsideTxRequest *read_outside_tx_req_{nullptr};
     CcHandlerResult<ReadKeyResult> hd_result_;

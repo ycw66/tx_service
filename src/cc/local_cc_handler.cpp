@@ -70,7 +70,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
-    LockType lk_type)
+    LockType lock_type)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -85,7 +85,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                  is_insert,
                  &hres,
                  proto,
-                 lk_type);
+                 lock_type);
         // The request is dispatched to the first core and then passed to
         // remaining cores consecutively.
         cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
@@ -101,7 +101,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                                    is_insert,
                                    hres,
                                    proto,
-                                   lk_type);
+                                   lock_type);
     }
 }
 
@@ -201,7 +201,8 @@ void txservice::LocalCcHandler::PostRead(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     CcHandlerResult<std::vector<TxId>> &hres,
-    CcProtocol protocol)
+    CcProtocol protocol,
+    LockType lock_type)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -218,8 +219,14 @@ void txservice::LocalCcHandler::PostRead(
         }
 
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Set(
-            &cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres, protocol);
+        req->Set(&cce_addr,
+                 tx_number,
+                 commit_ts,
+                 key_ts,
+                 gap_ts,
+                 &hres,
+                 protocol,
+                 lock_type);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -236,7 +243,8 @@ void txservice::LocalCcHandler::PostRead(
                             commit_ts,
                             cce_addr,
                             hres,
-                            protocol);
+                            protocol,
+                            lock_type);
     }
 }
 
@@ -249,7 +257,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      const uint64_t ts,
                                      CcHandlerResult<ReadKeyResult> &hres,
                                      IsolationLevel iso_level,
-                                     CcProtocol proto)
+                                     CcProtocol proto,
+                                     LockType lock_type)
 {
     hres.Value().rec_ = &record;
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -272,7 +281,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                  ts,
                  &hres,
                  iso_level,
-                 proto);
+                 proto,
+                 lock_type);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
     }
     else
@@ -288,7 +298,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         ts,
                         hres,
                         iso_level,
-                        proto);
+                        proto,
+                        lock_type);
     }
 }
 
@@ -335,7 +346,8 @@ void txservice::LocalCcHandler::ReadOutside(
                  1,
                  &hres,
                  IsolationLevel::ReadCommitted,
-                 CcProtocol::OCC);
+                 CcProtocol::OCC,
+                 LockType::NoLock);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -361,7 +373,8 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           const uint64_t ts,
                                           CcHandlerResult<ReadKeyResult> &hres,
                                           IsolationLevel iso_level,
-                                          CcProtocol proto)
+                                          CcProtocol proto,
+                                          LockType lock_type)
 {
     hres.Value().rec_ = &record;
     uint32_t shard_code = tx_number >> 32L;
@@ -394,7 +407,8 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                   ts,
                   &hres,
                   iso_level,
-                  proto);
+                  proto,
+                  lock_type);
 
     int8_t err_code = 0;
     CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id, err_code);
@@ -417,6 +431,7 @@ void txservice::LocalCcHandler::ScanOpen(
     ScanDirection direction,
     IsolationLevel iso_level,
     CcProtocol proto,
+    LockType lock_type,
     bool is_ckpt_delta)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
@@ -485,6 +500,7 @@ void txservice::LocalCcHandler::ScanOpen(
                          &hd_res,
                          iso_level,
                          proto,
+                         lock_type,
                          scanner_ptr->is_ckpt_delta_);
 
                 cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
@@ -513,6 +529,7 @@ void txservice::LocalCcHandler::ScanOpen(
                                 direction,
                                 iso_level,
                                 proto,
+                                lock_type,
                                 scanner_ptr->is_ckpt_delta_);
         }
     }
@@ -525,7 +542,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
     CcScanner &scanner,
     CcHandlerResult<ScanNextResult> &hd_res,
     IsolationLevel iso_level,
-    CcProtocol proto)
+    CcProtocol proto,
+    LockType lock_type)
 {
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
@@ -542,6 +560,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  &hd_res,
                  iso_level,
                  proto,
+                 lock_type,
                  scanner.is_ckpt_delta_);
 
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -557,6 +576,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             hd_res,
                             iso_level,
                             proto,
+                            lock_type,
                             scanner.is_ckpt_delta_);
     }
 }

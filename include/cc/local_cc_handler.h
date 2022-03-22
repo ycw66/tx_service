@@ -32,7 +32,7 @@ public:
                          bool is_insert,
                          CcHandlerResult<AcquireAllResult> &hres,
                          CcProtocol proto,
-                         LockType lk_type) override;
+                         LockType lock_type) override;
 
     void PostWriteAll(const TableName &table_name,
                       const TxKey &key,
@@ -83,7 +83,8 @@ public:
                   uint64_t commit_ts,
                   const CcEntryAddr &ccentry_addr,
                   CcHandlerResult<std::vector<TxId>> &hres,
-                  CcProtocol protocol) override;
+                  CcProtocol protocol,
+                  LockType lock_type) override;
 
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's
@@ -106,7 +107,8 @@ public:
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-              CcProtocol proto = CcProtocol::OCC) override;
+              CcProtocol proto = CcProtocol::OCC,
+              LockType lock_type = LockType::ReadLock) override;
 
     void ReadOutside(int64_t tx_term,
                      TxRecord &rec,
@@ -123,7 +125,8 @@ public:
                    const uint64_t ts,
                    CcHandlerResult<ReadKeyResult> &hres,
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
-                   CcProtocol proto = CcProtocol::Locking) override;
+                   CcProtocol proto = CcProtocol::Locking,
+                   LockType lock_type = LockType::ReadLock) override;
 
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,
@@ -136,6 +139,7 @@ public:
                   ScanDirection direction = ScanDirection::Forward,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
+                  LockType lock_type = LockType::ReadLock,
                   bool is_ckpt_delta = false) override;
 
     void ScanNextBatch(uint64_t tx_number,
@@ -144,12 +148,14 @@ public:
                        CcScanner &scanner,
                        CcHandlerResult<ScanNextResult> &hd_res,
                        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-                       CcProtocol proto = CcProtocol::OCC) override;
+                       CcProtocol proto = CcProtocol::OCC,
+                       LockType lock_type = LockType::ReadLock) override;
 
     void ScanClose(size_t alias,
                    const TxKey &end_key,
                    bool inclusive,
-                   CcProtocol proto = CcProtocol::OCC) override
+                   CcProtocol proto = CcProtocol::OCC,
+                   LockType lock_type = LockType::ReadLock) override
     {
     }
 

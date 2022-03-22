@@ -73,9 +73,16 @@ public:
      *
      * @param tx_number The tx who acquires the read intention
      */
-    void AcquireReadIntent(TxNumber tx_number);
+    bool AcquireReadIntent(TxNumber tx_number);
 
     void ReleaseReadIntent(TxNumber tx_number);
+
+    bool AcquireLock(CcRequestBase *cc_req,
+                     int64_t tx_term,
+                     CcProtocol protocol,
+                     LockType lock_type);
+
+    void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
     bool IsEmpty() const;
 
@@ -125,6 +132,26 @@ private:
         int64_t tx_term_;
     };
 
+    void ExecuteQueuedRequest(const LockQueueEntry &queue_head, CcShard *ccs);
+    void UpgradeLock(TxNumber tx_number, LockType lock_type);
+    void TryPopBlockingQueue(CcShard *ccs);
+
+    bool NoReadLockConflict(TxNumber tx_number) const
+    {
+        return (read_locks_.empty() ||
+                (read_locks_.size() == 1 && *read_locks_.begin() == tx_number));
+    }
+
+    bool NoWriteIntentConflict(TxNumber tx_number) const
+    {
+        return is_write_intent_empty_ || write_intent_tx_ == tx_number;
+    }
+
+    bool NoWriteLockConflict(TxNumber tx_number) const
+    {
+        return is_write_intent_empty_ || write_intent_tx_ == tx_number;
+    }
+
     // Read intentions do not block writes. They are used by a tx under OCC/MVCC
     // protocols to mark that the tx is accessing the data item and to prevent
     // the cache replacement algorithm from kicking out the item's concurrency
@@ -136,6 +163,11 @@ private:
     bool is_write_lock_empty_{true};
     TxNumber write_intent_tx_{0};
     bool is_write_intent_empty_{true};
+    // blocking_queue_ stores the requests which acquire lock/intent failed due
+    // to conflict. There are three types of lock requests can be in blocking
+    // queue: Write Lock(WL), Write Intent(WI) and Read Lock(RL). The conflict
+    // map is that WL conflicts with WL/WI/RL, WI conflicts with WL/WI and RL
+    // conflicts with WL.
     CircularQueue<LockQueueEntry> blocking_queue_;
 
     template <typename KeyT, typename ValueT>

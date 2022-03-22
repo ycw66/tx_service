@@ -67,7 +67,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
-    LockType lk_type)
+    LockType lock_type)
 {
     CcMessage send_msg;
 
@@ -86,15 +86,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_node_group_id(node_group_id);
     acq_all->set_insert(is_insert);
     acq_all->set_protocol(ConvertProtocol(proto));
-
-    if (lk_type == LockType::WriteIntent)
-    {
-        acq_all->set_is_write_intent(true);
-    }
-    else
-    {
-        acq_all->set_is_write_intent(false);
-    }
+    acq_all->set_lock_type(ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hres);
 }
@@ -210,7 +202,8 @@ void txservice::remote::RemoteCcHandler::PostRead(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     CcHandlerResult<std::vector<TxId>> &hres,
-    CcProtocol protocol)
+    CcProtocol protocol,
+    LockType lock_type)
 {
     CcMessage send_msg;
 
@@ -230,6 +223,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
     vali->set_protocol(ConvertProtocol(protocol));
+    vali->set_lock_type(ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -246,7 +240,8 @@ void txservice::remote::RemoteCcHandler::Read(
     const uint64_t ts,
     CcHandlerResult<ReadKeyResult> &hres,
     IsolationLevel iso_level,
-    CcProtocol proto)
+    CcProtocol proto,
+    LockType lock_type)
 {
     CcMessage send_msg;
 
@@ -264,6 +259,7 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_key_shard_code(key_shard_code);
     read->set_iso_level(ConvertIsolation(iso_level));
     read->set_protocol(ConvertProtocol(proto));
+    read->set_lock_type(ConvertLockType(lock_type));
 
     read->clear_record();
     switch (read_type)
@@ -343,6 +339,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     ScanDirection direction,
     IsolationLevel iso_level,
     CcProtocol proto,
+    LockType lock_type,
     bool is_ckpt)
 {
     CcMessage send_msg;
@@ -377,6 +374,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_ts(ts);
     scan_open->set_iso_level(ConvertIsolation(iso_level));
     scan_open->set_protocol(ConvertProtocol(proto));
+    scan_open->set_lock_type(ConvertLockType(lock_type));
     scan_open->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hd_res);
@@ -392,6 +390,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     CcHandlerResult<ScanNextResult> &hd_res,
     IsolationLevel iso_level,
     CcProtocol proto,
+    LockType lock_type,
     bool is_ckpt)
 {
     CcMessage send_msg;
@@ -414,6 +413,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_scan_cache_ptr(reinterpret_cast<uint64_t>(scan_cache));
     scan_next->set_iso_level(ConvertIsolation(iso_level));
     scan_next->set_protocol(ConvertProtocol(proto));
+    scan_next->set_lock_type(ConvertLockType(lock_type));
     scan_next->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hd_res);
@@ -513,6 +513,31 @@ txservice::remote::RemoteCcHandler::ConvertProtocol(CcProtocol proto)
     else
     {
         return CcProtocolType::Occ;
+    }
+}
+
+txservice::remote::CcLockType
+txservice::remote::RemoteCcHandler::ConvertLockType(LockType lock_type)
+{
+    if (lock_type == LockType::NoLock)
+    {
+        return CcLockType::NoLock;
+    }
+    else if (lock_type == LockType::ReadIntent)
+    {
+        return CcLockType::ReadIntent;
+    }
+    else if (lock_type == LockType::ReadLock)
+    {
+        return CcLockType::ReadLock;
+    }
+    else if (lock_type == LockType::WriteIntent)
+    {
+        return CcLockType::WriteIntent;
+    }
+    else
+    {
+        return CcLockType::WriteLock;
     }
 }
 

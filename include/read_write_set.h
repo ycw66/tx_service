@@ -48,11 +48,12 @@ public:
     void AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
                  CcProtocol proto,
-                 ReadType read_type)
+                 ReadType read_type,
+                 LockType lock_type)
     {
         if (read_type == ReadType::Inside)
         {
-            rset_.try_emplace(cce_addr, read_ts, proto);
+            rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
         }
         else
         {
@@ -61,7 +62,8 @@ public:
             // whose value is unknown. If the read-outside request returns a
             // version newer than the value in the data store, uses the new ts
             // for validation.
-            rset_.insert_or_assign(cce_addr, ReadSetEntry(read_ts, proto));
+            rset_.insert_or_assign(cce_addr,
+                                   ReadSetEntry(read_ts, proto, lock_type));
         }
     }
 

@@ -4,9 +4,9 @@
 
 namespace txservice
 {
-#define KB(x)   ((size_t) (x) << 10);
-#define MB(x)   ((size_t) (x) << 20);
-#define GB(x)   ((size_t) (x) << 30);
+#define KB(x) ((size_t) (x) << 10);
+#define MB(x) ((size_t) (x) << 20);
+#define GB(x) ((size_t) (x) << 30);
 
 struct Void
 {
@@ -53,7 +53,7 @@ enum class TxnStatus
 using TableName = std::string;
 using NodeGroupId = uint32_t;
 
-enum struct TableType
+enum class TableType
 {
     Primary,
     Secondary,
@@ -74,16 +74,16 @@ enum struct ReadType
     OutsideDeleted
 };
 
-enum struct LockType
+enum class LockType
 {
     NoLock = 0,
-    ReadIntention,
-    ReadLock,
+    ReadIntent,
     WriteIntent,
-    WriteLock
+    ReadLock,
+    WriteLock,
 };
 
-enum struct PostWriteType
+enum class PostWriteType
 {
     // Single commit installs the committed value and removes the write
     // lock/intent.

@@ -212,7 +212,7 @@ private:
             code;                                          \
     }
 #else
-#define DEFAULT_FAULT_INJECTOR(FaultName)
+#define ACTION_FAULT_INJECTOR(FaultName)
 #define CODE_FAULT_INJECTOR(FaultName, code)
 #endif
 }  // namespace txservice
