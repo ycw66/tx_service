@@ -101,7 +101,6 @@ public:
     size_t MemUsage() const
     {
         size_t mem_size_ = 0;
-        size_t ptr_size = sizeof(uint64_t);
 
         mem_size_ += sizeof(read_intentions_) +
                      read_intentions_.size() * sizeof(TxNumber);

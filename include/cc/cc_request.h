@@ -15,6 +15,7 @@
 #include "cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
+#include "constants.h"
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "scan.h"
@@ -132,7 +133,21 @@ protected:
      */
     const TableSchemaView *InitCcm(CcShard &ccs)
     {
-        const TableSchemaView *schema_view = ccs.GetCatalog(*table_name_);
+        const TableName *base_table_name_;
+        TableName sk_base_table_name_;
+        std::string::size_type pos = table_name_->find(INDEX_NAME_PREFIX);
+        if (pos != std::string::npos)
+        {
+            sk_base_table_name_ = *table_name_;
+            sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
+            base_table_name_ = &sk_base_table_name_;
+        }
+        else
+        {
+            base_table_name_ = table_name_;
+        }
+
+        const TableSchemaView *schema_view = ccs.GetCatalog(*base_table_name_);
 
         if (schema_view != nullptr)
         {
@@ -140,7 +155,7 @@ protected:
             if (curr_schema != nullptr && schema_view->version_ts_ > 0)
             {
                 CcMap *pk_ccm = ccs.CreatePkCcMap(
-                    *table_name_, curr_schema, node_group_id_);
+                    *base_table_name_, curr_schema, node_group_id_);
                 pk_ccm->commit_ts_ = schema_view->version_ts_;
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
@@ -158,7 +173,7 @@ protected:
             // FetchCatalog() method sends an async request toward the data
             // store to fetch the catalog. After fetching is finished, this cc
             // request is re-enqueued for re-execution.
-            ccs.FetchCatalog(*table_name_, this);
+            ccs.FetchCatalog(*base_table_name_, this);
         }
 
         return schema_view;

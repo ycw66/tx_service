@@ -182,22 +182,22 @@ private:
     void Update(const TableName &table_name,
                 TxKeyContainer &key,
                 TxRecordContainer &rec,
-                SecondaryKeys *skeys = nullptr);
+                std::vector<SecondaryKeyInfo> *skeys = nullptr);
 
     void Delete(const TableName &table_name,
                 TxKeyContainer &key,
-                SecondaryKeys *skeys = nullptr);
+                std::vector<SecondaryKeyInfo> *skeys = nullptr);
 
     void Upsert(const TableName &table_name,
                 TxKeyContainer &key,
                 TxRecordContainer &rec,
-                SecondaryKeys *skeys = nullptr,
+                std::vector<SecondaryKeyInfo> *skeys = nullptr,
                 DmlOperation op = DmlOperation::Upsert);
 
     void Insert(const TableName &table_name,
                 TxKeyContainer &key,
                 TxRecordContainer &rec,
-                SecondaryKeys *skeys = nullptr);
+                std::vector<SecondaryKeyInfo> *skeys = nullptr);
 
     void Commit();
     void Abort();

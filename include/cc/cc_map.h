@@ -71,6 +71,14 @@ public:
     virtual void Clean(LruEntry *remove_entry) = 0;
 
     /**
+     * @brief If the new cc_entry is not in the checkpoint list, enlists the new
+     * entry.
+     *
+     * @param entry
+     */
+    virtual void TryInsertCkptList(LruEntry *entry) = 0;
+
+    /**
      * Used for debug to verify the map_link is complete.
      */
     virtual size_t VerifyOrdering() = 0;

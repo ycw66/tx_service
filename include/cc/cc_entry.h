@@ -156,15 +156,21 @@ public:
 
         // CcEntry field members:
         // size of pointer and KeyT
-        mem_usage_ += ptr_size + key_->MemUsage();
+        mem_usage_ += ptr_size;
+        if (key_ != nullptr)
+        {
+            mem_usage_ += key_->MemUsage();
+        }
         // size of ValueT
         mem_usage_ += payload_.MemUsage();
         mem_usage_ += sizeof(RecordStatus);
-        // size of insert_intention_set_, not used yet
+
+        // TODO size of insert_intention_set_, not used yet
         // mem_usage_ += sizeof(insert_intention_set_) +
         //               insert_intention_set_.size() * 2 * ptr_size;
+
         // size of payload_ckpt_
-        mem_usage_ += payload_.MemUsage() + sizeof(bool);
+        mem_usage_ += payload_ckpt_.first.MemUsage() + sizeof(bool);
         // size of map_prev_, map_next_
         mem_usage_ += 2 * ptr_size;
 

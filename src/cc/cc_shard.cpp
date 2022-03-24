@@ -235,6 +235,32 @@ void CcShard::UpdateLruList(LruEntry *entry)
     tail_cce_.lru_prev_ = entry;
 }
 
+void CcShard::DetachCkpt(LruEntry *entry)
+{
+    LruEntry *prev = entry->ckpt_prev_;
+    LruEntry *post = entry->ckpt_next_;
+    prev->ckpt_next_ = post;
+    post->ckpt_prev_ = prev;
+    entry->ckpt_prev_ = nullptr;
+    entry->ckpt_next_ = nullptr;
+
+    estimate_ccshard_log_size_ -= entry->estimate_ccentry_log_size_;
+    entry->estimate_ccentry_log_size_ = 0;
+}
+
+void CcShard::UpdateEstimateLogSize(LruEntry *entry,
+                                    size_t key_size,
+                                    size_t payload_size)
+{
+    entry->estimate_ccentry_log_size_ += key_size + payload_size;
+    estimate_ccshard_log_size_ += key_size + payload_size;
+
+    if (estimate_ccshard_log_size_ >= log_size_limit)
+    {
+        NotifyCkpt();
+    }
+}
+
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr)
@@ -325,15 +351,6 @@ size_t CcShard::Clean()
         LruEntry *next_cce = cce->lru_next_;
         if (cce->IsFree())
         {
-            CcShard::DetachLru(cce);
-
-            if (cce->ckpt_next_ != nullptr)
-            {
-                // If the cc entry is in the checkpoint list, removes it from
-                // the checkpoint list.
-                CcShard::DetachCkpt(cce);
-            }
-
             cce->parent_map_->Clean(cce);
             --size_;
             ++free_cnt;

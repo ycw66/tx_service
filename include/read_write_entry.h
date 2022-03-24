@@ -10,8 +10,25 @@
 
 namespace txservice
 {
-using SecondaryKeys =
-    std::vector<std::tuple<const TableName *, TxKeyContainer, bool>>;
+
+struct WriteSetEntry;
+
+struct SecondaryKeyInfo
+{
+    SecondaryKeyInfo(const std::string *sk_index_name,
+                     std::unique_ptr<TxKey> sk_key,
+                     bool is_deleted)
+        : sk_index_name_(sk_index_name),
+          sk_key_(std::move(sk_key)),
+          is_deleted_(is_deleted)
+    {
+    }
+
+    const TableName *sk_index_name_;
+    TxKeyContainer sk_key_;
+    const WriteSetEntry *parent_entry_{nullptr};
+    bool is_deleted_;
+};
 
 struct WriteSetEntry
 {
@@ -24,6 +41,10 @@ struct WriteSetEntry
           cce_addr_(),
           sindx_()
     {
+        for (auto &sk_info_ : sindx_)
+        {
+            sk_info_.parent_entry_ = this;
+        }
     }
 
     WriteSetEntry(const WriteSetEntry &other) = delete;
@@ -35,13 +56,17 @@ struct WriteSetEntry
           cce_addr_(other.cce_addr_),
           sindx_(std::move(other.sindx_))
     {
+        for (auto &sk_info_ : sindx_)
+        {
+            sk_info_.parent_entry_ = this;
+        }
     }
 
     TxKeyContainer key_;
     TxRecordContainer rec_;
     DmlOperation op_;
     CcEntryAddr cce_addr_;
-    SecondaryKeys sindx_;
+    std::vector<SecondaryKeyInfo> sindx_;
 };
 
 struct ReadSetEntry

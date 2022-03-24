@@ -36,7 +36,7 @@ public:
     void SetFinish(RecordStatus status, int err);
 
 private:
-    const TableName &table_name_;
+    const TableName table_name_;
     std::string catalog_image_;
     uint64_t commit_ts_;
     CcShard &ccs_;

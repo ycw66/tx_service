@@ -93,7 +93,7 @@ public:
                   TxKeyContainer &key_c,
                   TxRecordContainer &rec_c,
                   DmlOperation op_type,
-                  SecondaryKeys *skeys = nullptr)
+                  std::vector<SecondaryKeyInfo> *skeys = nullptr)
     {
         auto table_iter = wset_.find(tabname);
         if (table_iter == wset_.end())
@@ -107,27 +107,26 @@ public:
 
         if (key_iter != tws.end())
         {
-            WriteSetEntry &write_entry = key_iter->second;
-            write_entry.rec_ = rec_c;
-            write_entry.op_ = op_type;
+            WriteSetEntry &wset_entry = key_iter->second;
+            wset_entry.rec_ = rec_c;
+            wset_entry.op_ = op_type;
             if (skeys != nullptr)
             {
-                write_entry.sindx_ = std::move(*skeys);
+                wset_entry.sindx_ = std::move(*skeys);
             }
         }
         else
         {
-            WriteSetEntry write_entry;
-            write_entry.key_ = key_c;
-            write_entry.rec_ = rec_c;
-            write_entry.op_ = op_type;
+            WriteSetEntry wset_entry;
+            wset_entry.key_ = key_c;
+            wset_entry.rec_ = rec_c;
+            wset_entry.op_ = op_type;
             if (skeys != nullptr && skeys->size() > 0)
             {
-                write_entry.sindx_ = std::move(*skeys);
+                wset_entry.sindx_ = std::move(*skeys);
             }
 
-            table_iter->second.emplace(write_entry.key_.get(),
-                                       std::move(write_entry));
+            tws.emplace(wset_entry.key_.get(), std::move(wset_entry));
             ++wset_cnt_;
         }
     }

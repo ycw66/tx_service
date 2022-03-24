@@ -338,16 +338,7 @@ public:
                 prior_cce.insert_intention_set_.erase(
                     --ite, prior_cce.insert_intention_set_.end());
 
-                if (new_cce->ckpt_next_ == nullptr)
-                {
-                    // If the new cc entry is not in the checkpoint list,
-                    // enlists the new entry.
-                    LruEntry *second_last = pos_inf_.ckpt_prev_;
-                    second_last->ckpt_next_ = new_cce;
-                    new_cce->ckpt_prev_ = second_last;
-                    new_cce->ckpt_next_ = &pos_inf_;
-                    pos_inf_.ckpt_prev_ = new_cce;
-                }
+                TryInsertCkptList(new_cce);
 
                 size_t key_size = new_cce->key_->MemUsage();
                 size_t payload_size = new_cce->payload_.MemUsage();
@@ -393,16 +384,7 @@ public:
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
 
-                if (cce.ckpt_next_ == nullptr)
-                {
-                    // If the cc entry is not in the checkpoint list, enlists
-                    // the entry.
-                    LruEntry *second_last = pos_inf_.ckpt_prev_;
-                    second_last->ckpt_next_ = &cce;
-                    cce.ckpt_prev_ = second_last;
-                    cce.ckpt_next_ = &pos_inf_;
-                    pos_inf_.ckpt_prev_ = &cce;
-                }
+                TryInsertCkptList(&cce);
 
                 size_t key_size = cce.key_->MemUsage();
                 size_t payload_size = cce.payload_.MemUsage();
@@ -805,16 +787,7 @@ public:
                     cce_ptr->insert_intention_set_.erase(
                         --insert_it, cce_ptr->insert_intention_set_.end());
 
-                    if (new_cce->ckpt_next_ == nullptr)
-                    {
-                        // If the new cc entry is not in the checkpoint list,
-                        // enlists the new entry.
-                        LruEntry *second_last = pos_inf_.ckpt_prev_;
-                        second_last->ckpt_next_ = new_cce;
-                        new_cce->ckpt_prev_ = second_last;
-                        new_cce->ckpt_next_ = &pos_inf_;
-                        pos_inf_.ckpt_prev_ = new_cce;
-                    }
+                    TryInsertCkptList(new_cce);
                 }
             }
 
@@ -868,16 +841,7 @@ public:
                         cce_ptr->payload_status_ = RecordStatus::Normal;
                     }
 
-                    if (cce_ptr->ckpt_next_ == nullptr)
-                    {
-                        // If the cc entry is not in the checkpoint list,
-                        // enlists the entry.
-                        LruEntry *second_last = pos_inf_.ckpt_prev_;
-                        second_last->ckpt_next_ = cce_ptr;
-                        cce_ptr->ckpt_prev_ = second_last;
-                        cce_ptr->ckpt_next_ = &pos_inf_;
-                        pos_inf_.ckpt_prev_ = cce_ptr;
-                    }
+                    TryInsertCkptList(cce_ptr);
                 }
 
                 // When commit_ts = 0, the request removes the write lock
@@ -1632,11 +1596,13 @@ public:
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
+                shard_->mem_usage_ -= cce->payload_ckpt_.first.MemUsage();
                 cce->payload_ckpt_.first = cce->payload_;
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
 
                 req.ckpt_vec_.emplace_back(cce);
+                shard_->mem_usage_ += cce->payload_ckpt_.first.MemUsage();
             }
             else if (cce->commit_ts_ <=
                      cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -1739,6 +1705,8 @@ public:
                 }
                 cce->commit_ts_ = req.CommitTs();
 
+                TryInsertCkptList(cce);
+
                 if (cce->key_lock_.HasWriteLock())
                 {
                     // If the record in the log has a commit ts greater than
@@ -1802,6 +1770,15 @@ public:
 
     void Clean(LruEntry *remove_entry) override
     {
+        CcShard::DetachLru(remove_entry);
+
+        if (remove_entry->ckpt_next_ != nullptr)
+        {
+            // If the cc entry is in the checkpoint list, removes it from
+            // the checkpoint list.
+            shard_->DetachCkpt(remove_entry);
+        }
+
         CcEntry<KeyT, ValueT> *cc_entry =
             static_cast<CcEntry<KeyT, ValueT> *>(remove_entry);
 
@@ -1832,6 +1809,18 @@ public:
     TableType Type() const override
     {
         return TableType::Primary;
+    }
+
+    void TryInsertCkptList(LruEntry *entry) override
+    {
+        if (entry->ckpt_next_ == nullptr)
+        {
+            LruEntry *second_last = pos_inf_.ckpt_prev_;
+            second_last->ckpt_next_ = entry;
+            entry->ckpt_prev_ = second_last;
+            entry->ckpt_next_ = &pos_inf_;
+            pos_inf_.ckpt_prev_ = entry;
+        }
     }
 
     const Schema *KeySchema() const override

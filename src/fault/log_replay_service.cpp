@@ -96,13 +96,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             while (offset < blob.size())
             {
                 // 1-byte integer for the length of the table name
-                uint8_t log_type =
-                    *reinterpret_cast<const uint8_t *>(blob.data());
-                offset += sizeof(uint8_t);
-
-                assert(log_type == static_cast<uint8_t>(LogType::RECORD));
-
-                // 1-byte integer for the length of the table name
                 uint8_t table_name_len =
                     *reinterpret_cast<const uint8_t *>(blob.data() + offset);
                 offset += sizeof(uint8_t);

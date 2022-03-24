@@ -18,7 +18,7 @@ public:
     TEntry(uint32_t vec_idx)
         : commit_ts_(0),
           lower_bound_(0),
-          status_(TxnStatus::Aborted),
+          status_(TxnStatus::Finished),
           ident_(UINT32_MAX),
           vec_idx_(vec_idx)
     {

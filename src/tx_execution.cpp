@@ -916,7 +916,7 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 void TransactionExecution::Update(const TableName &table_name,
                                   TxKeyContainer &key,
                                   TxRecordContainer &rec,
-                                  SecondaryKeys *skeys)
+                                  std::vector<SecondaryKeyInfo> *skeys)
 {
     Upsert(table_name, key, rec, skeys, DmlOperation::Update);
 }
@@ -924,14 +924,14 @@ void TransactionExecution::Update(const TableName &table_name,
 void TransactionExecution::Insert(const TableName &table_name,
                                   TxKeyContainer &key,
                                   TxRecordContainer &rec,
-                                  SecondaryKeys *skeys)
+                                  std::vector<SecondaryKeyInfo> *skeys)
 {
     Upsert(table_name, key, rec, skeys, DmlOperation::Insert);
 }
 
 void TransactionExecution::Delete(const TableName &table_name,
                                   TxKeyContainer &key,
-                                  SecondaryKeys *skeys)
+                                  std::vector<SecondaryKeyInfo> *skeys)
 {
     TxRecordContainer rcon(nullptr);
     Upsert(table_name, key, rcon, skeys, DmlOperation::Delete);
@@ -941,7 +941,7 @@ void TransactionExecution::Delete(const TableName &table_name,
 void TransactionExecution::Upsert(const TableName &table_name,
                                   TxKeyContainer &key,
                                   TxRecordContainer &rec,
-                                  SecondaryKeys *skeys,
+                                  std::vector<SecondaryKeyInfo> *skeys,
                                   DmlOperation op)
 {
     rw_set_.AddWrite(table_name, key, rec, op, skeys);
@@ -1167,23 +1167,23 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
     assert(log_rec->node_terms_size() == 0);
 
+    // old structure
     const std::unordered_map<TableName, TableWriteSet> &wset =
         rw_set_.WriteSet();
+    // new structure
     std::unordered_map<
         NodeGroupId,
-        std::unordered_map<TableName, std::vector<const WriteSetEntry *>>>
+        std::unordered_map<TableName,
+                           std::vector<std::variant<const WriteSetEntry *,
+                                                    const SecondaryKeyInfo *>>>>
         ng_table_rec_set;
 
-    for (auto table_it = wset.begin(); table_it != wset.end(); ++table_it)
+    // reorganize all WriteSetEntries from old structure to new structure
+    for (const auto &[table_name, table_write_set] : wset)
     {
-        const TableName &table_name = table_it->first;
-
-        for (auto key_it = table_it->second.begin();
-             key_it != table_it->second.end();
-             ++key_it)
+        for (const auto &[key_ptr, write_set_entry] : table_write_set)
         {
-            const WriteSetEntry &write_entry = key_it->second;
-            const CcEntryAddr &addr = write_entry.cce_addr_;
+            const CcEntryAddr &addr = write_set_entry.cce_addr_;
 
             auto shard_term_it = shard_terms->find(addr.NodeGroupId());
             if (shard_term_it == shard_terms->end())
@@ -1204,14 +1204,46 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
             auto table_rec_it =
                 ng_table_rec_set.try_emplace(addr.NodeGroupId());
-            std::unordered_map<TableName, std::vector<const WriteSetEntry *>>
+            std::unordered_map<
+                TableName,
+                std::vector<std::variant<const WriteSetEntry *,
+                                         const SecondaryKeyInfo *>>>
                 &table_rec_set = table_rec_it.first->second;
 
             auto rec_vec_it = table_rec_set.try_emplace(table_name);
-            rec_vec_it.first->second.emplace_back(&write_entry);
+            rec_vec_it.first->second.emplace_back(
+                std::in_place_type<const WriteSetEntry *>, &write_set_entry);
+
+            if (!write_set_entry.sindx_.empty())
+            {
+                for (auto &sk_info : write_set_entry.sindx_)
+                {
+                    // use sk and pk to get a HashCode
+                    const TxKey *sk = sk_info.sk_key_.get();
+                    const TxKey *pk = sk_info.parent_entry_->key_.get();
+
+                    // get cc_node group id for secondary index entry
+                    uint32_t shard_code = Sharder::Instance().ShardCode(
+                        TxKey::HashCode(*sk, *pk));
+                    uint32_t sk_ng_id = shard_code >> 10;
+
+                    auto table_rec_it = ng_table_rec_set.try_emplace(sk_ng_id);
+                    std::unordered_map<
+                        TableName,
+                        std::vector<std::variant<const WriteSetEntry *,
+                                                 const SecondaryKeyInfo *>>>
+                        &table_rec_set = table_rec_it.first->second;
+
+                    auto rec_vec_it =
+                        table_rec_set.try_emplace(*sk_info.sk_index_name_);
+                    rec_vec_it.first->second.emplace_back(
+                        std::in_place_type<const SecondaryKeyInfo *>, &sk_info);
+                }
+            }
         }
     }
 
+    // construct one log_ng_blob per ng_id
     for (const auto &[ng_id, table_rec_set] : ng_table_rec_set)
     {
         std::string *log_ng_blob = nullptr;
@@ -1228,21 +1260,17 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         }
 
         // The log blob of a table in a node group is in the following format:
-        // (1) A 1-byte integer for the type of log: LogType::RECORD
-        // (2) A 1-byte integer for the length of the table name, followed by
-        // (3) The string of the table name.
-        // (4) A 4-byte integer for the total length of serialized key-record
+        // (1) A 1-byte integer for the length of the table name, followed by
+        // (2) The string of the table name.
+        // (3) A 4-byte integer for the total length of serialized key-record
         // pairs modified by the tx in the node group.
-        // (5) A sequence of modified records. Each record is encoded as
+        // (4) A sequence of modified records. Each record is encoded as
         // follows:
         //   (a) The serialized key
         //   (b) A 1-byte flag to indicate if the record is normal, deleted or
         //   void.
         //   (c) The serialized record if the record is normal.
-        uint8_t log_type = static_cast<uint8_t>(LogType::RECORD);
-        const char *ptr = reinterpret_cast<const char *>(&log_type);
-        log_ng_blob->append(ptr, sizeof(uint8_t));
-        for (const auto &[table_name, rec_vec] : table_rec_set)
+        for (const auto &[table_name, variant_entry_vec] : table_rec_set)
         {
             uint8_t tabname_len = table_name.length();
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
@@ -1259,20 +1287,40 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             // are known.
             log_ng_blob->append(ptr, sizeof(uint32_t));
 
-            for (const WriteSetEntry *wset_entry : rec_vec)
+            for (auto variant_entry : variant_entry_vec)
             {
-                wset_entry->key_.get()->Serialize(*log_ng_blob);
-
-                uint8_t rec_flag =
-                    wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
-                log_ng_blob->append(reinterpret_cast<const char *>(&rec_flag),
-                                    1);
-
-                if (wset_entry->op_ != DmlOperation::Delete &&
-                    wset_entry->rec_.get() != nullptr)
+                if (variant_entry.index() == 0)
                 {
+                    const WriteSetEntry *wset_entry =
+                        std::get<const WriteSetEntry *>(variant_entry);
+
+                    wset_entry->key_.get()->Serialize(*log_ng_blob);
+
+                    uint8_t delete_flag =
+                        wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
+                    log_ng_blob->append(
+                        reinterpret_cast<const char *>(&delete_flag), 1);
+
+                    if (wset_entry->op_ != DmlOperation::Delete &&
+                        wset_entry->rec_.get() != nullptr)
+                    {
+                        wset_entry->rec_.get()->Serialize(*log_ng_blob);
+                    }
+                }
+                else
+                {
+                    const SecondaryKeyInfo *sk_info =
+                        std::get<const SecondaryKeyInfo *>(variant_entry);
+
+                    // Serialize sk and pk into log_ng_blob.
+                    sk_info->sk_key_.get()->Serialize(*log_ng_blob);
+                    sk_info->parent_entry_->key_.get()->Serialize(*log_ng_blob);
+
+                    uint8_t delete_flag = sk_info->is_deleted_ == true ? 1 : 0;
+                    log_ng_blob->append(
+                        reinterpret_cast<const char *>(&delete_flag), 1);
+
                     // A secondary index entry has no payload.
-                    wset_entry->rec_.get()->Serialize(*log_ng_blob);
                 }
             }
 
@@ -1421,9 +1469,9 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                      sk_iter != write_entry.sindx_.end();
                      ++sk_iter)
                 {
-                    const TableName *tn = std::get<0>(*sk_iter);
-                    const TxKey *sk = std::get<1>(*sk_iter).get();
-                    bool is_delete = std::get<2>(*sk_iter);
+                    const TableName *tn = sk_iter->sk_index_name_;
+                    const TxKey *sk = sk_iter->sk_key_.get();
+                    bool is_delete = sk_iter->is_deleted_;
 
                     handler->CommitSecondaryKey(*tn,
                                                 *sk,

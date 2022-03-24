@@ -11,6 +11,10 @@ namespace txservice
 
 struct VoidKey : public TxKey
 {
+    VoidKey()
+    {
+    }
+
     bool operator==(const TxKey &rhs) const override
     {
         if (const VoidKey *other_ptr = static_cast<const VoidKey *>(&rhs))
@@ -63,6 +67,14 @@ struct VoidKey : public TxKey
 template <typename SkT, typename PkT>
 struct SkRecord : public TxRecord
 {
+    SkRecord()
+    {
+    }
+
+    SkRecord(const SkT *sk, const PkT *pk) : sk_(sk), pk_(pk)
+    {
+    }
+
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {
     }
@@ -77,7 +89,7 @@ struct SkRecord : public TxRecord
 
     TxRecord::Uptr Clone() const override
     {
-        return std::make_unique<SkRecord>(*this);
+        return std::make_unique<SkRecord<SkT, PkT>>(sk_, pk_);
     }
 
     void Copy(const TxRecord &rhs) override
@@ -613,16 +625,7 @@ public:
         cce->commit_ts_ = req.ts_;
         cce->gap_commit_ts_ = req.ts_;
 
-        if (cce->ckpt_next_ == nullptr)
-        {
-            // If the cc entry is not in the checkpoint list, enlists
-            // the entry.
-            LruEntry *second_last = pos_inf_.ckpt_prev_;
-            second_last->ckpt_next_ = cce;
-            cce->ckpt_prev_ = second_last;
-            cce->ckpt_next_ = &pos_inf_;
-            pos_inf_.ckpt_prev_ = cce;
-        }
+        TryInsertCkptList(cce);
 
         req.Result()->SetFinished();
         return true;
@@ -647,6 +650,8 @@ public:
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
+                // no need to update memory usage since this payload_ckpt_ has a
+                // fixed size
                 cce->payload_ckpt_.first = cce->payload_;
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
@@ -685,7 +690,84 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
-        return true;
+        size_t offset = 0;
+        const std::string_view &log_blob = req.LogContentView();
+
+        // if replay record's commit_ts is smaller than ccmap's commit_ts,
+        // this record is generated before the latest schema of the table
+        // and hence should skip the replay process.
+        if (req.CommitTs() < commit_ts_)
+        {
+            req.SetFinish();
+            return false;
+        }
+
+        while (offset < log_blob.size())
+        {
+            SecondaryKey<SkT, PkT> decoded_key;
+            decoded_key.Deserialize(log_blob.data(), offset, &compound_schema_);
+
+            uint8_t delete_flag =
+                *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
+            offset += sizeof(uint8_t);
+
+            uint32_t shard_code =
+                Sharder::Instance().ShardCode(decoded_key.Hash());
+            uint16_t core_id = (shard_code & 0x3FF) % shard_->core_cnt_;
+            if (core_id != shard_->core_id_)
+            {
+                continue;
+            }
+
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = FindEmplace(
+                decoded_key.SKey(), decoded_key.PKey(), req.CommitTs());
+            assert(cce != nullptr);
+
+            // If the key exists in the cc map and its commit ts is
+            // greater than that of the log record, skips installing the
+            // log record in the cc map and moves to the next key in the
+            // log record.
+            if (cce->commit_ts_ < req.CommitTs())
+            {
+                if (delete_flag == 0)
+                {
+                    cce->payload_status_ = RecordStatus::Normal;
+                }
+                else
+                {
+                    cce->payload_status_ = RecordStatus::Deleted;
+                }
+                cce->commit_ts_ = req.CommitTs();
+
+                TryInsertCkptList(cce);
+
+                if (cce->key_lock_.HasWriteLock())
+                {
+                    // If the record in the log has a commit ts greater than
+                    // that of the cc entry and the cc entry has a write
+                    // lock, the lock's owner must be the tx that commits
+                    // the log record. TODO: it is safer if we ship the tx
+                    // ID with the recovering message and match it against
+                    // the lock holder.
+                    TxNumber txn = cce->key_lock_.WriteLockTx();
+                    cce->key_lock_.ReleaseWriteLock(txn, shard_);
+                    shard_->DeleteLockHolidngTx(txn, cce);
+                    // cce->key_lock_.ClearTx(txn);
+                }
+            }
+        }
+
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            req.SetFinish();
+        }
+
+        return false;
     }
 
     bool Execute(FaultInjectCC &req) override
@@ -714,6 +796,15 @@ public:
 
     void Clean(LruEntry *remove_entry) override
     {
+        CcShard::DetachLru(remove_entry);
+
+        if (remove_entry->ckpt_next_ != nullptr)
+        {
+            // If the cc entry is in the checkpoint list, removes it from
+            // the checkpoint list.
+            shard_->DetachCkpt(remove_entry);
+        }
+
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
             static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(remove_entry);
 
@@ -737,6 +828,18 @@ public:
             shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
             shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
             shard_->mem_usage_ -= cce->payload_.sk_->MemUsage();
+        }
+    }
+
+    void TryInsertCkptList(LruEntry *entry) override
+    {
+        if (entry->ckpt_next_ == nullptr)
+        {
+            LruEntry *second_last = pos_inf_.ckpt_prev_;
+            second_last->ckpt_next_ = entry;
+            entry->ckpt_prev_ = second_last;
+            entry->ckpt_next_ = &pos_inf_;
+            pos_inf_.ckpt_prev_ = entry;
         }
     }
 
@@ -912,27 +1015,6 @@ private:
             }
         }
 
-        /*
-         *
-         * When the program reaches here:
-         * 1) it's a cache miss for sk;
-         * 2) it's a cache hit for sk but cache miss for pk.
-         *
-         * After Clean() two situations require extra consideration:
-         * either the cache hit sk map is deleted,
-         * or some pk elements within the cache hit sk map are deleted.
-         *
-         * For situation 1:
-         * Recheck sk_it in case the iterator may change during Clean().
-         *
-         * For situation 2:
-         * If the cache hit sk is not cleaned, recheck sk_it, and reset pk_group
-         * accordingly, then recheck pk_it in case the iterator may change
-         * during Clean() If the cache hit sk is cleaned, recheck sk_it, and
-         * reset pk_group to nullptr.
-         *
-         */
-
         if (shard_->Full())
         {
             // The shard has reached the maximal capacity. Tries to clean cc
@@ -944,6 +1026,8 @@ private:
                 return nullptr;
             }
 
+            // Recheck sk_it in case the iterator may be invalidated during
+            // shard_->Clean(). The same for pk_it.
             sk_it = sk_index_.lower_bound(sk);
             if (sk_it->first == sk)
             {
@@ -981,8 +1065,6 @@ private:
                                              *new_cce = nullptr;
 
         new_cce = &pk_it->second;
-        shard_->mem_usage_ += new_cce->GetCcEntryMemUsage();
-        // The key of the cc entry of the secondary index is pseudo(VoidKey).
         new_cce->key_ = nullptr;
         new_cce->payload_.sk_ = &sk_it->first;
         new_cce->payload_.pk_ = &pk_it->first;
@@ -1049,6 +1131,9 @@ private:
         next_cce->map_prev_ = new_cce;
 
         shard_->UpdateLruList(new_cce);
+
+        shard_->mem_usage_ += new_cce->GetCcEntryMemUsage();
+
         return new_cce;
     }
 
