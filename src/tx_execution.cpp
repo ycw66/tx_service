@@ -1155,6 +1155,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     ::txlog::LogRequest &log_req = write_log.log_closure_.LogRequest();
     ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();
 
+    log_rec->set_tx_term(tx_term_);
     log_rec->set_txn_number(txid_.TxNumber());
     log_rec->set_commit_timestamp(commit_ts_);
 
