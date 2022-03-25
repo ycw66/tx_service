@@ -202,7 +202,7 @@ TEntry *CcShard::LocateTx(TxNumber tx_number)
     return nullptr;
 }
 
-inline void CcShard::DetachLru(LruEntry *entry)
+void CcShard::DetachLru(LruEntry *entry)
 {
     LruEntry *prev = entry->lru_prev_;
     LruEntry *post = entry->lru_next_;
