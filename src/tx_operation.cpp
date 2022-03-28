@@ -1430,6 +1430,7 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
     ::txlog::WriteLogRequest *prepare_log_rec =
         prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
+    prepare_log_rec->set_tx_term(txm->tx_term_);
     prepare_log_rec->set_txn_number(txm->tx_number_);
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
 
@@ -1467,6 +1468,7 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
     ::txlog::WriteLogRequest *commit_log_rec =
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
+    commit_log_rec->set_tx_term(txm->tx_term_);
     commit_log_rec->set_txn_number(txm->tx_number_);
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
 
@@ -1496,6 +1498,7 @@ void UpsertTableOp::FillCleanLogRequest(TransactionExecution *txm)
     ::txlog::WriteLogRequest *clean_log_rec =
         clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
+    clean_log_rec->set_tx_term(txm->tx_term_);
     clean_log_rec->set_txn_number(txm->tx_number_);
 
     ::txlog::SchemaOpMessage *clean_schema_msg =
