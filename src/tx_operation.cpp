@@ -131,6 +131,7 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
     finish_cnt_.store(0);
     fail_cnt_.store(0);
     remote_ack_cnt_.store(0);
+    rset_has_expired_.store(false);
     acquire_write_cnt_ = acquire_write_cnt;
     Resize(acquire_write_cnt);
 }
@@ -278,7 +279,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                     // key has been read before and the key's commit ts
                     // mismatches the prior version, this is not a
                     // repeatable read.
-                    fail_cnt_.fetch_add(1, std::memory_order_relaxed);
+                    rset_has_expired_.store(true, std::memory_order_relaxed);
                 }
             }
             else if (results_.at(idx).ErrorCode() == -1)

@@ -1013,7 +1013,8 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (acquire_write.fail_cnt_.load(std::memory_order_acquire) > 0)
+    if (acquire_write.fail_cnt_.load(std::memory_order_acquire) > 0 ||
+        acquire_write.rset_has_expired_.load(std::memory_order_acquire))
     {
         SetErrorMessage("Transaction abort: failed to acquire write lock.");
         Abort();
