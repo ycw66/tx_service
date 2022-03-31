@@ -1364,6 +1364,7 @@ public:
           mux_(),
           cv_()
     {
+        tx_number_ = tx_number;
     }
 
     bool Execute(CcShard &ccs) override
