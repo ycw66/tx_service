@@ -8,12 +8,12 @@ namespace txservice
 {
 /*
   Monograph Catalog
-  Abstract interface of catalog in monograph storage engine. Each runtime registers
-  it callback into monograph catalog. Take CREATE TABLE as an example, table is
-  distributed on all the runtimes and monograph engines. Tlog is the ground truth of
-  CREATE TABLE, but in postprocess of CREATE TABLE request, we need run callback
-  to notify the runtime to refresh cache(monograph share) and create table in
-  Cassandra
+  Abstract interface of catalog in monograph storage engine. Each runtime
+  registers it callback into monograph catalog. Take CREATE TABLE as an example,
+  table is distributed on all the runtimes and monograph engines. Tlog is the
+  ground truth of CREATE TABLE, but in postprocess of CREATE TABLE request, we
+  need run callback to notify the runtime to refresh cache(monograph share) and
+  create table in Cassandra
  */
 class Catalog
 {

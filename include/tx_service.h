@@ -271,9 +271,7 @@ public:
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
             pool_.emplace_back(std::make_unique<TxProcessor>(
-                thd_idx,
-                local_cc_shards_,
-                Sharder::Instance().GetLogAgent()));
+                thd_idx, local_cc_shards_, Sharder::Instance().GetLogAgent()));
         }
 
         Sharder::Instance().Init(local_path);

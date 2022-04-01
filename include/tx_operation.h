@@ -110,8 +110,8 @@ public:
     // Number of remote keys on which the acquire write operation needs to
     // acquire write intentions/locks.
     std::atomic<int32_t> remote_ack_cnt_{0};
-    // Identify whether any keys in rset are expired (may be updated by other tx) 
-    // under RepeatableRead isolation level.
+    // Identify whether any keys in rset are expired (may be updated by other
+    // tx) under RepeatableRead isolation level.
     std::atomic<bool> rset_has_expired_{false};
 };
 

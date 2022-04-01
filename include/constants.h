@@ -12,4 +12,4 @@ namespace txservice
 inline const std::string INDEX_NAME_PREFIX = "*$$";
 inline const std::string RANGE_TABLE_NAME_PREFIX = "*~~";
 inline const std::string RANGE_TABLE_NAME_SUFFIX = "ranges";
-}
+}  // namespace txservice
