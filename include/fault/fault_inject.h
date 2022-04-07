@@ -26,7 +26,8 @@ enum struct FaultAction
     RESET,
     STATUS,
     WAIT_UNTIL_TRIGGER,
-    REMOTE
+    REMOTE,
+    LOG_TRANSFER
 };
 static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
     {"UNKNOWN", FaultAction::UNKNOWN},
@@ -41,7 +42,8 @@ static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
     {"RESET", FaultAction::RESET},
     {"STATUS", FaultAction::STATUS},
     {"WAIT_UNTIL_TRIGGER", FaultAction::WAIT_UNTIL_TRIGGER},
-    {"REMOTE", FaultAction::REMOTE}};
+    {"REMOTE", FaultAction::REMOTE},
+    {"LOG_TRANSFER", FaultAction::LOG_TRANSFER}};
 
 class FaultEntry
 {

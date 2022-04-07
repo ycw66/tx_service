@@ -190,6 +190,23 @@ void FaultInject::TriggerAction(FaultEntry *entry)
                     InjectFault(fault_name, fault_paras);
                 }
             }
+            break;
+        }
+        case FaultAction::LOG_TRANSFER:
+        {
+            size_t pos = para.find('-');
+            if (pos == string::npos)
+            {
+                LOG(ERROR)
+                    << "Error LOG_TRANSFER parameters: The right style should "
+                       "be: action=LOG_TRANSFER#[group id]-[node id]";
+                abort();
+            }
+
+            uint32_t gid = std::stoul(para.substr(0, pos));
+            uint32_t idx = std::stoul(para.substr(pos + 1));
+            Sharder::Instance().LogTransferLeader(gid, idx);
+            break;
         }
         default:
             break;

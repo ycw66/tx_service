@@ -57,6 +57,8 @@ public:
                                       uint32_t cc_ng_id,
                                       int64_t cc_ng_term) = 0;
 
+    virtual void TransferLeader(uint32_t log_group_id, uint32_t leader_idx) = 0;
+
     virtual std::unique_ptr<TxLog> Clone() const = 0;
 
     virtual uint32_t LogGroupCount() const = 0;

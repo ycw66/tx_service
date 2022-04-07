@@ -184,6 +184,14 @@ public:
                    int64_t tx_term,
                    uint32_t cc_ng_id,
                    int64_t cc_ng_term);
+    /**
+     * @brief Transfer the leader for the log group. This function is developed
+     * for test
+     *
+     * @param log_group_id log group id that need to transfer leader
+     * @param leader_idx the node index from 0 in log group for new leader
+     */
+    void LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx);
 
     remote::CcStreamSender *GetCcStreamSender()
     {
