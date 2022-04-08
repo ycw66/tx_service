@@ -41,10 +41,6 @@ struct WriteSetEntry
           cce_addr_(),
           sindx_()
     {
-        for (auto &sk_info_ : sindx_)
-        {
-            sk_info_.parent_entry_ = this;
-        }
     }
 
     WriteSetEntry(const WriteSetEntry &other) = delete;
@@ -60,6 +56,22 @@ struct WriteSetEntry
         {
             sk_info_.parent_entry_ = this;
         }
+    }
+
+    WriteSetEntry &operator=(WriteSetEntry &&other)
+    {
+        key_ = other.key_;
+        rec_ = other.rec_;
+        op_ = other.op_;
+        cce_addr_ = other.cce_addr_;
+        sindx_ = std::move(other.sindx_);
+
+        for (auto &sk_info_ : sindx_)
+        {
+            sk_info_.parent_entry_ = this;
+        }
+
+        return *this;
     }
 
     TxKeyContainer key_;

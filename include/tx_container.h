@@ -163,11 +163,11 @@ public:
             return *this;
         }
 
-        if (owner_ != nullptr)
-        {
-            *owner_ = *rhs.ptr_;
-            return *this;
-        }
+        // if (owner_ != nullptr)
+        // {
+        //     *owner_ = *rhs.ptr_;
+        //     return *this;
+        // }
 
         switch (rhs.type_)
         {

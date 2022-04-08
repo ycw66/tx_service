@@ -73,6 +73,7 @@ endif()
 add_library(txservice STATIC 
     ${CMAKE_SOURCE_DIR}/src/tx_execution.cpp
     ${CMAKE_SOURCE_DIR}/src/tx_operation.cpp
+    ${CMAKE_SOURCE_DIR}/src/checkpointer.cpp
     ${CMAKE_SOURCE_DIR}/src/cc/cc_shard.cpp
     ${CMAKE_SOURCE_DIR}/src/cc/local_cc_handler.cpp 
     ${CMAKE_SOURCE_DIR}/include/proto/cc_request.pb.cc

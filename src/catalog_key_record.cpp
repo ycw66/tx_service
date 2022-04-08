@@ -6,7 +6,7 @@ CatalogKey::CatalogKey()
 {
 }
 
-CatalogKey::CatalogKey(const std::string &name) : table_name_(name)
+CatalogKey::CatalogKey(const TableName &name) : table_name_(name)
 {
 }
 

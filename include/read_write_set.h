@@ -103,30 +103,20 @@ public:
         }
 
         TableWriteSet &tws = table_iter->second;
-        auto key_iter = tws.find(key_c.get());
 
-        if (key_iter != tws.end())
+        WriteSetEntry wset_entry;
+        wset_entry.key_ = key_c;
+        wset_entry.rec_ = rec_c;
+        wset_entry.op_ = op_type;
+        if (skeys != nullptr && skeys->size() > 0)
         {
-            WriteSetEntry &wset_entry = key_iter->second;
-            wset_entry.rec_ = rec_c;
-            wset_entry.op_ = op_type;
-            if (skeys != nullptr)
-            {
-                wset_entry.sindx_ = std::move(*skeys);
-            }
+            wset_entry.sindx_ = std::move(*skeys);
         }
-        else
-        {
-            WriteSetEntry wset_entry;
-            wset_entry.key_ = key_c;
-            wset_entry.rec_ = rec_c;
-            wset_entry.op_ = op_type;
-            if (skeys != nullptr && skeys->size() > 0)
-            {
-                wset_entry.sindx_ = std::move(*skeys);
-            }
 
-            tws.emplace(wset_entry.key_.get(), std::move(wset_entry));
+        auto [it, is_insert] =
+            tws.insert_or_assign(wset_entry.key_.get(), std::move(wset_entry));
+        if (is_insert)
+        {
             ++wset_cnt_;
         }
     }

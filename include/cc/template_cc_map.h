@@ -830,15 +830,22 @@ public:
             {
                 if (commit_ts > 0)
                 {
-                    cce_ptr->commit_ts_ = commit_ts;
-                    if (req.DmlOp() == DmlOperation::Delete)
+                    if (req.CommitType() == PostWriteType::PrepareCommit)
                     {
-                        cce_ptr->payload_status_ = RecordStatus::Deleted;
+                        cce_ptr->payload_ = *payload;
                     }
                     else
                     {
-                        cce_ptr->payload_ = *payload;
-                        cce_ptr->payload_status_ = RecordStatus::Normal;
+                        cce_ptr->commit_ts_ = commit_ts;
+                        if (req.DmlOp() == DmlOperation::Delete)
+                        {
+                            cce_ptr->payload_status_ = RecordStatus::Deleted;
+                        }
+                        else
+                        {
+                            cce_ptr->payload_ = *payload;
+                            cce_ptr->payload_status_ = RecordStatus::Normal;
+                        }
                     }
 
                     TryInsertCkptList(cce_ptr);
@@ -890,11 +897,14 @@ public:
             return true;
         }
 
+        // validate rset cce
         CcEntry<KeyT, ValueT> &cc_entry =
             *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
+        // read_entry.version_ts_: cc_entry.commit_ts_ before validation
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
+        // the txm.commit_ts_
         uint64_t commit_ts = req.CommitTs();
         TxNumber txn = req.Txn();
 
@@ -1353,8 +1363,11 @@ public:
                     continue;
                 }
 
+                // Return first available scan_tuple in scan_cache.
                 TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                     typed_cache->AddScanTuple();
+
+                // Copy cce info to scan_tuple, which resides in scan_cache.
                 ScanKey(cce,
                         scan_tuple,
                         true,
@@ -1580,8 +1593,6 @@ public:
 
     bool Execute(CkptScanCc &req) override
     {
-        // TODO: checkpoint also need table lock
-
         LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
                                                         : req.start_entry_;
         CcEntry<KeyT, ValueT> *cce =
@@ -1600,6 +1611,10 @@ public:
                 cce->payload_ckpt_.first = cce->payload_;
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
+
+                cce->parent_map_->shard_->estimate_ccshard_log_size_ -=
+                    cce->estimate_ccentry_log_size_;
+                cce->estimate_ccentry_log_size_ = 0;
 
                 req.ckpt_vec_.emplace_back(cce);
                 shard_->mem_usage_ += cce->payload_ckpt_.first.MemUsage();

@@ -15,7 +15,7 @@ struct CatalogKey : public TxKey
 {
 public:
     CatalogKey();
-    CatalogKey(const std::string &name);
+    CatalogKey(const TableName &name);
     ~CatalogKey() = default;
 
     bool operator==(const TxKey &rhs) const override;

@@ -286,6 +286,48 @@ void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
         return;
     }
 
+    // If releasing the current read lock may unblock anything, it must be the
+    // write lock who is the head of the blocking queue.
+    if (removed_cnt > 0 && blocking_queue_.Size() > 0 &&
+        blocking_queue_.Peek().lk_type_ == LockType::WriteLock)
+    {
+        const LockQueueEntry &queue_head = blocking_queue_.Peek();
+
+        TxNumber txn = queue_head.req_->Txn();
+
+        bool no_read_lk_conflict =
+            read_locks_.empty() ||
+            (read_locks_.size() == 1 && *read_locks_.begin() == txn);
+        bool no_write_intent_conflict =
+            is_write_intent_empty_ || write_intent_tx_ == txn;
+
+        if (no_read_lk_conflict && no_write_intent_conflict)
+        {
+            is_write_lock_empty_ = false;
+            write_lock_tx_ = txn;
+
+            if (!read_locks_.empty())
+            {
+                read_locks_.erase(txn);
+            }
+
+            if (!is_write_intent_empty_)
+            {
+                is_write_intent_empty_ = true;
+                write_intent_tx_ = 0;
+            }
+
+            bool is_free = queue_head.req_->Execute(*ccs);
+            if (is_free)
+            {
+                // Blocked cc requests are not in the cc processing queue and
+                // hence needs to be freed here.
+                queue_head.req_->Free();
+            }
+            blocking_queue_.Dequeue();
+        }
+    }
+
     TryPopBlockingQueue(ccs);
 }
 

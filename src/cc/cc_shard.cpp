@@ -243,9 +243,6 @@ void CcShard::DetachCkpt(LruEntry *entry)
     post->ckpt_prev_ = prev;
     entry->ckpt_prev_ = nullptr;
     entry->ckpt_next_ = nullptr;
-
-    estimate_ccshard_log_size_ -= entry->estimate_ccentry_log_size_;
-    entry->estimate_ccentry_log_size_ = 0;
 }
 
 void CcShard::UpdateEstimateLogSize(LruEntry *entry,

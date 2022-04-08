@@ -1126,10 +1126,10 @@ public:
 
     CkptScanCc(const TableName &table_name,
                const uint64_t ckpt_ts,
-               std::vector<LruEntry *> &vec)
+               std::vector<LruEntry *> &ckpt_vec)
         : table_name_(table_name),
           ckpt_ts_(ckpt_ts),
-          ckpt_vec_(vec),
+          ckpt_vec_(ckpt_vec),
           start_entry_(nullptr),
           status_(CkptScanStatus::Ongoing),
           mux_(),
@@ -1525,6 +1525,13 @@ public:
                     {
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
+
+                        // Replaying records from a dropped table.
+                        if (ccm_ == nullptr)
+                        {
+                            res_->SetFinished();
+                            return false;
+                        }
                     }
                     else
                     {
@@ -1544,7 +1551,6 @@ public:
             }
         }
 
-        assert(ccm_ != nullptr);
         return ccm_->Execute(*this);
     }
 
