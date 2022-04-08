@@ -18,4 +18,6 @@ jobs:
           ,-whitespace/newline\
           ,-whitespace/operators\
           ,-whitespace/parens\
+          ,-build/include_subdir\
+          ,-runtime/references\
           " # Optional
