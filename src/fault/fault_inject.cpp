@@ -203,9 +203,9 @@ void FaultInject::TriggerAction(FaultEntry *entry)
                 abort();
             }
 
-            uint32_t gid = std::stoul(para.substr(0, pos));
-            uint32_t idx = std::stoul(para.substr(pos + 1));
-            Sharder::Instance().LogTransferLeader(gid, idx);
+            uint32_t log_group_id = std::stoul(para.substr(0, pos));
+            uint32_t leader_idx = std::stoul(para.substr(pos + 1));
+            Sharder::Instance().LogTransferLeader(log_group_id, leader_idx);
             break;
         }
         default:

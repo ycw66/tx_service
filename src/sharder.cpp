@@ -409,7 +409,6 @@ int Sharder::TransferLeader(uint32_t ng_id)
 
 void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
 {
-    // std::unique_ptr<TxLog> agent = log_agent_->Clone();
     log_agent_->TransferLeader(log_group_id, leader_idx);
 }
 }  // namespace txservice
