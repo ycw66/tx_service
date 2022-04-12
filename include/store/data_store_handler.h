@@ -30,6 +30,9 @@ public:
 
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    void *fetch_req) = 0;
+
+    virtual void FetchTableRanges(const TableName &range_table_name,
+                                  void *fetch_req) = 0;
 };
 
 // class IntMemoryStore : public DataStoreWriteHandler

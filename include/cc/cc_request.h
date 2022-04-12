@@ -21,6 +21,7 @@
 #include "scan.h"
 #include "tx_operation_result.h"
 #include "type.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -51,46 +52,92 @@ public:
 
             if (ccm_ == nullptr)
             {
-                const TableSchemaView *schema_view = InitCcm(ccs);
-
-                if (schema_view != nullptr)
+                if (txservice::IsRangeTablename(*table_name_))
                 {
-                    if (schema_view->version_ts_ == 0)
+                    // The request is toward a special cc map that contains a
+                    // table's ranges.
+                    auto ranges = ccs.GetTableRanges(*table_name_);
+                    if (ranges != nullptr)
                     {
-                        // The schema view is initialized but the current schema
-                        // is unset (version_ts is 0). This means that there is
-                        // an error when read the catalog from the data store.
-                        // Returns the request with an error.
-                        res_->SetError(100);
-                        return true;
-                    }
-                    else if (schema_view->schema_ != nullptr)
-                    {
+                        ccs.CreateRangeCcMap(*table_name_, node_group_id_);
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
+
+                        ccm_->commit_ts_ = 1;
                     }
                     else
                     {
-                        // The local node (LocalCcShards) contains a schema
-                        // instance, which indicates that the table has been
-                        // dropped (the schema pointer is null). Other than
-                        // replay log requests, cc requests should never reach
-                        // here, because before cc requests are sent, query
-                        // compilation reads the table schema and acquires a
-                        // read lock on it. If the table does not exist, the
-                        // query never enters the execution phase. If the table
-                        // exists during compilation, the table cannot be
-                        // dropped since then.
-                        res_->SetError(100);
-                        return true;
+                        // Get original table name for the range table name
+                        const txservice::TableName base_table_name =
+                            GetTablenameFromRangeTablename(*table_name_);
+                        const TableSchemaView *schema_view =
+                            ccs.GetCatalog(base_table_name);
+                        // When a tx sends a request toward a table's range
+                        // cc map, either to look up the range containing the
+                        // input key or to lock a range for splitting/merging,
+                        // this or prior tx's must have accessed the table's
+                        // cc map at this node to read or write the table's
+                        // data. Initialization of the table's cc map needs to
+                        // instantiate the schema instance. So, the table's
+                        // schema should never be null.
+                        assert(schema_view != nullptr &&
+                               schema_view->schema_ != nullptr);
+
+                        // The local node does not contain the table's ranges.
+                        // The FetchTableRanges() method will send an async
+                        // request toward the data store to fetch the table's
+                        // ranges and initializes the table's range cc map.
+                        // After fetching is finished, this cc request is
+                        // re-enqueued for re-execution.
+                        ccs.FetchTableRanges(*table_name_,
+                                             schema_view->schema_->KeySchema(),
+                                             this);
+                        return false;
                     }
                 }
                 else
                 {
-                    // The table's schema is not available yet. Cannot
-                    // initialize the cc map. The request will be re-executed
-                    // after the schema is fetched from the data store.
-                    return false;
+                    const TableSchemaView *schema_view =
+                        ccs.GetCatalog(*table_name_);
+
+                    if (schema_view != nullptr)
+                    {
+                        const TableSchema *curr_schema = schema_view->schema_;
+                        if (curr_schema != nullptr)
+                        {
+                            ccs.CreatePkCcMap(
+                                *table_name_, curr_schema, node_group_id_);
+
+                            std::vector<TableName> index_names =
+                                curr_schema->IndexNames();
+                            for (const TableName &index_name : index_names)
+                            {
+                                ccs.CreateSkCcMap(
+                                    index_name, curr_schema, node_group_id_);
+                            }
+
+                            ccm_ = ccs.GetCcm(
+                                *table_name_, node_group_id_, error_code);
+                        }
+                        else
+                        {
+                            // The local node (LocalCcShards) contains a schema
+                            // instance, which indicates that the table has been
+                            // dropped. Returns the request with an error.
+                            res_->SetError(100);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        // The local node does not contain the table's schema
+                        // instance. The FetchCatalog() method will send an
+                        // async request toward the data store to fetch the
+                        // catalog. After fetching is finished, this cc request
+                        // is re-enqueued for re-execution.
+                        ccs.FetchCatalog(*table_name_, this);
+                        return false;
+                    }
                 }
             }
         }
@@ -311,10 +358,10 @@ private:
     bool is_insert_;
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
-    // blocked due to read-write conflicts in 2PL. After the request is
-    // unblocked and acquires the lock, the request's execution resumes without
-    // further lookup of the cc entry.
-    LruEntry *cce_ptr_;
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
@@ -394,17 +441,6 @@ public:
         return is_insert_;
     }
 
-    void SetCcePtr(LruEntry *ptr)
-    {
-        cce_ptr_ = ptr;
-        ccm_ = nullptr;
-    }
-
-    LruEntry *CcePtr() const
-    {
-        return cce_ptr_;
-    }
-
     LockType GetLockType() const
     {
         return lock_type_;
@@ -421,22 +457,29 @@ public:
         key_ = decoded_key_.get();
     }
 
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
     std::unique_ptr<TxKey> decoded_key_{nullptr};
     int64_t tx_term_{-1};
     bool is_insert_{false};
-    /**
-     * @brief The pointer of the cc entry to which this request is directed. The
-     * pointer is set, when the request locates the cc entry but is blocked due
-     * to read-write conflicts in 2PL. After the request is unblocked and
-     * acquires the lock, the request's execution resumes without further lookup
-     * of the cc entry.
-     *
-     */
-    LruEntry *cce_ptr_{nullptr};
     LockType lock_type_{LockType::WriteIntent};
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, Void>
@@ -958,7 +1001,8 @@ public:
              IsolationLevel iso_level,
              CcProtocol proto,
              LockType lock_type,
-             bool is_delta)
+             bool is_delta,
+             bool is_include_floor_cce = false)
     {
         table_name_ = tn;
         index_type_ = type;
@@ -971,11 +1015,33 @@ public:
         scan_cache_ = cache;
         term_ = term;
         res_ = open_res;
-        iso_level_ = iso_level;
+        isolation_level_ = iso_level;
         proto_ = proto;
         lock_type_ = lock_type;
         ccm_ = nullptr;
         is_ckpt_delta_ = is_delta;
+        is_include_floor_cce_ = is_include_floor_cce;
+        cce_ptr_ = nullptr;
+    }
+
+    int64_t TxTerm()
+    {
+        return term_;
+    }
+
+    LockType GetLockType()
+    {
+        return lock_type_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
     }
 
 private:
@@ -986,15 +1052,26 @@ private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
     int64_t term_{-1};
-    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     LockType lock_type_{LockType::ReadLock};
     bool is_ckpt_delta_{false};
+    // If always include floor_cce in scan result
+    bool is_include_floor_cce_{false};
+
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
     friend class SkCcMap;
+
+    template <typename KeyT>
+    friend class RangeCcMap;
 };
 
 struct ScanNextBatchCc
@@ -1006,6 +1083,7 @@ public:
     void Set(const uint32_t &ng_id,
              const uint64_t &ts,
              ScanCache *cache,
+             int64_t tx_term,
              CcHandlerResult<ScanNextResult> *next_res,
              IsolationLevel iso_level,
              CcProtocol proto,
@@ -1015,30 +1093,62 @@ public:
         node_group_id_ = ng_id;
         ts_ = ts;
         scan_cache_ = cache;
+        tx_term_ = tx_term;
         const ScanTuple *last_tuple = cache->LastTuple();
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(last_tuple->cce_addr_.CcePtr());
         ccm_ = lru_entry->parent_map_;
         res_ = next_res;
-        iso_level_ = iso_level;
+        isolation_level_ = iso_level;
         proto_ = proto;
         lock_type_ = lock_type;
         is_ckpt_delta_ = is_delta;
+        cce_ptr_ = nullptr;
+    }
+
+    int64_t TxTerm()
+    {
+        return tx_term_;
+    }
+
+    LockType GetLockType()
+    {
+        return lock_type_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
     }
 
 private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
-    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    int64_t tx_term_{-1};
     LockType lock_type_{LockType::ReadLock};
 
     bool is_ckpt_delta_{false};
+
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
     friend class SkCcMap;
+
+    template <typename KeyT>
+    friend class RangeCcMap;
 };
 
 struct ScanCloseCc : public TemplatedCcRequest<ScanCloseCc, Void>

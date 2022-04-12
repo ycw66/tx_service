@@ -102,7 +102,7 @@ public:
 
                 const TableSchemaView *schema_view =
                     shard_->CreateDirtyCatalog(table_key->Name(),
-                                               schema_rec->SchemaBlob(),
+                                               schema_rec->SchemaImage(),
                                                req.CommitTs());
 
                 schema_rec->SetSchemaView(schema_view);
@@ -262,10 +262,10 @@ public:
 
             if (schema_view == nullptr)
             {
-                assert(schema_rec->SchemaBlob().size() > 0);
+                assert(schema_rec->SchemaImage().size() > 0);
 
                 schema_view = shard_->CreateCatalog(
-                    table_key->Name(), schema_rec->SchemaBlob(), 1);
+                    table_key->Name(), schema_rec->SchemaImage(), 1);
             }
             schema_rec->SetSchemaView(schema_view);
 

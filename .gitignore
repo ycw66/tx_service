@@ -346,3 +346,6 @@ include/proto/*.pb.h
 
 # log_service dir
 log_service
+
+# pre-commit
+.pre-commit-config.yaml

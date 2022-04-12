@@ -1,12 +1,21 @@
 #pragma once
 
+#include <cmath>
+#include <unordered_set>
+
+#include "cc_entry.h"
 #include "cc_map.h"
+#include "cc_protocol.h"
 #include "cc_request.h"
 #include "cc_shard.h"
 #include "fault/fault_inject.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_request.h"
 #include "sharder.h"
+#include "tx_execution.h"
+#include "tx_id.h"
+#include "tx_key.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -16,7 +25,7 @@ class TemplateCcMap : public CcMap
 public:
     TemplateCcMap() = delete;
     TemplateCcMap(const TemplateCcMap &rhs) = delete;
-    TemplateCcMap(CcMap &&rhs) = delete;
+    explicit TemplateCcMap(CcMap &&rhs) = delete;
     virtual ~TemplateCcMap() = default;
 
     TemplateCcMap(CcShard *shard,
@@ -1023,9 +1032,6 @@ public:
             return true;
         }
 
-        TxNumber txn = req.Txn();
-        int64_t tx_term = req.TxTerm();
-
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before. This is execution resumption
@@ -1035,58 +1041,46 @@ public:
         }
         else if (cce_addr.CcePtr() == 0)
         {
-            if (req.Key() != nullptr)
-            {
-                const KeyT *look_key = static_cast<const KeyT *>(req.Key());
-                cce = FindEmplace(*look_key, req.ReadTimestamp());
-
-                // The read request accesses a new key not in the cc map. But
-                // the cc map is full and cannot allocates a new entry.
-                if (cce == nullptr)
-                {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
-            }
-            else
+            const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+            if (look_key == nullptr)
             {
                 assert(req.KeyBlob() != nullptr);
-
                 KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
                     req.KeyBlob()->data(), offset, key_schema_);
-
-                cce = FindEmplace(decoded_key, req.ReadTimestamp());
-
-                if (cce == nullptr)
-                {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
+                look_key = &decoded_key;
             }
+
+            cce = FindEmplace(*look_key, req.ReadTimestamp());
+
+            // The read request accesses a new key not in the cc map. But
+            // the cc map is full and cannot allocates a new entry.
+            if (cce == nullptr)
+            {
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
+
+            req.SetCcePtr(cce);
             cce_addr.SetCce(
                 reinterpret_cast<uint64_t>(cce), ng_term, req.NodeGroupId());
 
-            req.SetCcePtr(cce);
-
             if (req.Isolation() >= IsolationLevel::RepeatableRead)
             {
-                // Isolation levels greater than or equal to repeatable read
-                // need to lock the cc entry or re-access the cc entry in the
-                // commit phase to validate version stability. Adds the read
-                // lock or intention to lock the key and prevent the cc entry
-                // from being kicked out from the cc map.
-                if (req.Protocol() == CcProtocol::Locking)
+                TxNumber tx_number = req.Txn();
+                int64_t tx_term = req.TxTerm();
+                uint32_t cce_node_group_id = req.NodeGroupId();
+
+                if (req.GetLockType() == LockType::ReadLock)
                 {
-                    bool lock_success = false;
-                    lock_success = cce->key_lock_.AcquireLock(
-                        &req, tx_term, CcProtocol::Locking, req.GetLockType());
+                    bool lock_success =
+                        ReadLockCce(cce, req, tx_term, cce_node_group_id);
 
                     if (!lock_success)
                     {
-                        uint32_t tx_node = (txn >> 32L) >> 10;
-                        if (tx_node != req.NodeGroupId())
+                        uint32_t tx_node = (tx_number >> 32L) >> 10;
+                        if (tx_node != cce_node_group_id)
                         {
                             // If the read request comes from a remote node,
                             // sends acknowledgement to the sender when the
@@ -1095,19 +1089,16 @@ public:
                                 static_cast<remote::RemoteRead &>(req);
                             remote_req.Acknowledge();
                         }
-
-                        return false;
                     }
                 }
                 else
                 {
                     // ReadIntention prevents ccentry being kicked out from
                     // cache, but will not block write lock.
-                    // cce->key_lock_.AcquireReadIntention(req.Txn());
-                    cce->key_lock_.AcquireReadIntent(req.Txn());
+                    cce->key_lock_.AcquireReadIntent(tx_number);
                 }
 
-                shard_->UpsertLockHoldingTx(txn, tx_term, cce);
+                shard_->UpsertLockHoldingTx(tx_number, tx_term, cce);
             }
         }
         else
@@ -1227,32 +1218,66 @@ public:
 
         if (req.direct_ == ScanDirection::Forward)
         {
-            CcEntry<KeyT, ValueT> *floor_cce =
-                look_key == NegativeInfinity<KeyT>::Instance()
-                    ? &neg_inf_
-                    : Floor(*look_key);
-
-            assert(floor_cce != nullptr);
-
-            TemplateScanTuple<KeyT, ValueT> *scan_tuple = nullptr;
-
-            if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                *look_key == *floor_cce->key_)
+            CcEntry<KeyT, ValueT> *floor_cce = nullptr;
+            if (req.CcePtr() != nullptr)
             {
-                scan_tuple = typed_cache->AddScanTuple();
-                // The forward scan's starting point is inclusive and matches a
-                // cc entry's key. The scan starts from this cc entry,
-                // including the entry's key and the gap.
-                ScanKey(
-                    floor_cce, scan_tuple, true, req.node_group_id_, req.term_);
+                floor_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+                req.SetCcePtr(nullptr);
+                // Lock has been acquired
             }
-            else if (!req.is_ckpt_delta_)
+            else
             {
-                scan_tuple = typed_cache->AddScanTuple();
-                // The forward scan's starting point is exclusive or falls into
-                // the gap of a cc entry. The scan starts from the cc entry and
-                // only includes the entry's gap.
-                ScanGap(floor_cce, scan_tuple, req.node_group_id_, req.term_);
+                floor_cce = look_key == NegativeInfinity<KeyT>::Instance()
+                                ? &neg_inf_
+                                : Floor(*look_key);
+                assert(floor_cce != nullptr);
+
+                TemplateScanTuple<KeyT, ValueT> *scan_tuple = nullptr;
+
+                if (req.is_include_floor_cce_ ||
+                    (floor_cce != &neg_inf_ && req.inclusive_ == true &&
+                     *look_key == *floor_cce->key_))
+                {
+                    scan_tuple = typed_cache->AddScanTuple();
+                    // The forward scan's starting point is inclusive and
+                    // matches a cc entry's key. The scan starts from this cc
+                    // entry, including the entry's key and the gap.
+                    ScanKey(floor_cce,
+                            scan_tuple,
+                            true,
+                            req.node_group_id_,
+                            req.term_);
+                    req.SetCcePtr(floor_cce);
+
+                    if (!ConditionalReadLockCce(floor_cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
+                }
+                else if (!req.is_ckpt_delta_)
+                {
+                    scan_tuple = typed_cache->AddScanTuple();
+                    // The forward scan's starting point is exclusive or falls
+                    // into the gap of a cc entry. The scan starts from the cc
+                    // entry and only includes the entry's gap.
+                    ScanGap(
+                        floor_cce, scan_tuple, req.node_group_id_, req.term_);
+                    req.SetCcePtr(floor_cce);
+
+                    if (!ConditionalReadLockCce(floor_cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
+                }
             }
 
             CcEntry<KeyT, ValueT> *cce = floor_cce->map_next_;
@@ -1268,6 +1293,7 @@ public:
                     continue;
                 }
 
+                TemplateScanTuple<KeyT, ValueT> *scan_tuple = nullptr;
                 scan_tuple = typed_cache->AddScanTuple();
                 ScanKey(cce,
                         scan_tuple,
@@ -1275,35 +1301,68 @@ public:
                         req.node_group_id_,
                         req.term_,
                         req.is_ckpt_delta_);
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            req.GetLockType(),
+                                            req.TxTerm(),
+                                            req.NodeGroupId()))
+                {
+                    return false;
+                }
+
                 cce = cce->map_next_;
             }
         }
         else
         {
-            CcEntry<KeyT, ValueT> *cce =
-                look_key == PositiveInfinity<KeyT>::Instance()
-                    ? pos_inf_.map_prev_
-                    : Floor(*look_key);
-
-            assert(cce != nullptr);
-
-            // The backward scan's starting point coincides with a cc entry's
-            // key. If the starting point is inclusive, the scan includes the
-            // entry's key. If the point is exclusive, the scan starts from the
-            // prior entry, including its the key and the gap.
-            if (cce != &neg_inf_ && *look_key == *cce->key_)
+            CcEntry<KeyT, ValueT> *cce = nullptr;
+            if (req.CcePtr() != nullptr)
             {
-                if (req.inclusive_)
-                {
-                    TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-                        typed_cache->AddScanTuple();
+                cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+                req.SetCcePtr(nullptr);
+                // Lock has been acquired
+            }
+            else
+            {
+                cce = look_key == PositiveInfinity<KeyT>::Instance()
+                          ? pos_inf_.map_prev_
+                          : Floor(*look_key);
+                assert(cce != nullptr);
 
-                    ScanKey(
-                        cce, scan_tuple, false, req.node_group_id_, req.term_);
+                // The backward scan's starting point coincides with a cc
+                // entry's key. If the starting point is inclusive, the scan
+                // includes the entry's key. If the point is exclusive, the scan
+                // starts from the prior entry, including its the key and the
+                // gap.
+                if (cce != &neg_inf_ && *look_key == *cce->key_)
+                {
+                    if (req.inclusive_)
+                    {
+                        TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+                            typed_cache->AddScanTuple();
+
+                        ScanKey(cce,
+                                scan_tuple,
+                                false,
+                                req.node_group_id_,
+                                req.term_);
+                        req.SetCcePtr(cce);
+
+                        if (!ConditionalReadLockCce(cce,
+                                                    req,
+                                                    req.GetLockType(),
+                                                    req.TxTerm(),
+                                                    req.NodeGroupId()))
+                        {
+                            return false;
+                        }
+                    }
                 }
-                cce = cce->map_prev_;
             }
 
+            cce = cce->map_prev_;
             while (cce != nullptr && !typed_cache->Full())
             {
                 TemplateScanTuple<KeyT, ValueT> *scan_tuple =
@@ -1312,11 +1371,32 @@ public:
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(
                         cce, scan_tuple, true, req.node_group_id_, req.term_);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
                 }
 
                 cce = cce->map_prev_;
@@ -1336,17 +1416,32 @@ public:
             return false;
         }
 
+        TxNumber tx_number = req.Txn();
+        const TransactionExecution *txm = req.Result()->Txm();
+        const TableName *table_name = req.GetTableName();
+        LOG(INFO) << "ScanOpenBatchCc, table_name: "
+                  << (table_name == nullptr ? "" : *table_name)
+                  << ", txm: " << txm << ", tx_number: " << tx_number;
+
         req.Result()->Value().term_ = term;
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
         assert(typed_cache->Full());
 
-        CcEntry<KeyT, ValueT> *prior_cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                typed_cache->Last()->cce_addr_.CcePtr());
-
         ScanDirection direction = typed_cache->Scanner()->Direction();
-        typed_cache->Reset();
+        CcEntry<KeyT, ValueT> *prior_cce = nullptr;
+        if (req.CcePtr() != nullptr)
+        {
+            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired
+        }
+        else
+        {
+            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                typed_cache->Last()->cce_addr_.CcePtr());
+            typed_cache->Reset();
+        }
 
         if (direction == ScanDirection::Forward)
         {
@@ -1374,6 +1469,17 @@ public:
                         req.node_group_id_,
                         term,
                         req.is_ckpt_delta_);
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            req.GetLockType(),
+                                            req.TxTerm(),
+                                            req.NodeGroupId()))
+                {
+                    return false;
+                }
+
                 cce = cce->map_next_;
             }
         }
@@ -1388,10 +1494,31 @@ public:
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, req.node_group_id_, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
                 }
 
                 cce = cce->map_prev_;
@@ -1435,29 +1562,60 @@ public:
 
         if (req.direct_ == ScanDirection::Forward)
         {
-            CcEntry<KeyT, ValueT> *floor_cce = Floor(*look_key);
-            assert(floor_cce != nullptr);
-
-            remote::ScanTuple_msg *tuple = cache.at(0);
-
+            CcEntry<KeyT, ValueT> *floor_cce = nullptr;
+            remote::ScanTuple_msg *tuple = nullptr;
             size_t tuple_idx = 0;
 
-            if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                *look_key == *floor_cce->key_)
+            if (req.CcePtr() != nullptr)
             {
-                // The scan's starting point is inclusive and matches a cc
-                // entry's key. The scan results start from this cc entry,
-                // including the entry's key and the gap.
-                ScanKey(floor_cce, tuple, true, term);
-                ++tuple_idx;
+                floor_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+                req.SetCcePtr(nullptr);
             }
-            else if (!req.is_ckpt_delta_)
+            else
             {
-                // The scan's starting point is exclusive or falls into the gap
-                // of a cc entry. The scan starts from the cc entry and only
-                // includes the entry's gap.
-                ScanGap(floor_cce, tuple, term);
-                ++tuple_idx;
+                floor_cce = Floor(*look_key);
+                assert(floor_cce != nullptr);
+
+                remote::ScanTuple_msg *tuple = cache.at(0);
+
+                if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
+                    *look_key == *floor_cce->key_)
+                {
+                    // The scan's starting point is inclusive and matches a cc
+                    // entry's key. The scan results start from this cc entry,
+                    // including the entry's key and the gap.
+                    ScanKey(floor_cce, tuple, true, term);
+                    ++tuple_idx;
+                    req.SetCcePtr(floor_cce);
+
+                    if (!ConditionalReadLockCce(floor_cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
+                }
+                else if (!req.is_ckpt_delta_)
+                {
+                    // The scan's starting point is exclusive or falls into the
+                    // gap of a cc entry. The scan starts from the cc entry and
+                    // only includes the entry's gap.
+                    ScanGap(floor_cce, tuple, term);
+                    ++tuple_idx;
+                    req.SetCcePtr(floor_cce);
+
+                    if (!ConditionalReadLockCce(floor_cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
+                }
             }
 
             CcEntry<KeyT, ValueT> *cce = floor_cce->map_next_;
@@ -1473,43 +1631,97 @@ public:
 
                 tuple = cache.at(tuple_idx);
                 ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
-                cce = cce->map_next_;
                 ++tuple_idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            req.GetLockType(),
+                                            req.TxTerm(),
+                                            req.NodeGroupId()))
+                {
+                    return false;
+                }
+
+                cce = cce->map_next_;
             }
 
             cache.resize(tuple_idx);
         }
         else
         {
-            CcEntry<KeyT, ValueT> *cce = Floor(*look_key);
-            assert(cce != nullptr);
-
+            CcEntry<KeyT, ValueT> *cce = nullptr;
             size_t idx = 0;
-            // The backward scan's starting point coincides with a cc entry's
-            // key. If the starting point is inclusive, the scan includes the
-            // entry's key. If the point is exclusive, the scan starts from the
-            // prior entry, including its both the key and the gap.
-            if (cce != &neg_inf_ && *look_key == *cce->key_)
+
+            if (req.CcePtr() != nullptr)
             {
-                if (req.inclusive_)
+                cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+                req.SetCcePtr(nullptr);
+                // Lock has been acquired
+            }
+            else
+            {
+                cce = Floor(*look_key);
+                assert(cce != nullptr);
+
+                // The backward scan's starting point coincides with a cc
+                // entry's key. If the starting point is inclusive, the scan
+                // includes the entry's key. If the point is exclusive, the scan
+                // starts from the prior entry, including its both the key and
+                // the gap.
+                if (cce != &neg_inf_ && *look_key == *cce->key_)
                 {
-                    remote::ScanTuple_msg *scan_tuple = cache.at(0);
-                    ScanKey(cce, scan_tuple, false, term);
-                    ++idx;
+                    if (req.inclusive_)
+                    {
+                        remote::ScanTuple_msg *scan_tuple = cache.at(0);
+                        ScanKey(cce, scan_tuple, false, term);
+                        ++idx;
+                        req.SetCcePtr(cce);
+
+                        if (!ConditionalReadLockCce(cce,
+                                                    req,
+                                                    req.GetLockType(),
+                                                    req.TxTerm(),
+                                                    req.NodeGroupId()))
+                        {
+                            return false;
+                        }
+                    }
                 }
-                cce = cce->map_prev_;
             }
 
+            cce = cce->map_prev_;
             while (cce != nullptr && idx < cache.size())
             {
                 remote::ScanTuple_msg *scan_tuple = cache.at(idx);
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(cce, scan_tuple, true, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
                 }
                 cce = cce->map_prev_;
                 ++idx;
@@ -1531,8 +1743,17 @@ public:
             return true;
         }
 
-        CcEntry<KeyT, ValueT> *prior_cce =
-            reinterpret_cast<CcEntry<KeyT, ValueT> *>(req.prior_cce_addr_);
+        CcEntry<KeyT, ValueT> *prior_cce = nullptr;
+
+        if (req.CcePtr() != nullptr)
+        {
+            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+        }
+        else
+        {
+            prior_cce =
+                reinterpret_cast<CcEntry<KeyT, ValueT> *>(req.prior_cce_addr_);
+        }
 
         ScanDirection direction = req.direct_;
 
@@ -1552,8 +1773,19 @@ public:
 
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
                 ScanKey(cce, scan_tuple, true, term, req.is_ckpt_delta_);
-                cce = cce->map_next_;
                 ++idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            req.GetLockType(),
+                                            req.TxTerm(),
+                                            req.NodeGroupId()))
+                {
+                    return false;
+                }
+
+                cce = cce->map_next_;
             }
         }
         else
@@ -1566,10 +1798,31 @@ public:
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                true))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(cce, scan_tuple, true, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                req.GetLockType(),
+                                                req.TxTerm(),
+                                                req.NodeGroupId()))
+                    {
+                        return false;
+                    }
                 }
 
                 cce = cce->map_prev_;
@@ -1598,9 +1851,9 @@ public:
         CcEntry<KeyT, ValueT> *cce =
             static_cast<CcEntry<KeyT, ValueT> *>(lru_cce);
 
-        // CkptScanCc is running on TxProcessor thread. To avoid blocking other
-        // transaction for a long time, we only process CkptScanBatch number of
-        // entries in each round.
+        // CkptScanCc is running on TxProcessor thread. To avoid blocking
+        // other transaction for a long time, we only process CkptScanBatch
+        // number of entries in each round.
         size_t cnt = 0;
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
@@ -1642,8 +1895,8 @@ public:
         }
         else
         {
-            // set the start_entry and put the CkptScanCc request in to CcQueue
-            // again.
+            // set the start_entry and put the CkptScanCc request in to
+            // CcQueue again.
             req.start_entry_ = cce;
             shard_->Enqueue(&req);
             return false;
@@ -1665,8 +1918,8 @@ public:
         const std::string_view &log_blob = req.LogContentView();
 
         // If the log record's commit ts is smaller than that of the cc map,
-        // this record is generated before the latest schema of the table and
-        // hence should skip the replay process.
+        // this record is generated before the latest schema of the table
+        // and hence should skip the replay process.
         if (req.CommitTs() < commit_ts_)
         {
             req.SetFinish();
@@ -1867,8 +2120,8 @@ protected:
         if (shard_->Full())
         {
             // The shard has reached the maximal capacity. Tries to clean cc
-            // entries that have been checkpointed but are not being accessed by
-            // active tx's.
+            // entries that have been checkpointed but are not being
+            // accessed by active tx's.
             size_t free_cnt = shard_->Clean();
             if (free_cnt == 0)
             {
@@ -1913,13 +2166,15 @@ protected:
         return new_cce_ptr;
     }
 
-    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key, uint64_t ts)
+    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key,
+                                   uint64_t ts,
+                                   bool force_to_emplace = false)
     {
-        if (shard_->Full())
+        if (shard_->Full() && !force_to_emplace)
         {
             // The shard has reached the maximal capacity. Try cleaning cc
-            // entries that has been checkpointed and is not accessed by active
-            // tx's.
+            // entries that has been checkpointed and is not accessed by
+            // active tx's.
             size_t free_cnt = shard_->Clean();
             if (free_cnt == 0)
             {
@@ -1933,8 +2188,8 @@ protected:
 
         if (em_it.second)
         {
-            // If a new cc entry is inserted, updates the ordered double-linked
-            // list of cc entries.
+            // If a new cc entry is inserted, updates the ordered
+            // double-linked list of cc entries.
 
             new_cce_ptr->key_ = &em_it.first->first;
 
@@ -1960,33 +2215,37 @@ protected:
             next_cce->map_prev_ = new_cce_ptr;
         }
 
-        shard_->UpdateLruList(new_cce_ptr);
-
-        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
+        if (!force_to_emplace)
+        {
+            shard_->UpdateLruList(new_cce_ptr);
+            shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
+        }
 
         return new_cce_ptr;
     }
 
     /**
-     * @brief Finds the greatest cc entry whose key less than or equal to the
-     * input key. If the map is empty, the floor key is the negative infinity.
+     * @brief Finds the greatest cc entry whose key is less than or equal to
+     * the input key. If the map is empty, the floor key is negative
+     * infinity.
      *
      * @param key The input key
-     * @return CcEntry<KeyT, ValueT>* The pointer to the cc entry whose key is
-     * the greatest key less than or equal to the input key.
+     * @return CcEntry<KeyT, ValueT>* The pointer to the cc entry whose key
+     * is the greatest key less than or equal to the input key.
      */
     CcEntry<KeyT, ValueT> *Floor(const KeyT &key)
     {
-        if (ccm_.size() == 0)
-        {
-            return &neg_inf_;
-        }
-
         auto it = ccm_.lower_bound(key);
-
         if (it == ccm_.end())
         {
-            return &ccm_.rbegin()->second;
+            if (ccm_.empty())
+            {
+                return &neg_inf_;
+            }
+            else
+            {
+                return &ccm_.rbegin()->second;
+            }
         }
 
         if (!(it->first == key))
@@ -2070,8 +2329,8 @@ protected:
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(term);
 
-        // For remote scans, the returned cc entries' node group ID is set on
-        // the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
     }
 
     void ScanGap(CcEntry<KeyT, ValueT> *cce,
@@ -2095,8 +2354,8 @@ protected:
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(term);
 
-        // For remote scans, the returned cc entries' node group ID is set on
-        // the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
     }
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;

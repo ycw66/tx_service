@@ -241,7 +241,6 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
 bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req, int64_t tx_term)
 {
     TxNumber tx_number = cc_req->Txn();
-
     // fast path for lock is already held.
     if (read_locks_.find(tx_number) != read_locks_.end() ||
         (!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
@@ -432,7 +431,10 @@ bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 
 void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
 {
-    read_intentions_.erase(tx_number);
+    if (read_intentions_.size() > 0)
+    {
+        read_intentions_.erase(tx_number);
+    }
 }
 
 bool NonBlockingLock::IsEmpty() const

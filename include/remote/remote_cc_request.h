@@ -2,6 +2,7 @@
 
 #include <atomic>
 
+#include "butil/logging.h"
 #include "cc/cc_request.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
@@ -159,6 +160,26 @@ public:
     void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
     void Free() override;
 
+    int64_t TxTerm()
+    {
+        return tx_term_;
+    }
+
+    LockType GetLockType()
+    {
+        return lock_type_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -174,6 +195,18 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
+    int64_t tx_term_{0};
+    enum LockType lock_type_
+    {
+        LockType::NoLock
+    };
+
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -189,6 +222,26 @@ public:
     RemoteScanNextBatch();
     void Set(std::unique_ptr<CcMessage> input_msg);
 
+    int64_t TxTerm()
+    {
+        return tx_term_;
+    }
+
+    LockType GetLockType()
+    {
+        return lock_type_;
+    }
+
+    void SetCcePtr(LruEntry *ptr)
+    {
+        cce_ptr_ = ptr;
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -202,6 +255,18 @@ private:
     CcHandlerResult<Void> cc_res_{nullptr};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
+    int64_t tx_term_{0};
+    enum LockType lock_type_
+    {
+        LockType::NoLock
+    };
+
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is
+    // blocked due to conflicts in 2PL. After the request is unblocked and
+    // acquires the lock, the request's execution resumes without further lookup
+    // of the cc entry.
+    LruEntry *cce_ptr_{nullptr};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

@@ -1051,8 +1051,9 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 SchemaOp::SchemaOp(const TableName &table_name,
                    const char *image_ptr,
                    size_t image_len)
-    : table_key_(table_name), catalog_rec_(image_ptr, image_len)
+    : table_key_(table_name)
 {
+    catalog_rec_.SetSchemaImage(std::string(image_ptr, image_len));
 }
 
 UpsertTableOp::UpsertTableOp(const TableName &table_name,
@@ -1447,7 +1448,7 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
     else
     {
         prepare_schema_msg->mutable_table_op()->set_is_deleted(false);
-        prepare_schema_msg->set_catalog_blob(catalog_rec_.SchemaBlob());
+        prepare_schema_msg->set_catalog_blob(catalog_rec_.SchemaImage());
     }
     prepare_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareSchema);
 

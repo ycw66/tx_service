@@ -153,7 +153,7 @@ TEntry &CcShard::NewTx()
     {
         uint32_t old_size = (uint32_t) tx_vec_.size();
         // Increases the capacity of the tx vector.
-        uint32_t new_size = (uint32_t) (tx_vec_.size() * 1.5);
+        uint32_t new_size = (uint32_t)(tx_vec_.size() * 1.5);
         tx_vec_.reserve(new_size);
 
         for (uint32_t idx = old_size; idx < new_size; ++idx)
@@ -400,29 +400,62 @@ const TableSchemaView *CcShard::GetCatalog(const std::string &table_name)
     return local_shards_.GetCatalog(table_name);
 }
 
+void CcShard::InitTableRanges(const TableName &table_name,
+                              std::vector<InitRangeEntry> &init_ranges)
+{
+    local_shards_.InitTableRanges(table_name, init_ranges);
+}
+
+const std::map<uint32_t, TableRangeEntry> *CcShard::GetTableRanges(
+    const TableName &range_table_name)
+{
+    return local_shards_.GetTableRanges(range_table_name);
+}
+
 void CcShard::FetchCatalog(const TableName &table_name,
                            CcRequestBase *requester)
 {
-    auto tab_it =
-        fetch_catalog_reqs_.try_emplace(table_name, table_name, *this);
-    FetchCatalogCc &fetch_req = tab_it.first->second;
-    fetch_req.AddRequester(requester);
+    auto tab_it = fetch_reqs_.try_emplace(
+        table_name, std::make_unique<FetchCatalogCc>(table_name, *this));
+    FetchCatalogCc *fetch_req =
+        static_cast<FetchCatalogCc *>(tab_it.first->second.get());
 
-    if (fetch_req.RequesterCount() == 1)
+    fetch_req->AddRequester(requester);
+    if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchTableCatalog(table_name, &fetch_req);
+        local_shards_.store_hd_->FetchTableCatalog(table_name, fetch_req);
+    }
+}
+
+void CcShard::FetchTableRanges(const TableName &range_table_name,
+                               const Schema *key_schema,
+                               CcRequestBase *requester)
+{
+    auto table_it =
+        fetch_reqs_.try_emplace(range_table_name,
+                                std::make_unique<FetchTableRangesCc>(
+                                    range_table_name, key_schema, *this));
+    FetchTableRangesCc *fetch_req =
+        static_cast<FetchTableRangesCc *>(table_it.first->second.get());
+
+    fetch_req->AddRequester(requester);
+    if (fetch_req->RequesterCount() == 1)
+    {
+        local_shards_.store_hd_->FetchTableRanges(range_table_name, fetch_req);
     }
 }
 
 void CcShard::RemoveFetchRequest(const TableName &table_name)
 {
-    fetch_catalog_reqs_.erase(table_name);
+    fetch_reqs_.erase(table_name);
 }
 
 CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                               const TableSchema *table_schema,
                               NodeGroupId ng_id)
 {
+    std::string ranges_image;
+
     if (ng_id == node_id_)
     {
         auto ccm_it = native_ccms_.try_emplace(
@@ -485,4 +518,22 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
     }
 }
 
+void CcShard::CreateRangeCcMap(const TableName &range_table_name,
+                               NodeGroupId ng_id)
+{
+    if (ng_id == node_id_)
+    {
+        native_ccms_.try_emplace(
+            range_table_name,
+            catalog_factory_->CreatePkRangeMap(range_table_name, this));
+    }
+    else
+    {
+        auto fail_range_it = failover_ccms_.try_emplace(range_table_name).first;
+        std::unordered_map<NodeGroupId, CcMap::uptr> &range_maps =
+            fail_range_it->second;
+        range_maps.try_emplace(
+            ng_id, catalog_factory_->CreatePkRangeMap(range_table_name, this));
+    }
+}
 }  // namespace txservice

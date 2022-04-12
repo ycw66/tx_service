@@ -101,7 +101,7 @@ public:
              const TxKey *key,
              TxRecord *rec,
              ReadType type,
-             LockType lock_type = LockType::ReadLock,
+             LockType lock_type,
              bool read_local = false)
     {
         tab_name_ = tab_name;
@@ -173,24 +173,30 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     ScanOpenTxRequest(const TableName *tabname,
                       ScanIndexType index_type,
                       const TxKey *start_key,
+                      LockType lock_type,
                       bool inclusive = true,
                       ScanDirection direction = ScanDirection::Forward,
-                      bool is_ckpt = false)
+                      bool is_ckpt = false,
+                      bool is_read_local = false)
         : tab_name_(tabname),
           indx_type_(index_type),
           start_key_(start_key),
+          lock_type_(lock_type),
           inclusive_(inclusive),
           direct_(direction),
-          is_ckpt_delta_(is_ckpt)
+          is_ckpt_delta_(is_ckpt),
+          read_local_(is_read_local)
     {
     }
 
     const TableName *tab_name_;
     ScanIndexType indx_type_;
     const TxKey *start_key_;
+    LockType lock_type_;
     bool inclusive_;
     ScanDirection direct_;
     bool is_ckpt_delta_;
+    bool read_local_;
 };
 
 struct ScanNextTxRequest
@@ -198,11 +204,13 @@ struct ScanNextTxRequest
           ScanNextTxRequest,
           std::tuple<const TxKey *, const TxRecord *, bool>>
 {
-    ScanNextTxRequest(size_t alias) : alias_(alias)
+    ScanNextTxRequest(size_t alias, LockType lock_type)
+        : alias_(alias), lock_type_(lock_type)
     {
     }
 
     size_t alias_;
+    LockType lock_type_;
 };
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>

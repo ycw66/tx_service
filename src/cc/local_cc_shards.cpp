@@ -169,4 +169,78 @@ void LocalCcShards::CreateSchemaRecoveryTx(
     TransactionExecution *txm = tx_service_->NewTx();
     txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
 }
+
+void LocalCcShards::InitTableRanges(const TableName &range_table_name,
+                                    std::vector<InitRangeEntry> &init_ranges)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.try_emplace(range_table_name);
+    //assert(!table_it.second);
+    std::map<uint32_t, TableRangeEntry> &ranges = table_it.first->second;
+
+    if (init_ranges.empty())
+    {
+        ranges.try_emplace(0, nullptr, 1, 0, UINT32_MAX);
+    }
+    else
+    {
+        ranges.try_emplace(0, nullptr, 1, 0, init_ranges[0].partition_id_);
+
+        for (size_t pidx = 0; pidx < ranges.size() - 1; ++pidx)
+        {
+            InitRangeEntry &range_entry = init_ranges[pidx];
+            InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
+
+            ranges.try_emplace(range_entry.partition_id_,
+                               std::move(range_entry.key_),
+                               range_entry.version_ts_,
+                               range_entry.partition_id_,
+                               next_range_entry.partition_id_);
+        }
+
+        InitRangeEntry &last_range_entry = init_ranges.back();
+        ranges.try_emplace(last_range_entry.partition_id_,
+                           std::move(last_range_entry.key_),
+                           last_range_entry.version_ts_,
+                           last_range_entry.partition_id_,
+                           UINT32_MAX);
+    }
+}
+
+const std::map<uint32_t, TableRangeEntry> *LocalCcShards::GetTableRanges(
+    const TableName &range_table_name)
+{
+    std::shared_lock<std::shared_mutex> s_lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(range_table_name);
+    return table_it == table_ranges_.end() ? nullptr : &table_it->second;
+}
+
+const TableRangeEntry *LocalCcShards::CreateDirtyRange(
+    const TableName &table_name,
+    uint32_t partition_id,
+    std::unique_ptr<TxKey> new_key,
+    uint32_t new_partition_id,
+    uint64_t commit_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(table_name);
+    assert(table_it != table_ranges_.end());
+
+    std::map<uint32_t, TableRangeEntry> &ranges = table_it->second;
+    auto range_it = ranges.find(partition_id);
+    assert(range_it != ranges.end());
+    TableRangeEntry &range_entry = range_it->second;
+
+    if (range_entry.dirty_ts_ < commit_ts)
+    {
+        range_entry.new_key_ = std::move(new_key);
+        range_entry.new_partition_id_ = new_partition_id;
+        range_entry.dirty_ts_ = commit_ts;
+    }
+
+    return &range_entry;
+}
 }  // namespace txservice

@@ -598,6 +598,8 @@ void txservice::remote::RemoteScanOpen::Set(
 
     node_group_id_ = scan_open.shard_id();
     table_name_ = &scan_open.tablename();
+    tx_term_ = input_msg->tx_term();
+    lock_type_ = static_cast<LockType>(scan_open.lock_type());
     ccm_ = nullptr;
 
     if (scan_open.start_key_case() == ScanOpenRequest::StartKeyCase::kNegInf)
@@ -732,6 +734,8 @@ void txservice::remote::RemoteScanNextBatch::Set(
     prior_cce_addr_ = scan_next.prior_cce_ptr();
     direct_ = scan_next.direction() ? ScanDirection::Forward
                                     : ScanDirection::Backward;
+    tx_term_ = input_msg->tx_term();
+    lock_type_ = static_cast<LockType>(scan_next.lock_type());
 
     const LruEntry *prior_lru_entry =
         reinterpret_cast<const LruEntry *>(prior_cce_addr_);

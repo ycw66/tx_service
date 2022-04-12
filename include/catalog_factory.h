@@ -37,5 +37,8 @@ public:
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       CcShard *shard) = 0;
+
+    virtual CcMap::uptr CreatePkRangeMap(const TableName &base_table,
+                                         CcShard *shard) = 0;
 };
 }  // namespace txservice

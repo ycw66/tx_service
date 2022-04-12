@@ -1,164 +1,148 @@
 #pragma once
 
-#include <map>
-
 #include "cc_entry.h"
-#include "cc_map.h"
+#include "cc_handler_result.h"
 #include "cc_request.h"
-#include "non_blocking_lock.h"
-#include "partition_id_record.h"
+#include "range_record.h"
+#include "template_cc_map.h"
 
 namespace txservice
 {
-struct RangePartitionEntry
-{
-    uint32_t partition_id_;
-    NonBlockingLock lock_;
-};
-
+/**
+ * @brief A range cc map is a special cc map that maps a table's sorted ranges
+ * into their partition IDs. Each range is represented by the start key of the
+ * range. When the table is newly created, the table has only one range, from
+ * negative infinity to positive infinity, i.e., [neg_inf, pos_inf). The range
+ * starting from negative infinity has a reserved partition ID: 0. Range
+ * [pos_inf, pos_inf) is a special (non-existent) range, whose partition ID is
+ * UINT32_MAX. So, the first range's partition ID is 0 and its next range's
+ * partition ID is UINT32_MAX. When [neg_inf, pos_inf) is (evenly) split into
+ * two sub-ranges [neg_inf, mid_key), [mid_key, pos_inf), the first sub-range
+ * inherits the original range's partition ID, i.e., the partition ID of
+ * [neg_inf, mid_key) is 0. The second sub-range's partition ID is designated as
+ * the half of the original range's partition ID and that of the next range,
+ * i.e., the partition ID of [mid_key, pos_inf) is (0 + UINT32_MAX) / 2.
+ *
+ * @tparam KeyT The type of the table's primary key.
+ */
 template <typename KeyT>
-class RangePartition : public TemplateCcMap<KeyT, PartitionIdRecord>
+class RangeCcMap : public TemplateCcMap<KeyT, RangeRecord>
 {
 public:
-    RangePartition(const RangePartition &rhs) = delete;
-    ~RangePartition() = default;
+    RangeCcMap(const RangeCcMap &rhs) = delete;
+    ~RangeCcMap() = default;
 
-    RangePartition(CcShard *shard)
-        : TemplateCcMap<KeyT, PartitionIdRecord>(shard)
+    RangeCcMap(const TableName &range_table_name, CcShard *shard)
+        : TemplateCcMap<KeyT, RangeRecord>(shard)
     {
-    }
+        const std::map<uint32_t, TableRangeEntry> *ranges =
+            CcMap::shard_->GetTableRanges(range_table_name);
+        assert(ranges != nullptr);
 
-    bool Execute(AcquireCc &req) override
-    {
-        return false;
-    }
-
-    bool Resume(AcquireCc &req) override
-    {
-        return false;
-    }
-
-    bool Execute(PostWriteCc &req) override
-    {
-        return false;
-    }
-
-    bool Execute(PostReadCc &req) override
-    {
-        return false;
-    }
-
-    bool Execute(ReadCc &req) override
-    {
-        CcEntry<KeyT, PartitionIdRecord> *floor_cce = nullptr;
-        bool resume = false;
-
-        if (req.cce_ptr_ == nullptr)
+        for (const auto &[partition_id, table_range] : *ranges)
         {
-            const KeyT *look_key = static_cast<const KeyT *>(req.key_);
-            floor_cce = Floor(*look_key, ScanDirection::Forward, true);
-            req.cce_ptr_ = floor_cce;
-
-            bool success = floor_cce->key_lock_.AcquireRead(&req);
-            if (!success)
+            if (partition_id == 0)
             {
-                // The request is put into the cc entry's blocking queue. Does
-                // not free the request.
-                return false;
+                RangeRecord &neg_inf_rec =
+                    TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_;
+                neg_inf_rec.binary_value_ = &table_range;
+                TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_status_ =
+                    RecordStatus::Normal;
+                continue;
             }
-        }
-        else
-        {
-            resume = true;
-            floor_cce =
-                static_cast<CcEntry<KeyT, PartitionIdRecord> *>(req.cce_ptr_);
-        }
 
-        PartitionIdRecord *partition_rec =
-            static_cast<PartitionIdRecord *>(req.rec_);
-        *partition_rec = floor_cce->payload_;
-        ReadKeyResult &read_res = req.res_->Value();
-        read_res.ts_ = floor_cce->commit_ts_;
-        read_res.rec_status_ = RecordStatus::Normal;
-        read_res.cce_addr_.SetCce(
-            reinterpret_cast<uint64_t>(floor_cce), 0, CcMap::shard_->node_id_);
+            const KeyT *start_key =
+                static_cast<const KeyT *>(table_range.start_key_.get());
 
-        req.res_->SetFinished();
-        if (resume)
-        {
-            req.Free();
-            return false;
-        }
-        else
-        {
-            return true;
+            CcEntry<KeyT, RangeRecord> *cce =
+                TemplateCcMap<KeyT, RangeRecord>::Emplace(
+                    *start_key, table_range.version_ts_, true);
+
+            cce->commit_ts_ = table_range.version_ts_;
+            cce->payload_.binary_value_ = &table_range;
+            cce->payload_status_ = RecordStatus::Normal;
         }
     }
 
-    bool Resume(ReadCc &req) override
-    {
-        return false;
-    }
-
-    bool Execute(ScanCloseCc &req) override
-    {
-        return false;
-    }
+    using TemplateCcMap<KeyT, RangeRecord>::Execute;
+    using TemplateCcMap<KeyT, RangeRecord>::ReadLockCce;
 
     bool Execute(ScanOpenBatchCc &req) override
     {
-        return false;
+        req.is_include_floor_cce_ = true;
+        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
     }
 
-    bool Execute(ScanNextBatchCc &req) override
+    /**
+     * @brief A read request toward the range cc map searches a range containing
+     * the input key, adds a read lock on the range and returns a pointer to the
+     * table range entry in the returned record. The table range entry gives the
+     * range's partition ID and the dirty range's partition ID, if the range is
+     * being split or merged.
+     *
+     * @param req The read request containing the input key and returned record.
+     * @return true, if the request has been executed and is to be freed; false,
+     * if the request blocked and should not be freed.
+     */
+    bool Execute(ReadCc &req) override
     {
-        return false;
-    }
+        CcHandlerResult<ReadKeyResult> *hd_result = req.Result();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            hd_result->SetError(-1);
+            return true;
+        }
 
-    bool Execute(remote::RemoteScanOpen &req) override
-    {
-        return false;
-    }
+        // For range cc maps, we assume that all of a table's ranges are loaded
+        // into memory for caching when the range cc map is initialized. There
+        // is never a read-outside request that brings an individual range into
+        // memory for caching.
+        assert(req.Type() != ReadType::OutsideNormal);
 
-    bool Execute(remote::RemoteScanNextBatch &req) override
-    {
-        return false;
-    }
+        CcEntry<KeyT, RangeRecord> *floor_cce = nullptr;
+        if (req.CcePtr() != nullptr)
+        {
+            // The request was blocked before. This is execution resumption
+            // after the request is unblocked. The read lock/intention must have
+            // been acquired.
+            floor_cce = static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
+        }
+        else
+        {
+            // Rather than looking for an exact match, looks up the floor key
+            // that represents the range containing the input key.
+            const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+            floor_cce = TemplateCcMap<KeyT, RangeRecord>::Floor(*look_key);
+            req.SetCcePtr(floor_cce);
 
-    bool Execute(CommitSkCc &req) override
-    {
-        return false;
-    }
+            int64_t tx_term = req.TxTerm();
+            uint32_t cce_node_group_id = req.NodeGroupId();
 
-    bool Execute(CkptScanCc &req) override
-    {
-        return false;
-    }
+            bool lock_success = TemplateCcMap<KeyT, RangeRecord>::ReadLockCce(
+                floor_cce, req, tx_term, cce_node_group_id);
+            if (lock_success)
+            {
+                CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
+                cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
+                                ng_term,
+                                req.NodeGroupId());
 
-    bool Execute(remote::RemoteReadOutside &req) override
-    {
-        return false;
+                RangeRecord *range_rec =
+                    static_cast<RangeRecord *>(req.Record());
+                *range_rec = floor_cce->payload_;
+                hd_result->Value().ts_ = floor_cce->commit_ts_;
+                hd_result->Value().rec_status_ = RecordStatus::Normal;
+                hd_result->SetFinished();
+                return true;
+            }
+            else
+            {
+                // You don't need a remote acknowledge here, since range read is
+                // a local read anyway
+                return false;
+            }
+        }
     }
-
-    bool Execute(ReplayLogCc &req) override
-    {
-        return false;
-    }
-
-    bool Execute(FaultInjectCC &req) override
-    {
-        return false;
-    }
-
-    std::unique_ptr<CcScanner> CreateScanner(
-        ScanDirection direction) const override
-    {
-        return nullptr;
-    }
-
-private:
-    // Partition ID 0 is reserved for the first range from negative infinity to
-    // the next key.
-    uint32_t partition_counter_{1};
 };
 }  // namespace txservice

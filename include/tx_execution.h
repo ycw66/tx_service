@@ -115,6 +115,11 @@ public:
 
     void SetErrorMessage(const std::string &err_msg);
 
+    CcProtocol GetCcProtocol() const
+    {
+        return protocol_;
+    }
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to

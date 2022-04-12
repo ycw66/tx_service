@@ -4,8 +4,22 @@
 
 namespace txservice
 {
+FetchCc::FetchCc(CcShard &ccs) : ccs_(ccs)
+{
+}
+
+void FetchCc::AddRequester(CcRequestBase *requester)
+{
+    requesters_.emplace_back(requester);
+}
+
+size_t FetchCc::RequesterCount() const
+{
+    return requesters_.size();
+}
+
 FetchCatalogCc::FetchCatalogCc(const TableName &table_name, CcShard &ccs)
-    : table_name_(table_name), ccs_(ccs)
+    : FetchCc(ccs), table_name_(table_name)
 {
 }
 
@@ -37,14 +51,36 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
     return false;
 }
 
-void FetchCatalogCc::AddRequester(CcRequestBase *requester)
-{
-    requesters_.emplace_back(requester);
-}
-
 void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 {
     status_ = status;
+    error_code_ = err;
+    ccs_.Enqueue(this);
+}
+
+FetchTableRangesCc::FetchTableRangesCc(const TableName &range_table_name,
+                                       const Schema *key_schema,
+                                       CcShard &ccs)
+    : FetchCc(ccs), range_table_name_(range_table_name), key_schema_(key_schema)
+{
+}
+
+bool FetchTableRangesCc::Execute(CcShard &ccs)
+{
+    ccs.InitTableRanges(range_table_name_, ranges_vec_);
+
+    for (CcRequestBase *&req : requesters_)
+    {
+        ccs.Enqueue(ccs.core_id_, req);
+    }
+
+    ccs.RemoveFetchRequest(range_table_name_);
+    return false;
+}
+
+void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges, int err)
+{
+    ranges_vec_ = std::move(ranges); 
     error_code_ = err;
     ccs_.Enqueue(this);
 }

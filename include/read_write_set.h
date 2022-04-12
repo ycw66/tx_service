@@ -1,10 +1,11 @@
 #pragma once
 
+#include <butil/logging.h>
+
 #include <map>
 #include <unordered_map>
 #include <vector>
 
-#include "raft_log.pb.h"
 #include "read_write_entry.h"
 
 namespace txservice

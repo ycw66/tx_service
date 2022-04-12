@@ -70,6 +70,11 @@ public:
         size_ = 0;
     }
 
+    void Rewind()
+    {
+        idx_ = 0;
+    }
+
     size_t Size() const
     {
         return size_;

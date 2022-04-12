@@ -81,8 +81,8 @@ static inline bool IsRangeTablename(
     {
         is_range_table =
             range_table_name.size() ==
-            pos + search_str.size() +
-                1;  // search_str is the last part of the range_table_name
+            pos + search_str.size();  // search_str is the last part of the
+                                      // range_table_name
     }
 
     return is_range_table;

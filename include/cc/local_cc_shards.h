@@ -211,6 +211,17 @@ public:
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);
+    void InitTableRanges(const TableName &range_table_name,
+                         std::vector<InitRangeEntry> &init_ranges);
+
+    const std::map<uint32_t, TableRangeEntry> *GetTableRanges(
+        const TableName &range_table_name);
+
+    const TableRangeEntry *CreateDirtyRange(const TableName &table_name,
+                                            uint32_t partition_id,
+                                            std::unique_ptr<TxKey> new_key,
+                                            uint32_t new_partition_id,
+                                            uint64_t commit_ts);
 
     store::DataStoreWriteHandler *const store_hd_;
 
@@ -300,6 +311,8 @@ private:
 
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, CatalogEntry> table_catalogs_;
+    std::unordered_map<TableName, std::map<uint32_t, TableRangeEntry>>
+        table_ranges_;
     std::shared_mutex catalog_mux_;
 
     TxService *tx_service_;

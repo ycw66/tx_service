@@ -236,6 +236,21 @@ public:
         LockType lock_type = LockType::ReadLock,
         bool is_ckpt = false) = 0;
 
+    virtual void ScanOpenLocal(
+        const TableName &table_name,
+        ScanIndexType index_type,
+        const TxKey &start_key,
+        bool inclusive,
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint64_t ts,
+        CcHandlerResult<ScanOpenResult> &hd_res,
+        ScanDirection direction = ScanDirection::Forward,
+        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+        CcProtocol proto = CcProtocol::OCC,
+        LockType lock_type = LockType::ReadLock,
+        bool is_ckpt_delta = false) = 0;
+
     virtual void ScanNextBatch(
         uint64_t tx_number,
         int64_t tx_term,
@@ -245,6 +260,15 @@ public:
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
         CcProtocol proto = CcProtocol::OCC,
         LockType lock_type = LockType::ReadLock) = 0;
+
+    virtual void ScanNextBatchLocal(
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint64_t start_ts,
+        CcScanner &scanner,
+        CcHandlerResult<ScanNextResult> &hd_res,
+        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+        CcProtocol proto = CcProtocol::OCC) = 0;
 
     virtual void ScanClose(size_t alias,
                            const TxKey &end_key,

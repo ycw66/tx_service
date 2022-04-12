@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 
 #include "cc/cc_req_base.h"
 #include "ccm_scanner.h"
@@ -107,6 +108,23 @@ public:
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual std::unique_ptr<CcMap> Clone() const = 0;
+
+    bool ConditionalReadLockCce(LruEntry *cce,
+                                CcRequestBase &req,
+                                LockType lock_type,
+                                int64_t tx_term,
+                                uint32_t cce_node_group_id,
+                                bool gap_lock = false);
+
+    bool ReadLockCce(LruEntry *cce,
+                     CcRequestBase &req,
+                     int64_t tx_term,
+                     uint32_t cce_node_group_id,
+                     bool gap_lock = false);
+
+    void RecoverReadLocks(LruEntry &cce, uint32_t node_group_id);
+    void RecoverWriteLock(const TxNumber &tx_number, uint32_t node_group_id);
+    void RecoverWriteIntent(LruEntry &cce, uint32_t node_group_id);
 
     CcShard *const shard_;
     uint64_t commit_ts_;

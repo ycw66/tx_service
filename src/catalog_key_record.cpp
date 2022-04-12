@@ -94,36 +94,34 @@ TableName &CatalogKey::Name()
     return table_name_;
 }
 
-CatalogRecord::CatalogRecord(const std::string &schema_blob)
-    : schema_blob_(schema_blob)
-{
-}
-
-CatalogRecord::CatalogRecord(const char *schema_ptr, size_t schema_len)
-    : schema_blob_(schema_ptr, schema_len)
-{
-}
-
 void CatalogRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 {
-    uint32_t len_val = (uint32_t) schema_blob_.size();
+    const std::string *dirty_schema_image = std::get_if<1>(&binary_value_);
+    assert(dirty_schema_image != nullptr);
+    const std::string &schema_blob = *dirty_schema_image;
+
+    uint32_t len_val = (uint32_t) schema_blob.size();
     const char *val_ptr =
         static_cast<const char *>(static_cast<const void *>(&len_val));
     std::copy(val_ptr, val_ptr + sizeof(uint32_t), buf.begin() + offset);
     offset += sizeof(uint32_t);
 
-    std::copy(schema_blob_.begin(), schema_blob_.end(), buf.begin() + offset);
+    std::copy(schema_blob.begin(), schema_blob.end(), buf.begin() + offset);
     offset += len_val;
 }
 
 void CatalogRecord::Serialize(std::string &str) const
 {
+    const std::string *dirty_schema_image = std::get_if<1>(&binary_value_);
+    assert(dirty_schema_image != nullptr);
+    const std::string &schema_blob = *dirty_schema_image;
+
     size_t len_sizeof = sizeof(uint32_t);
-    uint32_t len_val = (uint32_t) schema_blob_.size();
+    uint32_t len_val = (uint32_t) schema_blob.size();
     const char *len_ptr = reinterpret_cast<const char *>(&len_val);
 
     str.append(len_ptr, len_sizeof);
-    str.append(schema_blob_.data(), len_val);
+    str.append(schema_blob.data(), len_val);
 }
 
 void CatalogRecord::Deserialize(const char *buf, size_t &offset)
@@ -132,10 +130,7 @@ void CatalogRecord::Deserialize(const char *buf, size_t &offset)
     uint32_t len_val = *len_ptr;
     offset += sizeof(uint32_t);
 
-    schema_blob_.clear();
-    schema_blob_.reserve(len_val);
-
-    schema_blob_.append(buf + offset, len_val);
+    binary_value_.emplace<1>(buf + offset, len_val);
     offset += len_val;
 }
 
@@ -155,22 +150,26 @@ std::string CatalogRecord::ToString() const
 
 const TableSchemaView *CatalogRecord::SchemaView() const
 {
-    return view_;
+    const auto view = std::get_if<0>(&binary_value_);
+    assert(view != nullptr);
+    return *view;
 }
 
 void CatalogRecord::SetSchemaView(const TableSchemaView *view)
 {
-    view_ = view;
+    binary_value_ = view;
 }
 
-const std::string &CatalogRecord::SchemaBlob() const
+const std::string &CatalogRecord::SchemaImage() const
 {
-    return schema_blob_;
+    const std::string *schema_image = std::get_if<1>(&binary_value_);
+    assert(schema_image != nullptr);
+    return *schema_image;
 }
 
-std::string &CatalogRecord::SchemaBlob()
+void CatalogRecord::SetSchemaImage(std::string &&schema_image)
 {
-    return schema_blob_;
+    binary_value_.emplace<1>(std::move(schema_image));
 }
 
 CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
@@ -180,7 +179,8 @@ CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
         return *this;
     }
 
-    view_ = rhs.view_;
+    binary_value_ = rhs.binary_value_;
+
     return *this;
 }
 }  // namespace txservice

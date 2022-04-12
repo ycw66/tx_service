@@ -2,14 +2,17 @@
 
 #include <stdint.h>
 
+#include <bitset>
 #include <cassert>
 #include <chrono>
 #include <iostream>
 
+#include "cc_protocol.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -418,7 +421,7 @@ void TransactionExecution::Process(ReadOperation &read)
                                read.hd_result_,
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
-                               read.lock_type_);
+                               read.read_tx_req_->lock_type_);
         }
         else
         {
@@ -525,7 +528,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                             read_res.ts_,
                             read_.protocol_,
                             read_.read_type_,
-                            read_.lock_type_);
+                            read_.read_tx_req_->lock_type_);
         }
 
         if (read_.read_type_ == ReadType::Inside &&
@@ -553,6 +556,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool inclusive = scan_open.tx_req_->inclusive_;
     ScanDirection direction = scan_open.tx_req_->direct_;
     bool is_ckpt_delta = scan_open.tx_req_->is_ckpt_delta_;
+    LockType lock_type = scan_open.tx_req_->lock_type_;
 
     scan_open.Reset();
     scan_open.is_running_ = true;
@@ -563,22 +567,40 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                   direction,
                   is_ckpt_delta);
 
-    handler->ScanOpen(table_name,
-                      index_type,
-                      start_key,
-                      inclusive,
-                      tx_number_.load(std::memory_order_relaxed),
-                      tx_term_,
-                      commit_ts_bound_,
-                      scan_open.hd_result_,
-                      direction,
-                      iso_level_,
-                      protocol_,
-                      LockType::ReadLock,
-                      is_ckpt_delta);
+    if (scan_open.tx_req_->read_local_)
+    {
+        handler->ScanOpenLocal(table_name,
+                               index_type,
+                               start_key,
+                               inclusive,
+                               tx_number_.load(std::memory_order_relaxed),
+                               tx_term_,
+                               commit_ts_bound_,
+                               scan_open.hd_result_,
+                               direction,
+                               IsolationLevel::RepeatableRead,
+                               CcProtocol::Locking,
+                               LockType::ReadLock,
+                               is_ckpt_delta);
+    }
+    else
+    {
+        handler->ScanOpen(table_name,
+                          index_type,
+                          start_key,
+                          inclusive,
+                          tx_number_.load(std::memory_order_relaxed),
+                          tx_term_,
+                          commit_ts_bound_,
+                          scan_open.hd_result_,
+                          direction,
+                          iso_level_,
+                          protocol_,
+                          lock_type,
+                          is_ckpt_delta);
+    }
 
     StartTiming();
-
     return;
 }
 
@@ -630,6 +652,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 void TransactionExecution::Process(ScanNextOperation &scan_next)
 {
     size_t alias = scan_next.tx_req_->alias_;
+    LockType lock_type = scan_next_.tx_req_->lock_type_;
 
     auto it = scans_.find(alias);
     assert(it != scans_.end());
@@ -650,7 +673,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                                scan_next.hd_result_,
                                iso_level_,
                                protocol_,
-                               LockType::ReadLock);
+                               lock_type);
     }
     else
     {
@@ -679,7 +702,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 
     const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
-
     //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
     //  store already contains this entry. Since the final scan result is the
     //  merge of memory entries with data store entries, as a result it's safe
@@ -712,6 +734,22 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     assert(cc_scan_tuple != nullptr ||
            scan_next.scanner_->Status() == ScannerStatus::Closed);
+
+    // Lock need to be released when transaction be committed, so add scan
+    // result into transaction read set
+    if (cc_scan_tuple != nullptr &&
+        cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
+        iso_level_ >= IsolationLevel::RepeatableRead)
+    {
+        LOG(INFO) << "Transaction: " << this
+                  << " PostProcess ScanOperation AddRead: "
+                  << "0x" << std::hex << cc_scan_tuple->cce_addr_.CcePtr();
+        rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                        cc_scan_tuple->key_ts_,
+                        protocol_,
+                        ReadType::Inside,
+                        LockType::ReadLock);
+    }
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
     {
@@ -908,6 +946,26 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
 void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 {
+    // Add remaining ScanTuple into rset, so their lock can be released when
+    // transaction been committed
+    if (iso_level_ >= IsolationLevel::RepeatableRead)
+    {
+        auto scan_it = scans_.find(alias);
+        CcScanner &scanner = *scan_it->second;
+        const ScanTuple *cc_scan_tuple = scanner.Current();
+        while (cc_scan_tuple != nullptr)
+        {
+            if (cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown)
+            {
+                rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                cc_scan_tuple->key_ts_,
+                                protocol_,
+                                ReadType::Inside,
+                                LockType::ReadLock);
+            }
+        }
+    }
+
     handler->ScanClose(alias, end_key, false);
     scans_.erase(alias);
     void_resp_->Finish(void_);

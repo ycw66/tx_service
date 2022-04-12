@@ -3,6 +3,8 @@
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
+#include "tx_record.h"
+#include "type.h"
 
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
@@ -385,6 +387,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
     int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+    cce_addr.SetCce(0, term);
 
     if (term < 0)
     {
@@ -412,11 +415,15 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     int8_t err_code = 0;
     CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id, err_code);
-    // For read local requests, target cc maps should be initialized when the cc
-    // shard is initialized.
-    assert(ccm != nullptr);
 
-    ccm->Execute(*read_req);
+    if (ccm != nullptr)
+    {  //__catalog table will be preloaded when ccshard constructed
+        ccm->Execute(*read_req);
+    }
+    else
+    {  // otherwise, let the TemplateCcRequest load in the data
+        ccs.Enqueue(read_req);
+    }
 }
 
 void txservice::LocalCcHandler::ScanOpen(
@@ -535,6 +542,74 @@ void txservice::LocalCcHandler::ScanOpen(
     }
 }
 
+void txservice::LocalCcHandler::ScanOpenLocal(
+    const TableName &table_name,
+    ScanIndexType index_type,
+    const TxKey &start_key,
+    bool inclusive,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t ts,
+    CcHandlerResult<ScanOpenResult> &hd_res,
+    ScanDirection direction,
+    IsolationLevel iso_level,
+    CcProtocol proto,
+    LockType lock_type,
+    bool is_ckpt_delta)
+{
+    // TODO: consolidate these kind term check in some common place
+    if (tx_term < 0)
+    {
+        // When a tx starts, the tx can only be bound to a native cc node who is
+        // the leader. Since a read local request is dispatched to the same
+        // shard to which the tx is bound, if the native cc node is not the
+        // leader now, returns an error.
+        hd_res.SetError(-1);
+        return;
+    }
+
+    // Check if the table exists
+    CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
+    int8_t err_code = 0;
+    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_, err_code);
+
+    if (ccm == nullptr)
+    {
+        hd_res.SetError(-1);
+        return;
+    }
+
+    ScanOpenResult &open_result = hd_res.Value();
+    open_result.Reset(1);
+
+    open_result.scanner_ = ccm->CreateScanner(direction);
+    CcScanner *scanner_ptr = open_result.scanner_.get();
+    open_result.scan_alias_ = scan_alias_cnt_++;
+    scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
+    uint32_t ng_id = local_shard.node_id_;
+    uint32_t shard_code = (ng_id << 10) + local_shard.core_id_;
+    ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
+
+    ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
+    scan_open_cc_req->Set(&table_name,
+                          index_type,
+                          ng_id,
+                          &start_key,
+                          inclusive,
+                          direction,
+                          tx_number,
+                          ts,
+                          shard_scan_cache,
+                          tx_term,
+                          &hd_res,
+                          iso_level,
+                          proto,
+                          LockType::ReadLock,
+                          scanner_ptr->is_ckpt_delta_);
+
+    ccm->Execute(*scan_open_cc_req);
+}
+
 void txservice::LocalCcHandler::ScanNextBatch(
     uint64_t tx_number,
     int64_t tx_term,
@@ -557,6 +632,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         req->Set(node_group_id,
                  start_ts,
                  blocked_cache,
+                 tx_term,
                  &hd_res,
                  iso_level,
                  proto,
@@ -579,6 +655,35 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             lock_type,
                             scanner.is_ckpt_delta_);
     }
+}
+
+void txservice::LocalCcHandler::ScanNextBatchLocal(
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t start_ts,
+    CcScanner &scanner,
+    CcHandlerResult<ScanNextResult> &hd_res,
+    IsolationLevel iso_level,
+    CcProtocol proto)
+{
+    uint32_t shard_code = scanner.BlockedShard();
+    ScanCache *blocked_cache = scanner.Cache(shard_code);
+    uint32_t node_group_id = shard_code >> 10;
+    hd_res.Value().node_group_id_ = node_group_id;
+
+    CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
+    ScanNextBatchCc *req = scan_next_pool.NextRequest();
+    req->Set(node_group_id,
+             start_ts,
+             blocked_cache,
+             tx_term,
+             &hd_res,
+             iso_level,
+             proto,
+             LockType::ReadLock,
+             scanner.is_ckpt_delta_);
+
+    local_shard.Enqueue(req);
 }
 
 void txservice::LocalCcHandler::CommitSecondaryKey(const TableName &table_name,

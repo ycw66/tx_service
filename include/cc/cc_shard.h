@@ -15,6 +15,7 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "moodycamelqueue.h"
+#include "range_record.h"
 #include "secondary_key.h"
 #include "table_lock.h"
 #include "tentry.h"
@@ -291,6 +292,12 @@ public:
 
     const TableSchemaView *GetCatalog(const TableName &table_name);
 
+    void InitTableRanges(const TableName &table_name,
+                         std::vector<InitRangeEntry> &init_ranges);
+
+    const std::map<uint32_t, TableRangeEntry> *GetTableRanges(
+        const TableName &range_table_name);
+
     /**
      * @brief Fetches the table's catalog from the data store and temporarily
      * caches the demanding cc request in the cc shard. After the catalog is
@@ -303,6 +310,10 @@ public:
      */
     void FetchCatalog(const TableName &table_name, CcRequestBase *requester);
 
+    void FetchTableRanges(const TableName &range_table_name,
+                          const Schema *key_schema,
+                          CcRequestBase *requester);
+
     void RemoveFetchRequest(const TableName &table_name);
 
     CcMap *CreatePkCcMap(const TableName &table_name,
@@ -314,6 +325,8 @@ public:
                          NodeGroupId ng_id);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
+
+    void CreateRangeCcMap(const TableName &range_table_name, NodeGroupId ng_id);
 
     const uint32_t node_id_;
     const uint16_t core_id_;
@@ -350,11 +363,11 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;
 
-    std::unordered_map<TableName, FetchCatalogCc> fetch_catalog_reqs_;
+    std::unordered_map<TableName, std::unique_ptr<FetchCc>> fetch_reqs_;
 
-    std::unordered_map<TableName, CcMap::uptr> range_func_;
+    std::unordered_map<TableName, CcMap::uptr> native_range_maps_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
-        failover_range_func_;
+        failover_range_maps_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
