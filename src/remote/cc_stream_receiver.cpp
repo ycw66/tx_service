@@ -844,6 +844,10 @@ CcProtocol CcStreamReceiver::ConvertProtocol(CcProtocolType proto)
     {
         return CcProtocol::Locking;
     }
+    else if (proto == CcProtocolType::Mvcc)
+    {
+        return CcProtocol::MVCC;
+    }
     else
     {
         return CcProtocol::OCC;

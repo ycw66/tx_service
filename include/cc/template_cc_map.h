@@ -193,6 +193,9 @@ public:
             if (lock_success)
             {
                 shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), cce_ptr);
+                // for mvcc
+                uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
+                cc_entry.wlock_ts_ = lock_ts;
 
                 // Updates last_vali_ts after successfully acquiring the write
                 // lock such that it is no smaller than the current time of
@@ -203,7 +206,7 @@ public:
                 // relies on this property to avoid picking a checkpoint ts in
                 // this shard that may overlap with the ongoing tx.
                 acquire_key_result.last_vali_ts_ =
-                    std::max(cc_entry.last_vali_ts_, shard_->Now());
+                    std::max(cc_entry.last_vali_ts_, lock_ts);
                 acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
                 hd_res->SetFinished();
             }
@@ -230,7 +233,8 @@ public:
                                            ng_term);
                 }
 
-                if (req.Protocol() == CcProtocol::OCC)
+                if (req.Protocol() == CcProtocol::OCC ||
+                    req.Protocol() == CcProtocol::MVCC)
                 {
                     // For OCC/MVCC, a conflict causes the tx to abort
                     // immediately.
@@ -377,6 +381,17 @@ public:
 
             if (commit_ts > 0)
             {
+                // for mvcc
+                if (req.Protocol() == CcProtocol::MVCC)
+                {
+                    // recycle before archive
+                    // TODO(lzx): use scheduled tasks to perform recycling
+                    shard_->mem_usage_ -= cce.KickOutArchiveRecords(commit_ts);
+
+                    size_t added_mem_usage = cce.ArchiveBeforeUpdate();
+                    shard_->mem_usage_ += added_mem_usage;
+                }
+
                 cce.commit_ts_ = commit_ts;
 
                 shard_->mem_usage_ -= cce.payload_.MemUsage();
@@ -403,6 +418,7 @@ public:
 
             req.Result()->SetFinished();
             cce.key_lock_.ReleaseWriteLock(txn, shard_);
+            cce.wlock_ts_ = 0;
             shard_->DeleteLockHolidngTx(txn, &cce);
             return true;
         }
@@ -653,7 +669,8 @@ public:
                     }
                 }
 
-                if (req.Protocol() == CcProtocol::OCC)
+                if (req.Protocol() == CcProtocol::OCC ||
+                    req.Protocol() == CcProtocol::MVCC)
                 {
                     // For OCC/MVCC, a conflict causes the tx to abort
                     // immediately.
@@ -938,7 +955,8 @@ public:
 
             hd_res->SetError(1);
         }
-        else if (req.Protocol() == CcProtocol::OCC)
+        else if (req.Protocol() == CcProtocol::OCC ||
+                 req.Protocol() == CcProtocol::MVCC)
         {
             std::vector<TxId> &conflicting_txs = hd_res->Value();
 
@@ -1139,8 +1157,40 @@ public:
             }
         }
 
-        if (cce->payload_status_ == RecordStatus::Normal &&
-            (req.Type() == ReadType::Inside || cce->commit_ts_ > 1))
+        if (req.Isolation() == IsolationLevel::Snapshot)
+        {
+            assert(req.Protocol() == CcProtocol::MVCC);
+            assert(req.Type() == ReadType::Inside);
+
+            VersionRecord<ValueT> v_rec;
+            bool res = cce->MvccGet(req.ReadTimestamp(), v_rec);
+            if (res)  // Finds a visible version.
+            {
+                if (v_rec.payload_status_ == RecordStatus::Normal)
+                {
+                    if (req.Record() != nullptr)
+                    {
+                        ValueT *typed_rec = static_cast<ValueT *>(req.Record());
+                        *typed_rec = *(v_rec.payload_ptr_);
+                    }
+                    else
+                    {
+                        assert(req.RecordBlob() != nullptr);
+                        v_rec.payload_ptr_->Serialize(*req.RecordBlob());
+                    }
+                }
+                hd_res->Value().ts_ = v_rec.commit_ts_;
+                hd_res->Value().rec_status_ = v_rec.payload_status_;
+                hd_res->SetFinished();
+            }
+            else
+            {
+                hd_res->SetError(1);  // Not Found, return error.
+            }
+            return true;
+        }
+        else if (cce->payload_status_ == RecordStatus::Normal &&
+                 (req.Type() == ReadType::Inside || cce->commit_ts_ > 1))
         {
             // Copies the newest committed payload to the read result, if (1)
             // this is a read request that starts concurrency control for
@@ -1150,6 +1200,7 @@ public:
             // read request.
             // TODO: TxExecution and runtime also use this new value as read
             // result to avoid future PostRead abort.
+
             if (req.Record() != nullptr)
             {
                 ValueT *typed_rec = static_cast<ValueT *>(req.Record());

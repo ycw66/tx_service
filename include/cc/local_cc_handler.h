@@ -66,7 +66,8 @@ public:
                    const CcEntryAddr &ccentry_addr,
                    const TxRecord *record,
                    bool is_deleted,
-                   CcHandlerResult<Void> &hres) override;
+                   CcHandlerResult<Void> &hres,
+                   CcProtocol protocol) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the prior
@@ -266,6 +267,11 @@ public:
      * Get the node id which runs the current transaction.
      */
     uint32_t GetNodeId() const override;
+
+    /*
+     * Get the current ts_base value.
+     */
+    uint64_t GetTsBaseValue() const;
 
 private:
     /// <summary>

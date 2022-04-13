@@ -50,7 +50,8 @@ public:
                    const CcEntryAddr &cce_addr,
                    const TxRecord *record,
                    bool is_deleted,
-                   CcHandlerResult<Void> &hres);
+                   CcHandlerResult<Void> &hres,
+                   CcProtocol protocol);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,

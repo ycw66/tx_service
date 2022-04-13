@@ -374,7 +374,8 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     const InitTxResult &init_result = init_txn.hd_result_.Value();
     txid_ = init_result.txid_;
     tx_number_.store(txid_.TxNumber(), std::memory_order_release);
-    commit_ts_bound_ = init_result.start_ts_;
+    start_ts_ = init_result.start_ts_;
+    commit_ts_bound_ = init_result.start_ts_ + 1;
     tx_term_ = init_result.term_;
     state_stack_.pop_back();
     uint64_resp_->Finish(tx_number_.load(std::memory_order_acquire));
@@ -417,7 +418,7 @@ void TransactionExecution::Process(ReadOperation &read)
                                read_type,
                                tx_number_.load(std::memory_order_relaxed),
                                tx_term_,
-                               commit_ts_,
+                               start_ts_,
                                read.hd_result_,
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
@@ -471,7 +472,7 @@ void TransactionExecution::Process(ReadOperation &read)
                           read_type,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
-                          commit_ts_,
+                          start_ts_,
                           read.hd_result_,
                           iso_level_,
                           protocol_,
@@ -668,7 +669,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     {
         handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
                                tx_term_,
-                               commit_ts_bound_,
+                               start_ts_,
                                scanner,
                                scan_next.hd_result_,
                                iso_level_,
@@ -719,7 +720,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             scan_next.hd_result_.Reset();
             handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
-                                   commit_ts_bound_,
+                                   start_ts_,
                                    *scan_next.scanner_,
                                    scan_next.hd_result_,
                                    iso_level_,
@@ -1037,6 +1038,9 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     acquire_write.Reset(wset_size);
     acquire_write.is_running_ = true;
 
+    uint64_t current_ts =
+        static_cast<LocalCcHandler *>(handler)->GetTsBaseValue();
+
     size_t idx = 0;
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
     for (auto table_it = wset.begin(); table_it != wset.end(); ++table_it)
@@ -1055,7 +1059,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                                   *write_entry.key_.get(),
                                   txid_,
                                   tx_term_,
-                                  commit_ts_bound_,
+                                  current_ts,
                                   write_entry.op_ == DmlOperation::Insert,
                                   hres,
                                   protocol_);
@@ -1523,7 +1527,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    write_entry.cce_addr_,
                                    write_entry.rec_.get(),
                                    write_entry.op_ == DmlOperation::Delete,
-                                   hres);
+                                   hres,
+                                   protocol_);
 
                 for (auto sk_iter = write_entry.sindx_.begin();
                      sk_iter != write_entry.sindx_.end();
@@ -1581,7 +1586,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    write_entry.cce_addr_,
                                    nullptr,
                                    false,
-                                   hres);
+                                   hres,
+                                   protocol_);
 
                 ++offset;
                 ++idx;

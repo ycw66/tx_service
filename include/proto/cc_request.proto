@@ -78,6 +78,7 @@ enum IsolationType {
 enum CcProtocolType {
 	Occ = 0;
 	Locking = 1;
+	Mvcc = 2;
 }
 
 enum CcLockType {
@@ -136,11 +137,12 @@ message ValidateRequest {
 	uint32 src_node_id = 1;
 	uint32 node_group_id = 2;
 	CceAddr_msg cce_addr = 3;
-	uint64 commit_ts = 4;
-	uint64 key_ts = 5;
-	uint64 gap_ts = 6;
-	CcProtocolType protocol = 7;
-	CcLockType lock_type = 8;
+	uint64 start_ts = 4;
+	uint64 commit_ts = 5;
+	uint64 key_ts = 6;
+	uint64 gap_ts = 7;
+	CcProtocolType protocol = 8;
+	CcLockType lock_type = 9;
 }
 
 message ValidateResponse {
@@ -199,6 +201,7 @@ message PostCommitRequest {
 	uint64 commit_ts = 4;
 	bytes record = 5;
 	bool is_deleted = 6;
+	CcProtocolType protocol = 7;
 }
 
 message PostWriteAllRequest {

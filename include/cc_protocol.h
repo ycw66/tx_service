@@ -5,7 +5,8 @@ namespace txservice
 enum class CcProtocol
 {
     OCC = 0,
-    Locking
+    Locking,
+    MVCC
 };
 
 enum class IsolationLevel

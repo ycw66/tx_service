@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <deque>
 #include <map>
 #include <unordered_set>
 
@@ -109,6 +111,30 @@ public:
 };
 
 /**
+ * @brief Used as the result value type of read(scan/get) operation.
+ *
+ * @param payload_ptr_ Point to an payload saved in CcEntry or archives_.
+ * Notice: "payload_ptr_" should not be deleted explicitly.
+ * @param payload_status_
+ * @param commit_ts_
+ */
+template <typename ValueT>
+struct VersionRecord
+{
+public:
+    const ValueT *payload_ptr_;
+    RecordStatus payload_status_;
+    uint64_t commit_ts_;
+
+    VersionRecord()
+        : payload_ptr_(nullptr),
+          payload_status_(RecordStatus::Unknown),
+          commit_ts_(0)
+    {
+    }
+};
+
+/**
  * @brief A map entry in the concurrency control map. An entry governs
  * concurrency control of a data item and caches the data item's newest
  * committed value, as well as historical versions if needed.
@@ -174,6 +200,9 @@ public:
         // size of map_prev_, map_next_
         mem_usage_ += 2 * ptr_size;
 
+        // for mvcc
+        mem_usage_ += GetArchiveMemUsage();
+
         return mem_usage_;
     }
 
@@ -193,6 +222,143 @@ public:
 
     CcEntry<KeyT, ValueT> *map_prev_;
     CcEntry<KeyT, ValueT> *map_next_;
+
+    // for mvcc
+    struct ArchiveRecord
+    {
+    public:
+        ValueT payload_;
+        uint64_t commit_ts_;
+        RecordStatus payload_status_;
+
+        ArchiveRecord()
+            : payload_(), commit_ts_(0), payload_status_(RecordStatus::Unknown)
+        {
+        }
+
+        ArchiveRecord(ValueT payload, uint64_t commit_ts, RecordStatus status)
+            : payload_(std::move(payload)),
+              commit_ts_(commit_ts),
+              payload_status_(status)
+        {
+        }
+
+        size_t MemUsage() const
+        {
+            size_t mem_usage_ = 0;
+            mem_usage_ += payload_.MemUsage();
+            mem_usage_ += sizeof(uint64_t);
+            mem_usage_ += sizeof(RecordStatus);
+            return mem_usage_;
+        }
+    };
+
+    // save versions exclude the current version
+    std::deque<ArchiveRecord> archives_;
+    // The time when a write tx acquires the write lock/intent on this cc entry.
+    uint64_t wlock_ts_;
+
+    /**
+     * @brief Move(not copy) the current version (payload, payload_status,
+     * commit_ts) to the archives_.
+     *
+     * @return New memory usage caused by archive
+     */
+    size_t ArchiveBeforeUpdate()
+    {
+        if (commit_ts_ <= 1)  // no history record
+        {
+            return 0;
+        }
+
+        archives_.emplace_back(
+            std::move(payload_), commit_ts_, payload_status_);
+
+        return sizeof(commit_ts_) + sizeof(payload_status_);
+    }
+
+    /**
+     * @brief kick out records from archives_;
+     *
+     * @return mem usage of archive records kicked out
+     */
+    size_t KickOutArchiveRecords(uint64_t current_ts)
+    {
+        // Remove records submitted 5 seconds ago
+        // TODO(lzx): optimize recycle way
+        uint64_t bound_ts = current_ts - 5000000;
+        size_t mem_usage = 0;
+        auto it = archives_.begin();
+        for (; it != archives_.end() && it->commit_ts_ < bound_ts; it++)
+        {
+            mem_usage += it->MemUsage();
+        }
+        archives_.erase(archives_.begin(), it);
+        return mem_usage;
+    }
+
+    size_t GetArchiveMemUsage() const
+    {
+        size_t mem_usage = 0;
+        for (auto it = archives_.begin(); it != archives_.end(); ++it)
+        {
+            mem_usage += it->MemUsage();
+        }
+        return mem_usage;
+    }
+
+    /**
+     * @brief Gets the newest version whose version (commit_ts_) is no less than
+     * the input timestamp.
+     *
+     * @return true : if find the record; false: not found or has write_lock
+     */
+    bool MvccGet(uint64_t ts, VersionRecord<ValueT> &rec)
+    {
+        if (commit_ts_ <= ts)
+        {
+            if ((key_lock_.HasWriteLock() && wlock_ts_ < ts))
+            {
+                // Having write lock means the ccentry will be updated soon.
+                // If wlock_ts_ < ts, the future 'commit_ts' is may also less
+                // than the 'read timestamp', then should return the future
+                // version.
+                // There are two choice: (1)wait until the future version is
+                // committed; (2) abort read transcation.
+
+                // TODO(lzx): return error code and use retry mechanism instead
+                // of abort immediately.
+                return false;
+            }
+
+            // MVCC update last_validation_ts_ of lastest ccentry to tell later
+            // writer's commit_ts must be higher than MVCC reader's ts. Or it
+            // will break the REPEATABLE READ since the next MVCC read in the
+            // same transaction will read the new updated ccentry.
+            last_vali_ts_ = std::max(ts, last_vali_ts_);
+            if (payload_status_ == RecordStatus::Normal)
+            {
+                rec.payload_ptr_ = &payload_;
+            }
+            rec.commit_ts_ = commit_ts_;
+            rec.payload_status_ = payload_status_;
+            return true;
+        }
+        for (auto it = archives_.crbegin(); it != archives_.crend(); it++)
+        {
+            if (it->commit_ts_ <= ts)
+            {
+                if (it->payload_status_ == RecordStatus::Normal)
+                {
+                    rec.payload_ptr_ = &(it->payload_);
+                }
+                rec.commit_ts_ = it->commit_ts_;
+                rec.payload_status_ = it->payload_status_;
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 struct CcEntryAddr
@@ -316,6 +482,7 @@ private:
     // not need to be std::atomic.
     std::atomic<int64_t> term_;
 };
+
 }  // namespace txservice
 
 namespace std

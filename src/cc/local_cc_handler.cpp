@@ -158,7 +158,8 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
                                           const CcEntryAddr &cce_addr,
                                           const TxRecord *record,
                                           bool is_deleted,
-                                          CcHandlerResult<Void> &hres)
+                                          CcHandlerResult<Void> &hres,
+                                          CcProtocol protocol)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -175,7 +176,13 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
         }
 
         PostWriteCc *req = postwrite_pool.NextRequest();
-        req->Set(&cce_addr, tx_number, commit_ts, record, is_deleted, &hres);
+        req->Set(&cce_addr,
+                 tx_number,
+                 commit_ts,
+                 record,
+                 is_deleted,
+                 &hres,
+                 protocol);
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
         CcMap *ccm = lru_entry->parent_map_;
@@ -191,7 +198,8 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
                              cce_addr,
                              record,
                              is_deleted,
-                             hres);
+                             hres,
+                             protocol);
     }
 }
 
@@ -844,4 +852,13 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 uint32_t txservice::LocalCcHandler::GetNodeId() const
 {
     return cc_shards_.NodeId();
+}
+
+/**
+ * @brief Get value of "ts_base".
+ */
+uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
+{
+    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
+    return ccs.Now();
 }

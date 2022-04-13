@@ -102,6 +102,7 @@ public:
      * @param record Pointer to the committed record. Null, if the tx aborts.
      * @param is_deleted Whether or not the write deletes a record
      * @param hres Result handler of the request
+     * @param protocol Concurrency control protocol
      */
     virtual void PostWrite(uint64_t tx_number,
                            int64_t tx_term,
@@ -109,7 +110,8 @@ public:
                            const CcEntryAddr &ccentry_addr,
                            const TxRecord *record,
                            bool is_deleted,
-                           CcHandlerResult<Void> &hres) = 0;
+                           CcHandlerResult<Void> &hres,
+                           CcProtocol protocol) = 0;
 
     /**
      * @brief Post-processes a read/scan key. Post-processing clears the read

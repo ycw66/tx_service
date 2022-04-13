@@ -239,6 +239,7 @@ private:
     // receiving the response of the cc request for an extended period of time.
     std::atomic<uint64_t> tx_number_;
     int64_t tx_term_;
+    uint64_t start_ts_;
     uint64_t commit_ts_;
     uint64_t commit_ts_bound_;
     std::atomic<TxnStatus> tx_status_;

@@ -465,7 +465,8 @@ void txservice::remote::RemotePostWrite::Set(
                      commit_ts,
                      rec_str,
                      post_commit.is_deleted(),
-                     &cc_res_);
+                     &cc_res_,
+                     proto_);
 
     input_msg_ = std::move(input_msg);
 

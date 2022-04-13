@@ -47,7 +47,7 @@ public:
     }
 
     uint64_t commit_ts_;
-    uint64_t lower_bound_;
+    uint64_t lower_bound_;  // start_ts
     TxnStatus status_;
     uint32_t ident_;
     const uint32_t vec_idx_;

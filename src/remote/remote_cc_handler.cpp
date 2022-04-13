@@ -98,7 +98,8 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
                                                    const CcEntryAddr &cce_addr,
                                                    const TxRecord *record,
                                                    bool is_deleted,
-                                                   CcHandlerResult<Void> &hres)
+                                                   CcHandlerResult<Void> &hres,
+                                                   CcProtocol protocol)
 {
     CcMessage send_msg;
 
@@ -134,6 +135,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
 
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_is_deleted(is_deleted);
+    post_commit->set_protocol(ConvertProtocol(protocol));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -509,6 +511,10 @@ txservice::remote::RemoteCcHandler::ConvertProtocol(CcProtocol proto)
     if (proto == CcProtocol::Locking)
     {
         return CcProtocolType::Locking;
+    }
+    else if (proto == CcProtocol::MVCC)
+    {
+        return CcProtocolType::Mvcc;
     }
     else
     {

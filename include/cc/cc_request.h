@@ -502,7 +502,8 @@ public:
              uint64_t ts,
              const TxRecord *rec,
              bool is_deleted,
-             CcHandlerResult<Void> *res)
+             CcHandlerResult<Void> *res,
+             CcProtocol proto)
     {
         cce_addr_ = addr;
         tx_number_ = tx_number;
@@ -511,6 +512,7 @@ public:
         payload_str_ = nullptr;
         is_deleted_ = is_deleted;
         res_ = res;
+        proto_ = proto;
 
         if (addr->InsertPtr() != 0)
         {
@@ -533,7 +535,8 @@ public:
              uint64_t ts,
              const std::string *rec,
              bool is_deleted,
-             CcHandlerResult<Void> *res)
+             CcHandlerResult<Void> *res,
+             CcProtocol proto)
     {
         cce_addr_ = addr;
         tx_number_ = tx_number;
@@ -542,6 +545,7 @@ public:
         payload_str_ = rec;
         is_deleted_ = is_deleted;
         res_ = res;
+        proto_ = proto;
 
         if (addr->InsertPtr() != 0)
         {
