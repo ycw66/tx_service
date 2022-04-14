@@ -9,10 +9,12 @@
 
 #include "cc_protocol.h"
 #include "local_cc_shards.h"
+#include "scan.h"
 #include "sharder.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "type.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -290,7 +292,9 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
-    ScanClose(scan_close_req.alias_, *scan_close_req.end_key_.get());
+    ScanClose(scan_close_req.alias_,
+              *scan_close_req.end_key_.get(),
+              scan_close_req.scan_index_type_);
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
@@ -742,14 +746,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
         iso_level_ >= IsolationLevel::RepeatableRead)
     {
-        LOG(INFO) << "Transaction: " << this
-                  << " PostProcess ScanOperation AddRead: "
-                  << "0x" << std::hex << cc_scan_tuple->cce_addr_.CcePtr();
-        rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                        cc_scan_tuple->key_ts_,
-                        protocol_,
-                        ReadType::Inside,
-                        LockType::ReadLock);
+        // Not necessary to add read (and lock) on index table cc entry, unless
+        // iso level is serializable
+        if (scan_next_.tx_req_->scan_index_type_ != ScanIndexType::Secondary)
+        {
+            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                            cc_scan_tuple->key_ts_,
+                            protocol_,
+                            ReadType::Inside,
+                            LockType::ReadLock);
+        }
     }
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
@@ -945,7 +951,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 }
 
-void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
+void TransactionExecution::ScanClose(size_t alias,
+                                     const TxKey &end_key,
+                                     const ScanIndexType scan_index_type)
 {
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
@@ -956,13 +964,17 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
         const ScanTuple *cc_scan_tuple = scanner.Current();
         while (cc_scan_tuple != nullptr)
         {
-            if (cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown)
+            if (cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
+                iso_level_ >= IsolationLevel::RepeatableRead)
             {
-                rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                cc_scan_tuple->key_ts_,
-                                protocol_,
-                                ReadType::Inside,
-                                LockType::ReadLock);
+                if (scan_index_type != ScanIndexType::Secondary)
+                {
+                    rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                    cc_scan_tuple->key_ts_,
+                                    protocol_,
+                                    ReadType::Inside,
+                                    LockType::ReadLock);
+                }
             }
         }
     }

@@ -404,7 +404,7 @@ void ValidateOperation::Forward(TransactionExecution *txm)
 
     if (finish_cnt < vali_cnt_ && txm->IsTimeOut())
     {
-        for (size_t idx = 0; idx < results_.size(); ++idx)
+        for (size_t idx = 0; idx < vali_cce_addr_.size(); ++idx)
         {
             // For every validation request, attempts to force the request
             // to be errored. If the request has not received response

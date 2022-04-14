@@ -182,7 +182,9 @@ private:
 
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(size_t alias, const TxKey &end_key);
+    void ScanClose(size_t alias,
+                   const TxKey &end_key,
+                   const ScanIndexType scan_index_type);
 
     void Update(const TableName &table_name,
                 TxKeyContainer &key,
