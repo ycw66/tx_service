@@ -624,6 +624,7 @@ public:
                 else
                 {
                     req.SetCcePtr(nullptr);
+                    req.ResetCcm();
                     MoveRequest(&req, shard_->core_id_ + 1);
                     return false;
                 }

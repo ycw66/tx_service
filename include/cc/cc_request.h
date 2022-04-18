@@ -467,6 +467,11 @@ public:
         return cce_ptr_;
     }
 
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
