@@ -153,7 +153,7 @@ TEntry &CcShard::NewTx()
     {
         uint32_t old_size = (uint32_t) tx_vec_.size();
         // Increases the capacity of the tx vector.
-        uint32_t new_size = (uint32_t)(tx_vec_.size() * 1.5);
+        uint32_t new_size = (uint32_t) (tx_vec_.size() * 1.5);
         tx_vec_.reserve(new_size);
 
         for (uint32_t idx = old_size; idx < new_size; ++idx)

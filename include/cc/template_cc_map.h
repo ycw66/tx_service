@@ -1470,9 +1470,6 @@ public:
         TxNumber tx_number = req.Txn();
         const TransactionExecution *txm = req.Result()->Txm();
         const TableName *table_name = req.GetTableName();
-        LOG(INFO) << "ScanOpenBatchCc, table_name: "
-                  << (table_name == nullptr ? "" : *table_name)
-                  << ", txm: " << txm << ", tx_number: " << tx_number;
 
         req.Result()->Value().term_ = term;
         TemplateScanCache<KeyT, ValueT> *typed_cache =

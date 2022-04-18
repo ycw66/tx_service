@@ -60,21 +60,6 @@ private:
     // request is processed.
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
 
-    // Cc requests received via the stream are first de-serialized as remote cc
-    // requests and then enqueued into the local cc shards for processing.
-    CcRequestPool<RemoteAcquire> acquire_pool_;
-    CcRequestPool<RemotePostWrite> postwrite_pool_;
-    CcRequestPool<RemoteAcquireAll> acquire_all_pool_;
-    CcRequestPool<RemotePostWriteAll> post_write_all_pool_;
-    CcRequestPool<RemotePostRead> postread_pool_;
-    CcRequestPool<RemoteRead> read_pool_;
-    CcRequestPool<RemoteReadOutside> read_outside_pool_;
-    CcRequestPool<RemoteScanOpen> scan_open_pool_;
-    CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
-    CcRequestPool<RemoteCommitSk> commit_sk_pool_;
-    CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
-    // CcRequestPool<NegotiateCc> negoti_pool;
-
     friend class remote::CcStreamSender;
 };
 }  // namespace remote

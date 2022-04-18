@@ -594,6 +594,7 @@ void txservice::remote::RemoteScanOpen::Set(
 
     cc_res_.Reset();
     cc_res_.SetRefCnt(core_cnt);
+    cce_ptr_ = nullptr;
 
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 

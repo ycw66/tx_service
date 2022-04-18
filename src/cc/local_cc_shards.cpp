@@ -176,7 +176,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
 
     auto table_it = table_ranges_.try_emplace(range_table_name);
-    //assert(!table_it.second);
+    // assert(!table_it.second);
     std::map<uint32_t, TableRangeEntry> &ranges = table_it.first->second;
 
     if (init_ranges.empty())

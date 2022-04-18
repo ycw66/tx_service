@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -244,6 +245,7 @@ public:
 
     ScanCache *AddShard(uint32_t shard_code) override
     {
+        std::unique_lock<std::mutex> lock(mutex_);
         auto em_it = scans_.try_emplace(shard_code, this, key_schema_);
         assert(em_it.second == true);
         return &em_it.first->second;
@@ -367,5 +369,6 @@ private:
     ScannerStatus status_;
 
     const Schema *key_schema_;
+    std::mutex mutex_;
 };
 }  // namespace txservice

@@ -10,6 +10,20 @@ namespace txservice
 {
 namespace remote
 {
+// Cc requests received via the stream are first de-serialized as remote cc
+// requests and then enqueued into the local cc shards for processing.
+thread_local CcRequestPool<RemoteAcquire> acquire_pool_;
+thread_local CcRequestPool<RemotePostWrite> postwrite_pool_;
+thread_local CcRequestPool<RemoteAcquireAll> acquire_all_pool_;
+thread_local CcRequestPool<RemotePostWriteAll> post_write_all_pool_;
+thread_local CcRequestPool<RemotePostRead> postread_pool_;
+thread_local CcRequestPool<RemoteRead> read_pool_;
+thread_local CcRequestPool<RemoteReadOutside> read_outside_pool_;
+thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
+thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
+thread_local CcRequestPool<RemoteCommitSk> commit_sk_pool_;
+thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
+
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
@@ -623,7 +637,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 uint32_t shard_code = (ng_id << 10) + core_id;
                 const ScanCache_msg &cache_msg =
                     scan_open_res.scan_cache(core_id);
-
                 ScanCache *shard_cache = scanner.AddShard(shard_code);
 
                 for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)

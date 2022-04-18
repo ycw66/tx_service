@@ -78,9 +78,10 @@ bool FetchTableRangesCc::Execute(CcShard &ccs)
     return false;
 }
 
-void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges, int err)
+void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges,
+                                   int err)
 {
-    ranges_vec_ = std::move(ranges); 
+    ranges_vec_ = std::move(ranges);
     error_code_ = err;
     ccs_.Enqueue(this);
 }
