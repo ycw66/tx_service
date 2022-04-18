@@ -1467,10 +1467,6 @@ public:
             return false;
         }
 
-        TxNumber tx_number = req.Txn();
-        const TransactionExecution *txm = req.Result()->Txm();
-        const TableName *table_name = req.GetTableName();
-
         req.Result()->Value().term_ = term;
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);

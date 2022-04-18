@@ -603,6 +603,7 @@ void txservice::remote::RemoteScanOpen::Set(
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_open.lock_type());
     ccm_ = nullptr;
+    cce_ptr_ = nullptr;
 
     if (scan_open.start_key_case() == ScanOpenRequest::StartKeyCase::kNegInf)
     {
@@ -674,6 +675,7 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse);
     is_ckpt_delta_ = false;
     res_ = &cc_res_;
+    cce_ptr_ = nullptr;
 
     /*message ScanNextResponse
     {
