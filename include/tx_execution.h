@@ -182,9 +182,7 @@ private:
 
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(size_t alias,
-                   const TxKey &end_key,
-                   const ScanIndexType scan_index_type);
+    void ScanClose(size_t alias, const TxKey &end_key);
 
     void Update(const TableName &table_name,
                 TxKeyContainer &key,
@@ -213,13 +211,6 @@ private:
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
-
-    enum struct DDLType
-    {
-        UNKNOWN,
-        CREATE_TABLE,
-        DROP_TABLE
-    };
 
     enum struct TxType
     {

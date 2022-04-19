@@ -509,7 +509,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     break;
                 }
                 case ReadResponse::RecordStatus::
-                    ReadResponse_RecordStatus_UNKNOWN:
+                    ReadResponse_RecordStatus_UNDEFINED:
                 {
                     read_result.rec_status_ = RecordStatus::Unknown;
                     break;
@@ -656,7 +656,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                         rec_status = RecordStatus::Deleted;
                         break;
                     case ScanTuple_msg::RecordStatus::
-                        ScanTuple_msg_RecordStatus_UNKNOWN:
+                        ScanTuple_msg_RecordStatus_UNDEFINED:
                         rec_status = RecordStatus::Unknown;
                         break;
                     default:
@@ -758,7 +758,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     rec_status = RecordStatus::Deleted;
                     break;
                 case ScanTuple_msg::RecordStatus::
-                    ScanTuple_msg_RecordStatus_UNKNOWN:
+                    ScanTuple_msg_RecordStatus_UNDEFINED:
                     rec_status = RecordStatus::Unknown;
                     break;
                 default:

@@ -148,6 +148,8 @@ public:
     }
 
     void CommitSecondaryKey(uint32_t src_node_id,
+                            TxNumber txn,
+                            int64_t tx_term,
                             const TableName &table_name,
                             const TxKey &sk,
                             const TxKey &pk,

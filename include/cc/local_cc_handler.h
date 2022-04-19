@@ -200,7 +200,9 @@ public:
     {
     }
 
-    void CommitSecondaryKey(const TableName &table_name,
+    void CommitSecondaryKey(TxNumber txn,
+                            int64_t tx_term,
+                            const TableName &table_name,
                             const TxKey &sk,
                             const TxKey &pk,
                             bool is_delete,

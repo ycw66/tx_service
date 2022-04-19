@@ -204,32 +204,24 @@ struct ScanNextTxRequest
           ScanNextTxRequest,
           std::tuple<const TxKey *, const TxRecord *, bool>>
 {
-    ScanNextTxRequest(size_t alias,
-                      LockType lock_type,
-                      ScanIndexType scan_index_type)
-        : alias_(alias),
-          lock_type_(lock_type),
-          scan_index_type_(scan_index_type)
+    ScanNextTxRequest(size_t alias, LockType lock_type)
+        : alias_(alias), lock_type_(lock_type)
     {
     }
 
     size_t alias_;
     LockType lock_type_;
-    ScanIndexType scan_index_type_;
 };
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
-    ScanCloseTxRequest(size_t alias,
-                       TxKey *end_key,
-                       ScanIndexType scan_index_type)
-        : alias_(alias), end_key_(end_key), scan_index_type_(scan_index_type)
+    ScanCloseTxRequest(size_t alias, TxKey *end_key)
+        : alias_(alias), end_key_(end_key)
     {
     }
 
     size_t alias_;
     TxKeyContainer end_key_;
-    ScanIndexType scan_index_type_;
 };
 
 struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>

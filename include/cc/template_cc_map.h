@@ -2056,8 +2056,8 @@ public:
     std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const override
     {
-        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(direction,
-                                                                 key_schema_);
+        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
+            direction, ScanIndexType::Primary, key_schema_);
     }
 
     /**
@@ -2352,7 +2352,7 @@ protected:
             break;
         case RecordStatus::Unknown:
             tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_UNKNOWN);
+                                      ScanTuple_msg_RecordStatus_UNDEFINED);
             break;
         default:
             break;

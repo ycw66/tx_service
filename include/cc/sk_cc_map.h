@@ -8,7 +8,6 @@
 
 namespace txservice
 {
-
 struct VoidKey : public TxKey
 {
     VoidKey()
@@ -780,7 +779,7 @@ public:
     {
         return std::make_unique<
             TemplateCcScanner<SecondaryKey<SkT, PkT>, VoidRecord>>(
-            direction, &compound_schema_);
+            direction, ScanIndexType::Secondary, &compound_schema_);
     }
 
     size_t size() const override
@@ -945,7 +944,7 @@ private:
             break;
         case RecordStatus::Unknown:
             tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_UNKNOWN);
+                                      ScanTuple_msg_RecordStatus_UNDEFINED);
             break;
         default:
             break;

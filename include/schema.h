@@ -37,15 +37,14 @@ public:
     SkSchema() = delete;
 
     SkSchema(const Schema *sk_sch, const Schema *pk_sch)
+        : sk_schema_(sk_sch->Clone()), pk_schema_(pk_sch->Clone())
     {
-        sk_schema_.reset(sk_sch->Clone().release());
-        pk_schema_.reset(pk_sch->Clone().release());
     }
 
     SkSchema(const SkSchema &sch)
+        : sk_schema_(sch.sk_schema_->Clone()),
+          pk_schema_(sch.pk_schema_->Clone())
     {
-        sk_schema_.reset(sch.sk_schema_->Clone().release());
-        pk_schema_.reset(sch.pk_schema_->Clone().release());
     }
 
     Schema::Uptr Clone() const override

@@ -423,6 +423,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
 
 void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     uint32_t src_node_id,
+    TxNumber txn,
+    int64_t tx_term,
     const TableName &table_name,
     const TxKey &sk,
     const TxKey &pk,
@@ -446,6 +448,8 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
 
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_CommitSkRequest);
+    send_msg.set_tx_number(txn);
+    send_msg.set_tx_term(tx_term);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
 
     CommitSkRequest *commit_sk = send_msg.mutable_commit_sk_req();

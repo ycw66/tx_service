@@ -148,7 +148,7 @@ private:
 
     bool NoWriteLockConflict(TxNumber tx_number) const
     {
-        return is_write_intent_empty_ || write_intent_tx_ == tx_number;
+        return is_write_lock_empty_ || write_lock_tx_ == tx_number;
     }
 
     // Read intentions do not block writes. They are used by a tx under OCC/MVCC

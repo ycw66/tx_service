@@ -286,7 +286,7 @@ txservice::remote::RemoteRead::RemoteRead()
                 break;
             case RecordStatus::Unknown:
                 resp->set_rec_status(ReadResponse::RecordStatus::
-                                         ReadResponse_RecordStatus_UNKNOWN);
+                                         ReadResponse_RecordStatus_UNDEFINED);
                 break;
             default:
                 break;

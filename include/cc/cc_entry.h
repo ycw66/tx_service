@@ -243,6 +243,29 @@ public:
         {
         }
 
+        ArchiveRecord(const ArchiveRecord &rhs) = delete;
+
+        ArchiveRecord(ArchiveRecord &&rhs)
+            : payload_(std::move(rhs.payload_)),
+              commit_ts_(rhs.commit_ts_),
+              payload_status_(rhs.payload_status_)
+        {
+        }
+
+        ArchiveRecord &operator=(ArchiveRecord &&rhs)
+        {
+            if (this == &rhs)
+            {
+                return *this;
+            }
+
+            payload_ = std::move(rhs.payload_);
+            commit_ts_ = rhs.commit_ts_;
+            payload_status_ = rhs.payload_status_;
+
+            return *this;
+        }
+
         size_t MemUsage() const
         {
             size_t mem_usage_ = 0;

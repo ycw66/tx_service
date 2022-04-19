@@ -65,7 +65,7 @@ enum struct ReadType
 {
     // Starts concurrency control for the input the key and returns the key's
     // value.
-    Inside,
+    Inside = 0,
     // Starts concurrency control for the input key-value pair retrieved from
     // the data store.
     OutsideNormal,

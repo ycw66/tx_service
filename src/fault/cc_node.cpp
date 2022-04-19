@@ -230,7 +230,7 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
         res.set_error(false);
 
         brpc::Controller cntl;
-        cntl.set_timeout_ms(-1);
+        cntl.set_timeout_ms(100);
         stub.NotifyNewLeaderStart(&cntl, &req, &res, nullptr);
 
         // Retry is not needed at here, the remote nodes will also refresh their
@@ -307,7 +307,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
         res.set_error(false);
 
         brpc::Controller cntl;
-        cntl.set_timeout_ms(-1);
+        cntl.set_timeout_ms(100);
         stub.Transfer(&cntl, &req, &res, nullptr);
 
         if (cntl.Failed())

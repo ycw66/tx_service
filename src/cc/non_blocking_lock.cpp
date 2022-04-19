@@ -147,8 +147,9 @@ bool NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     {
         return AcquireWriteLock(cc_req, tx_term, protocol);
     }
-    else if (lock_type == LockType::ReadIntent)
+    else
     {
+        assert(lock_type == LockType::ReadIntent);
         return AcquireReadIntent(cc_req->Txn());
     }
 }
@@ -427,6 +428,7 @@ void NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
 bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 {
     read_intentions_.emplace(tx_number);
+    return true;
 }
 
 void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)

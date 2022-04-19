@@ -638,6 +638,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     {
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Set(node_group_id,
+                 tx_number,
                  start_ts,
                  blocked_cache,
                  tx_term,
@@ -682,6 +683,7 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
     ScanNextBatchCc *req = scan_next_pool.NextRequest();
     req->Set(node_group_id,
+             tx_number,
              start_ts,
              blocked_cache,
              tx_term,
@@ -694,7 +696,9 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     local_shard.Enqueue(req);
 }
 
-void txservice::LocalCcHandler::CommitSecondaryKey(const TableName &table_name,
+void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
+                                                   int64_t tx_term,
+                                                   const TableName &table_name,
                                                    const TxKey &sk,
                                                    const TxKey &pk,
                                                    bool is_delete,
@@ -714,6 +718,8 @@ void txservice::LocalCcHandler::CommitSecondaryKey(const TableName &table_name,
     else
     {
         remote_hd_.CommitSecondaryKey(cc_shards_.node_id_,
+                                      txn,
+                                      tx_term,
                                       table_name,
                                       sk,
                                       pk,

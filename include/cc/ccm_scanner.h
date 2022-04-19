@@ -201,8 +201,8 @@ private:
 class CcScanner
 {
 public:
-    CcScanner(ScanDirection direction)
-        : direct_(direction), is_ckpt_delta_(false)
+    CcScanner(ScanDirection direction, ScanIndexType index_type)
+        : direct_(direction), index_type_(index_type), is_ckpt_delta_(false)
     {
     }
 
@@ -222,8 +222,14 @@ public:
         return direct_;
     }
 
+    ScanIndexType IndexType() const
+    {
+        return index_type_;
+    }
+
 protected:
     ScanDirection direct_;
+    ScanIndexType index_type_;
 
 public:
     bool is_ckpt_delta_;
@@ -233,8 +239,10 @@ template <typename KeyT, typename ValueT>
 class TemplateCcScanner : public CcScanner
 {
 public:
-    TemplateCcScanner(ScanDirection direct, const Schema *schema)
-        : CcScanner(direct),
+    TemplateCcScanner(ScanDirection direct,
+                      ScanIndexType index_type,
+                      const Schema *schema)
+        : CcScanner(direct, index_type),
           scans_(),
           curr_shard_code_(0),
           curr_tuple_(nullptr),

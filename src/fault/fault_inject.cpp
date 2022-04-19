@@ -56,7 +56,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         std::transform(action.begin(), action.end(), action.begin(), ::toupper);
         auto iter = action_name_to_enum_map.find(action);
         FaultAction fa =
-            (iter == action_name_to_enum_map.end() ? FaultAction::UNKNOWN
+            (iter == action_name_to_enum_map.end() ? FaultAction::NOOP
                                                    : iter->second);
 
         switch (fa)

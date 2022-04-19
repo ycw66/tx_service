@@ -177,7 +177,7 @@ message ReadResponse {
 	bytes record = 2;
 	enum RecordStatus {
 		NORMAL = 0;
-		UNKNOWN = 1;
+		UNDEFINED = 1;
 		DELETED = 2;
 	}
 	RecordStatus rec_status = 3;
@@ -220,7 +220,7 @@ message ScanTuple_msg {
 	bytes record = 2;
 	enum RecordStatus {
 		NORMAL = 0;
-		UNKNOWN = 1;
+		UNDEFINED = 1;
 		DELETED = 2;
 	}
 	RecordStatus rec_status = 3;

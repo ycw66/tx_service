@@ -1085,6 +1085,7 @@ public:
     ScanNextBatchCc() = default;
 
     void Set(const uint32_t &ng_id,
+             TxNumber txn,
              const uint64_t &ts,
              ScanCache *cache,
              int64_t tx_term,
@@ -1095,6 +1096,7 @@ public:
              bool is_delta)
     {
         node_group_id_ = ng_id;
+        tx_number_ = txn;
         ts_ = ts;
         scan_cache_ = cache;
         tx_term_ = tx_term;

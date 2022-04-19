@@ -14,7 +14,7 @@ namespace txservice
 {
 enum struct FaultAction
 {
-    UNKNOWN = 0,
+    NOOP = 0,
     SLEEP,
     ERROR,
     FATAL,
@@ -30,7 +30,7 @@ enum struct FaultAction
     LOG_TRANSFER
 };
 static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
-    {"UNKNOWN", FaultAction::UNKNOWN},
+    {"UNKNOWN", FaultAction::NOOP},
     {"SLEEP", FaultAction::SLEEP},
     {"ERROR", FaultAction::ERROR},
     {"FATAL", FaultAction::FATAL},

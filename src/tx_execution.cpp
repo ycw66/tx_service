@@ -292,9 +292,7 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
-    ScanClose(scan_close_req.alias_,
-              *scan_close_req.end_key_.get(),
-              scan_close_req.scan_index_type_);
+    ScanClose(scan_close_req.alias_, *scan_close_req.end_key_.get());
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
@@ -748,7 +746,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     {
         // Not necessary to add read (and lock) on index table cc entry, unless
         // iso level is serializable
-        if (scan_next_.tx_req_->scan_index_type_ != ScanIndexType::Secondary)
+        if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
         {
             rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                             cc_scan_tuple->key_ts_,
@@ -951,9 +949,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 }
 
-void TransactionExecution::ScanClose(size_t alias,
-                                     const TxKey &end_key,
-                                     const ScanIndexType scan_index_type)
+void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 {
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
@@ -967,7 +963,7 @@ void TransactionExecution::ScanClose(size_t alias,
             if (cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
                 iso_level_ >= IsolationLevel::RepeatableRead)
             {
-                if (scan_index_type != ScanIndexType::Secondary)
+                if (scanner.IndexType() != ScanIndexType::Secondary)
                 {
                     rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                                     cc_scan_tuple->key_ts_,
@@ -1550,12 +1546,15 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     const TxKey *sk = sk_iter->sk_key_.get();
                     bool is_delete = sk_iter->is_deleted_;
 
-                    handler->CommitSecondaryKey(*tn,
-                                                *sk,
-                                                *write_entry.key_.get(),
-                                                is_delete,
-                                                commit_ts_,
-                                                hres);
+                    handler->CommitSecondaryKey(
+                        tx_number_.load(std::memory_order_relaxed),
+                        tx_term_,
+                        *tn,
+                        *sk,
+                        *write_entry.key_.get(),
+                        is_delete,
+                        commit_ts_,
+                        hres);
                 }
             }
         }
