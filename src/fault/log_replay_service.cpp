@@ -71,7 +71,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 {
     std::vector<::txlog::ReplayMessage> msg_vec(size);
     std::vector<std::unique_ptr<ReplayLogCc>> cc_req_vec;
-    cc_req_vec.reserve(size);
 
     std::mutex mux;
     std::condition_variable cv;
@@ -85,37 +84,49 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
         uint32_t cc_ng_id = msg.cc_node_group_id();
         int64_t cc_ng_term = msg.cc_node_group_term();
-        if (msg.has_log_record())
+
+        // parse and process log records
+        const std::string &log_records = msg.binary_log_records();
+        size_t offset = 0;
+        while (offset < log_records.size())
         {
-            const ::txlog::ReplayRecordMsg &log_rec = msg.log_record();
-            uint64_t commit_ts = log_rec.commit_ts();
-            const std::string &blob = log_rec.log_blob();
+            // 8-byte for commit_ts
+            uint64_t commit_ts = *reinterpret_cast<const uint64_t *>(
+                log_records.data() + offset);
+            offset += sizeof(uint64_t);
+            // 4-byte for log_blob length
+            uint32_t blob_length = *reinterpret_cast<const uint32_t *>(
+                log_records.data() + offset);
+            offset += sizeof(uint32_t);
 
-            size_t offset = 0;
+            std::string_view blob(log_records.data() + offset, blob_length);
+            offset += blob_length;
 
-            while (offset < blob.size())
+            // parse log_blob
+            size_t blob_offset = 0;
+            while (blob_offset < blob.size())
             {
                 // 1-byte integer for the length of the table name
-                uint8_t table_name_len =
-                    *reinterpret_cast<const uint8_t *>(blob.data() + offset);
-                offset += sizeof(uint8_t);
+                uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint8_t);
 
                 // Table name string
-                std::string_view table_name_view(blob.data() + offset,
+                std::string_view table_name_view(blob.data() + blob_offset,
                                                  table_name_len);
-                offset += table_name_len;
+                blob_offset += table_name_len;
 
                 // 4-byte integer for the length of the serialized
                 // records from the table
-                uint32_t kv_len =
-                    *reinterpret_cast<const uint32_t *>(blob.data() + offset);
-                offset += sizeof(uint32_t);
+                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint32_t);
 
                 std::unique_ptr<ReplayLogCc> &cc_req =
                     cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
                         cc_ng_id,
                         table_name_view,
-                        std::string_view(blob.data() + offset, kv_len),
+                        std::string_view(blob.data() + blob_offset, kv_len),
                         commit_ts,
                         0,
                         mux,
@@ -129,28 +140,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 // at individual shards separately.
                 local_shards_.EnqueueCcRequest(0, cc_req.get());
 
-                offset += kv_len;
+                blob_offset += kv_len;
             }
         }
-        else if (msg.has_finish())
-        {
-            // mark log replay finish only when all preceding ReplayLogCc
-            // requests finished.
-            {
-                std::unique_lock<std::mutex> lk(mux);
-                cv.wait(lk,
-                        [&finish_log_cnt, &cc_req_vec]
-                        { return finish_log_cnt == cc_req_vec.size(); });
-            }
 
-            // receive finish message from one of log groups
-            const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
-            uint32_t lg_id = finish_msg.log_group_id();
-            Sharder::Instance().FinishLogReplay(cc_ng_id, cc_ng_term, lg_id);
-        }
-        else if (msg.has_schema_op())
+        // process schema_op_msgs
+        for (const ::txlog::ReplaySchemaMsg &schema_op_msg :
+             msg.schema_op_msgs())
         {
-            const ::txlog::ReplaySchemaMsg &schema_op_msg = msg.schema_op();
             const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
             std::string_view catalog_table_name_view(catalog_ccm_name);
 
@@ -175,6 +172,24 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             cv.wait(lk,
                     [&finish_log_cnt, &cc_req_vec]
                     { return finish_log_cnt == cc_req_vec.size(); });
+        }
+
+        // process finish message
+        if (msg.has_finish())
+        {
+            // mark log replay finish only when all preceding ReplayLogCc
+            // requests finished.
+            {
+                std::unique_lock<std::mutex> lk(mux);
+                cv.wait(lk,
+                        [&finish_log_cnt, &cc_req_vec]
+                        { return finish_log_cnt == cc_req_vec.size(); });
+            }
+
+            // receive finish message from one of log groups
+            const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
+            uint32_t lg_id = finish_msg.log_group_id();
+            Sharder::Instance().FinishLogReplay(cc_ng_id, cc_ng_term, lg_id);
         }
     }
 
