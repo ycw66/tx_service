@@ -348,6 +348,12 @@ public:
         CcEntry<CatalogKey, CatalogRecord> *cce =
             FindEmplace(table_key, req.CommitTs());
 
+        if (cce == nullptr)
+        {
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+        }
+
         if (schema_op_msg.stage() !=
             ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema)
         {

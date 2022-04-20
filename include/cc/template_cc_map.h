@@ -758,6 +758,12 @@ public:
             cce_ptr = FindEmplace(*target_key, 0);
         }
 
+        if (cce_ptr == nullptr)
+        {
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+        }
+
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
 
@@ -1995,7 +2001,12 @@ public:
             }
 
             CcEntry<KeyT, ValueT> *cce = FindEmplace(key, req.CommitTs());
-            assert(cce != nullptr);
+
+            if (cce == nullptr)
+            {
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
 
             if (cce->commit_ts_ >= req.CommitTs())
             {

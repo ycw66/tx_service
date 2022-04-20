@@ -720,7 +720,12 @@ public:
 
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = FindEmplace(
                 decoded_key.SKey(), decoded_key.PKey(), req.CommitTs());
-            assert(cce != nullptr);
+
+            if (cce == nullptr)
+            {
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
 
             // If the key exists in the cc map and its commit ts is
             // greater than that of the log record, skips installing the
