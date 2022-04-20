@@ -982,41 +982,13 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
 
     if (finish_cnt_.load(std::memory_order_acquire) == upload_cnt_)
     {
-        for (size_t nid = 0; nid < upload_cnt_; ++nid)
-        {
-            if (hd_results_[nid].ErrorCode() == -1)
-            {
-                if (retry_num_ == 0)
-                {
-                    Sharder::Instance().UpdateLeader(nid);
-                }
-                else if (retry_num_ > 0)
-                {
-                    ReRunOp(txm);
-                    return;
-                }
-            }
-        }
-
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
         for (size_t nid = 0; nid < upload_cnt_; ++nid)
         {
-            bool success = hd_results_[nid].ForceError();
-            if (success || hd_results_[nid].ErrorCode() == -1)
-            {
-                if (retry_num_ == 0)
-                {
-                    Sharder::Instance().UpdateLeader(nid);
-                }
-                else if (retry_num_ > 0)
-                {
-                    ReRunOp(txm);
-                    return;
-                }
-            }
+            hd_results_[nid].ForceError();
         }
         txm->PostProcess(*this);
     }
@@ -1053,7 +1025,8 @@ SchemaOp::SchemaOp(const TableName &table_name,
                    size_t image_len)
     : table_key_(table_name)
 {
-    catalog_rec_.SetSchemaImage(std::string(image_ptr, image_len));
+    image_str_ = std::string(image_ptr, image_len);
+    catalog_rec_.SetSchemaImage(image_str_);
 }
 
 UpsertTableOp::UpsertTableOp(const TableName &table_name,
@@ -1199,6 +1172,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
+                // set catalog_rec_'s binary_value_ to image_str since it could
+                // be set to TableSchemaView pointer in localshard.
+                catalog_rec_.SetSchemaImage(image_str_);
                 txm->PushOperation(&post_all_intent_op_);
                 txm->Process(post_all_intent_op_);
             }

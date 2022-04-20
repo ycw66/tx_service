@@ -86,6 +86,7 @@ public:
     void SetSchemaView(const TableSchemaView *view);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
+    void SetSchemaImage(std::string &schema_image);
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
 

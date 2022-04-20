@@ -172,6 +172,11 @@ void CatalogRecord::SetSchemaImage(std::string &&schema_image)
     binary_value_.emplace<1>(std::move(schema_image));
 }
 
+void CatalogRecord::SetSchemaImage(std::string &schema_image)
+{
+    binary_value_.emplace<1>(schema_image);
+}
+
 CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
 {
     if (this == &rhs)

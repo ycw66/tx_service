@@ -1108,6 +1108,9 @@ public:
                                 static_cast<remote::RemoteRead &>(req);
                             remote_req.Acknowledge();
                         }
+                        // ReadLock fail should stop the execution of current
+                        // ReadCc request since it's already in blocking queue.
+                        return false;
                     }
                 }
                 else

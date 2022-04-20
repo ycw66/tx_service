@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "catalog_key_record.h"
 #include "cc_handler.h"
 #include "log_closure.h"
@@ -301,6 +303,7 @@ struct SchemaOp : public TransactionOperation
 
     CatalogKey table_key_;
     CatalogRecord catalog_rec_;
+    std::string image_str_{""};
 };
 
 struct UpsertTableOp : public SchemaOp
