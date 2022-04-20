@@ -54,6 +54,5 @@ private:
     Status status_;
 
     TxService *tx_service_;
-    std::mutex ccm_mux_;
 };
 }  // namespace txservice

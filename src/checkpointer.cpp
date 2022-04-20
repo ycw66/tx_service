@@ -82,7 +82,8 @@ void Checkpointer::Ckpt()
     // Copy a list of TableName of native_ccms_
     std::unordered_set<TableName> tables;
     {
-        std::lock_guard<std::mutex> lk(ccm_mux_);
+        // Acquire lock on the first shard to block DDL.
+        std::lock_guard<std::mutex> lk(local_shards_.ShardMutex(0));
         for (const auto &ccm_pair : shard.native_ccms_)
         {
             tables.emplace(ccm_pair.first);
@@ -104,6 +105,9 @@ void Checkpointer::Ckpt()
         TransactionExecution *ckpt_txm = tx_service_->NewTx();
 
         InitTxRequest init_req;
+        // Set isolation level to RepeatableRead to ensure the readlock will be
+        // set during the execution of the following ReadTxRequest.
+        init_req.iso_level_ = IsolationLevel::RepeatableRead;
         init_req.Reset();
         ckpt_txm->Execute(&init_req);
         init_req.Wait();
@@ -124,6 +128,11 @@ void Checkpointer::Ckpt()
 
         ckpt_txm->Execute(&read_req);
         read_req.Wait();
+
+        if (read_req.Result() != RecordStatus::Normal)
+        {
+            continue;
+        }
 
         ckpt_vec.clear();
         CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, ckpt_vec);
@@ -207,15 +216,10 @@ void Checkpointer::Run()
     {
         if (!request_ckpt_ && status_ == Status::Active)
         {
-            cv_.wait_for(lk,
-                         10s,
-                         [this]
-                         {
-                             // mannully trigger checkpoint
-                             CODE_FAULT_INJECTOR("mannully_trigger_checkpoint",
-                                                 Notify());
-                             return status_ != Status::Active || request_ckpt_;
-                         });
+            cv_.wait_for(
+                lk,
+                10s,
+                [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
         lk.unlock();

@@ -49,6 +49,7 @@ CcShard::CcShard(uint16_t core_id,
         thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
     }
 
+    std::lock_guard<std::mutex> lk(shard_mux_);
     native_ccms_.try_emplace(catalog_ccm_name,
                              std::make_unique<CatalogCcMap>(this));
 }
@@ -458,6 +459,7 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
 
     if (ng_id == node_id_)
     {
+        std::lock_guard<std::mutex> lk(shard_mux_);
         auto ccm_it = native_ccms_.try_emplace(
             table_name, catalog_factory_->CreatePkCcMap(table_schema, this));
         return ccm_it.first->second.get();
@@ -479,6 +481,7 @@ CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
 {
     if (ng_id == node_id_)
     {
+        std::lock_guard<std::mutex> lk(shard_mux_);
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
             catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
@@ -500,6 +503,7 @@ void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
 {
     if (ng_id == node_id_)
     {
+        std::lock_guard<std::mutex> lk(shard_mux_);
         native_ccms_.erase(table_name);
     }
     else
@@ -523,6 +527,7 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
 {
     if (ng_id == node_id_)
     {
+        std::lock_guard<std::mutex> lk(shard_mux_);
         native_ccms_.try_emplace(
             range_table_name,
             catalog_factory_->CreatePkRangeMap(range_table_name, this));
