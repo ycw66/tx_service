@@ -1,5 +1,7 @@
 #pragma once
 
+#include <brpc/controller.h>
+
 #include "../log_service/proto/raft_log.pb.h"
 
 namespace txservice

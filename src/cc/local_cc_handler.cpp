@@ -736,6 +736,13 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
     TEntry &tx = ccs.NewTx();
 
     int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+
+    // Code injection for test InitTxRequest failure
+    CODE_FAULT_INJECTOR("init_tx_error", {
+        // This injection just run once
+        term = -2;
+    });
+
     if (term >= 0)
     {
         InitTxResult &init_tx_res = hres.Value();
