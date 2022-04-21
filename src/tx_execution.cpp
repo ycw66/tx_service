@@ -972,17 +972,13 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
         const ScanTuple *cc_scan_tuple = scanner.Current();
         while (cc_scan_tuple != nullptr)
         {
-            if (cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
-                iso_level_ >= IsolationLevel::RepeatableRead)
+            if (scanner.IndexType() != ScanIndexType::Secondary)
             {
-                if (scanner.IndexType() != ScanIndexType::Secondary)
-                {
-                    rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                    cc_scan_tuple->key_ts_,
-                                    protocol_,
-                                    ReadType::Inside,
-                                    LockType::ReadLock);
-                }
+                rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                cc_scan_tuple->key_ts_,
+                                protocol_,
+                                ReadType::Inside,
+                                LockType::ReadLock);
             }
         }
     }
