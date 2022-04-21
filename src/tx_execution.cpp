@@ -1185,6 +1185,8 @@ void TransactionExecution::Process(ValidateOperation &validate)
 
         ++offset;
     }
+
+    StartTiming();
 }
 
 void TransactionExecution::PostProcess(ValidateOperation &validate)

@@ -920,6 +920,7 @@ public:
 
     bool Execute(PostReadCc &req) override
     {
+        ACTION_FAULT_INJECTOR("before_post_read");
         auto hd_res = req.Result();
 
         const CcEntryAddr &cce_addr = *req.CceAddr();
