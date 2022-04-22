@@ -125,12 +125,17 @@ void Checkpointer::Ckpt()
                      ReadType::Inside,
                      LockType::ReadLock,
                      true);
-
         ckpt_txm->Execute(&read_req);
         read_req.Wait();
 
-        if (read_req.Result() != RecordStatus::Normal)
+        if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
         {
+            // Use CommitTxRequest to release read lock.
+            CommitTxRequest commit_req;
+            commit_req.Reset();
+            ckpt_txm->Execute(&commit_req);
+            commit_req.Wait();
+            assert(commit_req.Result() == true);
             continue;
         }
 
