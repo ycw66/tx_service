@@ -1069,16 +1069,15 @@ public:
         else if (cce_addr.CcePtr() == 0)
         {
             const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+            KeyT decoded_key;
             if (look_key == nullptr)
             {
                 assert(req.KeyBlob() != nullptr);
-                KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
                     req.KeyBlob()->data(), offset, key_schema_);
                 look_key = &decoded_key;
             }
-
             cce = FindEmplace(*look_key, req.ReadTimestamp());
 
             // The read request accesses a new key not in the cc map. But
