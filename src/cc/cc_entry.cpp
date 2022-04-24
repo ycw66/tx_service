@@ -9,13 +9,13 @@ LruEntry::LruEntry(CcMap *parent) : parent_map_(parent)
     if (parent != nullptr)
     {
         uint64_t now_ts = parent->shard_->Now();
-        last_vali_ts_ = now_ts;
-        gap_last_vali_ts_ = now_ts;
+        last_read_ts_ = now_ts;
+        gap_last_read_ts_ = now_ts;
     }
     else
     {
-        last_vali_ts_ = 1;
-        gap_last_vali_ts_ = 1;
+        last_read_ts_ = 1;
+        gap_last_read_ts_ = 1;
     }
 }
 

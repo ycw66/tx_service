@@ -138,6 +138,17 @@ public:
         return nullptr;
     }
 
+    const ReadSetEntry *FindRead(const CcEntryAddr &cce_addr) const
+    {
+        auto key_it = rset_.find(cce_addr);
+        if (key_it != rset_.end())
+        {
+            return &key_it->second;
+        }
+
+        return nullptr;
+    }
+
     /*ScanSetEntry &NewScanEntry(const TableName &tabname, TxKey *key)
     {
         auto find_iter = sset_.find(tabname);

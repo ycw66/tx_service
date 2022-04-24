@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cmath>
+#include <algorithm>  // std::max
 #include <unordered_set>
 
 #include "cc_entry.h"
@@ -176,7 +176,7 @@ public:
                                                    std::move(insert_entry));
             // Cc entry address has been updated. Only reset the result's last
             // validation ts.
-            acquire_key_result.last_vali_ts_ = cc_entry.gap_last_vali_ts_;
+            acquire_key_result.last_vali_ts_ = cc_entry.gap_last_read_ts_;
             acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
             hd_res->SetFinished();
         }
@@ -206,7 +206,7 @@ public:
                 // relies on this property to avoid picking a checkpoint ts in
                 // this shard that may overlap with the ongoing tx.
                 acquire_key_result.last_vali_ts_ =
-                    std::max(cc_entry.last_vali_ts_, lock_ts);
+                    std::max(cc_entry.last_read_ts_, lock_ts);
                 acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
                 hd_res->SetFinished();
             }
@@ -345,7 +345,7 @@ public:
 
                 new_cce->gap_commit_ts_ = commit_ts;
                 new_cce->commit_ts_ = commit_ts;
-                new_cce->gap_last_vali_ts_ = prior_cce.gap_last_vali_ts_;
+                new_cce->gap_last_read_ts_ = prior_cce.gap_last_read_ts_;
 
                 prior_cce.gap_commit_ts_ = commit_ts;
                 prior_cce.insert_intention_set_.erase(
@@ -559,7 +559,7 @@ public:
             // Cc entry address has been updated. Only reset the result's last
             // validation ts.
             acquire_all_result.last_vali_ts_ = std::max(
-                cc_entry.gap_last_vali_ts_, acquire_all_result.last_vali_ts_);
+                cc_entry.gap_last_read_ts_, acquire_all_result.last_vali_ts_);
             acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
             acquire_all_result.node_term_ = ng_term;
             hd_res->SetFinished();
@@ -598,12 +598,12 @@ public:
 
                 if (shard_->core_id_ == 0)
                 {
-                    acquire_all_result.last_vali_ts_ = cc_entry.last_vali_ts_;
+                    acquire_all_result.last_vali_ts_ = cc_entry.last_read_ts_;
                 }
                 else
                 {
                     acquire_all_result.last_vali_ts_ =
-                        std::max(cc_entry.last_vali_ts_,
+                        std::max(cc_entry.last_read_ts_,
                                  acquire_all_result.last_vali_ts_);
                 }
 
@@ -814,7 +814,7 @@ public:
 
                     new_cce->gap_commit_ts_ = commit_ts;
                     new_cce->commit_ts_ = commit_ts;
-                    new_cce->gap_last_vali_ts_ = cce_ptr->gap_last_vali_ts_;
+                    new_cce->gap_last_read_ts_ = cce_ptr->gap_last_read_ts_;
 
                     cce_ptr->gap_commit_ts_ = commit_ts;
                     cce_ptr->insert_intention_set_.erase(
@@ -946,11 +946,13 @@ public:
             (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_))
         {
             // 2PL is a blocking protocol. Once a read lock is acquired, no one
-            // can possibly change the key. So, this branch is only reachable
-            // for OCC/MVCC protocols validating version stability.
+            // can possibly change the key. There is no validation step under
+            // MVCC protocol.(MVCC using history versions to ensure repeatable
+            // read.) So, this branch is only reachable for OCC protocol
+            // validating version stability.
             assert(req.Protocol() == CcProtocol::OCC);
 
-            // Releases intentions for OCC/MVCC protocols.
+            // Releases intentions for OCC protocols.
             if (key_ts > 0)
             {
                 cc_entry.key_lock_.ReleaseReadIntent(txn);
@@ -961,17 +963,16 @@ public:
                 cc_entry.gap_lock_.ReleaseReadIntent(txn);
             }
 
-            hd_res->SetError(1);
+            hd_res->SetError(1);  // broken repeatable read, set error.
         }
-        else if (req.Protocol() == CcProtocol::OCC ||
-                 req.Protocol() == CcProtocol::MVCC)
+        else if (req.Protocol() == CcProtocol::OCC)
         {
             std::vector<TxId> &conflicting_txs = hd_res->Value();
 
             if (gap_ts > 0)
             {
-                cc_entry.gap_last_vali_ts_ =
-                    std::max(cc_entry.gap_last_vali_ts_, commit_ts);
+                cc_entry.gap_last_read_ts_ =
+                    std::max(cc_entry.gap_last_read_ts_, commit_ts);
 
                 conflicting_txs.reserve(cc_entry.insert_intention_set_.size() +
                                         1);
@@ -987,8 +988,8 @@ public:
 
             if (key_ts > 0)
             {
-                cc_entry.last_vali_ts_ =
-                    std::max(cc_entry.last_vali_ts_, commit_ts);
+                cc_entry.last_read_ts_ =
+                    std::max(cc_entry.last_read_ts_, commit_ts);
 
                 if (cc_entry.key_lock_.HasWriteLock())
                 {
@@ -1008,21 +1009,21 @@ public:
             // lock before the log is persisted. This difference demands
             // that future write transactions modifying this key cannot commit
             // prior to this read tx. This is achieved via updating the
-            // last_vali_ts field of the cc entry, which pushes future
+            // last_read_ts field of the cc entry, which pushes future
             // transactions' commit timestamps larger than the largest commit
             // timestamp of all read transactions that have released the read
             // lock on the key.
 
             if (gap_ts > 0)
             {
-                cc_entry.gap_last_vali_ts_ =
-                    std::max(cc_entry.gap_last_vali_ts_, commit_ts);
+                cc_entry.gap_last_read_ts_ =
+                    std::max(cc_entry.gap_last_read_ts_, commit_ts);
             }
 
             if (key_ts > 0)
             {
-                cc_entry.last_vali_ts_ =
-                    std::max(cc_entry.last_vali_ts_, commit_ts);
+                cc_entry.last_read_ts_ =
+                    std::max(cc_entry.last_read_ts_, commit_ts);
             }
 
             // For 2PL, releasing read locks may spend extra cycles to

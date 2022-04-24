@@ -6,6 +6,8 @@
 #include <mutex>
 #include <thread>
 
+#include "error_messages.h"
+
 namespace txservice
 {
 enum struct TxResultStatus
@@ -28,7 +30,12 @@ template <typename T>
 class TxResult
 {
 public:
-    TxResult() : value_(), status_(TxResultStatus::Unknown), mutex_(), cv_()
+    TxResult()
+        : value_(),
+          status_(TxResultStatus::Unknown),
+          error_code_(TxErrorCode::NO_ERROR),
+          mutex_(),
+          cv_()
     {
     }
 
@@ -53,6 +60,11 @@ public:
         return value_;
     }
 
+    TxErrorCode ErrorCode() const
+    {
+        return error_code_;
+    }
+
     void Finish(const T &val)
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -69,10 +81,11 @@ public:
         cv_.notify_one();
     }
 
-    void FinishError()
+    void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
         std::lock_guard<std::mutex> lk(mutex_);
         status_ = TxResultStatus::Error;
+        error_code_ = err_code;
         cv_.notify_one();
     }
 
@@ -134,6 +147,7 @@ public:
 private:
     T value_;
     TxResultStatus status_;
+    TxErrorCode error_code_;
     std::mutex mutex_;
     std::condition_variable cv_;
 };

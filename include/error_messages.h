@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,7 @@ namespace txservice
 enum struct TxErrorCode
 {
     NO_ERROR = 0,
+    UNDEFINED_ERR,
     // Fails to acquire write locks due to write-Write conflicts.
     WRITE_WRITE_CONFLICT,
     // Acquairing write locks times out.
@@ -30,8 +32,14 @@ enum struct TxErrorCode
     TX_BOUND_FOLLOWER,
     DATA_STORE_READ_ERR,
     DATA_STORE_WRITE_ERR,
-    DATA_STORE_CONNECT_ERR
+    DATA_STORE_CONNECT_ERR,
+    OCC_BREAK_REPEATABLE_READ
 };
 
-static const std::vector<std::string> error_messages{""};
+static const std::map<TxErrorCode, std::string> error_messages{
+    {TxErrorCode::UNDEFINED_ERR, "Undefined error."},
+    {TxErrorCode::OCC_BREAK_REPEATABLE_READ,
+     "OCC break repeatable read isolation level."},
+};
+
 }  // namespace txservice

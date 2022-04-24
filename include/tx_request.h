@@ -46,6 +46,21 @@ struct TemplateTxRequest : TxRequest
         return tx_result_.IsError();
     }
 
+    TxErrorCode ErrorCode() const
+    {
+        return tx_result_.ErrorCode();
+    }
+
+    std::string ErrorMsg() const
+    {
+        auto it = error_messages.find(ErrorCode());
+        if (it != error_messages.end())
+        {
+            return it->second;
+        }
+        return "";
+    }
+
     void Wait()
     {
         tx_result_.Wait();

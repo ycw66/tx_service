@@ -527,11 +527,23 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         if (read_res.rec_status_ != RecordStatus::RemoteUnknown &&
             read_.iso_level_ >= IsolationLevel::RepeatableRead)
         {
-            rw_set_.AddRead(read_res.cce_addr_,
-                            read_res.ts_,
-                            read_.protocol_,
-                            read_.read_type_,
-                            read_.read_tx_req_->lock_type_);
+            const ReadSetEntry *prev_read =
+                rw_set_.FindRead(read_res.cce_addr_);
+            if (prev_read != nullptr && prev_read->version_ts_ != read_res.ts_)
+            {
+                // this branch is only reachable for OCC protocol
+                assert(read_.protocol_ == CcProtocol::OCC);
+                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                return;
+            }
+            else
+            {
+                rw_set_.AddRead(read_res.cce_addr_,
+                                read_res.ts_,
+                                read_.protocol_,
+                                read_.read_type_,
+                                read_.read_tx_req_->lock_type_);
+            }
         }
 
         if (read_.read_type_ == ReadType::Inside &&

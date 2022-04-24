@@ -1,6 +1,6 @@
 #pragma once
 
-#include <algorithm>
+#include <algorithm>  // std::max
 #include <atomic>
 #include <cassert>
 #include <deque>
@@ -95,10 +95,21 @@ public:
     NonBlockingLock gap_lock_;
 
     uint64_t commit_ts_{1};
-    uint64_t last_vali_ts_{1};
+    // "last_read_ts_" is updated in tow cases:
+    // (1) Read under MVCC+SnapshotIsolation: it will be updated to
+    // max{read_ts, last_read_ts_} if latest version of ccentry less than
+    // read timestamp, which pushes future transactions' commit
+    // timestamps larger than the read timestamp of the current read
+    // transaction;
+    //(2) PostRead under OCC/LOCKING+RepeatableRead: it will be updated to
+    // max{commit_ts,last_read_ts_} after releasing read intent/lock, which
+    // pushes future transactions' commit timestamps larger than the largest
+    // commit timestamp of all read transactions that have released the read
+    // lock on the key;
+    uint64_t last_read_ts_{1};
 
     uint64_t gap_commit_ts_{1};
-    uint64_t gap_last_vali_ts_{1};
+    uint64_t gap_last_read_ts_{1};
 
     // Accumulated size of key-value pairs committed since last checkpoint.
     size_t estimate_ccentry_log_size_{0};
@@ -176,7 +187,7 @@ public:
         mem_usage_ += 5 * ptr_size;
         // two NonBlockingLocks
         mem_usage_ += key_lock_.MemUsage() + gap_lock_.MemUsage();
-        // size of commit_ts_, last_vali_ts_, gap_commit_ts_, gap_last_vali_ts_
+        // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_
         // and ckpt_ts_
         mem_usage_ += 5 * sizeof(uint64_t);
 
@@ -358,7 +369,7 @@ public:
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
             // same transaction will read the new updated ccentry.
-            last_vali_ts_ = std::max(ts, last_vali_ts_);
+            last_read_ts_ = std::max(ts, last_read_ts_);
             if (payload_status_ == RecordStatus::Normal)
             {
                 rec.payload_ptr_ = &payload_;
