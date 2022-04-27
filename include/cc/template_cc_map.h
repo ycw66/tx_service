@@ -29,9 +29,10 @@ public:
     virtual ~TemplateCcMap() = default;
 
     TemplateCcMap(CcShard *shard,
+                  uint64_t schema_ts,
                   const Schema *key_schema = nullptr,
                   const Schema *rec_schema = nullptr)
-        : CcMap(shard),
+        : CcMap(shard, schema_ts),
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
@@ -1068,17 +1069,20 @@ public:
         }
         else if (cce_addr.CcePtr() == 0)
         {
-            const KeyT *look_key = static_cast<const KeyT *>(req.Key());
-            KeyT decoded_key;
-            if (look_key == nullptr)
+            if (req.Key() != nullptr)
+            {
+                const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+                cce = FindEmplace(*look_key, req.ReadTimestamp());
+            }
+            else
             {
                 assert(req.KeyBlob() != nullptr);
+                KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
                     req.KeyBlob()->data(), offset, key_schema_);
-                look_key = &decoded_key;
+                cce = FindEmplace(decoded_key, req.ReadTimestamp());
             }
-            cce = FindEmplace(*look_key, req.ReadTimestamp());
 
             // The read request accesses a new key not in the cc map. But
             // the cc map is full and cannot allocates a new entry.
@@ -1117,6 +1121,7 @@ public:
                         }
                         // ReadLock fail should stop the execution of current
                         // ReadCc request since it's already in blocking queue.
+
                         return false;
                     }
                 }
@@ -1160,11 +1165,13 @@ public:
                     cce->payload_.Deserialize(req.RecordBlob()->data(), offset);
                 }
                 cce->payload_status_ = RecordStatus::Normal;
+                cce->commit_ts_ = req.ReadTimestamp();
             }
             // set tomb ccentry to prevent access data store again.
             else if (req.Type() == ReadType::OutsideDeleted)
             {
                 cce->payload_status_ = RecordStatus::Deleted;
+                cce->commit_ts_ = req.ReadTimestamp();
             }
         }
 
@@ -1256,6 +1263,7 @@ public:
                 cce->payload_.Deserialize(req.rec_str_->data(), offset);
                 cce->payload_status_ = RecordStatus::Normal;
             }
+            cce->commit_ts_ = req.CommitTs();
         }
 
         req.Finish();
@@ -2164,7 +2172,7 @@ public:
     std::unique_ptr<CcMap> Clone() const override
     {
         return std::make_unique<TemplateCcMap<KeyT, ValueT>>(
-            shard_, key_schema_, record_schema_);
+            shard_, commit_ts_, key_schema_, record_schema_);
     }
 
 protected:

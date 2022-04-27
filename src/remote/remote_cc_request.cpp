@@ -740,6 +740,7 @@ void txservice::remote::RemoteScanNextBatch::Set(
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_next.lock_type());
+    cce_ptr_ = nullptr;
 
     const LruEntry *prior_lru_entry =
         reinterpret_cast<const LruEntry *>(prior_cce_addr_);
@@ -833,6 +834,7 @@ void txservice::remote::RemoteReadOutside::Set(
     cce_addr_.SetCce(
         req.cce_addr().cce_ptr(), req.cce_addr().term(), req.node_group_id());
     is_deleted_ = req.is_deleted();
+    commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
 
     input_msg_ = std::move(input_msg);

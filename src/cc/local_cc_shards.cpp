@@ -160,6 +160,20 @@ const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name)
                : catalog_it->second.SchemaView();
 }
 
+std::unordered_set<TableName> LocalCcShards::CatalogTableNames()
+{
+    std::unordered_set<TableName> table_set;
+    std::shared_lock<std::shared_mutex> lk(catalog_mux_);
+    for (auto catalog_it = table_catalogs_.begin();
+         catalog_it != table_catalogs_.end();
+         ++catalog_it)
+    {
+        table_set.emplace(catalog_it->first);
+    }
+
+    return table_set;
+}
+
 void LocalCcShards::CreateSchemaRecoveryTx(
     const ::txlog::SchemaOpMessage &schema_op_msg,
     uint64_t txn,

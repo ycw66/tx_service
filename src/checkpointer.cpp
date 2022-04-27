@@ -79,16 +79,8 @@ void Checkpointer::Ckpt()
     const CcShard &shard = *local_shards_.cc_shards_[0];
     bool flushed = true;
 
-    // Copy a list of TableName of native_ccms_
-    std::unordered_set<TableName> tables;
-    {
-        // Acquire lock on the first shard to block DDL.
-        std::lock_guard<std::mutex> lk(local_shards_.ShardMutex(0));
-        for (const auto &ccm_pair : shard.native_ccms_)
-        {
-            tables.emplace(ccm_pair.first);
-        }
-    }
+    // Copy a set of table names
+    std::unordered_set<TableName> tables = local_shards_.CatalogTableNames();
 
     // Iteratate all the tables and execute CkptScanCc requests on each
     // ccshard on all the ccmaps. The result of CkptScanCc is stored in
@@ -260,6 +252,7 @@ void Checkpointer::Terminate()
 {
     {
         std::scoped_lock<std::mutex> lk(mux_);
+        assert(status_ == Status::Active);
         status_ = Status::Terminating;
     }
     cv_.notify_one();

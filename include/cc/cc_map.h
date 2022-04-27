@@ -41,7 +41,8 @@ class CcMap
 public:
     using uptr = std::unique_ptr<CcMap>;
 
-    CcMap(CcShard *shard) : shard_(shard)
+    CcMap(CcShard *shard, uint64_t schema_ts)
+        : shard_(shard), commit_ts_(schema_ts)
     {
     }
 

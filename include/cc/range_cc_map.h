@@ -32,8 +32,15 @@ public:
     RangeCcMap(const RangeCcMap &rhs) = delete;
     ~RangeCcMap() = default;
 
+    /**
+     * @brief Construct a new range cc map object. The range cc map has no
+     * schema, so the schema's timestamp is set to 1 (the beginning of history).
+     *
+     * @param range_table_name
+     * @param shard
+     */
     RangeCcMap(const TableName &range_table_name, CcShard *shard)
-        : TemplateCcMap<KeyT, RangeRecord>(shard)
+        : TemplateCcMap<KeyT, RangeRecord>(shard, 1)
     {
         const std::map<uint32_t, TableRangeEntry> *ranges =
             CcMap::shard_->GetTableRanges(range_table_name);

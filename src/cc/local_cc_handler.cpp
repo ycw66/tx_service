@@ -320,6 +320,7 @@ void txservice::LocalCcHandler::ReadOutside(
     int64_t tx_term,
     TxRecord &rec,
     bool is_deleted,
+    uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     CcHandlerResult<ReadKeyResult> &hres)
 {
@@ -353,7 +354,7 @@ void txservice::LocalCcHandler::ReadOutside(
                  read_type,
                  0,
                  tx_term,
-                 1,
+                 commit_ts,
                  &hres,
                  IsolationLevel::ReadCommitted,
                  CcProtocol::OCC,
@@ -366,7 +367,7 @@ void txservice::LocalCcHandler::ReadOutside(
     }
     else
     {
-        remote_hd_.ReadOutside(tx_term, rec, is_deleted, cce_addr);
+        remote_hd_.ReadOutside(tx_term, rec, is_deleted, commit_ts, cce_addr);
         // we don't care whether the remote request succeeds or not,
         // since it's just a fill of cache.
         hres.Value().rec_status_ = RecordStatus::RemoteUnknown;
@@ -386,15 +387,17 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           CcProtocol proto,
                                           LockType lock_type)
 {
-    hres.Value().rec_ = &record;
-    uint32_t shard_code = tx_number >> 32L;
-    uint32_t cc_ng_id = shard_code >> 10;
-    CcEntryAddr &cce_addr = hres.Value().cce_addr_;
-    cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, -1);
+    ReadKeyResult &read_result = hres.Value();
+    read_result.rec_ = &record;
+    read_result.rec_status_ = RecordStatus::Unknown;
+    read_result.ts_ = 0;
+    CcEntryAddr &cce_addr = read_result.cce_addr_;
 
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
     int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
+    cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, term);
 
     if (term < 0)

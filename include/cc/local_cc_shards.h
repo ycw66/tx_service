@@ -207,6 +207,8 @@ public:
 
     const TableSchemaView *GetCatalog(const std::string &table_name);
 
+    std::unordered_set<TableName> CatalogTableNames();
+
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
                                 uint64_t txn,
                                 int64_t tx_term,

@@ -32,10 +32,12 @@ public:
         uint64_t version) = 0;
 
     virtual CcMap::uptr CreatePkCcMap(const TableSchema *table_schema,
+                                      uint64_t schema_ts,
                                       CcShard *shard) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
+                                      uint64_t schema_ts,
                                       CcShard *shard) = 0;
 
     virtual CcMap::uptr CreatePkRangeMap(const TableName &base_table,

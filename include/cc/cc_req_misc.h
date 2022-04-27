@@ -42,6 +42,11 @@ public:
         return commit_ts_;
     }
 
+    const TableName &CatalogName() const
+    {
+        return table_name_;
+    }
+
     void SetFinish(RecordStatus status, int err);
 
 private:

@@ -108,12 +108,18 @@ public:
         return cce_addr_;
     }
 
+    uint64_t CommitTs() const
+    {
+        return commit_ts_;
+    }
+
 private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
     const std::string *rec_str_{nullptr};
     bool is_deleted_{false};
+    uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
 
     template <typename KeyT, typename ValueT>

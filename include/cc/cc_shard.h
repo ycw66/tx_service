@@ -318,11 +318,13 @@ public:
 
     CcMap *CreatePkCcMap(const TableName &table_name,
                          const TableSchema *table_schema,
-                         NodeGroupId ng_id);
+                         NodeGroupId ng_id,
+                         uint64_t schema_ts);
 
     CcMap *CreateSkCcMap(const TableName &index_name,
                          const TableSchema *table_schema,
-                         NodeGroupId ng_id);
+                         NodeGroupId ng_id,
+                         uint64_t schema_ts);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 

@@ -191,7 +191,8 @@ message ReadOutsideRequest {
     uint32 node_group_id = 1;
 	bytes record = 2;
 	bool is_deleted = 3;
-	CceAddr_msg cce_addr = 4;
+	uint64 commit_ts = 4;
+	CceAddr_msg cce_addr = 5;
 }
 
 message PostCommitRequest {

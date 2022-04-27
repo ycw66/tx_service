@@ -139,13 +139,14 @@ struct ReadOutsideTxRequest
     : public TemplateTxRequest<ReadOutsideTxRequest, RecordStatus>
 {
 public:
-    ReadOutsideTxRequest(TxRecord &rec, bool is_deleted)
-        : rec_(rec), is_deleted_(is_deleted)
+    ReadOutsideTxRequest(TxRecord &rec, bool is_deleted, uint64_t commit_ts)
+        : rec_(rec), is_deleted_(is_deleted), commit_ts_(commit_ts)
     {
     }
 
     TxRecord &rec_;
     bool is_deleted_;
+    uint64_t commit_ts_;
 };
 
 struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>

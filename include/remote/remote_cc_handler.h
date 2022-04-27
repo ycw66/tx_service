@@ -93,6 +93,7 @@ public:
     void ReadOutside(int64_t tx_term,
                      const TxRecord &record,
                      bool is_deleted,
+                     uint64_t commit_ts,
                      const CcEntryAddr &cce_addr);
 
     void ScanOpen(uint32_t src_node_id,

@@ -297,6 +297,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     int64_t tx_term,
     const TxRecord &record,
     bool is_deleted,
+    uint64_t commit_ts,
     const CcEntryAddr &cce_addr)
 {
     CcMessage send_msg;
@@ -315,6 +316,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     cce_msg->set_term(cce_addr.Term());
 
     read_outside->set_is_deleted(is_deleted);
+    read_outside->set_commit_ts(commit_ts);
 
     read_outside->clear_record();
     if (!is_deleted)

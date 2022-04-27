@@ -123,9 +123,10 @@ public:
     virtual ~SkCcMap() = default;
 
     SkCcMap(CcShard *shard,
+            uint64_t schema_ts,
             const Schema *sk_schema = nullptr,
             const Schema *pk_schema = nullptr)
-        : CcMap(shard),
+        : CcMap(shard, schema_ts),
           neg_inf_(this),
           pos_inf_(this),
           compound_schema_(sk_schema, pk_schema)
@@ -904,6 +905,7 @@ public:
     {
         return std::make_unique<SkCcMap<SkT, PkT>>(
             shard_,
+            commit_ts_,
             compound_schema_.sk_schema_.get(),
             compound_schema_.pk_schema_.get());
     }

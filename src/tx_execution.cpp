@@ -489,12 +489,15 @@ void TransactionExecution::Process(ReadOperation &read)
     {
         TxRecord &record = read.read_outside_tx_req_->rec_;
         bool is_deleted = read.read_outside_tx_req_->is_deleted_;
-
         rw_set_.cache_rec_ = record.Clone();
+
+        rw_set_.UpdateRead(cache_miss_read_cce_addr_,
+                           read.read_outside_tx_req_->commit_ts_);
 
         handler->ReadOutside(tx_term_,
                              record,
                              is_deleted,
+                             read.read_outside_tx_req_->commit_ts_,
                              cache_miss_read_cce_addr_,
                              read.hd_result_);
 
@@ -524,7 +527,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             rw_set_.cache_rec_ = read_res.rec_->Clone();
         }
 
-        if (read_res.rec_status_ != RecordStatus::RemoteUnknown &&
+        if (read_.read_type_ == ReadType::Inside &&
             read_.iso_level_ >= IsolationLevel::RepeatableRead)
         {
             const ReadSetEntry *prev_read =
@@ -541,7 +544,6 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 rw_set_.AddRead(read_res.cce_addr_,
                                 read_res.ts_,
                                 read_.protocol_,
-                                read_.read_type_,
                                 read_.read_tx_req_->lock_type_);
             }
         }
@@ -753,9 +755,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     // Lock need to be released when transaction be committed, so add scan
     // result into transaction read set
     if (cc_scan_tuple != nullptr &&
-        cc_scan_tuple->rec_status_ != RecordStatus::RemoteUnknown &&
         iso_level_ >= IsolationLevel::RepeatableRead)
     {
+        LockType lk_type = protocol_ == CcProtocol::Locking
+                               ? LockType::ReadLock
+                               : LockType::ReadIntent;
+
         // Not necessary to add read (and lock) on index table cc entry, unless
         // iso level is serializable
         if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
@@ -763,8 +768,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                             cc_scan_tuple->key_ts_,
                             protocol_,
-                            ReadType::Inside,
-                            LockType::ReadLock);
+                            lk_type);
         }
     }
 
@@ -963,28 +967,35 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
 void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 {
+    auto scan_it = scans_.find(alias);
+    assert(scan_it != scans_.end());
+    CcScanner &scanner = *scan_it->second;
+
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
-    if (iso_level_ >= IsolationLevel::RepeatableRead)
+    if (iso_level_ >= IsolationLevel::RepeatableRead &&
+        scanner.IndexType() != ScanIndexType::Secondary)
     {
-        auto scan_it = scans_.find(alias);
-        CcScanner &scanner = *scan_it->second;
-        const ScanTuple *cc_scan_tuple = scanner.Current();
-        while (cc_scan_tuple != nullptr)
-        {
-            if (scanner.IndexType() != ScanIndexType::Secondary)
-            {
-                rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                cc_scan_tuple->key_ts_,
-                                protocol_,
-                                ReadType::Inside,
-                                LockType::ReadLock);
-            }
-        }
+        //
+        // The following code is temporarily commented out, as we lack the
+        // appropriate API of the scanner to drain cached tuples in the scanner.
+        //
+        // LockType lk_type = protocol_ == CcProtocol::Locking
+        //                        ? LockType::ReadLock
+        //                        : LockType::ReadIntent;
+
+        // const ScanTuple *cc_scan_tuple = scanner.Current();
+        // while (cc_scan_tuple != nullptr)
+        // {
+        //     rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+        //                     cc_scan_tuple->key_ts_,
+        //                     protocol_,
+        //                     lk_type);
+        // }
     }
 
     handler->ScanClose(alias, end_key, false);
-    scans_.erase(alias);
+    scans_.erase(scan_it);
     void_resp_->Finish(void_);
 }
 

@@ -12,7 +12,7 @@ enum struct RecordStatus
     /// <summary>
     /// The record returned from the cc map is the newest committed value.
     /// </summary>
-    Normal,
+    Normal = 0,
     /// <summary>
     /// A tx starts concurrency control for the key, but the key's record is
     /// unknown and needs to be retrieved from the data store.

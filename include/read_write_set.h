@@ -49,22 +49,30 @@ public:
     void AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
                  CcProtocol proto,
-                 ReadType read_type,
                  LockType lock_type)
     {
-        if (read_type == ReadType::Inside)
+        rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
+    }
+
+    /**
+     * @brief Updates a data item's timestamp in the read set. The method is
+     * called after a read-outside request. A read-outside request immediately
+     * follows a read-inside request and is only issued if the initial
+     * read-inside returns a record whose value is unknown. The read-outside
+     * request retrieves the value and its commit timestamp from the data store
+     * and updates the timestamp in the read set.
+     *
+     * @param cce_addr Cc entry address
+     * @param version_ts Commit timestamp of the value retrieved from the data
+     * store.
+     */
+    void UpdateRead(const CcEntryAddr &cce_addr, uint64_t version_ts)
+    {
+        auto read_it = rset_.find(cce_addr);
+        if (read_it != rset_.end())
         {
-            rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
-        }
-        else
-        {
-            // A read-outside request immediately follows a read-inside request
-            // and is only issued if the initial read-inside returns a record
-            // whose value is unknown. If the read-outside request returns a
-            // version newer than the value in the data store, uses the new ts
-            // for validation.
-            rset_.insert_or_assign(cce_addr,
-                                   ReadSetEntry(read_ts, proto, lock_type));
+            ReadSetEntry &rs_entry = read_it->second;
+            rs_entry.version_ts_ = version_ts;
         }
     }
 

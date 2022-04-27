@@ -453,15 +453,15 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
 
 CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                               const TableSchema *table_schema,
-                              NodeGroupId ng_id)
+                              NodeGroupId ng_id,
+                              uint64_t schema_ts)
 {
-    std::string ranges_image;
-
     if (ng_id == node_id_)
     {
         std::lock_guard<std::mutex> lk(shard_mux_);
         auto ccm_it = native_ccms_.try_emplace(
-            table_name, catalog_factory_->CreatePkCcMap(table_schema, this));
+            table_name,
+            catalog_factory_->CreatePkCcMap(table_schema, schema_ts, this));
         return ccm_it.first->second.get();
     }
     else
@@ -470,21 +470,24 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
         auto ccm_it = ccms.try_emplace(
-            ng_id, catalog_factory_->CreatePkCcMap(table_schema, this));
+            ng_id,
+            catalog_factory_->CreatePkCcMap(table_schema, schema_ts, this));
         return ccm_it.first->second.get();
     }
 }
 
 CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
                               const TableSchema *table_schema,
-                              NodeGroupId ng_id)
+                              NodeGroupId ng_id,
+                              uint64_t schema_ts)
 {
     if (ng_id == node_id_)
     {
         std::lock_guard<std::mutex> lk(shard_mux_);
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
-            catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+            catalog_factory_->CreateSkCcMap(
+                index_name, table_schema, schema_ts, this));
         return ccm_it.first->second.get();
     }
     else
@@ -492,9 +495,10 @@ CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
         auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        auto ccm_it = ccms.try_emplace(
-            ng_id,
-            catalog_factory_->CreateSkCcMap(index_name, table_schema, this));
+        auto ccm_it =
+            ccms.try_emplace(ng_id,
+                             catalog_factory_->CreateSkCcMap(
+                                 index_name, table_schema, schema_ts, this));
         return ccm_it.first->second.get();
     }
 }

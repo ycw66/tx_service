@@ -19,8 +19,14 @@ public:
     CatalogCcMap(const CatalogCcMap &rhs) = delete;
     ~CatalogCcMap() = default;
 
+    /**
+     * @brief Constructs a new catalog cc map object. The catalog cc map has no
+     * schema, so the schema's timestamp is set to 1 (the beginning of history).
+     *
+     * @param shard
+     */
     CatalogCcMap(CcShard *shard)
-        : TemplateCcMap<CatalogKey, CatalogRecord>(shard)
+        : TemplateCcMap<CatalogKey, CatalogRecord>(shard, 1)
     {
     }
 
@@ -199,14 +205,18 @@ public:
 
                 // This is a CREATE TABLE statement. Creates the cc maps
                 // associated with the table in the final commit step.
-                shard_->CreatePkCcMap(
-                    table_key->Name(), new_schema, req.NodeGroupId());
+                shard_->CreatePkCcMap(table_key->Name(),
+                                      new_schema,
+                                      req.NodeGroupId(),
+                                      schema_view->dirty_version_ts_);
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    shard_->CreateSkCcMap(
-                        index_name, new_schema, req.NodeGroupId());
+                    shard_->CreateSkCcMap(index_name,
+                                          new_schema,
+                                          req.NodeGroupId(),
+                                          schema_view->dirty_version_ts_);
                 }
             }
         }
@@ -272,14 +282,18 @@ public:
             const TableSchema *curr_schema = schema_view->schema_;
             if (curr_schema != nullptr)
             {
-                shard_->CreatePkCcMap(
-                    table_key->Name(), curr_schema, req.NodeGroupId());
+                shard_->CreatePkCcMap(table_key->Name(),
+                                      curr_schema,
+                                      req.NodeGroupId(),
+                                      schema_view->version_ts_);
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    shard_->CreateSkCcMap(
-                        index_name, curr_schema, req.NodeGroupId());
+                    shard_->CreateSkCcMap(index_name,
+                                          curr_schema,
+                                          req.NodeGroupId(),
+                                          schema_view->version_ts_);
                 }
             }
         }
@@ -289,14 +303,6 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
-        int64_t ng_term =
-            Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(-1);
-            return false;
-        }
-
         ::txlog::SchemaOpMessage schema_op_msg;
         const std::string_view &content = req.LogContentView();
         schema_op_msg.ParseFromArray(content.data(), content.length());
@@ -320,14 +326,17 @@ public:
                 {
                     shard_->CreatePkCcMap(schema_op_msg.table_name(),
                                           committed_schema,
-                                          req.NodeGroupId());
+                                          req.NodeGroupId(),
+                                          schema_view->version_ts_);
 
                     std::vector<TableName> index_names =
                         committed_schema->IndexNames();
                     for (const TableName &index_name : index_names)
                     {
-                        shard_->CreateSkCcMap(
-                            index_name, committed_schema, req.NodeGroupId());
+                        shard_->CreateSkCcMap(index_name,
+                                              committed_schema,
+                                              req.NodeGroupId(),
+                                              schema_view->version_ts_);
                     }
                 }
             }
@@ -357,8 +366,17 @@ public:
         if (schema_op_msg.stage() !=
             ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema)
         {
-            bool success = cce->key_lock_.AcquireWriteLock(
-                &req, ng_term, CcProtocol::Locking);
+            // If the prepare log has been flushed, the recovered cc ng leader
+            // replays all steps between the prepare log and the commit log,
+            // including the write lock on the schema. The recovered write lock
+            // is special in that the holding tx is not associated with the tx's
+            // term (always set to 0). This is because after the prepare log,
+            // the write lock on the schema and the coordinating tx are
+            // guaranteed to be recovered upon failures. The tx's term is not
+            // necessary here to mark whether or not if the coordinating tx has
+            // failed or not.
+            bool success =
+                cce->key_lock_.AcquireWriteLock(&req, 0, CcProtocol::Locking);
 
             // When a cc node recovers, no one should be holding read locks. So,
             // the acquire operation should always succeed.
@@ -381,8 +399,10 @@ public:
 
             if (tx_node_id == req.NodeGroupId())
             {
+                // If the coordinating tx is bound to the recoverying cc node,
+                // re-resumes the tx.
                 shard_->local_shards_.CreateSchemaRecoveryTx(
-                    schema_op_msg, req.Txn(), ng_term, req.CommitTs());
+                    schema_op_msg, req.Txn(), 0, req.CommitTs());
             }
         }
 

@@ -105,15 +105,19 @@ public:
                         const TableSchema *curr_schema = schema_view->schema_;
                         if (curr_schema != nullptr)
                         {
-                            ccs.CreatePkCcMap(
-                                *table_name_, curr_schema, node_group_id_);
+                            ccs.CreatePkCcMap(*table_name_,
+                                              curr_schema,
+                                              node_group_id_,
+                                              schema_view->version_ts_);
 
                             std::vector<TableName> index_names =
                                 curr_schema->IndexNames();
                             for (const TableName &index_name : index_names)
                             {
-                                ccs.CreateSkCcMap(
-                                    index_name, curr_schema, node_group_id_);
+                                ccs.CreateSkCcMap(index_name,
+                                                  curr_schema,
+                                                  node_group_id_,
+                                                  schema_view->version_ts_);
                             }
 
                             ccm_ = ccs.GetCcm(
@@ -201,16 +205,18 @@ protected:
             const TableSchema *curr_schema = schema_view->schema_;
             if (curr_schema != nullptr && schema_view->version_ts_ > 0)
             {
-                CcMap *pk_ccm = ccs.CreatePkCcMap(
-                    *base_table_name_, curr_schema, node_group_id_);
-                pk_ccm->commit_ts_ = schema_view->version_ts_;
+                ccs.CreatePkCcMap(*base_table_name_,
+                                  curr_schema,
+                                  node_group_id_,
+                                  schema_view->version_ts_);
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    CcMap *sk_ccm = ccs.CreateSkCcMap(
-                        index_name, curr_schema, node_group_id_);
-                    sk_ccm->commit_ts_ = schema_view->version_ts_;
+                    ccs.CreateSkCcMap(index_name,
+                                      curr_schema,
+                                      node_group_id_,
+                                      schema_view->version_ts_);
                 }
             }
         }

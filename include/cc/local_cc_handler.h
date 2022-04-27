@@ -116,6 +116,7 @@ public:
     void ReadOutside(int64_t tx_term,
                      TxRecord &rec,
                      bool is_deleted,
+                     uint64_t commit_ts,
                      const CcEntryAddr &cce_addr,
                      CcHandlerResult<ReadKeyResult> &hres) override;
 
