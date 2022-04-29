@@ -104,6 +104,12 @@ void Checkpointer::Ckpt()
         ckpt_txm->Execute(&init_req);
         init_req.Wait();
 
+        if (init_req.IsError())
+        {
+            flushed = false;
+            break;
+        }
+
         // If table_name has been dropped at this point, read lock would not be
         // acquired.
         CatalogKey table_key(table_name);
@@ -128,7 +134,8 @@ void Checkpointer::Ckpt()
             ckpt_txm->Execute(&commit_req);
             commit_req.Wait();
             assert(commit_req.Result() == true);
-            continue;
+            flushed = false;
+            break;
         }
 
         ckpt_vec.clear();
@@ -192,6 +199,7 @@ void Checkpointer::Ckpt()
 
         // Use CommitTxRequest to release read lock.
         CommitTxRequest commit_req;
+
         commit_req.Reset();
         ckpt_txm->Execute(&commit_req);
         commit_req.Wait();
