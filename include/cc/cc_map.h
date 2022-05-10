@@ -71,6 +71,7 @@ public:
     virtual size_t size() const = 0;
 
     virtual void Clean(LruEntry *remove_entry) = 0;
+    virtual void Clean() = 0;
 
     /**
      * @brief If the new cc_entry is not in the checkpoint list, enlists the new

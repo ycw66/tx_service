@@ -26,7 +26,6 @@ public:
     TemplateCcMap() = delete;
     TemplateCcMap(const TemplateCcMap &rhs) = delete;
     explicit TemplateCcMap(CcMap &&rhs) = delete;
-    virtual ~TemplateCcMap() = default;
 
     TemplateCcMap(CcShard *shard,
                   uint64_t schema_ts,
@@ -51,6 +50,11 @@ public:
         neg_inf_.ckpt_next_ = &pos_inf_;
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
+    }
+
+    virtual ~TemplateCcMap()
+    {
+        Clean();
     }
 
     bool Execute(AcquireCc &req) override
@@ -2127,6 +2131,14 @@ public:
         shard_->mem_usage_ -= cc_entry->GetCcEntryMemUsage();
 
         ccm_.erase(*cc_entry->key_);
+    }
+
+    void Clean() override
+    {
+        while (neg_inf_.map_next_ != &pos_inf_)
+        {
+            Clean(neg_inf_.map_next_);
+        }
     }
 
     void GetCkptKeyRecord(const LruEntry *lru_entry,

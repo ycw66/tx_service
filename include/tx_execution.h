@@ -264,7 +264,13 @@ private:
                        std::pair<TableWriteSet::const_reverse_iterator,
                                  TableWriteSet::const_reverse_iterator>>
         wset_reverse_iters_;
-    // std::unordered_map<size_t, const ScanTuple *> scan_tuples_;
+
+    /**
+     * @brief A collection of open primary/secondary index scans. Each scan is
+     * identified by a scan alias (of type size_t) generated when the scan is
+     * opened.
+     *
+     */
     std::unordered_map<size_t, std::unique_ptr<CcScanner>> scans_;
 
     // Response whose returned result is void

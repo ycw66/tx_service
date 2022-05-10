@@ -63,7 +63,7 @@ struct LruEntry
 {
 public:
     LruEntry() = delete;
-    virtual ~LruEntry() = default;
+    virtual ~LruEntry();
 
     LruEntry(CcMap *parent);
 
@@ -176,6 +176,8 @@ public:
           map_next_(nullptr)
     {
     }
+
+    ~CcEntry() = default;
 
     size_t GetCcEntryMemUsage() const override
     {

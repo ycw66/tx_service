@@ -64,6 +64,7 @@ void Sharder::Shutdown()
     log_replay_server_.Join();
 
     cc_nodes_.clear();
+    cc_node_service_ = nullptr;
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
 

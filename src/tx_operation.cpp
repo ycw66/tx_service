@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iostream>
 
+#include "fault/fault_inject.h"
 #include "sharder.h"
 #include "tx_execution.h"
 

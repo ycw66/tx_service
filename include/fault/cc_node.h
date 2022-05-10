@@ -93,9 +93,7 @@ private:
 
     void on_leader_start(int64_t term) override;
 
-    void on_leader_stop(const butil::Status &status) override
-    {
-    }
+    void on_leader_stop(const butil::Status &status) override;
 
     void on_shutdown() override
     {

@@ -4,6 +4,47 @@
 
 namespace txservice
 {
+LruEntry::~LruEntry()
+{
+    // Deletes key write lock.
+    if (key_lock_.HasWriteLock())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(key_lock_.WriteLockTx(), this);
+    }
+    // Deletes gap write lock.
+    if (gap_lock_.HasWriteLock())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(gap_lock_.WriteLockTx(), this);
+    }
+
+    // Deletes key write intent.
+    if (key_lock_.HasWriteIntent())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(key_lock_.WriteIntentTx(),
+                                                 this);
+    }
+    // Deletes gap write intent.
+    if (gap_lock_.HasWriteIntent())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(gap_lock_.WriteIntentTx(),
+                                                 this);
+    }
+
+    // Deletes key read locks.
+    const std::unordered_set<TxNumber> &key_read_locks = key_lock_.ReadLocks();
+    for (const TxNumber &txn : key_read_locks)
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+    }
+
+    // Deletes gap read locks.
+    const std::unordered_set<TxNumber> &gap_read_locks = gap_lock_.ReadLocks();
+    for (const TxNumber &txn : gap_read_locks)
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+    }
+}
+
 LruEntry::LruEntry(CcMap *parent) : parent_map_(parent)
 {
     if (parent != nullptr)

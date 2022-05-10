@@ -1,5 +1,6 @@
 #include "fault/cc_node.h"
 
+#include "local_cc_shards.h"
 #include "sharder.h"
 
 namespace txservice::fault
@@ -237,13 +238,13 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
         // leader caches passively.
         if (cntl.Failed())
         {
-            LOG(ERROR) << "Fail the NotifyNewLeaderStart RPC of ng"
+            LOG(ERROR) << "Fail the NotifyNewLeaderStart RPC of ng#"
                        << leader_ng_id << ". Error code: " << cntl.ErrorCode()
                        << ". Msg: " << cntl.ErrorText();
         }
         else if (res.error())
         {
-            LOG(ERROR) << "Fail to notify the new leader of ng" << leader_ng_id
+            LOG(ERROR) << "Fail to notify the new leader of ng#" << leader_ng_id
                        << " to remote node id:" << node_id;
         }
     }
@@ -275,13 +276,27 @@ void CcNode::on_leader_start(int64_t term)
     NotifyNewLeaderStart(ng_id_, node_id_);
 }
 
-void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
+void CcNode::on_leader_stop(const butil::Status &status)
 {
-    LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng"
-              << ng_id_ << ", term: " << ctx.term();
+    LOG(INFO) << "CC node " << ip_ << ":" << port_
+              << " steps down as the leader of ng#" << ng_id_ << ".";
 
     leader_term_.store(-1, std::memory_order_release);
     candidate_leader_term_ = -1;
+
+    uint16_t core_cnt = local_cc_shards_.Count();
+    ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+    {
+        local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+    }
+    clear_ccm_req.Wait();
+}
+
+void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
+{
+    LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng#"
+              << ng_id_ << ", term: " << ctx.term();
 
     // when preferred leader is actually a follower, e.g. caused by a
     // failover, it will send the TransferRequest to the current leader
@@ -294,7 +309,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
         brpc::Channel channel;
         if (channel.Init(leader_peer.addr, nullptr) != 0)
         {
-            LOG(ERROR) << "Fail to init the channel to the leader of ng"
+            LOG(ERROR) << "Fail to init the channel to the leader of ng#"
                        << ng_id_ << " for leadership transfer.";
             return;
         }
@@ -312,14 +327,14 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
 
         if (cntl.Failed())
         {
-            LOG(ERROR) << "Fail the transfer RPC of ng" << ng_id_
+            LOG(ERROR) << "Fail the transfer RPC of ng#" << ng_id_
                        << ". Error code: " << cntl.ErrorCode()
                        << ". Msg: " << cntl.ErrorText();
         }
         else if (res.error())
         {
             // TODO: consider retry logic.
-            LOG(ERROR) << "Fail to transfer the leader of ng" << ng_id_;
+            LOG(ERROR) << "Fail to transfer the leader of ng#" << ng_id_;
         }
     }
 }

@@ -89,12 +89,6 @@ public:
                   uint32_t node_group,
                   int8_t &error_code);
 
-    void RemoveCcm(const TableName &table_name)
-    {
-        native_ccms_.erase(table_name);
-        failover_ccms_.erase(table_name);
-    }
-
     bool Full() const
     {
         return mem_usage_ >=
@@ -327,6 +321,15 @@ public:
                          uint64_t schema_ts);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
+    /**
+     * @brief Drops all cc maps associated with a cc node group. The method is
+     * called when this node steps down as the leader of the specified cc node
+     * group.
+     *
+     * @param ng_id The cc node group whose leader has been transferred to
+     * another node.
+     */
+    void DropCcms(NodeGroupId ng_id);
 
     void CreateRangeCcMap(const TableName &range_table_name, NodeGroupId ng_id);
 

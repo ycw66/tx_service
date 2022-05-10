@@ -20,6 +20,7 @@
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "scan.h"
+#include "sharder.h"
 #include "tx_operation_result.h"
 #include "type.h"
 #include "util.h"
@@ -1715,6 +1716,54 @@ private:
     std::mutex &external_mux_;
     std::condition_variable &external_cv_;
     uint32_t &finish_cnt_;
+};
+
+/**
+ * @brief The request sent by a cc node when the cc node steps down as the
+ * leader of its node group, so as to clear cc maps associated with the cc node
+ * group at this node.
+ *
+ */
+struct ClearCcNodeGroup : public CcRequestBase
+{
+public:
+    ClearCcNodeGroup(uint32_t cc_ng_id, uint16_t core_cnt)
+        : cc_ng_id_(cc_ng_id), core_cnt_(core_cnt)
+    {
+    }
+
+    ClearCcNodeGroup() = delete;
+    ClearCcNodeGroup(const ClearCcNodeGroup &) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        ccs.DropCcms(cc_ng_id_);
+
+        std::unique_lock<std::mutex> lk(mux_);
+        ++finish_cnt_;
+        if (finish_cnt_ == core_cnt_)
+        {
+            wait_cv_.notify_one();
+        }
+
+        // The owner of this request is the raft thread that downgrades the cc
+        // ng leader to a non-leader node. The request is not in a resource pool
+        // and re-used. So, always returns false.
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        wait_cv_.wait(lk, [this]() { return finish_cnt_ == core_cnt_; });
+    }
+
+private:
+    const uint32_t cc_ng_id_;
+    const uint16_t core_cnt_;
+    uint16_t finish_cnt_{0};
+    std::mutex mux_;
+    std::condition_variable wait_cv_;
 };
 
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>

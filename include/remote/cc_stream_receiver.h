@@ -9,7 +9,7 @@
 #include "cc_req_pool.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
-#include "remote/remote_cc_request.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -17,6 +17,8 @@ class LocalCcShards;
 
 namespace remote
 {
+class CcStreamSender;
+
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:
@@ -59,8 +61,6 @@ private:
     // for processing. The message is put back into the pool after the cc
     // request is processed.
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
-
-    friend class remote::CcStreamSender;
 };
 }  // namespace remote
 }  // namespace txservice

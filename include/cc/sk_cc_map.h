@@ -120,7 +120,6 @@ public:
     SkCcMap() = delete;
     SkCcMap(const SkCcMap &rhs) = delete;
     SkCcMap(SkCcMap &&rhs) = delete;
-    virtual ~SkCcMap() = default;
 
     SkCcMap(CcShard *shard,
             uint64_t schema_ts,
@@ -145,6 +144,11 @@ public:
         neg_inf_.ckpt_next_ = &pos_inf_;
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
+    }
+
+    virtual ~SkCcMap()
+    {
+        Clean();
     }
 
     bool Execute(AcquireCc &req) override
@@ -816,23 +820,40 @@ public:
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *prev_cce = cce->map_prev_;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *next_cce = cce->map_next_;
 
-        if (*prev_cce->payload_.sk_ == *cce->payload_.sk_ ||
-            *cce->payload_.sk_ == *next_cce->payload_.sk_)
+        if ((prev_cce != &neg_inf_ &&
+             *prev_cce->payload_.sk_ == *cce->payload_.sk_) ||
+            (next_cce != &pos_inf_ &&
+             *cce->payload_.sk_ == *next_cce->payload_.sk_))
         {
-            sk_index_.at(*cce->payload_.sk_).erase(*cce->payload_.pk_);
             // delete secondary map of sk_index_
             shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
             shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
+
+            auto sk_it = sk_index_.find(*cce->payload_.sk_);
+            assert(sk_it != sk_index_.end());
+            sk_it->second.erase(*cce->payload_.pk_);
         }
         else
         {
-            // The (sk,pk) pair is the last entry of this sk group. Removes the
-            // sk from the index.
-            sk_index_.erase(*cce->payload_.sk_);
             // delete sk_index_
             shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
             shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
             shard_->mem_usage_ -= cce->payload_.sk_->MemUsage();
+
+            // The (sk,pk) pair is the last entry of this sk group. Removes the
+            // sk from the index.
+            sk_index_.erase(*cce->payload_.sk_);
+        }
+
+        prev_cce->map_next_ = next_cce;
+        next_cce->map_prev_ = prev_cce;
+    }
+
+    void Clean() override
+    {
+        while (neg_inf_.map_next_ != &pos_inf_)
+        {
+            Clean(neg_inf_.map_next_);
         }
     }
 
