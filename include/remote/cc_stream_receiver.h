@@ -25,7 +25,9 @@ public:
     CcStreamReceiver(
         LocalCcShards &local_shards,
         moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
-    ~CcStreamReceiver();
+    ~CcStreamReceiver() = default;
+
+    void Shutdown();
 
     void Connect(::google::protobuf::RpcController *controller,
                  const ConnectRequest *request,

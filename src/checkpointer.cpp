@@ -137,7 +137,7 @@ void Checkpointer::Ckpt()
             commit_req.Wait();
             assert(commit_req.Result() == true);
             flushed = false;
-            break;
+            continue;
         }
 
         ckpt_vec.clear();

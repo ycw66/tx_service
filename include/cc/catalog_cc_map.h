@@ -299,8 +299,9 @@ public:
             {
                 assert(schema_rec->SchemaImage().size() > 0);
 
-                schema_view = shard_->CreateCatalog(
-                    table_key->Name(), schema_rec->SchemaImage(), 1);
+                schema_view = shard_->CreateCatalog(table_key->Name(),
+                                                    schema_rec->SchemaImage(),
+                                                    req.ReadTimestamp());
             }
             schema_rec->SetSchemaView(schema_view);
 

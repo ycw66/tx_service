@@ -53,20 +53,25 @@ void Sharder::Shutdown()
 {
     LOG(INFO) << "Shutting down the sharder at node #" << node_id_;
 
-    cc_stream_sender_ = nullptr;
+    if (ips_.size() > 1)
+    {
+        cc_stream_sender_ = nullptr;
 
-    cc_stream_receiver_ = nullptr;
-    cc_stream_server_.Stop(0);
-    cc_stream_server_.Join();
+        cc_stream_receiver_->Shutdown();
+        cc_stream_server_.Stop(0);
+        cc_stream_server_.Join();
+        cc_stream_receiver_ = nullptr;
+    }
 
-    log_replay_service_ = nullptr;
+    log_replay_service_->Shutdown();
     log_replay_server_.Stop(0);
     log_replay_server_.Join();
+    log_replay_service_ = nullptr;
 
-    cc_nodes_.clear();
-    cc_node_service_ = nullptr;
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
+    cc_node_service_ = nullptr;
+    cc_nodes_.clear();
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
 }

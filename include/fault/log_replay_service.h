@@ -25,7 +25,9 @@ class ReplayService : public brpc::StreamInputHandler,
 public:
     ReplayService() = delete;
     ReplayService(LocalCcShards &local_shards);
-    ~ReplayService();
+    ~ReplayService() = default;
+
+    void Shutdown();
 
     void Connect(::google::protobuf::RpcController *controller,
                  const ::txlog::LogReplayConnectRequest *request,

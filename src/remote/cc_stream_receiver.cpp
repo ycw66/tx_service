@@ -32,7 +32,7 @@ CcStreamReceiver::CcStreamReceiver(
 {
 }
 
-CcStreamReceiver::~CcStreamReceiver()
+void CcStreamReceiver::Shutdown()
 {
     std::unique_lock<std::mutex> lk(inbound_mux_);
     for (auto &stream_id : inbound_streams_)
@@ -57,7 +57,6 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
     brpc::Controller *cntl = static_cast<brpc::Controller *>(controller);
 
     brpc::StreamOptions stream_options;
-    stream_options.max_buf_size = 0;
     stream_options.handler = this;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)
     {
