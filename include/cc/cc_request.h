@@ -1089,6 +1089,9 @@ private:
 
     template <typename KeyT>
     friend class RangeCcMap;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::ScanOpenBatchCc *r);
 };
 
 struct ScanNextBatchCc
@@ -1168,6 +1171,9 @@ private:
 
     template <typename KeyT>
     friend class RangeCcMap;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::ScanNextBatchCc *r);
 };
 
 struct ScanCloseCc : public TemplatedCcRequest<ScanCloseCc, Void>
@@ -1333,6 +1339,8 @@ private:
     friend class SkCcMap;
 
     friend class Checkpointer;
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::CkptScanCc *r);
 };
 
 /**
@@ -1423,6 +1431,9 @@ private:
 
     template <typename SkT, typename PkT>
     friend class SkCcMap;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::CommitSkCc *r);
 };
 
 struct NegotiateCc : public CcRequestBase
@@ -1481,6 +1492,8 @@ private:
     const TxId *txid_;
     uint64_t tx_ts_;
     CcHandlerResult<uint64_t> *res_;
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::NegotiateCc *r);
 };
 
 struct CheckTxStatusCc : public CcRequestBase
@@ -1544,6 +1557,9 @@ private:
     bool finish_;
     std::mutex mux_;
     std::condition_variable cv_;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::CheckTxStatusCc *r);
 };
 
 struct ClearTxCc : public CcRequestBase
@@ -1716,6 +1732,9 @@ private:
     std::mutex &external_mux_;
     std::condition_variable &external_cv_;
     uint32_t &finish_cnt_;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::ReplayLogCc *r);
 };
 
 /**

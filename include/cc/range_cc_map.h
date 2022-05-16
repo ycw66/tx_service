@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <string>
+
 #include "cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_request.h"
@@ -76,6 +79,18 @@ public:
 
     bool Execute(ScanOpenBatchCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
         req.is_include_floor_cce_ = true;
         return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
     }
@@ -93,6 +108,18 @@ public:
      */
     bool Execute(ReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
         CcHandlerResult<ReadKeyResult> *hd_result = req.Result();
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
@@ -145,6 +172,17 @@ public:
             }
             else
             {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireReadLock.Fail",
+                    reinterpret_cast<LruEntry *>(floor_cce),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
                 // You don't need a remote acknowledge here, since range read is
                 // a local read anyway
                 return false;

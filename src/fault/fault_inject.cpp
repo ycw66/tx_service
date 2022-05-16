@@ -1,7 +1,6 @@
 #include "fault/fault_inject.h"
 
 #include "cc/cc_handler_result.h"
-#include "cc_handler_result.h"
 #include "proto/cc_request.pb.h"
 #include "remote/cc_stream_sender.h"
 #include "sharder.h"

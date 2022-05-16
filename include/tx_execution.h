@@ -104,6 +104,8 @@ public:
      */
     uint64_t TxNumber() const;
 
+    int64_t TxTerm() const;
+
     uint32_t TxCcNodeId() const;
 
     void RecoverSchemaTx(const ::txlog::SchemaOpMessage &schema_op,

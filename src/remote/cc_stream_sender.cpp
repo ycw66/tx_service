@@ -1,6 +1,9 @@
 #include "remote/cc_stream_sender.h"
 
+#include <string>
+
 #include "sharder.h"
+#include "tx_trace.h"
 
 namespace txservice
 {
@@ -34,6 +37,20 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
                                  bool resend)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
+
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &msg,
+        (
+            [&node_group_id, &dest_node_id]() -> std::string
+            {
+                return std::string("{\"node_group_id\":")
+                    .append(std::to_string(node_group_id))
+                    .append(",\"dest_node_id\":")
+                    .append(std::to_string(dest_node_id))
+                    .append("}");
+            }));
+    TX_TRACE_DUMP(&msg);
 
     auto stream_it = outbound_streams_.find(dest_node_id);
 

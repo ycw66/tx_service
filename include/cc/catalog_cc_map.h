@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <unordered_map>
 
 #include "../log_service/proto/raft_log.pb.h"
@@ -39,6 +40,18 @@ public:
 
     bool Execute(PostWriteAllCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -239,6 +252,18 @@ public:
 
     bool Execute(ReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -303,6 +328,26 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+        int64_t ng_term =
+            Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(-1);
+            return false;
+        }
+
         ::txlog::SchemaOpMessage schema_op_msg;
         const std::string_view &content = req.LogContentView();
         schema_op_msg.ParseFromArray(content.data(), content.length());

@@ -6,6 +6,7 @@
 #include <cassert>
 #include <chrono>
 #include <iostream>
+#include <string>
 
 #include "cc_protocol.h"
 #include "local_cc_shards.h"
@@ -13,6 +14,7 @@
 #include "sharder.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
+#include "tx_trace.h"
 #include "type.h"
 #include "util.h"
 
@@ -53,6 +55,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       sleep_op_(this),
       fault_inject_op_(this)
 {
+    TX_TRACE_ASSOCIATE(this, handler);
 }
 
 void TransactionExecution::Reset(CcProtocol proto)
@@ -92,6 +95,11 @@ bool TransactionExecution::Idle() const
 uint64_t TransactionExecution::TxNumber() const
 {
     return tx_number_.load(std::memory_order_acquire);
+}
+
+int64_t TransactionExecution::TxTerm() const
+{
+    return tx_term_;
 }
 
 std::string TransactionExecution::GetErrorMessage() const
@@ -235,6 +243,7 @@ void TransactionExecution::PushOperation(TransactionOperation *op,
 
 void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
 {
+    TX_TRACE_ACTION(this, &init_txn_req);
     uint64_resp_ = &init_txn_req.tx_result_;
     uint64_resp_->Reset();
     iso_level_ = init_txn_req.iso_level_;
@@ -246,6 +255,16 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
 
 void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &read_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     rec_resp_ = &read_req.tx_result_;
     rec_resp_->Reset();
 
@@ -258,6 +277,16 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
 void TransactionExecution::ProcessTxRequest(
     ReadOutsideTxRequest &read_outside_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &read_outside_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     rec_resp_ = &read_outside_req.tx_result_;
     rec_resp_->Reset();
 
@@ -270,6 +299,16 @@ void TransactionExecution::ProcessTxRequest(
 
 void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_open_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     uint64_resp_ = &scan_open_req.tx_result_;
     uint64_resp_->Reset();
     scan_open_.tx_req_ = &scan_open_req;
@@ -279,6 +318,16 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
 
 void TransactionExecution::ProcessTxRequest(ScanNextTxRequest &scan_next_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_next_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     kvp_resp_ = &scan_next_req.tx_result_;
     kvp_resp_->Reset();
 
@@ -289,6 +338,16 @@ void TransactionExecution::ProcessTxRequest(ScanNextTxRequest &scan_next_req)
 
 void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_close_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
@@ -297,6 +356,16 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &upsert_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     void_resp_ = &upsert_req.tx_result_;
     void_resp_->Reset();
     Upsert(*upsert_req.tab_name_,
@@ -308,6 +377,16 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
 
 void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &commit_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     bool_resp_ = &commit_req.tx_result_;
     bool_resp_->Reset();
     Commit();
@@ -315,6 +394,16 @@ void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
 
 void TransactionExecution::ProcessTxRequest(AbortTxRequest &abort_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &abort_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     bool_resp_ = &abort_req.tx_result_;
     bool_resp_->Reset();
     // When the tx is aborted/rolled back by the user, write intentions must
@@ -325,6 +414,16 @@ void TransactionExecution::ProcessTxRequest(AbortTxRequest &abort_req)
 
 void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     bool_resp_ = &req.tx_result_;
 
     schema_op_ = std::make_unique<UpsertTableOp>(*req.table_name_,
@@ -339,6 +438,16 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
 
 void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &fi_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     bool_resp_ = &fi_req.tx_result_;
     bool_resp_->Reset();
 
@@ -350,6 +459,16 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &init_txn,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     init_txn.is_running_ = true;
     commit_ts_ = 0;
     commit_ts_bound_ = 0;
@@ -363,6 +482,16 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
 void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &init_txn,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     if (init_txn.hd_result_.IsError())
     {
         state_stack_.clear();
@@ -390,6 +519,16 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
  */
 void TransactionExecution::Process(ReadOperation &read)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &read,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     read.Reset();
     read.is_running_ = true;
     if (read.read_type_ == ReadType::Inside)
@@ -507,6 +646,16 @@ void TransactionExecution::Process(ReadOperation &read)
 
 void TransactionExecution::PostProcess(ReadOperation &read)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &read,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
@@ -567,6 +716,16 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
 void TransactionExecution::Process(ScanOpenOperation &scan_open)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_open,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
     const TxKey &start_key = *scan_open.tx_req_->start_key_;
@@ -623,6 +782,16 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
 void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_open,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
@@ -668,6 +837,16 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
 void TransactionExecution::Process(ScanNextOperation &scan_next)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_next,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     size_t alias = scan_next.tx_req_->alias_;
     LockType lock_type = scan_next_.tx_req_->lock_type_;
 
@@ -708,6 +887,16 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_next,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     prev_op_ = state_stack_.back();
     state_stack_.pop_back();
     assert(state_stack_.empty());
@@ -1061,6 +1250,16 @@ void TransactionExecution::Abort()
 
 void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &acquire_write,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     size_t wset_size = rw_set_.WriteSetSize();
     acquire_write.Reset(wset_size);
     acquire_write.is_running_ = true;
@@ -1099,6 +1298,16 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 
 void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &acquire_write,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
@@ -1117,6 +1326,16 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 
 void TransactionExecution::Process(SetCommitTsOperation &set_ts)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &set_ts,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     uint64_t candidate = commit_ts_bound_;
 
     set_ts.is_running_ = true;
@@ -1140,6 +1359,16 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
 
 void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &set_ts,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
@@ -1177,6 +1406,16 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
 
 void TransactionExecution::Process(ValidateOperation &validate)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &validate,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     size_t offset = 0;
     const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
         rw_set_.ReadSet();
@@ -1210,6 +1449,16 @@ void TransactionExecution::Process(ValidateOperation &validate)
 
 void TransactionExecution::PostProcess(ValidateOperation &validate)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &validate,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     // The validation step is optional. Only pops the stack if the last step is
     // the validation step.
     if (!state_stack_.empty())
@@ -1429,6 +1678,16 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
 void TransactionExecution::Process(WriteToLogOp &write_log)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &write_log,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     write_log.Reset();
     write_log.is_running_ = true;
 
@@ -1448,6 +1707,16 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &write_log,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     WriteToLogOp *log_op = static_cast<WriteToLogOp *>(state_stack_.back());
     state_stack_.pop_back();
 
@@ -1474,6 +1743,16 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 
 void TransactionExecution::Process(UpdateTxnStatus &update_txn)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &update_txn,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     update_txn.Reset();
     update_txn.is_running_ = true;
     handler->UpdateTxnStatus(txid_,
@@ -1484,6 +1763,16 @@ void TransactionExecution::Process(UpdateTxnStatus &update_txn)
 
 void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &update_txn,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
 
     int wset_intention_cnt =
@@ -1526,6 +1815,16 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 
 void TransactionExecution::Process(PostProcessOp &post_process)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &post_process,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     size_t read_intention_size = post_process.read_intention_size_;
     size_t write_intention_size = post_process.write_intention_size_;
     post_process.is_running_ = true;
@@ -1654,6 +1953,16 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
 void TransactionExecution::PostProcess(PostProcessOp &post_process)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &post_process,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     if (!state_stack_.empty())
     {
         assert(state_stack_.back() == &post_process);
@@ -1682,6 +1991,16 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &acq_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
     acq_all_op.Reset(node_group_cnt);
     acq_all_op.is_running_ = true;
@@ -1707,12 +2026,32 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
 
 void TransactionExecution::PostProcess(AcquireAllOp &acq_all_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &acq_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     Forward();
 }
 
 void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &post_write_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
     post_write_all_op.Reset(node_group_cnt);
     post_write_all_op.is_running_ = true;
@@ -1738,6 +2077,16 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
 
 void TransactionExecution::PostProcess(PostWriteAllOp &post_write_all_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &post_write_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     // So far, post-write-all is only used for schema evolution operations.
     assert(!state_stack_.empty());
@@ -1746,6 +2095,16 @@ void TransactionExecution::PostProcess(PostWriteAllOp &post_write_all_op)
 
 void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_upsert_table_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
     handler->DataStoreUpsertTable(*ds_upsert_table_op.table_name_,
@@ -1757,6 +2116,16 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
 
 void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_upsert_table_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(!state_stack_.empty());
     Forward();
@@ -1764,6 +2133,16 @@ void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)
 
 void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &fault_inject_op_,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     fault_inject_op_.Reset();
     fault_inject_op_.is_running_ = true;
 
@@ -1778,6 +2157,16 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
 
 void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &fault_inject_op_,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
     state_stack_.pop_back();
     assert(state_stack_.empty());
 

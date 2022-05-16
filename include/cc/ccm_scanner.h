@@ -212,6 +212,8 @@ public:
     virtual uint32_t BlockedShard() const = 0;
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
     virtual ScanCache *AddShard(uint32_t shard_code) = 0;
+    virtual void ShardCodes(std::vector<uint32_t> *shard_codes) const = 0;
+    virtual size_t ShardCacheSize(uint32_t shard_code) const = 0;
 
     virtual const ScanTuple *Current() = 0;
     virtual ScannerStatus Status() const = 0;
@@ -267,6 +269,19 @@ public:
     ScanCache *Cache(uint32_t shard_code) override
     {
         return &scans_.at(shard_code);
+    }
+
+    size_t ShardCacheSize(uint32_t shard_code) const override
+    {
+        return scans_.at(shard_code).Size();
+    }
+
+    void ShardCodes(std::vector<uint32_t> *shard_codes) const override
+    {
+        for (const auto &[shard_code, cache] : scans_)
+        {
+            shard_codes->push_back(shard_code);
+        }
     }
 
     const ScanTuple *Current() override

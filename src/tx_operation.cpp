@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <iostream>
+#include <string>
 
+#include "cc_handler_result.h"
 #include "fault/fault_inject.h"
 #include "sharder.h"
 #include "tx_execution.h"
+#include "tx_trace.h"
 
 namespace txservice
 {
@@ -35,6 +38,19 @@ public:
  */
 void TransactionOperation::ReRunOp(TransactionExecution *txm)
 {
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        txm,
+        (
+            [txm, this]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()))
+                    .append(",\"retry_num_\":")
+                    .append(std::to_string(this->retry_num_));
+            }));
     if (retry_num_ <= 0)
     {
         return;
@@ -53,6 +69,7 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
 
 ReadOperation::ReadOperation(TransactionExecution *txm) : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void ReadOperation::Reset()
@@ -72,6 +89,18 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (cce_addr.Term() < 0 && txm->IsTimeOut())
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.Term<0.IsTimeout",
+            txm,
+            (
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                }));
         // For non-blocking concurrency control protocols, the read request
         // is expected to return instantly. For lock-based protocols, if the
         // read request is blocked, the cc node will send an acknowledgement to
@@ -115,6 +144,7 @@ AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
     for (size_t idx = 0; idx < 16; ++idx)
     {
         auto &res = results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
 
         res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
         {
@@ -159,6 +189,7 @@ void AcquireWriteOperation::Resize(size_t new_size)
             // All cc handler results in an operation points to the same tx
             // machine.
             auto &res = results_.emplace_back(results_.at(0).Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
 
             res.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *hres)
             {
@@ -310,6 +341,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 SetCommitTsOperation::SetCommitTsOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void SetCommitTsOperation::Reset()
@@ -339,6 +371,7 @@ ValidateOperation::ValidateOperation(TransactionExecution *txm)
     for (size_t idx = 0; idx < 16; ++idx)
     {
         auto &res = results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
         res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *hres)
         {
             if (hres->IsError())
@@ -379,6 +412,7 @@ void ValidateOperation::Resize(size_t new_size)
             // All cc handler results in an operation points to the same tx
             // machine.
             auto &res = results_.emplace_back(results_.at(0).Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
 
             res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *hres)
             {
@@ -461,6 +495,7 @@ void ValidateOperation::Forward(TransactionExecution *txm)
 
 WriteToLogOp::WriteToLogOp(TransactionExecution *txm) : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void WriteToLogOp::Forward(TransactionExecution *txm)
@@ -499,6 +534,7 @@ void WriteToLogOp::Reset()
 
 UpdateTxnStatus::UpdateTxnStatus(TransactionExecution *txm) : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void UpdateTxnStatus::Reset()
@@ -530,6 +566,7 @@ void UpdateTxnStatus::Forward(TransactionExecution *txm)
 
 InitTxnOperation::InitTxnOperation(TransactionExecution *txm) : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void InitTxnOperation::Reset()
@@ -560,6 +597,7 @@ PostProcessOp::PostProcessOp(TransactionExecution *txm)
     {
         CcHandlerResult<std::vector<TxId>> &res =
             read_results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
 
         res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
         { finish_cnt_.fetch_add(1); };
@@ -568,6 +606,7 @@ PostProcessOp::PostProcessOp(TransactionExecution *txm)
     for (size_t idx = 0; idx < 8; ++idx)
     {
         CcHandlerResult<Void> &res = write_results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
 
         res.post_lambda_ = [this](CcHandlerResult<Void> *)
         { finish_cnt_.fetch_add(1); };
@@ -600,6 +639,7 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
         for (size_t idx = read_old_size; idx < read_cnt; ++idx)
         {
             auto &res = read_results_.emplace_back(read_results_[0].Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
             res.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *)
             { finish_cnt_.fetch_add(1); };
         }
@@ -621,6 +661,7 @@ void PostProcessOp::Resize(size_t read_cnt, size_t write_cnt)
         for (size_t idx = write_old_size; idx < write_cnt; ++idx)
         {
             auto &res = write_results_.emplace_back(write_results_[0].Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
             res.post_lambda_ = [this](CcHandlerResult<Void> *)
             { finish_cnt_.fetch_add(1); };
         }
@@ -635,6 +676,21 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         txm->Process(*this);
     }
 
+    if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeout",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+    }
+
     if (finish_cnt_.load(std::memory_order_acquire) == acquire_write_cnt_ ||
         txm->IsTimeOut())
     {
@@ -646,6 +702,7 @@ void PostProcessOp::Forward(TransactionExecution *txm)
 
 FaultInjectOp::FaultInjectOp(TransactionExecution *txm) : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void FaultInjectOp::Reset()
@@ -679,6 +736,7 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
 ScanOpenOperation::ScanOpenOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void ScanOpenOperation::Reset()
@@ -700,6 +758,17 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 
         if (time_out)
         {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.IsTimeout",
+                txm,
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                });
             hd_result_.ForceError();
             // TODO: So far we do not store scanned keys in the tx's scan set.
             // In future, we need ScanOpenResult to check which cc nodes have
@@ -733,6 +802,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void ScanNextOperation::Reset()
@@ -755,6 +825,17 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         bool time_out = txm->IsTimeOut();
         if (time_out)
         {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.IsTimeout",
+                txm,
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                });
             hd_result_.ForceError();
             txm->PostProcess(*this);
         }
@@ -790,6 +871,7 @@ AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
     for (size_t idx = 0; idx < 8; ++idx)
     {
         auto &res = hd_results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
 
         res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres)
         {
@@ -821,6 +903,7 @@ void AcquireAllOp::Resize(size_t new_size)
             // All cc handler results in an operation points to the same tx
             // machine.
             auto &res = hd_results_.emplace_back(hd_results_.at(0).Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
 
             res.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *hres)
             {
@@ -864,6 +947,17 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
         if (time_out)
         {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.IsTimeOut",
+                txm,
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                });
             // At least one remote acquire request has not received
             // acknowledgement and the upload phase has timed out. Forces
             // un-acknowledged requests to finish with an error.
@@ -946,6 +1040,7 @@ PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm)
     for (size_t idx = 0; idx < 8; ++idx)
     {
         CcHandlerResult<Void> &res = hd_results_.emplace_back(txm);
+        TX_TRACE_ASSOCIATE(this, &res);
 
         res.post_lambda_ = [this](CcHandlerResult<Void> *)
         { finish_cnt_.fetch_add(1); };
@@ -967,6 +1062,7 @@ void PostWriteAllOp::Resize(uint32_t ng_cnt)
         for (size_t idx = old_size; idx < ng_cnt; ++idx)
         {
             auto &res = hd_results_.emplace_back(hd_results_[0].Txm());
+            TX_TRACE_ASSOCIATE(this, &res);
             res.post_lambda_ = [this](CcHandlerResult<Void> *)
             { finish_cnt_.fetch_add(1); };
         }
@@ -987,6 +1083,17 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     }
     else if (txm->IsTimeOut())
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
         for (size_t nid = 0; nid < upload_cnt_; ++nid)
         {
             hd_results_[nid].ForceError();
@@ -1000,6 +1107,7 @@ DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
                                  TransactionExecution *txm)
     : table_name_(table_name), is_deleted_(is_deleted), hd_result_(txm)
 {
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void DsUpsertTableOp::Reset()
@@ -1069,6 +1177,15 @@ UpsertTableOp::UpsertTableOp(const TableName &table_name,
     post_all_lock_op_.dml_op_ =
         is_deleted ? DmlOperation::Delete : DmlOperation::Upsert;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
+    TX_TRACE_ASSOCIATE(this, &post_all_intent_op_, "post_all_intent_op_");
+    TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
+    TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
+    TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
 }
 
 void UpsertTableOp::Forward(TransactionExecution *txm)
@@ -1506,6 +1623,17 @@ void SleepOperation::Forward(TransactionExecution *txm)
     // not be accurate, but retry logic is not sensitive to it.
     if (txm->IsTimeOut(sleep_secs_))
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
         // pop the sleep op and re-execute the last failed op.
         txm->state_stack_.pop_back();
         txm->Forward();

@@ -2,6 +2,7 @@
 
 #include "cc/local_cc_shards.h"
 #include "cc_entry.h"
+#include "tx_trace.h"
 
 namespace txservice
 {
@@ -104,6 +105,14 @@ bool CcMap::ReadLockCce(LruEntry *cce,
         {
             if (cce->key_lock_.HasWriteLock())
             {
+                TX_TRACE_DUMP_WITH_CONTEXT(
+                    cce->key_lock_.WriteLockTx(),
+                    [cce]() -> std::string
+                    {
+                        return std::string("\"cce\":")
+                            .append(FMT_POINTER_TO_UINT64T(cce))
+                            .append(",\"associate\":\"key_lock_.write_lock\"");
+                    });
                 RecoverWriteLock(cce->key_lock_.WriteLockTx(),
                                  cce_node_group_id);
             }
@@ -118,6 +127,14 @@ bool CcMap::ReadLockCce(LruEntry *cce,
         {
             if (cce->gap_lock_.HasWriteLock())
             {
+                TX_TRACE_DUMP_WITH_CONTEXT(
+                    cce->key_lock_.WriteLockTx(),
+                    [cce]() -> std::string
+                    {
+                        return std::string("\"cce\":")
+                            .append(FMT_POINTER_TO_UINT64T(cce))
+                            .append(",\"associate\":\"key_lock_.write_lock\"");
+                    });
                 RecoverWriteLock(cce->gap_lock_.WriteLockTx(),
                                  cce_node_group_id);
             }

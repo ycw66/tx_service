@@ -53,7 +53,7 @@ message(STATUS "protobuf dir: ${Protobuf_INCLUDE_DIR}")
 message(STATUS "protobuf dir: ${OPENSSL_LIB}")
 message(STATUS "protobuf dir: ${OPENSSL_INCLUDE_PATH}")
 
-set(INCLUDE_DIR 
+set(INCLUDE_DIR
    ${CMAKE_SOURCE_DIR}/include
    ${CMAKE_SOURCE_DIR}/include/cc
    ${CMAKE_SOURCE_DIR}/include/remote
@@ -70,17 +70,19 @@ if ( CMAKE_COMPILER_IS_GNUCC )
    set(LINK_LIB ${LINK_LIB} ${OPENSSL_LIB} ${BRPC_LIB} ${BRAFT_LIB} ${GFLAGS_LIBRARY})
 endif()
 
-add_library(txservice STATIC 
+add_library(txservice STATIC
     ${CMAKE_SOURCE_DIR}/src/tx_execution.cpp
     ${CMAKE_SOURCE_DIR}/src/tx_operation.cpp
     ${CMAKE_SOURCE_DIR}/src/checkpointer.cpp
     ${CMAKE_SOURCE_DIR}/src/cc/cc_shard.cpp
-    ${CMAKE_SOURCE_DIR}/src/cc/local_cc_handler.cpp 
+    ${CMAKE_SOURCE_DIR}/src/cc/local_cc_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/cc/cc_handler_result.cpp
     ${CMAKE_SOURCE_DIR}/include/proto/cc_request.pb.cc
     ${CMAKE_SOURCE_DIR}/src/remote/remote_cc_handler.cpp
     ${CMAKE_SOURCE_DIR}/src/remote/remote_cc_request.cpp
     ${CMAKE_SOURCE_DIR}/src/remote/remote_cc_handler_win.cpp
-    ${CMAKE_SOURCE_DIR}/log_service/proto/raft_log.pb.cc)
+    ${CMAKE_SOURCE_DIR}/log_service/proto/raft_log.pb.cc
+    ${CMAKE_SOURCE_DIR}/src/trace.cpp)
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 

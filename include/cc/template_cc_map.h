@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>  // std::max
+#include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "cc_entry.h"
 #include "cc_map.h"
@@ -15,6 +17,7 @@
 #include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
+#include "tx_trace.h"
 #include "type.h"
 
 namespace txservice
@@ -59,6 +62,19 @@ public:
 
     bool Execute(AcquireCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         CcHandlerResult<AcquireKeyResult> *hd_res = req.Result();
         AcquireKeyResult &acquire_key_result = hd_res->Value();
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
@@ -217,10 +233,30 @@ public:
             }
             else
             {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireWriteLock.Fail",
+                    reinterpret_cast<LruEntry *>(&cc_entry),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
                 const std::unordered_set<TxNumber> &read_locks =
                     cc_entry.key_lock_.ReadLocks();
                 if (read_locks.size() > 0)
                 {
+                    TX_TRACE_DUMP_WITH_CONTEXT(
+                        &read_locks,
+                        [&cc_entry]() -> std::string
+                        {
+                            return std::string("\"CcEntry\":")
+                                .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                .append(
+                                    ",\"associate\":\"key_lock_.read_locks\"");
+                        });
                     // If the request fails to acquire the write lock because of
                     // read locks, checks each read lock and recovers if needed.
                     for (const auto &read_tx : read_locks)
@@ -231,6 +267,15 @@ public:
                 }
                 else
                 {
+                    TX_TRACE_DUMP_WITH_CONTEXT(
+                        cc_entry.key_lock_.WriteLockTx(),
+                        [&cc_entry]() -> std::string
+                        {
+                            return std::string("\"CcEntry\":")
+                                .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                .append(
+                                    ",\"associate\":\"key_lock_.write_lock\"");
+                        });
                     // The request fails because of write-write conflicts.
                     assert(cc_entry.key_lock_.HasWriteLock());
                     shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
@@ -272,6 +317,19 @@ public:
 
     bool Execute(PostWriteCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         const CcEntryAddr &cce_addr = *req.CceAddr();
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
@@ -431,6 +489,19 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
         AcquireAllResult &acquire_all_result = hd_res->Value();
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
@@ -636,9 +707,29 @@ public:
             }
             else
             {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireWriteLock(Intention).Fail",
+                    reinterpret_cast<LruEntry *>(&cc_entry),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
                 if (req.GetLockType() == LockType::WriteIntent &&
                     cc_entry.key_lock_.HasWriteLock())
                 {
+                    TX_TRACE_DUMP_WITH_CONTEXT(
+                        cc_entry.key_lock_.WriteLockTx(),
+                        [&cc_entry]() -> std::string
+                        {
+                            return std::string("\"CcEntry\":")
+                                .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                .append(
+                                    ",\"associate\":\"key_lock_.write_lock\"");
+                        });
                     shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
                                            req.NodeGroupId(),
                                            ng_term);
@@ -649,6 +740,16 @@ public:
                         cc_entry.key_lock_.ReadLocks();
                     if (!read_locks.empty())
                     {
+                        TX_TRACE_DUMP_WITH_CONTEXT(
+                            &read_locks,
+                            [&cc_entry]() -> std::string
+                            {
+                                return std::string("\"CcEntry\":")
+                                    .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                    .append(
+                                        ",\"associate\":\"key_lock_.read_"
+                                        "locks\"");
+                            });
                         // If the request fails to acquire the write lock
                         // because of read locks, checks each read lock and
                         // recovers if needed.
@@ -660,6 +761,16 @@ public:
                     }
                     else if (cc_entry.key_lock_.HasWriteIntent())
                     {
+                        TX_TRACE_DUMP_WITH_CONTEXT(
+                            cc_entry.key_lock_.WriteIntentTx(),
+                            [&cc_entry]() -> std::string
+                            {
+                                return std::string("\"CcEntry\":")
+                                    .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                    .append(
+                                        ",\"associate\":\"key_lock_.write_"
+                                        "intent\"");
+                            });
                         // The request fails because of the write intent.
                         shard_->CheckRecoverTx(
                             cc_entry.key_lock_.WriteIntentTx(),
@@ -668,6 +779,16 @@ public:
                     }
                     else if (cc_entry.key_lock_.HasWriteLock())
                     {
+                        TX_TRACE_DUMP_WITH_CONTEXT(
+                            cc_entry.key_lock_.WriteLockTx(),
+                            [&cc_entry]() -> std::string
+                            {
+                                return std::string("\"CcEntry\":")
+                                    .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                                    .append(
+                                        ",\"associate\":\"key_lock_.write_"
+                                        "lock\"");
+                            });
                         // The request fails because of the write lock.
                         shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
                                                req.NodeGroupId(),
@@ -710,6 +831,19 @@ public:
 
     bool Execute(PostWriteAllCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -925,6 +1059,19 @@ public:
 
     bool Execute(PostReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         ACTION_FAULT_INJECTOR("before_post_read");
         auto hd_res = req.Result();
 
@@ -1052,6 +1199,19 @@ public:
 
     bool Execute(ReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         auto hd_res = req.Result();
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
@@ -1113,6 +1273,17 @@ public:
 
                     if (!lock_success)
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLock.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         uint32_t tx_node = (tx_number >> 32L) >> 10;
                         if (tx_node != cce_node_group_id)
                         {
@@ -1244,6 +1415,19 @@ public:
 
     bool Execute(remote::RemoteReadOutside &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         const CcEntryAddr &cce_addr = req.cce_addr_;
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
@@ -1281,6 +1465,19 @@ public:
 
     bool Execute(ScanOpenBatchCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         // Before the scan open request is enqueued, the local node's term is
         // obtained and kept in the cc request. This is to avoid getting the
         // node's terms repeatedly in each core, as the scan request is
@@ -1329,6 +1526,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(floor_cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1349,6 +1557,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(floor_cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1383,6 +1602,17 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId()))
                 {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadLockOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
                     return false;
                 }
 
@@ -1430,6 +1660,17 @@ public:
                                                     req.TxTerm(),
                                                     req.NodeGroupId()))
                         {
+                            TX_TRACE_ACTION_WITH_CONTEXT(
+                                &req,
+                                "AcquireReadLockOnKey.Fail",
+                                reinterpret_cast<LruEntry *>(cce),
+                                [&req]() -> std::string
+                                {
+                                    return std::string(",\"tx_number\":")
+                                        .append(std::to_string(req.Txn()))
+                                        .append(",\"term\":")
+                                        .append(std::to_string(req.TxTerm()));
+                                });
                             return false;
                         }
                     }
@@ -1454,6 +1695,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1469,6 +1721,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1483,6 +1746,19 @@ public:
 
     bool Execute(ScanNextBatchCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -1544,6 +1820,17 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId()))
                 {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadLock.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
                     return false;
                 }
 
@@ -1570,6 +1857,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1584,6 +1882,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1598,6 +1907,19 @@ public:
 
     bool Execute(remote::RemoteScanOpen &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -1661,6 +1983,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(floor_cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1680,6 +2013,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(floor_cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1707,6 +2051,17 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId()))
                 {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadLockOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
                     return false;
                 }
 
@@ -1751,6 +2106,17 @@ public:
                                                     req.TxTerm(),
                                                     req.NodeGroupId()))
                         {
+                            TX_TRACE_ACTION_WITH_CONTEXT(
+                                &req,
+                                "AcquireReadLockOnKey.Fail",
+                                reinterpret_cast<LruEntry *>(cce),
+                                [&req]() -> std::string
+                                {
+                                    return std::string(",\"tx_number\":")
+                                        .append(std::to_string(req.Txn()))
+                                        .append(",\"term\":")
+                                        .append(std::to_string(req.TxTerm()));
+                                });
                             return false;
                         }
                     }
@@ -1773,6 +2139,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1787,6 +2164,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1803,6 +2191,19 @@ public:
 
     bool Execute(remote::RemoteScanNextBatch &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -1849,6 +2250,17 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId()))
                 {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadLockOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
                     return false;
                 }
 
@@ -1874,6 +2286,17 @@ public:
                                                 req.NodeGroupId(),
                                                 true))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1888,6 +2311,17 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId()))
                     {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadLockOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
                         return false;
                     }
                 }
@@ -1908,11 +2342,37 @@ public:
     /// <param name="req"></param>
     bool Execute(CommitSkCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         return true;
     }
 
     bool Execute(CkptScanCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
                                                         : req.start_entry_;
         CcEntry<KeyT, ValueT> *cce =
@@ -1972,11 +2432,37 @@ public:
 
     bool Execute(FaultInjectCC &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         return true;
     }
 
     bool Execute(ReplayLogCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         KeyT key;
         // A psuedo record that is used to deserialize and move forward the
         // record that is not sharded to the core.

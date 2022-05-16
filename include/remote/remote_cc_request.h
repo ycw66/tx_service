@@ -28,6 +28,17 @@ public:
     RemoteAcquire(RemoteAcquire &&rhs) = delete;
     void Set(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -46,6 +57,17 @@ public:
     RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
     void Set(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -60,6 +82,17 @@ struct RemotePostRead : public PostReadCc
 public:
     RemotePostRead();
     void Set(std::unique_ptr<CcMessage> input_msg);
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -76,6 +109,17 @@ public:
     RemoteRead();
     void Set(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -89,6 +133,17 @@ struct RemoteReadOutside : public CcRequestBase
 public:
     RemoteReadOutside() = default;
     void Set(std::unique_ptr<CcMessage> input_msg);
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
     CcMap *Ccm()
     {
@@ -134,6 +189,17 @@ struct RemotePostWrite : public PostWriteCc
 public:
     RemotePostWrite();
     void Set(std::unique_ptr<CcMessage> input_msg);
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -149,6 +215,17 @@ struct RemotePostWriteAll : public PostWriteAllCc
 public:
     RemotePostWriteAll();
     void Set(std::unique_ptr<CcMessage> input_msg);
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;
@@ -165,6 +242,17 @@ public:
 
     void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
     void Free() override;
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
     int64_t TxTerm()
     {
@@ -228,6 +316,18 @@ public:
     RemoteScanNextBatch();
     void Set(std::unique_ptr<CcMessage> input_msg);
 
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
     int64_t TxTerm()
     {
         return tx_term_;
@@ -287,6 +387,18 @@ public:
     RemoteCommitSk();
     void Set(std::unique_ptr<CcMessage> input_msg);
 
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -306,6 +418,18 @@ public:
     RemoteFaultInjectCC(RemoteFaultInjectCC &&rhs) = delete;
 
     void Set(std::unique_ptr<CcMessage> input_msg);
+
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
 private:
     CcMessage output_msg_;

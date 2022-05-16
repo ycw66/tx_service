@@ -4,7 +4,9 @@
 #include <cassert>
 #include <chrono>
 #include <functional>
+#include <string>
 #include <system_error>
+#include <utility>
 #include <variant>
 
 namespace txservice
@@ -23,6 +25,7 @@ public:
     virtual void SetError(int8_t err_code) = 0;
     virtual void SetFinished() = 0;
     virtual bool IsFinished() const = 0;
+    virtual bool ForceError() = 0;
     virtual bool IsError() const = 0;
 };
 
@@ -84,44 +87,28 @@ public:
         ref_cnted_ = false;
     }
 
-    void SetFinished() override
+    void SetValue(const T &val)
     {
-        if (ref_cnted_)
-        {
-            auto r = ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-            if (r == 1)
-            {
-                bool expect = false;
-                is_finished_.compare_exchange_strong(
-                    expect, true, std::memory_order_acq_rel);
-
-                if (post_lambda_)
-                {
-                    post_lambda_(this);
-                }
-            }
-        }
-        else
-        {
-            bool expect = false;
-            is_finished_.compare_exchange_strong(
-                expect, true, std::memory_order_acq_rel);
-
-            if (post_lambda_)
-            {
-                post_lambda_(this);
-            }
-        }
+        result_ = val;
     }
 
-    void SetError(int8_t err_code) override
+    void SetValue(T &&val)
     {
-        int8_t no_error = 0;
-        error_code_.compare_exchange_strong(
-            no_error, err_code, std::memory_order_acq_rel);
-        SetFinished();
+        result_ = std::move(val);
     }
 
+    const T &Value() const
+    {
+        return result_;
+    }
+
+    T &Value()
+    {
+        return result_;
+    }
+
+    void SetFinished() override;
+    void SetError(int8_t err_code) override;
     /**
      * @brief Forces the handler result to an error state.
      *
@@ -143,46 +130,7 @@ public:
      * @return true, if the result is forced to be errored; false, if the result
      * has already been set by the remote request's resposne.
      */
-    bool ForceError()
-    {
-        bool expect = false;
-        bool success = is_finished_.compare_exchange_strong(
-            expect, true, std::memory_order_acq_rel);
-
-        if (success)
-        {
-            int8_t no_error = 0;
-            error_code_.compare_exchange_strong(
-                no_error, -2, std::memory_order_acq_rel);
-
-            if (post_lambda_)
-            {
-                post_lambda_(this);
-            }
-        }
-
-        return success;
-    }
-
-    void SetValue(const T &val)
-    {
-        result_ = val;
-    }
-
-    void SetValue(T &&val)
-    {
-        result_ = std::move(val);
-    }
-
-    const T &Value() const
-    {
-        return result_;
-    }
-
-    T &Value()
-    {
-        return result_;
-    }
+    bool ForceError() override;
 
     void Reset()
     {

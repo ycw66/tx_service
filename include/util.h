@@ -10,7 +10,6 @@
 
 namespace txservice
 {
-
 /** @brief
   Split a string_view by a delimiter
  */

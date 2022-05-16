@@ -5,6 +5,7 @@
 #include "cc/local_cc_shards.h"
 #include "sharder.h"
 #include "tx_execution.h"
+#include "tx_trace.h"
 
 txservice::remote::RemoteCcHandler::RemoteCcHandler(CcStreamSender &sender)
     : stream_sender_(sender)
