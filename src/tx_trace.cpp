@@ -1,7 +1,5 @@
 #include "tx_trace.h"
 
-#include <_types/_uint64_t.h>
-
 #include <ostream>
 #include <sstream>
 #include <string>
