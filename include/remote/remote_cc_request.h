@@ -26,7 +26,7 @@ public:
     RemoteAcquire();
     RemoteAcquire(const RemoteAcquire &rhs) = delete;
     RemoteAcquire(RemoteAcquire &&rhs) = delete;
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -55,7 +55,7 @@ public:
     RemoteAcquireAll();
     RemoteAcquireAll(const RemoteAcquireAll &rhs) = delete;
     RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -81,7 +81,7 @@ struct RemotePostRead : public PostReadCc
 {
 public:
     RemotePostRead();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -107,7 +107,7 @@ struct RemoteRead : public ReadCc
 {
 public:
     RemoteRead();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -132,7 +132,7 @@ struct RemoteReadOutside : public CcRequestBase
 {
 public:
     RemoteReadOutside() = default;
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -188,7 +188,7 @@ struct RemotePostWrite : public PostWriteCc
 {
 public:
     RemotePostWrite();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -214,7 +214,7 @@ struct RemotePostWriteAll : public PostWriteAllCc
 {
 public:
     RemotePostWriteAll();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -240,7 +240,7 @@ struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
 public:
     RemoteScanOpen();
 
-    void Set(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
+    void Reset(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
     void Free() override;
     uint64_t handler_addr()
     {
@@ -314,7 +314,7 @@ struct RemoteScanNextBatch
 {
 public:
     RemoteScanNextBatch();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
 
     uint64_t handler_addr()
     {
@@ -385,7 +385,7 @@ struct RemoteCommitSk : public CommitSkCc
 {
 public:
     RemoteCommitSk();
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
 
     uint64_t handler_addr()
     {
@@ -417,7 +417,7 @@ public:
     RemoteFaultInjectCC(const RemoteFaultInjectCC &rhs) = delete;
     RemoteFaultInjectCC(RemoteFaultInjectCC &&rhs) = delete;
 
-    void Set(std::unique_ptr<CcMessage> input_msg);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
 
     uint64_t handler_addr()
     {

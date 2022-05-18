@@ -234,6 +234,12 @@ void Checkpointer::Run()
         request_ckpt_ = false;
     }
 
+    // ensure normal shutdown execute checkpoint since we could receive
+    // terminating request during the last checkpoint.
+    lk.unlock();
+    Ckpt();
+    lk.lock();
+
     status_ = Status::Terminated;
     cv_.notify_all();
 }

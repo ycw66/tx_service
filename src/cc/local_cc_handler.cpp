@@ -38,15 +38,15 @@ void txservice::LocalCcHandler::AcquireWrite(
     {
         hres.Value().remote_ack_cnt_ = nullptr;
         AcquireCc *req = acquire_pool.NextRequest();
-        req->Set(&table_name,
-                 &key,
-                 shard_code,
-                 &txid,
-                 tx_term,
-                 ts,
-                 is_insert,
-                 &hres,
-                 proto);
+        req->Reset(&table_name,
+                   &key,
+                   shard_code,
+                   &txid,
+                   tx_term,
+                   ts,
+                   is_insert,
+                   &hres,
+                   proto);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -83,15 +83,15 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     {
         hres.Value().remote_ack_cnt_ = nullptr;
         AcquireAllCc *req = acquire_all_pool_.NextRequest();
-        req->Set(&table_name,
-                 &key,
-                 ng_id,
-                 txn,
-                 tx_term,
-                 is_insert,
-                 &hres,
-                 proto,
-                 lock_type);
+        req->Reset(&table_name,
+                   &key,
+                   ng_id,
+                   txn,
+                   tx_term,
+                   is_insert,
+                   &hres,
+                   proto,
+                   lock_type);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         // The request is dispatched to the first core and then passed to
@@ -128,15 +128,15 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
     if (dest_node_id == cc_shards_.node_id_)
     {
         PostWriteAllCc *req = postwrite_all_pool_.NextRequest();
-        req->Set(&table_name,
-                 &key,
-                 ng_id,
-                 tx_number,
-                 commit_ts,
-                 &rec,
-                 dml_op,
-                 &hres,
-                 post_write_type);
+        req->Reset(&table_name,
+                   &key,
+                   ng_id,
+                   tx_number,
+                   commit_ts,
+                   &rec,
+                   dml_op,
+                   &hres,
+                   post_write_type);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         // The request is dispatched to the first core and then passed to
@@ -183,13 +183,13 @@ void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
         }
 
         PostWriteCc *req = postwrite_pool.NextRequest();
-        req->Set(&cce_addr,
-                 tx_number,
-                 commit_ts,
-                 record,
-                 is_deleted,
-                 &hres,
-                 protocol);
+        req->Reset(&cce_addr,
+                   tx_number,
+                   commit_ts,
+                   record,
+                   is_deleted,
+                   &hres,
+                   protocol);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -238,14 +238,14 @@ void txservice::LocalCcHandler::PostRead(
         }
 
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Set(&cce_addr,
-                 tx_number,
-                 commit_ts,
-                 key_ts,
-                 gap_ts,
-                 &hres,
-                 protocol,
-                 lock_type);
+        req->Reset(&cce_addr,
+                   tx_number,
+                   commit_ts,
+                   key_ts,
+                   gap_ts,
+                   &hres,
+                   protocol,
+                   lock_type);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -292,18 +292,18 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
     if (dest_node_id == cc_shards_.node_id_)
     {
         ReadCc *req = read_pool.NextRequest();
-        req->Set(&table_name,
-                 &key,
-                 shard_code,
-                 &record,
-                 read_type,
-                 tx_number,
-                 tx_term,
-                 ts,
-                 &hres,
-                 iso_level,
-                 proto,
-                 lock_type);
+        req->Reset(&table_name,
+                   &key,
+                   shard_code,
+                   &record,
+                   read_type,
+                   tx_number,
+                   tx_term,
+                   ts,
+                   &hres,
+                   iso_level,
+                   proto,
+                   lock_type);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -360,18 +360,18 @@ void txservice::LocalCcHandler::ReadOutside(
         // which is good enough for the concurrency control purpose. The
         // isolation level is set to read committed, so that the request leaves
         // no read intention or lock on the cc entry.
-        req->Set(nullptr,
-                 nullptr,
-                 ng_id << 10,
-                 &rec,
-                 read_type,
-                 0,
-                 tx_term,
-                 commit_ts,
-                 &hres,
-                 IsolationLevel::ReadCommitted,
-                 CcProtocol::OCC,
-                 LockType::NoLock);
+        req->Reset(nullptr,
+                   nullptr,
+                   ng_id << 10,
+                   &rec,
+                   read_type,
+                   0,
+                   tx_term,
+                   commit_ts,
+                   &hres,
+                   IsolationLevel::ReadCommitted,
+                   CcProtocol::OCC,
+                   LockType::NoLock);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -426,18 +426,18 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     }
 
     ReadCc *read_req = read_pool.NextRequest();
-    read_req->Set(&table_name,
-                  &key,
-                  shard_code,
-                  &record,
-                  read_type,
-                  tx_number,
-                  tx_term,
-                  ts,
-                  &hres,
-                  iso_level,
-                  proto,
-                  lock_type);
+    read_req->Reset(&table_name,
+                    &key,
+                    shard_code,
+                    &record,
+                    read_type,
+                    tx_number,
+                    tx_term,
+                    ts,
+                    &hres,
+                    iso_level,
+                    proto,
+                    lock_type);
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
@@ -522,21 +522,21 @@ void txservice::LocalCcHandler::ScanOpen(
                 ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
 
                 ScanOpenBatchCc *req = scan_open_pool.NextRequest();
-                req->Set(&table_name,
-                         index_type,
-                         ng_id,
-                         &start_key,
-                         inclusive,
-                         direction,
-                         tx_number,
-                         ts,
-                         shard_scan_cache,
-                         local_term,
-                         &hd_res,
-                         iso_level,
-                         proto,
-                         lock_type,
-                         scanner_ptr->is_ckpt_delta_);
+                req->Reset(&table_name,
+                           index_type,
+                           ng_id,
+                           &start_key,
+                           inclusive,
+                           direction,
+                           tx_number,
+                           ts,
+                           shard_scan_cache,
+                           local_term,
+                           &hd_res,
+                           iso_level,
+                           proto,
+                           lock_type,
+                           scanner_ptr->is_ckpt_delta_);
 
                 TX_TRACE_ACTION(this, req);
                 TX_TRACE_DUMP(req);
@@ -621,21 +621,21 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
 
     ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
-    scan_open_cc_req->Set(&table_name,
-                          index_type,
-                          ng_id,
-                          &start_key,
-                          inclusive,
-                          direction,
-                          tx_number,
-                          ts,
-                          shard_scan_cache,
-                          tx_term,
-                          &hd_res,
-                          iso_level,
-                          proto,
-                          LockType::ReadLock,
-                          scanner_ptr->is_ckpt_delta_);
+    scan_open_cc_req->Reset(&table_name,
+                            index_type,
+                            ng_id,
+                            &start_key,
+                            inclusive,
+                            direction,
+                            tx_number,
+                            ts,
+                            shard_scan_cache,
+                            tx_term,
+                            &hd_res,
+                            iso_level,
+                            proto,
+                            LockType::ReadLock,
+                            scanner_ptr->is_ckpt_delta_);
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
@@ -661,16 +661,16 @@ void txservice::LocalCcHandler::ScanNextBatch(
     if (node_id == cc_shards_.node_id_)
     {
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
-        req->Set(node_group_id,
-                 tx_number,
-                 start_ts,
-                 blocked_cache,
-                 tx_term,
-                 &hd_res,
-                 iso_level,
-                 proto,
-                 lock_type,
-                 scanner.is_ckpt_delta_);
+        req->Reset(node_group_id,
+                   tx_number,
+                   start_ts,
+                   blocked_cache,
+                   tx_term,
+                   &hd_res,
+                   iso_level,
+                   proto,
+                   lock_type,
+                   scanner.is_ckpt_delta_);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -708,16 +708,16 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
 
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
     ScanNextBatchCc *req = scan_next_pool.NextRequest();
-    req->Set(node_group_id,
-             tx_number,
-             start_ts,
-             blocked_cache,
-             tx_term,
-             &hd_res,
-             iso_level,
-             proto,
-             LockType::ReadLock,
-             scanner.is_ckpt_delta_);
+    req->Reset(node_group_id,
+               tx_number,
+               start_ts,
+               blocked_cache,
+               tx_term,
+               &hd_res,
+               iso_level,
+               proto,
+               LockType::ReadLock,
+               scanner.is_ckpt_delta_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
     local_shard.Enqueue(req);
@@ -739,7 +739,8 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
     if (node_id == cc_shards_.node_id_)
     {
         CommitSkCc *req = commitsk_pool.NextRequest();
-        req->Set(&table_name, &sk, &pk, shard_code, ts, is_delete, &hres);
+        req->Reset(
+            &table_name, &sk, &pk, txn, shard_code, ts, is_delete, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -821,7 +822,7 @@ void txservice::LocalCcHandler::UpdateCommitLowerBound(
     CcHandlerResult<uint64_t> &hres)
 {
     NegotiateCc *req = negoti_pool.NextRequest();
-    req->Set(&txid, commit_ts_lower_bound, &hres);
+    req->Reset(&txid, commit_ts_lower_bound, &hres);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
     // The lower 10 bits represent the local core Id. The remaining high
@@ -866,7 +867,7 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
         if (dest_node_id == cc_shards_.node_id_)
         {
             FaultInjectCC *req = fault_inject_pool.NextRequest();
-            req->Set(&fault_name, &fault_paras, &hres);
+            req->Reset(&fault_name, &fault_paras, &hres);
             TX_TRACE_ACTION(this, req);
             TX_TRACE_DUMP(req);
             cc_shards_.EnqueueCcRequest(0, req);

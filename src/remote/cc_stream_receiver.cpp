@@ -141,7 +141,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteAcquire *acquire_req = acquire_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), acquire_req);
-        acquire_req->Set(std::move(msg));
+        acquire_req->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(acquire_req->KeyShardCode(),
                                        acquire_req);
 
@@ -236,7 +236,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteAcquireAll *acquire_all_req = acquire_all_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), acquire_all_req);
-        acquire_all_req->Set(std::move(msg));
+        acquire_all_req->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(0, acquire_all_req);
         break;
     }
@@ -329,7 +329,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             RemotePostRead *vali_req = postread_pool_.NextRequest();
             TX_TRACE_ASSOCIATE(msg.get(), vali_req);
-            vali_req->Set(std::move(msg));
+            vali_req->Reset(std::move(msg));
             vali_req->Ccm()->shard_->Enqueue(vali_req);
         }
 
@@ -432,7 +432,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteRead *read = read_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), read);
-        read->Set(std::move(msg));
+        read->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(read->KeyShardCode(), read);
         break;
     }
@@ -440,7 +440,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteReadOutside *read_outside = read_outside_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), read_outside);
-        read_outside->Set(std::move(msg));
+        read_outside->Reset(std::move(msg));
 
         const CcEntryAddr &cce_addr = read_outside->CceAddr();
         if (Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
@@ -570,7 +570,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
             TX_TRACE_ASSOCIATE(msg.get(), post_commit);
-            post_commit->Set(std::move(msg));
+            post_commit->Reset(std::move(msg));
             post_commit->Ccm()->shard_->Enqueue(post_commit);
         }
 
@@ -580,7 +580,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemotePostWriteAll *post_write_all = post_write_all_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), post_write_all);
-        post_write_all->Set(std::move(msg));
+        post_write_all->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(0, post_write_all);
         break;
     }
@@ -589,7 +589,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
         uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
         TX_TRACE_ASSOCIATE(msg.get(), scan_open_req);
-        scan_open_req->Set(std::move(msg), local_core_cnt);
+        scan_open_req->Reset(std::move(msg), local_core_cnt);
 
         for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
         {
@@ -707,7 +707,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteScanNextBatch *scan_next_req = scan_next_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), scan_next_req);
-        scan_next_req->Set(std::move(msg));
+        scan_next_req->Reset(std::move(msg));
         scan_next_req->Ccm()->shard_->Enqueue(scan_next_req);
         break;
     }
@@ -807,7 +807,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         RemoteCommitSk *commit_sk_req = commit_sk_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), commit_sk_req);
-        commit_sk_req->Set(std::move(msg));
+        commit_sk_req->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(commit_sk_req->KeyShardCode(),
                                        commit_sk_req);
         break;
@@ -817,7 +817,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         RemoteFaultInjectCC *fault_inject_req =
             fault_inject_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), fault_inject_req);
-        fault_inject_req->Set(std::move(msg));
+        fault_inject_req->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(0, fault_inject_req);
 
         break;

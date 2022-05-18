@@ -173,6 +173,23 @@ public:
         return node_group_id_;
     }
 
+    void Reset(const TableName *tname,
+               CcHandlerResult<ResultType> *res,
+               uint32_t node_group_id,
+               uint64_t tx_number,
+               CcProtocol proto = CcProtocol::OCC,
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
+    {
+        res_ = res;
+        table_name_ = tname;
+        ccm_ = nullptr;
+        node_group_id_ = node_group_id;
+
+        tx_number_ = tx_number;
+        proto_ = proto;
+        isolation_level_ = iso_level;
+    }
+
 protected:
     /**
      * @brief Initializes the request's target cc map, if the table
@@ -259,55 +276,49 @@ public:
     AcquireCc(const AcquireCc &rhs) = delete;
     AcquireCc(AcquireCc &&rhs) = delete;
 
-    void Set(const TableName *tname,
-             const TxKey *key,
-             const uint32_t key_shard_code,
-             const TxId *txid,
-             int64_t tx_term,
-             uint64_t ts,
-             bool is_insert,
-             CcHandlerResult<AcquireKeyResult> *res,
-             CcProtocol proto)
+    void Reset(const TableName *tname,
+               const TxKey *key,
+               const uint32_t key_shard_code,
+               const TxId *txid,
+               int64_t tx_term,
+               uint64_t ts,
+               bool is_insert,
+               CcHandlerResult<AcquireKeyResult> *res,
+               CcProtocol proto)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<AcquireCc, AcquireKeyResult>::Reset(
+            tname, res, key_shard_code >> 10, txid->TxNumber(), proto);
+
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
-        node_group_id_ = key_shard_code >> 10;
         txid_ = txid;
-        tx_number_ = txid->TxNumber();
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
-        res_ = res;
-        ccm_ = nullptr;
-        proto_ = proto;
         cce_ptr_ = nullptr;
     }
 
-    void Set(const TableName *tname,
-             const std::string *key_str,
-             const uint32_t key_shard_code,
-             const TxId *txid,
-             int64_t tx_term,
-             uint64_t ts,
-             bool is_insert,
-             CcHandlerResult<AcquireKeyResult> *res,
-             CcProtocol proto)
+    void Reset(const TableName *tname,
+               const std::string *key_str,
+               const uint32_t key_shard_code,
+               const TxId *txid,
+               int64_t tx_term,
+               uint64_t ts,
+               bool is_insert,
+               CcHandlerResult<AcquireKeyResult> *res,
+               CcProtocol proto)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<AcquireCc, AcquireKeyResult>::Reset(
+            tname, res, key_shard_code >> 10, txid->TxNumber(), proto);
+
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
-        node_group_id_ = key_shard_code >> 10;
         txid_ = txid;
-        tx_number_ = txid->TxNumber();
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
-        res_ = res;
-        ccm_ = nullptr;
-        proto_ = proto;
         cce_ptr_ = nullptr;
     }
 
@@ -381,52 +392,48 @@ public:
     AcquireAllCc(const AcquireAllCc &rhs) = delete;
     AcquireAllCc(AcquireAllCc &&rhs) = delete;
 
-    void Set(const TableName *tname,
-             const TxKey *key,
-             uint32_t node_group_id,
-             TxNumber tx_num,
-             int64_t tx_term,
-             bool is_insert,
-             CcHandlerResult<AcquireAllResult> *res,
-             CcProtocol proto,
-             LockType lk_type)
+    void Reset(const TableName *tname,
+               const TxKey *key,
+               uint32_t node_group_id,
+               TxNumber tx_number,
+               int64_t tx_term,
+               bool is_insert,
+               CcHandlerResult<AcquireAllResult> *res,
+               CcProtocol proto,
+               LockType lk_type)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
+            tname, res, node_group_id, tx_number, proto);
+
         key_ = key;
         key_str_ = nullptr;
-        node_group_id_ = node_group_id;
-        tx_number_ = tx_num;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
-        res_ = res;
-        ccm_ = nullptr;
-        proto_ = proto;
-        cce_ptr_ = nullptr;
+        decoded_key_ = nullptr;
         lock_type_ = lk_type;
+        cce_ptr_ = nullptr;
     }
 
-    void Set(const TableName *tname,
-             const std::string *key_str,
-             uint32_t node_group_id,
-             TxNumber tx_num,
-             int64_t tx_term,
-             bool is_insert,
-             CcHandlerResult<AcquireAllResult> *res,
-             CcProtocol proto,
-             LockType lk_type)
+    void Reset(const TableName *tname,
+               const std::string *key_str,
+               uint32_t node_group_id,
+               TxNumber tx_number,
+               int64_t tx_term,
+               bool is_insert,
+               CcHandlerResult<AcquireAllResult> *res,
+               CcProtocol proto,
+               LockType lk_type)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
+            tname, res, node_group_id, tx_number, proto);
+
         key_ = nullptr;
         key_str_ = key_str;
-        node_group_id_ = node_group_id;
-        tx_number_ = tx_num;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
-        res_ = res;
-        ccm_ = nullptr;
-        proto_ = proto;
-        cce_ptr_ = nullptr;
+        decoded_key_ = nullptr;
         lock_type_ = lk_type;
+        cce_ptr_ = nullptr;
     }
 
     const TxKey *Key() const
@@ -510,22 +517,22 @@ public:
     PostWriteCc(const PostWriteCc &rhs) = delete;
     PostWriteCc(PostWriteCc &&rhs) = delete;
 
-    void Set(const CcEntryAddr *addr,
-             uint64_t tx_number,
-             uint64_t ts,
-             const TxRecord *rec,
-             bool is_deleted,
-             CcHandlerResult<Void> *res,
-             CcProtocol proto)
+    void Reset(const CcEntryAddr *addr,
+               uint64_t tx_number,
+               uint64_t ts,
+               const TxRecord *rec,
+               bool is_deleted,
+               CcHandlerResult<Void> *res,
+               CcProtocol proto)
     {
+        TemplatedCcRequest<PostWriteCc, Void>::Reset(
+            nullptr, res, addr->NodeGroupId(), tx_number, proto);
+
         cce_addr_ = addr;
-        tx_number_ = tx_number;
         commit_ts_ = ts;
         payload_ = rec;
         payload_str_ = nullptr;
         is_deleted_ = is_deleted;
-        res_ = res;
-        proto_ = proto;
 
         if (addr->InsertPtr() != 0)
         {
@@ -539,26 +546,24 @@ public:
                 reinterpret_cast<const LruEntry *>(addr->CcePtr());
             ccm_ = lru_entry->parent_map_;
         }
-
-        node_group_id_ = cce_addr_->NodeGroupId();
     }
 
-    void Set(const CcEntryAddr *addr,
-             uint64_t tx_number,
-             uint64_t ts,
-             const std::string *rec,
-             bool is_deleted,
-             CcHandlerResult<Void> *res,
-             CcProtocol proto)
+    void Reset(const CcEntryAddr *addr,
+               uint64_t tx_number,
+               uint64_t ts,
+               const std::string *rec,
+               bool is_deleted,
+               CcHandlerResult<Void> *res,
+               CcProtocol proto)
     {
+        TemplatedCcRequest<PostWriteCc, Void>::Reset(
+            nullptr, res, addr->NodeGroupId(), tx_number, proto);
+
         cce_addr_ = addr;
-        tx_number_ = tx_number;
         commit_ts_ = ts;
         payload_ = nullptr;
         payload_str_ = rec;
         is_deleted_ = is_deleted;
-        res_ = res;
-        proto_ = proto;
 
         if (addr->InsertPtr() != 0)
         {
@@ -614,49 +619,51 @@ public:
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
 
-    void Set(const TableName *tname,
-             const TxKey *key,
-             uint32_t node_group_id,
-             uint64_t tx_number,
-             uint64_t ts,
-             TxRecord *rec,
-             DmlOperation dml_op,
-             CcHandlerResult<Void> *res,
-             PostWriteType commit_type)
+    void Reset(const TableName *tname,
+               const TxKey *key,
+               uint32_t node_group_id,
+               uint64_t tx_number,
+               uint64_t ts,
+               TxRecord *rec,
+               DmlOperation dml_op,
+               CcHandlerResult<Void> *res,
+               PostWriteType commit_type)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+
         key_ = key;
-        tx_number_ = tx_number;
-        node_group_id_ = node_group_id;
+        key_str_ = nullptr;
+        decoded_key_ = nullptr;
         commit_ts_ = ts;
         payload_ = rec;
         payload_str_ = nullptr;
+        decoded_payload_ = nullptr;
         dml_op_ = dml_op;
-        res_ = res;
-        ccm_ = nullptr;
         commit_type_ = commit_type;
     }
 
-    void Set(const TableName *tname,
-             const std::string *key_str,
-             uint32_t node_group_id,
-             uint64_t tx_number,
-             uint64_t ts,
-             const std::string *rec,
-             DmlOperation dml_op,
-             CcHandlerResult<Void> *res,
-             PostWriteType commit_type)
+    void Reset(const TableName *tname,
+               const std::string *key_str,
+               uint32_t node_group_id,
+               uint64_t tx_number,
+               uint64_t ts,
+               const std::string *rec,
+               DmlOperation dml_op,
+               CcHandlerResult<Void> *res,
+               PostWriteType commit_type)
     {
-        table_name_ = tname;
+        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+
+        key_ = nullptr;
         key_str_ = key_str;
-        tx_number_ = tx_number;
-        node_group_id_ = node_group_id;
+        decoded_key_ = nullptr;
         commit_ts_ = ts;
         payload_ = nullptr;
         payload_str_ = rec;
+        decoded_payload_ = nullptr;
         dml_op_ = dml_op;
-        res_ = res;
-        ccm_ = nullptr;
         commit_type_ = commit_type;
     }
 
@@ -744,30 +751,28 @@ public:
     PostReadCc(const PostReadCc &rhs) = delete;
     PostReadCc(PostReadCc &&rhs) = delete;
 
-    void Set(const CcEntryAddr *addr,
-             uint64_t tx_number,
-             uint64_t commit_ts,
-             uint64_t key_ts,
-             uint64_t gap_ts,
-             CcHandlerResult<std::vector<TxId>> *res,
-             CcProtocol protocol,
-             LockType lock_type)
+    void Reset(const CcEntryAddr *addr,
+               uint64_t tx_number,
+               uint64_t commit_ts,
+               uint64_t key_ts,
+               uint64_t gap_ts,
+               CcHandlerResult<std::vector<TxId>> *res,
+               CcProtocol protocol,
+               LockType lock_type)
     {
+        TemplatedCcRequest<PostReadCc, std::vector<TxId>>::Reset(
+            nullptr, res, addr->NodeGroupId(), tx_number, protocol);
+
         cce_addr_ = addr;
-        tx_number_ = tx_number;
         commit_ts_ = commit_ts;
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
-        res_ = res;
-        proto_ = protocol;
         lock_type_ = lock_type;
         res->Value().clear();
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(addr->CcePtr());
         ccm_ = lru_entry->parent_map_;
-
-        node_group_id_ = cce_addr_->NodeGroupId();
     }
 
     const CcEntryAddr *CceAddr() const
@@ -825,32 +830,32 @@ public:
     ReadCc(const ReadCc &rhs) = delete;
     ReadCc(ReadCc &&rhs) = delete;
 
-    void Set(const TableName *tn,
-             const TxKey *key,
-             uint32_t key_shard_code,
-             TxRecord *rec,
-             ReadType read_type,
-             uint64_t tx_number,
-             int64_t tx_term,
-             uint64_t ts,
-             CcHandlerResult<ReadKeyResult> *res,
-             IsolationLevel iso_level,
-             CcProtocol proto,
-             LockType lock_type)
+    void Reset(const TableName *tn,
+               const TxKey *key,
+               uint32_t key_shard_code,
+               TxRecord *rec,
+               ReadType read_type,
+               uint64_t tx_number,
+               int64_t tx_term,
+               uint64_t ts,
+               CcHandlerResult<ReadKeyResult> *res,
+               IsolationLevel iso_level,
+               CcProtocol protocol,
+               LockType lock_type)
     {
+        TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
+            nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
+
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         rec_ = rec;
         rec_str_ = nullptr;
-        type_ = read_type;
-        res_ = res;
-        tx_number_ = tx_number;
         tx_term_ = tx_term;
         ts_ = ts;
-        proto_ = proto;
-        isolation_level_ = iso_level;
+        type_ = read_type;
         lock_type_ = lock_type;
+        cce_ptr_ = nullptr;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -865,37 +870,34 @@ public:
             table_name_ = tn;
             ccm_ = nullptr;
         }
-
-        node_group_id_ = key_shard_code >> 10;
-        cce_ptr_ = nullptr;
     }
 
-    void Set(const TableName *tn,
-             const std::string *key_str,
-             uint32_t key_shard_code,
-             std::string *rec_str,
-             ReadType read_type,
-             uint64_t tx_number,
-             int64_t tx_term,
-             uint64_t ts,
-             CcHandlerResult<ReadKeyResult> *res,
-             IsolationLevel iso_level,
-             CcProtocol proto,
-             LockType lock_type)
+    void Reset(const TableName *tn,
+               const std::string *key_str,
+               uint32_t key_shard_code,
+               std::string *rec_str,
+               ReadType read_type,
+               uint64_t tx_number,
+               int64_t tx_term,
+               uint64_t ts,
+               CcHandlerResult<ReadKeyResult> *res,
+               IsolationLevel iso_level,
+               CcProtocol protocol,
+               LockType lock_type)
     {
+        TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
+            nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
+
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         rec_ = nullptr;
         rec_str_ = rec_str;
-        type_ = read_type;
-        res_ = res;
-        tx_number_ = tx_number;
         tx_term_ = tx_term;
         ts_ = ts;
-        proto_ = proto;
-        isolation_level_ = iso_level;
+        type_ = read_type;
         lock_type_ = lock_type;
+        cce_ptr_ = nullptr;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -910,9 +912,6 @@ public:
             table_name_ = tn;
             ccm_ = nullptr;
         }
-
-        node_group_id_ = key_shard_code >> 10;
-        cce_ptr_ = nullptr;
     }
 
     uint32_t KeyShardCode() const
@@ -1004,38 +1003,34 @@ struct ScanOpenBatchCc
 public:
     ScanOpenBatchCc() = default;
 
-    void Set(const TableName *tn,
-             ScanIndexType type,
-             uint32_t ng_id,
-             const TxKey *start_key,
-             bool inclusive,
-             ScanDirection direction,
-             uint64_t tx_number,
-             const uint64_t &ts,
-             ScanCache *cache,
-             int64_t term,
-             CcHandlerResult<ScanOpenResult> *open_res,
-             IsolationLevel iso_level,
-             CcProtocol proto,
-             LockType lock_type,
-             bool is_delta,
-             bool is_include_floor_cce = false)
+    void Reset(const TableName *tn,
+               ScanIndexType type,
+               uint32_t ng_id,
+               const TxKey *start_key,
+               bool inclusive,
+               ScanDirection direction,
+               uint64_t tx_number,
+               const uint64_t &ts,
+               ScanCache *cache,
+               int64_t term,
+               CcHandlerResult<ScanOpenResult> *res,
+               IsolationLevel iso_level,
+               CcProtocol protocol,
+               LockType lock_type,
+               bool is_delta,
+               bool is_include_floor_cce = false)
     {
-        table_name_ = tn;
+        TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
+            tn, res, ng_id, tx_number, protocol, iso_level);
+
         index_type_ = type;
-        node_group_id_ = ng_id;
         start_key_ = start_key;
         inclusive_ = inclusive;
         direct_ = direction;
-        tx_number_ = tx_number;
         ts_ = ts;
         scan_cache_ = cache;
         term_ = term;
-        res_ = open_res;
-        isolation_level_ = iso_level;
-        proto_ = proto;
         lock_type_ = lock_type;
-        ccm_ = nullptr;
         is_ckpt_delta_ = is_delta;
         is_include_floor_cce_ = is_include_floor_cce;
         cce_ptr_ = nullptr;
@@ -1100,32 +1095,31 @@ struct ScanNextBatchCc
 public:
     ScanNextBatchCc() = default;
 
-    void Set(const uint32_t &ng_id,
-             TxNumber txn,
-             const uint64_t &ts,
-             ScanCache *cache,
-             int64_t tx_term,
-             CcHandlerResult<ScanNextResult> *next_res,
-             IsolationLevel iso_level,
-             CcProtocol proto,
-             LockType lock_type,
-             bool is_delta)
+    void Reset(const uint32_t &ng_id,
+               TxNumber tx_number,
+               const uint64_t &ts,
+               ScanCache *cache,
+               int64_t tx_term,
+               CcHandlerResult<ScanNextResult> *next_res,
+               IsolationLevel iso_level,
+               CcProtocol protocol,
+               LockType lock_type,
+               bool is_delta)
     {
-        node_group_id_ = ng_id;
-        tx_number_ = txn;
+        TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
+            nullptr, next_res, ng_id, tx_number, protocol, iso_level);
+
         ts_ = ts;
         scan_cache_ = cache;
         tx_term_ = tx_term;
+        lock_type_ = lock_type;
+        is_ckpt_delta_ = is_delta;
+        cce_ptr_ = nullptr;
+
         const ScanTuple *last_tuple = cache->LastTuple();
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(last_tuple->cce_addr_.CcePtr());
         ccm_ = lru_entry->parent_map_;
-        res_ = next_res;
-        isolation_level_ = iso_level;
-        proto_ = proto;
-        lock_type_ = lock_type;
-        is_ckpt_delta_ = is_delta;
-        cce_ptr_ = nullptr;
     }
 
     int64_t TxTerm()
@@ -1373,37 +1367,39 @@ public:
     CommitSkCc(const CommitSkCc &rhs) = delete;
     CommitSkCc(CommitSkCc &&rhs) = delete;
 
-    void Set(const TableName *tn,
-             const TxKey *sk,
-             const TxKey *pk,
-             uint32_t key_shard_code,
-             uint64_t ts,
-             bool is_delete,
-             CcHandlerResult<Void> *res)
+    void Reset(const TableName *tn,
+               const TxKey *sk,
+               const TxKey *pk,
+               TxNumber tx_number,
+               uint32_t key_shard_code,
+               uint64_t ts,
+               bool is_delete,
+               CcHandlerResult<Void> *res)
     {
-        table_name_ = tn;
-        ccm_ = nullptr;
+        TemplatedCcRequest<CommitSkCc, Void>::Reset(
+            tn, res, key_shard_code >> 10, tx_number);
+
         skey_ = sk;
         skey_str_ = nullptr;
+        key_shard_code_ = key_shard_code;
         pkey_ = pk;
         pkey_str_ = nullptr;
-        key_shard_code_ = key_shard_code;
         ts_ = ts;
         is_delete_ = is_delete;
-        res_ = res;
-        node_group_id_ = key_shard_code >> 10;
     }
 
-    void Set(const TableName *tn,
-             const std::string *sk,
-             uint32_t key_shard_code,
-             const std::string *pk,
-             uint64_t ts,
-             bool is_delete,
-             CcHandlerResult<Void> *res)
+    void Reset(const TableName *tn,
+               const std::string *sk,
+               TxNumber tx_number,
+               uint32_t key_shard_code,
+               const std::string *pk,
+               uint64_t ts,
+               bool is_delete,
+               CcHandlerResult<Void> *res)
     {
-        table_name_ = tn;
-        ccm_ = nullptr;
+        TemplatedCcRequest<CommitSkCc, Void>::Reset(
+            tn, res, key_shard_code >> 10, tx_number);
+
         skey_ = nullptr;
         skey_str_ = sk;
         key_shard_code_ = key_shard_code;
@@ -1411,8 +1407,6 @@ public:
         pkey_str_ = pk;
         ts_ = ts;
         is_delete_ = is_delete;
-        res_ = res;
-        node_group_id_ = key_shard_code >> 10;
     }
 
     uint32_t KeyShardCode() const
@@ -1481,7 +1475,7 @@ public:
         return true;
     }
 
-    void Set(const TxId *txid, uint64_t tx_ts, CcHandlerResult<uint64_t> *res)
+    void Reset(const TxId *txid, uint64_t tx_ts, CcHandlerResult<uint64_t> *res)
     {
         txid_ = txid;
         tx_ts_ = tx_ts;
@@ -1805,9 +1799,9 @@ public:
         return true;
     }
 
-    void Set(const std::string *fault_name,
-             const std::string *fault_paras,
-             CcHandlerResult<bool> *res)
+    void Reset(const std::string *fault_name,
+               const std::string *fault_paras,
+               CcHandlerResult<bool> *res)
     {
         fault_name_ = fault_name;
         fault_paras_ = fault_paras;
