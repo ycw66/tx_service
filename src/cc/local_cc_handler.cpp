@@ -762,7 +762,6 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-    TEntry &tx = ccs.NewTx();
 
     int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
 
@@ -774,6 +773,10 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
 
     if (term >= 0)
     {
+        // NewTx reads each ccshard's next_tx_ident_, which is set concurrently
+        // by log replay thread when native cc node finishes log replay. The two
+        // events are synchronized by leader_term_.
+        TEntry &tx = ccs.NewTx();
         InitTxResult &init_tx_res = hres.Value();
         init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId());
         init_tx_res.start_ts_ = tx.lower_bound_;

@@ -257,4 +257,14 @@ const TableRangeEntry *LocalCcShards::CreateDirtyRange(
 
     return &range_entry;
 }
+
+bool LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
+{
+    for (const auto &cc_shard : cc_shards_)
+    {
+        LOG(INFO) << "cc shard on core: " << cc_shard->core_id_
+                  << " set next_tx_ident_ to " << latest_committed_tx_no + 1;
+        cc_shard->next_tx_ident_ = latest_committed_tx_no + 1;
+    }
+}
 }  // namespace txservice

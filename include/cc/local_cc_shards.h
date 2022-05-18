@@ -225,6 +225,8 @@ public:
                                             uint32_t new_partition_id,
                                             uint64_t commit_ts);
 
+    bool SetTxIdent(uint32_t latest_committed_txn_no);
+
     store::DataStoreWriteHandler *const store_hd_;
 
 private:

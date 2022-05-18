@@ -164,12 +164,17 @@ public:
      * records from all log groups.
      *
      * @param cc_ng_id The cc node group ID.
+     * @param cc_ng_term The cc node's term.
      * @param log_group_id The ID of the log group from which committed log
      * records have been shipped.
+     * @param latest_txn_no The latest txn number committed from cc node group
+     * cc_ng_id, valid only when cc node group cc_ng_id is bound to log group
+     * log_group_id, otherwise it should be 0.
      */
     void FinishLogReplay(uint32_t cc_ng_id,
                          int64_t cc_ng_term,
-                         uint32_t log_group_id);
+                         uint32_t log_group_id,
+                         uint32_t latest_txn_no);
 
     /**
      * @brief Recovers the input orphan lock held for an extended period of
@@ -206,6 +211,11 @@ public:
     uint32_t NodeId() const
     {
         return node_id_;
+    }
+
+    uint32_t LogGroupId(uint32_t cc_ng_id)
+    {
+        return log_agent_->GetLogGroupId(cc_ng_id);
     }
 
 private:

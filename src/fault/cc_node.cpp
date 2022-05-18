@@ -142,17 +142,30 @@ int CcNode::TransferLeader()
     return -1;
 }
 
-void CcNode::FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term)
+void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
+                                  int64_t ng_term,
+                                  uint32_t latest_committed_txn_no)
 {
     // recovery_mux_ is used to protect recovered_log_groups_, since raft
     // service thread will also modify it concurrently.
     std::lock_guard<std::mutex> lk(recovery_mux_);
 
     // ignore the FinishReplayMsg whose ng_term is smaller than the current
-    // candidate_leader_term_.
-    if (candidate_leader_term_ > ng_term)
+    // candidate_leader_term_ or if this cc node is not recovering.
+    if (candidate_leader_term_ < 0 || candidate_leader_term_ > ng_term)
     {
         return;
+    }
+
+    // native cc node finishes log replay from its bound log group, set
+    // starting txn numbers of local cc shards. Since only native cc_node can
+    // start transaction.
+    // each ccshard reads tx_ident_ in NewTx(), which is concurrent with this
+    // write, native cc node's leader_term_ synchronizes them.
+    if (node_idx_ == 0 &&
+        log_group_id == Sharder::Instance().LogGroupId(ng_id_))
+    {
+        local_cc_shards_.SetTxIdent(latest_committed_txn_no);
     }
 
     auto lg_it = recovered_log_groups_.emplace(log_group_id);
@@ -166,6 +179,7 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term)
         LOG(INFO) << "The leader of cc node group ng#" << ng_id_
                   << " with the term " << candidate_leader_term_
                   << " has been recovered.";
+        candidate_leader_term_ = -1;
     }
 }
 
@@ -282,7 +296,6 @@ void CcNode::on_leader_stop(const butil::Status &status)
               << " steps down as the leader of ng#" << ng_id_ << ".";
 
     leader_term_.store(-1, std::memory_order_release);
-    candidate_leader_term_ = -1;
 
     uint16_t core_cnt = local_cc_shards_.Count();
     ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);

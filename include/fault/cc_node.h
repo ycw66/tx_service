@@ -63,7 +63,10 @@ public:
         return leader_term_.load(std::memory_order_acquire);
     }
 
-    void FinishLogGroupReplay(uint32_t log_group_id, int64_t ng_term);
+    void FinishLogGroupReplay(uint32_t log_group_id,
+                              int64_t ng_term,
+                              uint32_t latest_committed_txn_no);
+
     int64_t CandidateTerm() const
     {
         return candidate_leader_term_;

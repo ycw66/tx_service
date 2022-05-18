@@ -339,7 +339,8 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
 
 void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
-                              uint32_t log_group_id)
+                              uint32_t log_group_id,
+                              uint32_t latest_txn_no)
 {
     auto ng_it = cc_nodes_.find(cc_ng_id);
     if (ng_it == cc_nodes_.end())
@@ -347,7 +348,8 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
         return;
     }
 
-    ng_it->second->FinishLogGroupReplay(log_group_id, cc_ng_term);
+    ng_it->second->FinishLogGroupReplay(
+        log_group_id, cc_ng_term, latest_txn_no);
 }
 
 void Sharder::RecoverTx(uint64_t tx_number,
