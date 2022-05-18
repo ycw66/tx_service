@@ -892,7 +892,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{scanner_:" << r->scanner_
+    return outs << "{scanner_:" << r->scanner_.get()
                 << ",scan_alias_:" << r->scan_alias_
                 << ",cc_node_terms_:" << &r->cc_node_terms_ << "}";
 };

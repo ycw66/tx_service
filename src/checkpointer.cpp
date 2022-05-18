@@ -45,8 +45,6 @@ Checkpointer::~Checkpointer()
 
 void Checkpointer::Ckpt()
 {
-    // Disable Ckpt for debug purpose
-    return;
     if (local_shards_.Count() == 0 || store_hd_ == nullptr)
     {
         return;
