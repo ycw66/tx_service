@@ -258,7 +258,7 @@ const TableRangeEntry *LocalCcShards::CreateDirtyRange(
     return &range_entry;
 }
 
-bool LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
+void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
 {
     for (const auto &cc_shard : cc_shards_)
     {
