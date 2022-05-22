@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 
-#include "cc_handler_result.h"
+#include "cc/cc_handler_result.h"
 #include "fault/fault_inject.h"
 #include "sharder.h"
 #include "tx_execution.h"
@@ -508,19 +508,24 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.IsError())
+        if (hd_result_.ErrorCode() ==
+                (int8_t) HandlerResultErrorType::Unknown &&
+            retry_num_ > 0)
         {
-            if (retry_num_ > 0)
-            {
-                // log group doesn't support active refresh the leader cache
-                // yet, hence we refresh leader for every failed WriteToLogOp.
-                txm->txlog_->RefreshLeader(log_group_id_);
-                ReRunOp(txm);
-                return;
-            }
-        }
-        ACTION_FAULT_INJECTOR("write_log_finished");
+            LOG(INFO) << "Retry Write Log Request, tx_number: "
+                      << txm->tx_number_;
+            // log request return unknown status, we need to check tx status
+            // from log service.
+            ::txlog::LogRequest &log_req = log_closure_.LogRequest();
+            ::txlog::WriteLogRequest *log_rec =
+                log_req.mutable_write_log_request();
+            log_rec->set_retry(true);
 
+            ReRunOp(txm);
+            return;
+        }
+
+        ACTION_FAULT_INJECTOR("write_log_finished");
         txm->PostProcess(*this);
     }
 }
@@ -769,12 +774,21 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                         .append(",\"term\":")
                         .append(std::to_string(txm->TxTerm()));
                 });
-            hd_result_.ForceError();
-            // TODO: So far we do not store scanned keys in the tx's scan set.
-            // In future, we need ScanOpenResult to check which cc nodes have
-            // returned and to release scan locks in these cc nodes in
-            // post-processing.
-            txm->PostProcess(*this);
+
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+            else
+            {
+                hd_result_.ForceError();
+                // TODO: So far we do not store scanned keys in the tx's scan
+                // set. In future, we need ScanOpenResult to check which cc
+                // nodes have returned and to release scan locks in these cc
+                // nodes in post-processing.
+                txm->PostProcess(*this);
+            }
         }
     }
     else
@@ -928,7 +942,7 @@ void AcquireAllOp::Reset(size_t node_cnt)
 {
     finish_cnt_.store(0);
     fail_cnt_.store(0);
-    remote_ack_cnt_.store(node_cnt - 1);
+    remote_ack_cnt_.store(0);
     upload_cnt_ = node_cnt;
     Resize(node_cnt);
 }
@@ -940,7 +954,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     {
         txm->Process(*this);
     }
-
     if (remote_ack_cnt_.load(std::memory_order_acquire) > 0)
     {
         bool time_out = txm->IsTimeOut();
@@ -1201,13 +1214,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_acquire) >
             0)
         {
+            DLOG(ERROR)
+                << "Upsert table acquire write intent failed, tx_number:"
+                << txm->tx_number_;
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
             // Fails to acquire the write intent on the schema. Since write
             // intents only conflict with other writes, there must be
-            // another tx trying to modify the same table's schema. Stops the
-            // schema operation. Set the commit ts to 0 to signal that the
-            // following post write operation releases all write intents.
+            // another tx trying to modify the same table's schema. Stops
+            // the schema operation. Set the commit ts to 0 to signal that
+            // the following post write operation releases all write
+            // intents.
             txm->commit_ts_ = 0;
-            // Moves to the last operation that removes all write intents/locks.
+            // Moves to the last operation that removes all write
+            // intents/locks.
             op_ = &post_all_lock_op_;
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
@@ -1241,22 +1261,19 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (prepare_log_op_.hd_result_.IsError())
         {
+            DLOG(ERROR) << "Upsert table write prepare log failed, tx_number:"
+                        << txm->tx_number_;
             // Fails to flush the prepare log. The schema operation is
-            // considered failed if the prepare log is not flushed. The commit
-            // ts is set to 0 to signal that the following post write operation
-            // releases all write intents.
+            // considered failed if the prepare log is not flushed. The
+            // commit ts is set to 0 to signal that the following post write
+            // operation releases all write intents.
             txm->commit_ts_ = 0;
-            // Moves to the last operation that removes all write intents/locks.
+            // Moves to the last operation that removes all write
+            // intents/locks.
             op_ = &post_all_lock_op_;
 
-            if (is_deleted_)
-            {
-                txm->SetErrorMessage("Drop table failed at prepare phase.");
-            }
-            else
-            {
-                txm->SetErrorMessage("Create table failed at prepare phase.");
-            }
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
 
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
@@ -1283,31 +1300,31 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (failed)
         {
-            // After the prepare log is flushed, the schema op is guaranteed to
-            // succeed and can only roll forward. Retry this step to install the
-            // dirty schema in the tx service, unless the tx node is not the
-            // leader anymore.
+            // After the prepare log is flushed, the schema op is guaranteed
+            // to succeed and can only roll forward. Retry this step to
+            // install the dirty schema in the tx service, unless the tx
+            // node is not the leader anymore.
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
-                // set catalog_rec_'s binary_value_ to image_str since it could
-                // be set to TableSchemaView pointer in localshard.
+                // set catalog_rec_'s binary_value_ to image_str since it
+                // could be set to TableSchemaView pointer in localshard.
                 catalog_rec_.SetSchemaImage(image_str_);
                 txm->PushOperation(&post_all_intent_op_);
                 txm->Process(post_all_intent_op_);
             }
             else
             {
-                txm->SetErrorMessage(
-                    "Transaction failed due to the transaction node is no "
-                    "longer the raft leader.");
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
         else if (is_deleted_)
         {
-            // For DROP TABLE operations, the data store operation of deleting
-            // the k-v table happens after the commit log is flushed.
+            // For DROP TABLE operations, the data store operation of
+            // deleting the k-v table happens after the commit log is
+            // flushed.
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -1316,8 +1333,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             op_ = &upsert_kv_table_op_;
             // The post write request right after flushing the prepare log
-            // installs the dirty schema in the tx service and returns a local
-            // view (pointer) of the committed and dirty schema.
+            // installs the dirty schema in the tx service and returns a
+            // local view (pointer) of the committed and dirty schema.
             upsert_kv_table_op_.table_schema_ =
                 catalog_rec_.SchemaView()->dirty_schema_;
             txm->PushOperation(&upsert_kv_table_op_);
@@ -1328,8 +1345,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
-            // The data store operation failed. Retry the operation if the tx
-            // node is still the leader.
+            // The data store operation failed. Retry the operation if the
+            // tx node is still the leader.
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
@@ -1338,16 +1355,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->SetErrorMessage(
-                    "Transaction failed due to the transaction node is no "
-                    "longer the raft leader.");
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
         else if (is_deleted_)
         {
-            // For DROP TABLE statements, the data store operation happens after
-            // the commit log is flushed and is the second to the last step.
+            // For DROP TABLE statements, the data store operation happens
+            // after the commit log is flushed and is the second to the last
+            // step.
             op_ = &clean_log_op_;
             FillCleanLogRequest(txm);
             txm->PushOperation(&clean_log_op_);
@@ -1364,9 +1381,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_acquire) > 0)
         {
-            // Fails to acquire the write lock. The schema operation can only
-            // roll forward after flushing the prepare log. Retries the request
-            // if the tx node is still the leader.
+            // Fails to acquire the write lock. The schema operation can
+            // only roll forward after flushing the prepare log. Retries the
+            // request if the tx node is still the leader.
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
@@ -1375,9 +1392,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->SetErrorMessage(
-                    "Transaction failed due to the transaction node is no "
-                    "longer the raft leader.");
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1393,8 +1409,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // Fails to flush the commit log. Retries the operation if the tx
-            // node is still the leader.
+            // Fails to flush the commit log. Retries the operation if the
+            // tx node is still the leader.
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
@@ -1403,9 +1419,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->SetErrorMessage(
-                    "Transaction failed due to the transaction node is no "
-                    "longer the raft leader.");
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1431,10 +1446,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (txm->commit_ts_ == 0)
         {
-            // The schema operation failed without flushing the prepare log. Do
-            // not retry post-processing (release write intents) even if it
-            // fails. Remaining write intents on the schema, if there are any,
-            // will be recovered by individual cc nodes separately.
+            // The schema operation failed without flushing the prepare log.
+            // Do not retry post-processing (release write intents) even if
+            // it fails. Remaining write intents on the schema, if there are
+            // any, will be recovered by individual cc nodes separately.
             txm->bool_resp_->Finish(false);
 
             txm->state_stack_.pop_back();
@@ -1443,10 +1458,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (failed)
         {
-            // After the prepare log is flushed, the schema op is guaranteed to
-            // succeed and can only roll forward. Retry this step to install the
-            // committed schema and remove write locks, if the tx node is still
-            // the leader.
+            // After the prepare log is flushed, the schema op is guaranteed
+            // to succeed and can only roll forward. Retry this step to
+            // install the committed schema and remove write locks, if the
+            // tx node is still the leader.
             if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
                                                     txm->tx_term_))
             {
@@ -1455,19 +1470,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->SetErrorMessage(
-                    "Transaction failed due to the transaction node is no "
-                    "longer the raft leader.");
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
         else
         {
-            // The tx's modification of the schema has succeeded. If the tx has
-            // previously read the same schema and keeps a pointer in the read
-            // set to the cc entry of the schema, removes it from the read set.
-            // As a result, the tx will not try to release the read lock of the
-            // schema when committing.
+            // The tx's modification of the schema has succeeded. If the tx
+            // has previously read the same schema and keeps a pointer in
+            // the read set to the cc entry of the schema, removes it from
+            // the read set. As a result, the tx will not try to release the
+            // read lock of the schema when committing.
             const CcEntryAddr &schema_entry_addr =
                 acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
                     .Value()
@@ -1502,8 +1516,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else if (txm->tx_status_ == TxnStatus::Recovering)
         {
             txm->Reset();
-            // Setting the tx's status to finished signals that this tx state
-            // machine can be recycled for a new tx.
+            // Setting the tx's status to finished signals that this tx
+            // state machine can be recycled for a new tx.
             txm->tx_status_.store(TxnStatus::Finished,
                                   std::memory_order_release);
         }
@@ -1577,11 +1591,11 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
     // does not match terms in the log service. This is because all
     // operations after the prepare log are retried or replayed upon
     // failures to guarantee that the schema operation always roll forward.
-    // If a cc node fails over, the new node must restore write intents gained
-    // prior to the prepare log and then replay operations between the prepare
-    // log and the commit log, which in this case upgrade write intents to write
-    // locks. So, there is no need to check the liveness of write locks when
-    // flushing the commit log.
+    // If a cc node fails over, the new node must restore write intents
+    // gained prior to the prepare log and then replay operations between
+    // the prepare log and the commit log, which in this case upgrade write
+    // intents to write locks. So, there is no need to check the liveness of
+    // write locks when flushing the commit log.
     commit_log_rec->mutable_node_terms()->clear();
 }
 
@@ -1617,10 +1631,10 @@ SleepOperation::SleepOperation(TransactionExecution *txm)
 
 void SleepOperation::Forward(TransactionExecution *txm)
 {
-    // forward of sleep op will check whether the sleep time reached. Note that
-    // we cannot use sleep_for API since the TxProcessor thread cannot be
-    // blocked. Instead we use the TimeOut interface to simulate sleep. It may
-    // not be accurate, but retry logic is not sensitive to it.
+    // forward of sleep op will check whether the sleep time reached. Note
+    // that we cannot use sleep_for API since the TxProcessor thread cannot
+    // be blocked. Instead we use the TimeOut interface to simulate sleep.
+    // It may not be accurate, but retry logic is not sensitive to it.
     if (txm->IsTimeOut(sleep_secs_))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

@@ -110,6 +110,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                                    hres,
                                    proto,
                                    lock_type);
+        hres.Value().remote_ack_cnt_->fetch_add(1);
     }
 }
 

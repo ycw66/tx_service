@@ -37,15 +37,7 @@ Sharder::Sharder(uint32_t node_id,
 
     if (log_agent_ != nullptr)
     {
-        for (uint32_t i = 0; i < log_agent_->LogGroupCount(); i++)
-        {
-            // idx = 0, default value, it will refresh when change leader or
-            // call LogAgent::RefreshLeader
-            lg_leader_idx_vct_.push_back(
-                std::make_unique<std::atomic_uint32_t>(0));
-        }
-
-        log_agent_->SetLogGroupLeaderIdxs(&lg_leader_idx_vct_);
+        log_agent_->Init(ips_, ports_);
     }
 }
 
@@ -334,6 +326,8 @@ void Sharder::UpdateLeader(uint32_t ng_id)
 }
 void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
 {
+    DLOG(INFO) << "ccnode group ng" << ng_id
+               << " updates leader to node_id:" << node_id;
     ng_leader_cache_.at(ng_id).store(node_id, std::memory_order_release);
 }
 
@@ -352,20 +346,21 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
         log_group_id, cc_ng_term, latest_txn_no);
 }
 
-void Sharder::RecoverTx(uint64_t tx_number,
-                        int64_t tx_term,
-                        uint32_t cc_ng_id,
-                        int64_t cc_ng_term)
+void Sharder::RecoverTx(uint64_t lock_tx_number,
+                        int64_t lock_tx_coord_term,
+                        uint32_t lock_cc_ng_id,
+                        int64_t lock_cc_ng_term)
 {
-    auto cc_ng_it = cc_nodes_.find(cc_ng_id);
+    auto cc_ng_it = cc_nodes_.find(lock_cc_ng_id);
     if (cc_ng_it == cc_nodes_.end())
     {
-        LOG(ERROR) << "RecoverTx(): the specified cc node group ng#" << cc_ng_id
-                   << " does not exist at this node.";
+        LOG(ERROR) << "RecoverTx(): the specified cc node group ng#"
+                   << lock_cc_ng_id << " does not exist at this node.";
         return;
     }
 
-    cc_ng_it->second->RecoverTx(tx_number, tx_term, cc_ng_id, cc_ng_term);
+    cc_ng_it->second->RecoverTx(
+        lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
 }
 
 void Sharder::ConfigRouteTable()

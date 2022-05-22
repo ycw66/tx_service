@@ -2,6 +2,9 @@
 
 #include <brpc/controller.h>
 
+#include <string>
+#include <vector>
+
 #include "../log_service/proto/raft_log.pb.h"
 
 namespace txservice
@@ -28,9 +31,6 @@ class TxLog
 {
 public:
     virtual ~TxLog() = default;
-    virtual void SetLogGroupLeaderIdxs(
-        std::vector<std::unique_ptr<std::atomic_uint32_t>>
-            *lg_leader_idx_vct) = 0;
 
     // Persists and replicates a log record in the specified log group.
     virtual void WriteLog(uint32_t log_group_id,
@@ -61,8 +61,6 @@ public:
 
     virtual void TransferLeader(uint32_t log_group_id, uint32_t leader_idx) = 0;
 
-    virtual std::unique_ptr<TxLog> Clone() const = 0;
-
     virtual uint32_t LogGroupCount() const = 0;
 
     virtual uint32_t LogGroupReplicaNum() const = 0;
@@ -70,5 +68,9 @@ public:
     virtual uint32_t GetLogGroupId(uint32_t cc_node_id) const = 0;
 
     virtual void RefreshLeader(uint32_t log_group_id) = 0;
+
+    virtual void Init(std::vector<std::string> &ips,
+                      std::vector<uint16_t> &ports) = 0;
+    virtual void UpdateLeaderCache(uint32_t lg_id, uint32_t node_id) = 0;
 };
 }  // namespace txservice

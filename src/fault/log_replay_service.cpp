@@ -58,10 +58,11 @@ void ReplayService::UpdateLogGroupLeader(
 {
     brpc::ClosureGuard done_guard(done);
     uint32_t lg_id = request->lg_id();
-    uint32_t idx = request->lg_idx();
-    Sharder::Instance().UpdateLogGroupLeader(lg_id, idx);
+    uint32_t node_id = request->node_id();
+    Sharder::Instance().UpdateLogGroupLeader(lg_id, node_id);
     response->set_error(false);
-    LOG(INFO) << "Update log group:" << lg_id << " leader to index:" << idx;
+    LOG(INFO) << "Update log group:" << lg_id
+              << " leader to node_id:" << node_id;
 }
 
 int ReplayService::on_received_messages(brpc::StreamId stream_id,

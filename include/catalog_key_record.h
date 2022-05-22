@@ -92,18 +92,19 @@ public:
 
 private:
     /**
-     * @brief The binary value of a catalog record serves three purposes: (1) a
-     * tx looks up a table's schema. The returned catalog record's value points
-     * to a pair of current and dirty schemas of the table. Allowing ongoing
-     * tx's to see the dirty schema is crucial to make schema operations
-     * non-blocking. (2) Initialization of a table's catalog at a node reads the
-     * table's schema the data store and instantiates the schema instance in
-     * memory. The record's value in this case contains serialized images of the
-     * schema. (3) A tx modifies a table's schema and uses the catalog record to
-     * install a dirty version of the schema in the tx service. The record's
-     * value is the binary image of the dirty schema.
+     * @brief The CatalogRecord serves three purposes:
+     * (1) a tx looks up a table's schema. The schema_view_ points to a pair of
+     * current and dirty schemas of the table. Allowing ongoing tx's to see the
+     * dirty schema is crucial to make schema operations non-blocking. (2)
+     * Initialization of a table's catalog at a node reads the table's schema
+     * the data store and instantiates the schema instance in memory. The
+     * schema_image_ in this case contains serialized images of the schema. (3)
+     * A tx modifies a table's schema and uses the catalog record to install a
+     * dirty version of the schema in the tx service. The schema_image_ is the
+     * binary image of the dirty schema.
      *
      */
-    std::variant<const TableSchemaView *, std::string> binary_value_{""};
+    const TableSchemaView *schema_view_{nullptr};
+    std::string schema_image_{""};
 };
 }  // namespace txservice

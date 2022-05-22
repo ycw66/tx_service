@@ -13,6 +13,16 @@ namespace txservice
 {
 class TransactionExecution;
 
+enum class HandlerResultErrorType
+{
+    // Ccnode is not the raft leader
+    NotLeader = -1,
+    // Other errors
+    Error = 1,
+    // Unknown
+    Unknown = 3
+};
+
 /**
  * @brief CcHandlerResultBase is the base class of CcHandlerResult of different
  * operators which provides SetError and SetFinished API.

@@ -283,11 +283,11 @@ void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
     }
 }
 
-void CcShard::CheckRecoverTx(TxNumber txn,
+void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                              uint32_t cc_ng_id,
                              int64_t cc_ng_term)
 {
-    auto tx_it = lock_holding_txs_.find(txn);
+    auto tx_it = lock_holding_txs_.find(lock_holding_txn);
     if (tx_it == lock_holding_txs_.end())
     {
         return;
@@ -308,7 +308,8 @@ void CcShard::CheckRecoverTx(TxNumber txn,
     if (now_ts - lk_info.ts_ >= ts_gap &&
         now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
-        Sharder::Instance().RecoverTx(txn, lk_info.term_, cc_ng_id, cc_ng_term);
+        Sharder::Instance().RecoverTx(
+            lock_holding_txn, lk_info.tx_coord_term_, cc_ng_id, cc_ng_term);
 
         // Updates the last_recover_ts field, so that following
         // conflicting tx's will not try recovery immediately,

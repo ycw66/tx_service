@@ -536,7 +536,6 @@ void TransactionExecution::Process(ReadOperation &read)
         const TableName &table_name = *read.read_tx_req_->tab_name_;
         const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
-        ReadType read_type = read.read_tx_req_->type_;
         read.lock_type_ = read.read_tx_req_->lock_type_;
 
         // Reads the specified key from the local cc map to which this tx is
@@ -549,14 +548,13 @@ void TransactionExecution::Process(ReadOperation &read)
             // Reading catalogs needs to put read locks, regardless of the tx's
             // concurrency control protocol. So for now, a read's isolation
             // level and cc protocol is fixed.
-            read.read_type_ = read_type;
             read.iso_level_ = IsolationLevel::RepeatableRead;
             read.protocol_ = CcProtocol::Locking;
 
             handler->ReadLocal(table_name,
                                key,
                                rec,
-                               read_type,
+                               read.read_type_,
                                tx_number_.load(std::memory_order_relaxed),
                                tx_term_,
                                start_ts_,
@@ -599,7 +597,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 return;
             }
 
-            read.read_type_ = read_type;
             read.protocol_ = protocol_;
             read.iso_level_ = iso_level_;
 
@@ -610,7 +607,7 @@ void TransactionExecution::Process(ReadOperation &read)
             handler->Read(table_name,
                           key,
                           rec,
-                          read_type,
+                          read.read_type_,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
                           start_ts_,
@@ -1499,6 +1496,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     log_rec->set_tx_term(tx_term_);
     log_rec->set_txn_number(txid_.TxNumber());
     log_rec->set_commit_timestamp(commit_ts_);
+    log_rec->set_retry(false);
 
     auto shard_terms = log_rec->mutable_node_terms();
     shard_terms->clear();
@@ -1722,17 +1720,27 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 
     if (state_stack_.empty())
     {
-        if (log_op->hd_result_.IsError())
+        if (!log_op->hd_result_.IsError())
         {
-            SetErrorMessage("Transaction abort: failed to write log.");
-            tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
+            tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+            PushOperation(&update_txn_);
+            Process(update_txn_);
         }
         else
         {
-            tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+            if (log_op->hd_result_.ErrorCode() ==
+                (int8_t) HandlerResultErrorType::Unknown)
+            {
+                bool_resp_->SetErrorCode(TxErrorCode::LOG_SERVICE_UNREACHABLE);
+            }
+            else
+            {
+                bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+            }
+            tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
+            PushOperation(&update_txn_);
+            Process(update_txn_);
         }
-        PushOperation(&update_txn_);
-        Process(update_txn_);
     }
     else
     {

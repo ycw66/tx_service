@@ -100,13 +100,11 @@ public:
     ReadTxRequest(const TableName *tab_name = nullptr,
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
-                  ReadType type = ReadType::Inside,
                   LockType lock_type = LockType::ReadLock,
                   bool read_local = false)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
-          type_(type),
           lock_type_(lock_type),
           read_local_(read_local)
     {
@@ -115,14 +113,12 @@ public:
     void Set(const TableName *tab_name,
              const TxKey *key,
              TxRecord *rec,
-             ReadType type,
              LockType lock_type,
              bool read_local = false)
     {
         tab_name_ = tab_name;
         key_ = key;
         rec_ = rec;
-        type_ = type;
         lock_type_ = lock_type;
         read_local_ = read_local;
     }
@@ -130,7 +126,6 @@ public:
     const TableName *tab_name_;
     const TxKey *key_;
     TxRecord *rec_;
-    ReadType type_;
     LockType lock_type_;
     bool read_local_;
 };

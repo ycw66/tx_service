@@ -44,12 +44,16 @@ public:
 struct TxLockInfo
 {
     TxLockInfo() = delete;
-    TxLockInfo(int64_t term, uint64_t ts)
-        : term_(term), ts_(ts), last_recover_ts_(0), cce_list_()
+    TxLockInfo(int64_t tx_coord_term, uint64_t ts)
+        : tx_coord_term_(tx_coord_term),
+          ts_(ts),
+          last_recover_ts_(0),
+          cce_list_()
     {
     }
 
-    int64_t term_;
+    // tx coordinator's term.
+    int64_t tx_coord_term_;
     // The timestamp when the tx acquires the first lock in the cc shard.
     uint64_t ts_;
     // The last time when the tx is recovered.

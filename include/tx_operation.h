@@ -18,7 +18,7 @@ struct ReadOutsideTxRequest;
 struct ScanOpenTxRequest;
 struct ScanNextTxRequest;
 
-#define RETRY_NUM 4
+#define RETRY_NUM 5
 
 enum class TxLogType
 {

@@ -30,9 +30,7 @@ namespace txservice
 class TxProcessor
 {
 public:
-    TxProcessor(size_t thd_id,
-                LocalCcShards &shards,
-                std::unique_ptr<TxLog> txlog_hd)
+    TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
         : thd_id_(thd_id),
           active_tx_cnt_(0),
           terminate_(false),
@@ -43,7 +41,7 @@ public:
           free_tx_list_(),
           waiting_mux_(shards.ShardMutex(thd_id)),
           waiting_cv_(shards.ShardCv(thd_id)),
-          txlog_hd_(std::move(txlog_hd))
+          txlog_hd_(txlog_hd)
     {
         batch_.reserve(20);
     }
@@ -55,8 +53,8 @@ public:
 
         if (!ret)
         {
-            tx = std::make_unique<TransactionExecution>(
-                cc_hd_.get(), txlog_hd_ == nullptr ? nullptr : txlog_hd_.get());
+            tx =
+                std::make_unique<TransactionExecution>(cc_hd_.get(), txlog_hd_);
         }
         else
         {
@@ -244,7 +242,7 @@ public:
     std::mutex &waiting_mux_;
     std::condition_variable &waiting_cv_;
 
-    std::unique_ptr<TxLog> txlog_hd_;
+    TxLog *txlog_hd_;
 
     friend class TxService;
 };

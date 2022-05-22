@@ -26,7 +26,8 @@ enum struct LogType
 class LogClosure : public google::protobuf::Closure
 {
 public:
-    LogClosure(CcHandlerResult<Void> *notify) : cntl_(), notify_tx_(notify)
+    explicit LogClosure(CcHandlerResult<Void> *hd_result)
+        : cntl_(), hd_result_(hd_result)
     {
     }
 
@@ -35,13 +36,21 @@ public:
     // Run() will be called when log request is processed by txlog service.
     void Run() override
     {
-        if (response_.success())
+        // rpc fails including timeout indicates the status of log request is
+        // unknown.
+        if (cntl_.Failed() || response_.response_status() ==
+                                  ::txlog::LogResponse_ResponseStatus_Unknown)
         {
-            notify_tx_->SetFinished();
+            hd_result_->SetError((int8_t) HandlerResultErrorType::Unknown);
+        }
+        else if (response_.response_status() ==
+                 ::txlog::LogResponse_ResponseStatus_Success)
+        {
+            hd_result_->SetFinished();
         }
         else
         {
-            notify_tx_->SetError(1);
+            hd_result_->SetError((int8_t) HandlerResultErrorType::Error);
         }
     }
 
@@ -81,7 +90,7 @@ private:
     brpc::Controller cntl_;
     ::txlog::LogRequest request_;
     ::txlog::LogResponse response_;
-    CcHandlerResult<Void> *notify_tx_;
+    CcHandlerResult<Void> *hd_result_;
 };
 }  // namespace txservice
 

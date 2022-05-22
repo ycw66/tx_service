@@ -120,7 +120,6 @@ void Checkpointer::Ckpt()
         read_req.Set(&catalog_ccm_name,
                      &table_key,
                      &catalog_rec,
-                     ReadType::Inside,
                      LockType::ReadLock,
                      true);
         ckpt_txm->Execute(&read_req);

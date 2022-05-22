@@ -19,26 +19,26 @@ struct RecoverTxInfo
 {
     RecoverTxInfo() = default;
 
-    RecoverTxInfo(uint64_t tx_number,
-                  int64_t tx_term,
-                  uint32_t cc_ng_id,
-                  int64_t cc_ng_term)
-        : tx_number_(tx_number),
-          tx_term_(tx_term),
-          cc_ng_id_(cc_ng_id),
-          cc_ng_term_(cc_ng_term)
+    RecoverTxInfo(uint64_t lock_tx_number,
+                  int64_t lock_tx_coord_term,
+                  uint32_t lock_cc_ng_id,
+                  int64_t lock_cc_ng_term)
+        : lock_tx_number_(lock_tx_number),
+          lock_tx_coord_term_(lock_tx_coord_term),
+          lock_cc_ng_id_(lock_cc_ng_id),
+          lock_cc_ng_term_(lock_cc_ng_term)
     {
     }
 
     // The number of tx who holds the intention/lock.
-    uint64_t tx_number_;
+    uint64_t lock_tx_number_;
     // The term of the cc node group in which the tx resides when the tx
     // acquires the intention/lock.
-    int64_t tx_term_;
+    int64_t lock_tx_coord_term_;
     // The ID of the cc node group in which the lock/intention resides.
-    uint32_t cc_ng_id_;
+    uint32_t lock_cc_ng_id_;
     // The term of the cc node group in which the lock/intention resides.
-    int64_t cc_ng_term_;
+    int64_t lock_cc_ng_term_;
 };
 
 /**

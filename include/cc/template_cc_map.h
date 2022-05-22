@@ -638,6 +638,7 @@ public:
                 cc_entry.gap_last_read_ts_, acquire_all_result.last_vali_ts_);
             acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
             acquire_all_result.node_term_ = ng_term;
+
             hd_res->SetFinished();
         }
         else

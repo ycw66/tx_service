@@ -283,7 +283,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_all_res.node_term_ = cc_res.node_term();
                 acq_all_res.remote_ack_cnt_->fetch_sub(1);
             }
-
             if (!cc_res.is_ack())
             {
                 // For locking-based protocols, when the acquire request is

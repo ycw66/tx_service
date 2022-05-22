@@ -136,11 +136,11 @@ public:
      * changed.
      *
      * @param lg_id The log group ID.
-     * @param node_id The index of leader in log group.
+     * @param node_id The node_id of leader in log group.
      */
-    void UpdateLogGroupLeader(uint32_t lg_id, uint32_t idx)
+    void UpdateLogGroupLeader(uint32_t lg_id, uint32_t node_id)
     {
-        lg_leader_idx_vct_[lg_id]->store(idx, std::memory_order_relaxed);
+        log_agent_->UpdateLeaderCache(lg_id, node_id);
     }
 
     /**
@@ -152,9 +152,9 @@ public:
      */
     int TransferLeader(uint32_t ng_id);
 
-    std::unique_ptr<TxLog> GetLogAgent() const
+    TxLog *GetLogAgent() const
     {
-        return log_agent_->Clone();
+        return log_agent_.get();
     }
 
     /**
@@ -180,15 +180,16 @@ public:
      * @brief Recovers the input orphan lock held for an extended period of
      * time.
      *
-     * @param tx_number The number of the tx who holds the lock.
-     * @param tx_term The term of the tx node when the lock was acquired.
-     * @param cc_ng_id The cc node group in which the lock resides.
-     * @param cc_ng_term The term of the cc node group of the lock.
+     * @param lock_tx_number The number of the tx who holds the lock.
+     * @param lock_tx_coord_term The term of the tx coordinator node when
+     * the lock was acquired.
+     * @param lock_cc_ng_id The cc node group in which the lock resides.
+     * @param lock_cc_ng_term The term of the cc node group of the lock.
      */
-    void RecoverTx(uint64_t tx_number,
-                   int64_t tx_term,
-                   uint32_t cc_ng_id,
-                   int64_t cc_ng_term);
+    void RecoverTx(uint64_t lock_tx_number,
+                   int64_t lock_tx_coord_term,
+                   uint32_t lock_cc_ng_id,
+                   int64_t lock_cc_ng_term);
     /**
      * @brief Transfer the leader for the log group. This function is developed
      * for test
@@ -237,12 +238,10 @@ private:
     uint32_t node_id_;
     std::vector<std::string> ips_;
     std::vector<uint16_t> ports_;
-    // save the newest log group leader index, it will be update by rpc call
-    // LogReplayService or LogAgent::RefreshLeader when the leader was changed
-    std::vector<std::unique_ptr<std::atomic_uint32_t>> lg_leader_idx_vct_;
     // we have one raft group for each logical shard(specified by ip & port)
     // each group's current leader is stored in ng_leader_cache_.
     std::unordered_map<uint32_t, std::atomic<uint32_t>> ng_leader_cache_;
+
     std::mutex mux_;
     std::unordered_map<uint32_t, std::unique_ptr<fault::CcNode>> cc_nodes_;
 

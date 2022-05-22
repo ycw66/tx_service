@@ -28,8 +28,7 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
             // send ReplayLog request to all the log groups of LogService, since
             // one phase commit shuffles the redo logs to every log groups and
             // thus requires full recovery.
-            std::unique_ptr<TxLog> log_agent =
-                Sharder::Instance().GetLogAgent();
+            TxLog *log_agent = Sharder::Instance().GetLogAgent();
 
             log_agent->ReplayLog(ng_id_, term_, ip_, port_, finish_);
 
@@ -65,7 +64,7 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
 
                 // The tx node ID is represented by the higher 4 bytes, in which
                 // the lower 10 bits represents the local core ID.
-                uint32_t tx_ng = (recover_tx_info.tx_number_ >> 32L) >> 10;
+                uint32_t tx_ng = (recover_tx_info.lock_tx_number_ >> 32L) >> 10;
                 uint32_t tx_leader = Sharder::Instance().LeaderNodeId(tx_ng);
 
                 std::string tx_ip;
@@ -86,8 +85,8 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
                 remote::CcRpcService_Stub stub(&channel);
 
                 remote::CheckTxStatusRequest req;
-                req.set_tx_number(recover_tx_info.tx_number_);
-                req.set_tx_term(recover_tx_info.tx_term_);
+                req.set_tx_number(recover_tx_info.lock_tx_number_);
+                req.set_tx_term(recover_tx_info.lock_tx_coord_term_);
                 remote::CheckTxStatusResponse res;
 
                 brpc::Controller cntl;
@@ -106,16 +105,16 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
 
                 if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
                 {
-                    LOG(INFO) << "The tx " << recover_tx_info.tx_number_
+                    LOG(INFO) << "The tx " << recover_tx_info.lock_tx_number_
                               << " is ongoing. Does nothing for recovery.";
                     continue;
                 }
                 else if (tx_status ==
                          remote::CheckTxStatusResponse_TxStatus_ABORTED)
                 {
-                    LOG(INFO) << "The tx" << recover_tx_info.tx_number_
+                    LOG(INFO) << "The tx" << recover_tx_info.lock_tx_number_
                               << " has aborted. Clears the tx's lock.";
-                    ClearTx(recover_tx_info.tx_number_);
+                    ClearTx(recover_tx_info.lock_tx_number_);
                 }
                 else
                 {
@@ -127,11 +126,11 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
                     // cc node to recover the committed record. Or, the tx must
                     // have aborted.
 
-                    RecoverTxStatus status =
-                        log_agent->RecoverTx(recover_tx_info.tx_number_,
-                                             recover_tx_info.tx_term_,
-                                             recover_tx_info.cc_ng_id_,
-                                             recover_tx_info.cc_ng_term_);
+                    RecoverTxStatus status = log_agent->RecoverTx(
+                        recover_tx_info.lock_tx_number_,
+                        recover_tx_info.lock_tx_coord_term_,
+                        recover_tx_info.lock_cc_ng_id_,
+                        recover_tx_info.lock_cc_ng_term_);
 
                     if (status == RecoverTxStatus::NotCommitted ||
                         status == RecoverTxStatus::Alive)
@@ -146,7 +145,7 @@ CcNodeRecoveryAgent::CcNodeRecoveryAgent(NodeGroupId ng_id,
                         // the prior inquiry of the tx status is inconclusive,
                         // the tx must have aborted proactively. Clears the tx's
                         // locks.
-                        ClearTx(recover_tx_info.tx_number_);
+                        ClearTx(recover_tx_info.lock_tx_number_);
                     }
                     else if (status == RecoverTxStatus::RecoverError)
                     {
@@ -177,14 +176,14 @@ CcNodeRecoveryAgent ::~CcNodeRecoveryAgent()
     notify_thd_.join();
 }
 
-void CcNodeRecoveryAgent::RecoverTx(uint64_t tx_number,
-                                    int64_t tx_term,
-                                    uint32_t cc_ng_id,
-                                    int64_t cc_ng_term)
+void CcNodeRecoveryAgent::RecoverTx(uint64_t lock_tx_number,
+                                    int64_t lock_tx_coord_term,
+                                    uint32_t lock_cc_ng_id,
+                                    int64_t lock_cc_ng_term)
 {
     std::unique_lock<std::mutex> lk(queue_mux_);
-    recover_tx_queue_.push_back(
-        RecoverTxInfo(tx_number, tx_term, cc_ng_id, cc_ng_term));
+    recover_tx_queue_.push_back(RecoverTxInfo(
+        lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term));
     queue_cv_.notify_one();
 }
 

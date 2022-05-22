@@ -89,6 +89,17 @@ public:
         cv_.notify_one();
     }
 
+    /**
+     * @brief Set the Error Code for tx request.
+     * For example, set the reason for transaction abort.
+     *
+     * @param err_code
+     */
+    void SetErrorCode(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
+    {
+        error_code_ = err_code;
+    }
+
     void Reset()
     {
         std::lock_guard<std::mutex> lk(mutex_);

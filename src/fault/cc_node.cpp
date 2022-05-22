@@ -183,10 +183,10 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     }
 }
 
-void CcNode::RecoverTx(uint64_t tx_number,
-                       int64_t tx_term,
-                       uint32_t cc_ng_id,
-                       int64_t cc_ng_term)
+void CcNode::RecoverTx(uint64_t lock_tx_number,
+                       int64_t lock_tx_coord_term,
+                       uint32_t lock_cc_ng_id,
+                       int64_t lock_cc_ng_term)
 {
     // Only if a cc node is the leader does it have an active recovery handler.
     // Recovering a tx's locks in a non-leader cc node is meaningless. Failover
@@ -195,7 +195,8 @@ void CcNode::RecoverTx(uint64_t tx_number,
     // ensure correctness.
     if (leader_term_.load(std::memory_order_acquire) >= 0)
     {
-        recovery_hd_->RecoverTx(tx_number, tx_term, cc_ng_id, cc_ng_term);
+        recovery_hd_->RecoverTx(
+            lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
     }
 }
 
