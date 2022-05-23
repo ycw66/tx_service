@@ -766,15 +766,16 @@ template std::string tx_trace_action(txservice::remote::RemoteScanNextBatch *,
  */
 std::ostream &operator<<(std::ostream &outs, txservice::TxId *r)
 {
-    return outs << "{tx_number_:" << r->TxNumber()
-                << ",global_core_id_:" << r->GlobalCoreId()
-                << ",ident_:" << r->Identity() << ",vec_idx_:" << r->VecIdx()
-                << "}";
+    outs << "{tx_number_:" << r->TxNumber()
+         << ",global_core_id_:" << r->GlobalCoreId()
+         << ",ident_:" << r->Identity() << ",vec_idx_:" << r->VecIdx() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::InitTxResult *r)
 {
-    return outs << "{txid_:" << &r->txid_ << ",start_ts_:" << r->start_ts_
-                << ",term_:" << r->term_ << "}";
+    outs << "{txid_:" << &r->txid_ << ",start_ts_:" << r->start_ts_
+         << ",term_:" << r->term_ << "}";
+    return outs;
 };
 template <typename K>
 std::ostream &operator<<(std::ostream &outs, std::vector<K> *r)
@@ -839,7 +840,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::RecordStatus *r)
         status = "[Unknown Status]";
     };
 
-    return outs << status;
+    outs << status;
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CcEntryAddr *r)
 {
@@ -847,10 +849,21 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcEntryAddr *r)
     {
         return outs << "{}";
     }
-    return outs << "{cce_ptr_:" << r->CcePtr()
-                << ",insert_ptr_:" << r->InsertPtr()
-                << ",node_group_id_:" << r->NodeGroupId()
-                << ",term_:" << r->Term() << "}";
+    outs << "{cce_ptr_:" << r->CcePtr() << ",insert_ptr_:" << r->InsertPtr()
+         << ",node_group_id_:" << r->NodeGroupId() << ",term_:" << r->Term()
+         << "}";
+    return outs;
+};
+std::ostream &operator<<(std::ostream &outs, const txservice::CcEntryAddr *r)
+{
+    if (!r)
+    {
+        return outs << "{}";
+    }
+    outs << "{cce_ptr_:" << r->CcePtr() << ",insert_ptr_:" << r->InsertPtr()
+         << ",node_group_id_:" << r->NodeGroupId() << ",term_:" << r->Term()
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ReadKeyResult *r)
 {
@@ -858,8 +871,9 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReadKeyResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{cce_addr_:" << &r->cce_addr_ << ",ts_:" << r->ts_
-                << ",rec_status_:" << &r->rec_status_ << "}";
+    outs << "{cce_addr_:" << &r->cce_addr_ << ",ts_:" << r->ts_
+         << ",rec_status_:" << &r->rec_status_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CcScanner *r)
 {
@@ -894,9 +908,10 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{scanner_:" << r->scanner_.get()
-                << ",scan_alias_:" << r->scan_alias_
-                << ",cc_node_terms_:" << &r->cc_node_terms_ << "}";
+    outs << "{scanner_:" << r->scanner_.get()
+         << ",scan_alias_:" << r->scan_alias_
+         << ",cc_node_terms_:" << &r->cc_node_terms_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ScanNextResult *r)
 {
@@ -904,8 +919,9 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanNextResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{term_:" << r->term_
-                << ",node_group_id_:" << r->node_group_id_ << "}";
+    outs << "{term_:" << r->term_ << ",node_group_id_:" << r->node_group_id_
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllResult *r)
 {
@@ -913,10 +929,10 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{last_vali_ts_:" << r->last_vali_ts_
-                << ",commit_ts_:" << r->commit_ts_
-                << ",node_term_:" << r->node_term_
-                << ",local_cce_addr_:" << &r->local_cce_addr_ << "}";
+    outs << "{last_vali_ts_:" << r->last_vali_ts_
+         << ",commit_ts_:" << r->commit_ts_ << ",node_term_:" << r->node_term_
+         << ",local_cce_addr_:" << &r->local_cce_addr_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::AcquireKeyResult *r)
 {
@@ -924,9 +940,10 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireKeyResult *r)
     {
         return outs << "{}";
     }
-    return outs << "{last_vali_ts_:" << r->last_vali_ts_
-                << ",commit_ts_:" << r->commit_ts_
-                << ",cce_addr_:" << &r->cce_addr_ << "}";
+    outs << "{last_vali_ts_:" << r->last_vali_ts_
+         << ",commit_ts_:" << r->commit_ts_ << ",cce_addr_:" << &r->cce_addr_
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, bool *r)
 {
@@ -934,7 +951,8 @@ std::ostream &operator<<(std::ostream &outs, bool *r)
     {
         return outs << false;
     }
-    return outs << *r;
+    outs << *r;
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, uint64_t *r)
 {
@@ -942,7 +960,8 @@ std::ostream &operator<<(std::ostream &outs, uint64_t *r)
     {
         return outs << 0;
     }
-    return outs << *r;
+    outs << *r;
+    return outs;
 };
 std::string cc_message_type_to_string(
     txservice::remote::CcMessage::MessageType type)
@@ -1043,10 +1062,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::remote::CcMessage *r)
         return outs << "{}";
     }
     std::string msg_type = cc_message_type_to_string(r->type());
-    return outs << "{\"type\":\"" << msg_type << "\",\"handler_addr\":\""
-                << fmt_hex(r->handler_addr()) << ",\"tx_number\":\""
-                << r->tx_number() << "\""
-                << ",\"tx_term\":\"" << r->tx_term() << "\"}";
+    outs << "{\"type\":\"" << msg_type << "\",\"handler_addr\":\""
+         << fmt_hex(r->handler_addr()) << ",\"tx_number\":\"" << r->tx_number()
+         << "\""
+         << ",\"tx_term\":\"" << r->tx_term() << "\"}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          const txservice::remote::CcMessage *r)
@@ -1056,10 +1076,11 @@ std::ostream &operator<<(std::ostream &outs,
         return outs << "{}";
     }
     std::string msg_type = cc_message_type_to_string(r->type());
-    return outs << "{\"type\":\"" << msg_type << "\",\"handler_addr\":\""
-                << fmt_hex(r->handler_addr()) << ",\"tx_number\":\""
-                << r->tx_number() << "\""
-                << ",\"tx_term\":\"" << r->tx_term() << "\"}";
+    outs << "{\"type\":\"" << msg_type << "\",\"handler_addr\":\""
+         << fmt_hex(r->handler_addr()) << ",\"tx_number\":\"" << r->tx_number()
+         << "\""
+         << ",\"tx_term\":\"" << r->tx_term() << "\"}";
+    return outs;
 };
 // CcRequest ostream
 std::ostream &operator<<(std::ostream &outs, txservice::IsolationLevel r)
@@ -1082,7 +1103,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::IsolationLevel r)
     default:
         iso_level = "[Unknown Isolation Level]";
     };
-    return outs << iso_level;
+    outs << iso_level;
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CcProtocol r)
 {
@@ -1101,7 +1123,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcProtocol r)
     default:
         proto = "[Unknown Cc Protocal]";
     };
-    return outs << proto;
+    outs << proto;
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::LockType r)
 {
@@ -1126,7 +1149,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::LockType r)
     default:
         lock_type = "[Unknown Lock Type]";
     };
-    return outs << lock_type;
+    outs << lock_type;
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::DmlOperation r)
 {
@@ -1148,7 +1172,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::DmlOperation r)
     default:
         dml_op = "[Unknown DML Operation]";
     };
-    return outs << dml_op;
+    outs << dml_op;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::PostWriteType r)
 {
@@ -1167,7 +1192,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteType r)
     default:
         pwt = "[Unknown Post Write Type]";
     };
-    return outs << pwt;
+    outs << pwt;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::ReadType r)
 {
@@ -1186,7 +1212,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReadType r)
     default:
         read_type = "[Unknown Read Type]";
     }
-    return outs << read_type;
+    outs << read_type;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::ScanIndexType r)
 {
@@ -1202,7 +1229,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanIndexType r)
     default:
         idx_t = "[Unknown Scan Index Type]";
     }
-    return outs << idx_t;
+    outs << idx_t;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::ScanDirection r)
 {
@@ -1218,7 +1246,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanDirection r)
     default:
         d = "[Unknown Scan Direction]";
     }
-    return outs << d;
+    outs << d;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::TxnStatus r)
 {
@@ -1246,7 +1275,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::TxnStatus r)
     default:
         s = "[Unknown Tx Status]";
     }
-    return outs << s;
+    outs << s;
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs, txservice::AcquireCc *r)
 {
@@ -1254,16 +1284,18 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
-                << ",\"is_insert_\":" << r->IsInsert()
-                << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
+         << ",\"is_insert_\":" << r->IsInsert()
+         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteAcquire *r)
@@ -1272,17 +1304,19 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
-                << ",\"is_insert_\":" << r->IsInsert()
-                << ",\"cce_ptr_\":" << r->CcePtr()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
+         << ",\"is_insert_\":" << r->IsInsert()
+         << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllCc *r)
 {
@@ -1290,17 +1324,19 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"is_insert_\":" << r->IsInsert()
-                << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm()
+         << ",\"is_insert_\":" << r->IsInsert()
+         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteAcquireAll *r)
@@ -1309,17 +1345,19 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"is_insert_\":" << r->IsInsert()
-                << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm()
+         << ",\"is_insert_\":" << r->IsInsert()
+         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::PostWriteCc *r)
 {
@@ -1327,16 +1365,17 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"cce_ptr_\":" << r->CceAddr()
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
-                << ",\"payload_str_\":"
-                << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-                << ",\"is_delete_\":" << r->IsDeleted() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"cce_ptr_\":" << r->CceAddr()
+         << ",\"commit_ts_\":" << r->CommitTs()
+         << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
+         << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"is_delete_\":" << r->IsDeleted() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemotePostWrite *r)
@@ -1345,17 +1384,18 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"cce_ptr_\":" << r->CceAddr()
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
-                << ",\"payload_str_\":"
-                << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-                << ",\"is_delete_\":" << r->IsDeleted()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"cce_ptr_\":" << r->CceAddr()
+         << ",\"commit_ts_\":" << r->CommitTs()
+         << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
+         << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
+         << ",\"is_delete_\":" << r->IsDeleted()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::PostWriteAllCc *r)
 {
@@ -1363,19 +1403,21 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteAllCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
-                << ",\"payload_str_\":"
-                << FMT_POINTER_TO_UINT64T(r->PayloadStr()) << ",\"dml_op_\":\""
-                << r->DmlOp() << "\""
-                << ",\"commit_type_\":\"" << r->CommitType() << "\""
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"commit_ts_\":" << r->CommitTs()
+         << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
+         << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
+         << ",\"dml_op_\":\""
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << r->DmlOp()
+         << "\""
+         << ",\"commit_type_\":\"" << r->CommitType() << "\""
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemotePostWriteAll *r)
@@ -1384,19 +1426,21 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
-                << ",\"payload_str_\":"
-                << FMT_POINTER_TO_UINT64T(r->PayloadStr()) << ",\"dml_op_\":\""
-                << r->DmlOp() << "\""
-                << ",\"commit_type_\":\"" << r->CommitType() << "\""
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyStr())
+         << ",\"commit_ts_\":" << r->CommitTs()
+         << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
+         << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
+         << ",\"dml_op_\":\""
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << r->DmlOp()
+         << "\""
+         << ",\"commit_type_\":\"" << r->CommitType() << "\""
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::PostReadCc *r)
 {
@@ -1404,16 +1448,17 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostReadCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"cce_ptr_\":" << r->CceAddr()
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"key_ts_\":" << r->KeyTs()
-                << ",\"gap_ts_\":" << r->GapTs() << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"cce_ptr_\":" << r->CceAddr()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"commit_ts_\":" << r->CommitTs() << ",\"key_ts_\":" << r->KeyTs()
+         << ",\"gap_ts_\":" << r->GapTs() << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemotePostRead *r)
@@ -1422,16 +1467,17 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"cce_ptr_\":" << r->CceAddr()
-                << ",\"commit_ts_\":" << r->CommitTs()
-                << ",\"key_ts_\":" << r->KeyTs()
-                << ",\"gap_ts_\":" << r->GapTs() << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"cce_ptr_\":" << r->CceAddr()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"commit_ts_\":" << r->CommitTs() << ",\"key_ts_\":" << r->KeyTs()
+         << ",\"gap_ts_\":" << r->GapTs() << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ReadCc *r)
 {
@@ -1439,18 +1485,19 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReadCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"ts_\":" << r->ReadTimestamp() << ",\"type_\":\""
-                << r->Type() << "\""
-                << ",\"lock_type_\":\"" << r->GetLockType() << "\""
-                << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
+         << ",\"type_\":\"" << r->Type() << "\""
+         << ",\"lock_type_\":\"" << r->GetLockType() << "\""
+         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::remote::RemoteRead *r)
 {
@@ -1458,19 +1505,20 @@ std::ostream &operator<<(std::ostream &outs, txservice::remote::RemoteRead *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-                << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"ts_\":" << r->ReadTimestamp() << ",\"type_\":\""
-                << r->Type() << "\""
-                << ",\"lock_type_\":\"" << r->GetLockType() << "\""
-                << ",\"cce_ptr_\":" << r->CcePtr()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
+         << ",\"type_\":\"" << r->Type() << "\""
+         << ",\"lock_type_\":\"" << r->GetLockType() << "\""
+         << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteReadOutside *r)
@@ -1479,11 +1527,12 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"cce_ptr_\":" << &r->CceAddr()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"cce_ptr_\":" << &r->CceAddr()
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenBatchCc *r)
 {
@@ -1491,21 +1540,23 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenBatchCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"index_type_\":\"" << r->index_type_ << "\""
-                << ",\"start_key_\":" << FMT_POINTER_TO_UINT64T(r->start_key_)
-                << ",\"inclusive_\":" << r->inclusive_ << ",\"direct_\":\""
-                << r->direct_ << "\""
-                << ",\"ts_\":" << r->ts_
-                << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
-                << ",\"term_\":" << r->term_ << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
-                << ",\"is_include_floor_cce_\":" << r->is_include_floor_cce_
-                << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"index_type_\":\"" << r->index_type_ << "\""
+         << ",\"start_key_\":" << FMT_POINTER_TO_UINT64T(r->start_key_)
+         << ",\"inclusive_\":" << r->inclusive_ << ",\"direct_\":\""
+         << r->direct_ << "\""
+         << ",\"ts_\":" << r->ts_
+         << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
+         << ",\"term_\":" << r->term_ << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
+         << ",\"is_include_floor_cce_\":" << r->is_include_floor_cce_
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteScanOpen *r)
@@ -1514,13 +1565,14 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"cce_ptr_\":" << r->CcePtr()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ScanNextBatchCc *r)
 {
@@ -1528,16 +1580,18 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanNextBatchCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"ts_\":" << r->ts_
-                << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
-                << ",\"tx_term_\":" << r->tx_term_ << ",\"lock_type_\":\""
-                << r->GetLockType() << "\""
-                << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
-                << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"ts_\":" << r->ts_
+         << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"tx_term_\":" << r->tx_term_ << ",\"lock_type_\":\""
+         << r->GetLockType() << "\""
+         << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
+         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteScanNextBatch *r)
@@ -1546,13 +1600,14 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"tx_term\":" << r->TxTerm()
-                << ",\"cce_ptr_\":" << r->CcePtr()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ScanCloseCc *r)
 {
@@ -1560,13 +1615,15 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanCloseCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"alias_\":" << r->alias_
-                << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->key_)
-                << ",\"inclusive_\":" << r->inclusive_ << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"alias_\":" << r->alias_
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->key_)
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"inclusive_\":" << r->inclusive_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CkptTsCc *r)
 {
@@ -1574,10 +1631,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::CkptTsCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"ckpt_ts_\":" << r->GetCkptTs() << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"ckpt_ts_\":" << r->GetCkptTs() << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CkptScanCc *r)
 {
@@ -1585,12 +1643,13 @@ std::ostream &operator<<(std::ostream &outs, txservice::CkptScanCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << r->table_name_ << "\""
-                << ",\"ckpt_ts_\":" << r->ckpt_ts_
-                << ",\"node_group_\":" << r->node_group_ << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << r->table_name_ << "\""
+         << ",\"ckpt_ts_\":" << r->ckpt_ts_
+         << ",\"node_group_\":" << r->node_group_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CommitSkCc *r)
 {
@@ -1598,17 +1657,18 @@ std::ostream &operator<<(std::ostream &outs, txservice::CommitSkCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"skey_\":" << FMT_POINTER_TO_UINT64T(r->skey_)
-                << ",\"skey_str_\":" << FMT_POINTER_TO_UINT64T(r->skey_str_)
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"pkey_\":" << FMT_POINTER_TO_UINT64T(r->pkey_)
-                << ",\"pkey_str_\":" << FMT_POINTER_TO_UINT64T(r->pkey_str_)
-                << ",\"ts_\":" << r->ts_ << ",\"is_delete_\":" << r->is_delete_
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"skey_\":" << FMT_POINTER_TO_UINT64T(r->skey_)
+         << ",\"skey_str_\":" << FMT_POINTER_TO_UINT64T(r->skey_str_)
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"pkey_\":" << FMT_POINTER_TO_UINT64T(r->pkey_)
+         << ",\"pkey_str_\":" << FMT_POINTER_TO_UINT64T(r->pkey_str_)
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"ts_\":" << r->ts_ << ",\"is_delete_\":" << r->is_delete_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteCommitSk *r)
@@ -1617,12 +1677,14 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-                << ",\"key_shard_code\":" << r->KeyShardCode()
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_shard_code\":" << r->KeyShardCode()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::NegotiateCc *r)
 {
@@ -1630,11 +1692,12 @@ std::ostream &operator<<(std::ostream &outs, txservice::NegotiateCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->txid_->TxNumber()
-                << ",\"isolation_level\":\"" << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"tx_ts_\":" << r->tx_ts_
-                << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->res_) << "}";
+    outs << "{\"tx_number_\":" << r->txid_->TxNumber()
+         << ",\"isolation_level\":\"" << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"tx_ts_\":" << r->tx_ts_
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->res_) << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::CheckTxStatusCc *r)
 {
@@ -1642,10 +1705,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::CheckTxStatusCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"tx_status_\":" << r->tx_status_ << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"tx_status_\":" << r->tx_status_ << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ClearTxCc *r)
 {
@@ -1653,10 +1717,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::ClearTxCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::ReplayLogCc *r)
 {
@@ -1664,11 +1729,12 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReplayLogCc *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-                << r->Isolation() << "\""
-                << ",\"proto_\":\"" << r->Protocol() << "\""
-                << ",\"table_name_str_\":\"" << r->table_name_str_ << "\""
-                << "}";
+    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
+         << r->Isolation() << "\""
+         << ",\"proto_\":\"" << r->Protocol() << "\""
+         << ",\"table_name_str_\":\"" << r->table_name_str_ << "\""
+         << "}";
+    return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::FaultInjectCC *r)
 {
@@ -1676,9 +1742,10 @@ std::ostream &operator<<(std::ostream &outs, txservice::FaultInjectCC *r)
     {
         return outs << "{}";
     }
-    return outs << "{\"fault_name_\":\"" << r->FaultName() << "\""
-                << ",\"fault_paras_\":\"" << r->FaultParas() << "\""
-                << "}";
+    outs << "{\"fault_name_\":\"" << r->FaultName() << "\""
+         << ",\"fault_paras_\":\"" << r->FaultParas() << "\""
+         << "}";
+    return outs;
 }
 std::ostream &operator<<(std::ostream &outs,
                          txservice::remote::RemoteFaultInjectCC *r)
@@ -1687,9 +1754,10 @@ std::ostream &operator<<(std::ostream &outs,
     {
         return outs << "{}";
     }
-    return outs << "{\"fault_name_\":\"" << r->FaultName() << "\""
-                << ",\"fault_paras_\":\"" << r->FaultParas() << "\""
-                << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    outs << "{\"fault_name_\":\"" << r->FaultName() << "\""
+         << ",\"fault_paras_\":\"" << r->FaultParas() << "\""
+         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
+    return outs;
 }
 // template tx_trace_dump
 template <typename T>

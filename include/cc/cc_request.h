@@ -1482,6 +1482,11 @@ public:
         res_ = res;
     }
 
+    CcHandlerResult<uint64_t> *Result()
+    {
+        return res_;
+    }
+
 private:
     const TxId *txid_;
     uint64_t tx_ts_;

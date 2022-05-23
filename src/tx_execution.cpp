@@ -951,6 +951,21 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         // iso level is serializable
         if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
         {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                &scan_next,
+                (
+                    [this, cc_scan_tuple]() -> std::string
+                    {
+                        return std::string("\"tx_number\":")
+                            .append(std::to_string(this->TxNumber()))
+                            .append(",\"tx_term\":")
+                            .append(std::to_string(this->tx_term_))
+                            .append(",\"cce_ptr\":")
+                            .append(std::to_string(
+                                cc_scan_tuple->cce_addr_.CcePtr()));
+                    }));
             rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                             cc_scan_tuple->key_ts_,
                             protocol_,
