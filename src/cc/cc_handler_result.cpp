@@ -31,8 +31,11 @@ void CcHandlerResult<T>::SetFinished()
             {
                 return std::string("\"tx_number\":")
                     .append(std::to_string(this->txm_->TxNumber()))
-                    .append("\"tx_term\":")
-                    .append(std::to_string(this->txm_->TxTerm()));
+                    .append(",\"tx_term\":")
+                    .append(std::to_string(this->txm_->TxTerm()))
+                    .append(",\"ref_cnt_\":")
+                    .append(std::to_string(
+                        this->ref_cnt_.load(std::memory_order_acquire)));
             }
         });
     TX_TRACE_DUMP(static_cast<T *>(&result_));

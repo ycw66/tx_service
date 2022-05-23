@@ -868,18 +868,20 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcScanner *r)
         return outs << "[]";
     }
     outs << "[";
-    std::vector<uint32_t> shard_codes;
-    r->ShardCodes(&shard_codes);
-    for (std::vector<uint32_t>::iterator iter = shard_codes.begin();
-         iter != shard_codes.end();
+    std::vector<std::pair<uint32_t, size_t>> shard_code_and_sizes;
+    r->ShardCacheSizes(&shard_code_and_sizes);
+    for (std::vector<std::pair<uint32_t, size_t>>::iterator iter =
+             shard_code_and_sizes.begin();
+         iter != shard_code_and_sizes.end();
          ++iter)
     {
-        if (iter != shard_codes.begin())
+        if (iter != shard_code_and_sizes.begin())
         {
             outs << ",";
         }
-        uint32_t shard_code = *iter;
-        size_t scan_cache_size = r->ShardCacheSize(shard_code);
+        std::pair<uint32_t, size_t> shard_code_and_size = *iter;
+        uint32_t shard_code = shard_code_and_size.first;
+        size_t scan_cache_size = shard_code_and_size.second;
         outs << "{shard_code:" << shard_code
              << ",scan_cache_size:" << scan_cache_size << "}";
     }
