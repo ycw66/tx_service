@@ -5,8 +5,10 @@
 #include <brpc/stream.h>
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #include "proto/cc_request.pb.h"
 #include "raft_log.pb.h"
@@ -14,6 +16,8 @@
 namespace txservice
 {
 class LocalCcShards;
+
+struct ReplayLogCc;
 
 namespace fault
 {
@@ -54,6 +58,12 @@ private:
     std::unordered_set<brpc::StreamId> inbound_streams_;
     std::mutex inbound_mux_;
     std::condition_variable inbound_cv_;
+
+    void WaitAndClearRequests(
+        std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
+        std::mutex &mux,
+        std::condition_variable &cv,
+        uint32_t &finish_log_cnt);
 };
 }  // namespace fault
 }  // namespace txservice

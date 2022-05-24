@@ -85,6 +85,32 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         uint32_t cc_ng_id = msg.cc_node_group_id();
         int64_t cc_ng_term = msg.cc_node_group_term();
 
+        // process schema ops before processing data ops
+        for (const ::txlog::ReplaySchemaMsg &schema_op_msg :
+             msg.schema_op_msgs())
+        {
+            const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
+            std::string_view catalog_table_name_view(catalog_ccm_name);
+
+            std::unique_ptr<ReplayLogCc> &cc_req =
+                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+                    cc_ng_id,
+                    catalog_table_name_view,
+                    std::string_view(schema_op_blob.data(),
+                                     schema_op_blob.length()),
+                    schema_op_msg.commit_ts(),
+                    schema_op_msg.txn(),
+                    mux,
+                    cv,
+                    finish_log_cnt));
+
+            local_shards_.EnqueueCcRequest(0, cc_req.get());
+
+            // wait for this schema operation to be recovered at all shards
+            // before processing next
+            WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
+        }
+
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
         size_t offset = 0;
@@ -144,49 +170,11 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             }
         }
 
-        // process schema_op_msgs
-        for (const ::txlog::ReplaySchemaMsg &schema_op_msg :
-             msg.schema_op_msgs())
-        {
-            const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
-            std::string_view catalog_table_name_view(catalog_ccm_name);
-
-            std::unique_ptr<ReplayLogCc> &cc_req =
-                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                    cc_ng_id,
-                    catalog_table_name_view,
-                    std::string_view(schema_op_blob.data(),
-                                     schema_op_blob.length()),
-                    schema_op_msg.commit_ts(),
-                    schema_op_msg.txn(),
-                    mux,
-                    cv,
-                    finish_log_cnt));
-
-            assert(finish_log_cnt == 0);
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
-
-            // For every schema operation, waits for it to be recovered at all
-            // shards before moving to the next replay request.
-            std::unique_lock<std::mutex> lk(mux);
-            cv.wait(lk,
-                    [&finish_log_cnt, &cc_req_vec]
-                    { return finish_log_cnt == cc_req_vec.size(); });
-        }
-
-        // process finish message
         if (msg.has_finish())
         {
-            // mark log replay finish only when all preceding ReplayLogCc
-            // requests finished.
-            {
-                std::unique_lock<std::mutex> lk(mux);
-                cv.wait(lk,
-                        [&finish_log_cnt, &cc_req_vec]
-                        { return finish_log_cnt == cc_req_vec.size(); });
-            }
-
-            // receive finish message from one of log groups
+            // wait for all preceding ReplayLogCc requests finish
+            WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
+            // finish log replay of this log group
             const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
             uint32_t lg_id = finish_msg.log_group_id();
             uint32_t latest_txn_no = finish_msg.latest_txn_no();
@@ -195,13 +183,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         }
     }
 
-    {
-        std::unique_lock<std::mutex> lk(mux);
-        cv.wait(lk,
-                [&finish_log_cnt, &cc_req_vec]
-                { return finish_log_cnt == cc_req_vec.size(); });
-    }
-
+    WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
     return 0;
 }
 
@@ -213,6 +195,20 @@ void ReplayService::on_closed(brpc::StreamId id)
     {
         inbound_cv_.notify_one();
     }
+}
+
+void ReplayService::WaitAndClearRequests(
+    std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
+    std::mutex &mux,
+    std::condition_variable &cv,
+    uint32_t &finish_log_cnt)
+{
+    std::unique_lock<std::mutex> lk(mux);
+    cv.wait(lk,
+            [&finish_log_cnt, &cc_req_vec]
+            { return finish_log_cnt == cc_req_vec.size(); });
+    cc_req_vec.clear();
+    finish_log_cnt = 0;
 }
 }  // namespace fault
 }  // namespace txservice
