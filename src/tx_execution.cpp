@@ -882,64 +882,21 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     return;
 }
 
-void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
+void TransactionExecution::ScanTupleAddReadset(ScanNextOperation &scan_next,
+                                               const ScanTuple *cc_scan_tuple)
 {
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &scan_next,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    prev_op_ = state_stack_.back();
-    state_stack_.pop_back();
-    assert(state_stack_.empty());
-
-    if (scan_next.hd_result_.IsError())
-    {
-        kvp_resp_->FinishError();
-        return;
-    }
-
-    const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
-    //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
-    //  store already contains this entry. Since the final scan result is the
-    //  merge of memory entries with data store entries, as a result it's safe
-    //  to skip these backfill entries.
-    while (cc_scan_tuple != nullptr &&
-           (cc_scan_tuple->key_ts_ == 0 ||
-            cc_scan_tuple->rec_status_ == RecordStatus::Unknown))
-    {
-        scan_next.scanner_->MoveNext();
-        cc_scan_tuple = scan_next.scanner_->Current();
-
-        if (cc_scan_tuple == nullptr &&
-            scan_next.scanner_->Status() == ScannerStatus::Blocked)
-        {
-            scan_next.hd_result_.Reset();
-            handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   start_ts_,
-                                   *scan_next.scanner_,
-                                   scan_next.hd_result_,
-                                   iso_level_,
-                                   protocol_);
-            // put scannext_op into state stack since we need to scan the ccmap
-            // again. Note that we should not call PushOperation() since we have
-            // already triggerred the ScanNextBatch.
-            state_stack_.push_back(prev_op_);
-            return;
-        }
-    }
-
-    assert(cc_scan_tuple != nullptr ||
-           scan_next.scanner_->Status() == ScannerStatus::Closed);
-
-    // Lock need to be released when transaction be committed, so add scan
-    // result into transaction read set
+    // Lock need to be released when transaction is committed, so add
+    // scan result into transaction read set for RepeateableRead. Note
+    // that for Unknown status tuples, we also need to add them into
+    // read set. Consider concurrent two transactions. Tx1 firstly read
+    // a tuple but didn't find it, hence marked it as Unknown. Then Tx2
+    // read the same tuple. Tx2 couldn't see this tuple since unknown
+    // status. Then Tx1 scanned KV store and backfill the tuple with
+    // correct value from KV store. Then Tx2 re-read the same tuple
+    // again. This time Tx2 could see this tuple. In this case, Tx2 is
+    // not repeatable read and we must add the first read (unknown
+    // status tuple) of Tx2 into readset to detect this validation
+    // failure.
     if (cc_scan_tuple != nullptr &&
         iso_level_ >= IsolationLevel::RepeatableRead)
     {
@@ -947,8 +904,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                ? LockType::ReadLock
                                : LockType::ReadIntent;
 
-        // Not necessary to add read (and lock) on index table cc entry, unless
-        // iso level is serializable
+        // Not necessary to add read (and lock) on index table cc entry,
+        // unless iso level is serializable
         if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
@@ -972,6 +929,66 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             lk_type);
         }
     }
+}
+
+void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &scan_next,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    prev_op_ = state_stack_.back();
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (scan_next.hd_result_.IsError())
+    {
+        kvp_resp_->FinishError();
+        return;
+    }
+
+    const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
+    ScanTupleAddReadset(scan_next, cc_scan_tuple);
+
+    //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
+    //  store already contains this entry. Since the final scan result is the
+    //  merge of memory entries with data store entries, as a result it's safe
+    //  to skip these backfill entries.
+    while (cc_scan_tuple != nullptr &&
+           (cc_scan_tuple->key_ts_ == 0 ||
+            cc_scan_tuple->rec_status_ == RecordStatus::Unknown))
+    {
+        scan_next.scanner_->MoveNext();
+        cc_scan_tuple = scan_next.scanner_->Current();
+        ScanTupleAddReadset(scan_next, cc_scan_tuple);
+
+        if (cc_scan_tuple == nullptr &&
+            scan_next.scanner_->Status() == ScannerStatus::Blocked)
+        {
+            scan_next.hd_result_.Reset();
+            handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   start_ts_,
+                                   *scan_next.scanner_,
+                                   scan_next.hd_result_,
+                                   iso_level_,
+                                   protocol_);
+            // put scannext_op into state stack since we need to scan the ccmap
+            // again. Note that we should not call PushOperation() since we have
+            // already triggerred the ScanNextBatch.
+            state_stack_.push_back(prev_op_);
+            return;
+        }
+    }
+
+    assert(cc_scan_tuple != nullptr ||
+           scan_next.scanner_->Status() == ScannerStatus::Closed);
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
     {
