@@ -881,55 +881,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     return;
 }
 
-void TransactionExecution::ScanTupleAddReadset(ScanNextOperation &scan_next,
-                                               const ScanTuple *cc_scan_tuple)
-{
-    // Lock need to be released when transaction is committed, so add
-    // scan result into transaction read set for RepeateableRead. Note
-    // that for Unknown status tuples, we also need to add them into
-    // read set. Consider concurrent two transactions. Tx1 firstly read
-    // a tuple but didn't find it, hence marked it as Unknown. Then Tx2
-    // read the same tuple. Tx2 couldn't see this tuple since unknown
-    // status. Then Tx1 scanned KV store and backfill the tuple with
-    // correct value from KV store. Then Tx2 re-read the same tuple
-    // again. This time Tx2 could see this tuple. In this case, Tx2 is
-    // not repeatable read and we must add the first read (unknown
-    // status tuple) of Tx2 into readset to detect this validation
-    // failure.
-    if (cc_scan_tuple != nullptr &&
-        iso_level_ >= IsolationLevel::RepeatableRead)
-    {
-        LockType lk_type = protocol_ == CcProtocol::Locking
-                               ? LockType::ReadLock
-                               : LockType::ReadIntent;
-
-        // Not necessary to add read (and lock) on index table cc entry,
-        // unless iso level is serializable
-        if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                &scan_next,
-                (
-                    [this, cc_scan_tuple]() -> std::string
-                    {
-                        return std::string("\"tx_number\":")
-                            .append(std::to_string(this->TxNumber()))
-                            .append(",\"tx_term\":")
-                            .append(std::to_string(this->tx_term_))
-                            .append(",\"cce_ptr\":")
-                            .append(std::to_string(
-                                cc_scan_tuple->cce_addr_.CcePtr()));
-                    }));
-            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                            cc_scan_tuple->key_ts_,
-                            protocol_,
-                            lk_type);
-        }
-    }
-}
-
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -953,8 +904,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 
     const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
-    ScanTupleAddReadset(scan_next, cc_scan_tuple);
-
     //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
     //  store already contains this entry. Since the final scan result is the
     //  merge of memory entries with data store entries, as a result it's safe
@@ -965,7 +914,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     {
         scan_next.scanner_->MoveNext();
         cc_scan_tuple = scan_next.scanner_->Current();
-        ScanTupleAddReadset(scan_next, cc_scan_tuple);
 
         if (cc_scan_tuple == nullptr &&
             scan_next.scanner_->Status() == ScannerStatus::Blocked)
@@ -988,6 +936,41 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     assert(cc_scan_tuple != nullptr ||
            scan_next.scanner_->Status() == ScannerStatus::Closed);
+
+    // Lock need to be released when transaction be committed, so add scan
+    // result into transaction read set
+    if (cc_scan_tuple != nullptr &&
+        iso_level_ >= IsolationLevel::RepeatableRead)
+    {
+        LockType lk_type = protocol_ == CcProtocol::Locking
+                               ? LockType::ReadLock
+                               : LockType::ReadIntent;
+
+        // Not necessary to add read (and lock) on index table cc entry, unless
+        // iso level is serializable
+        if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                &scan_next,
+                (
+                    [this, cc_scan_tuple]() -> std::string
+                    {
+                        return std::string("\"tx_number\":")
+                            .append(std::to_string(this->TxNumber()))
+                            .append(",\"tx_term\":")
+                            .append(std::to_string(this->tx_term_))
+                            .append(",\"cce_ptr\":")
+                            .append(std::to_string(
+                                cc_scan_tuple->cce_addr_.CcePtr()));
+                    }));
+            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                            cc_scan_tuple->key_ts_,
+                            protocol_,
+                            lk_type);
+        }
+    }
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
     {

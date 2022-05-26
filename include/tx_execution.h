@@ -185,8 +185,6 @@ private:
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
     void ScanClose(size_t alias, const TxKey &end_key);
-    void ScanTupleAddReadset(ScanNextOperation &scan_next,
-                             const ScanTuple *cc_scan_tuple);
 
     void Update(const TableName &table_name,
                 TxKey::Uptr key,

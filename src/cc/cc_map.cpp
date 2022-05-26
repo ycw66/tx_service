@@ -44,9 +44,13 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
                                    LockType lock_type,
                                    int64_t tx_term,
                                    uint32_t cce_node_group_id,
+                                   RecordStatus payload_status,
                                    bool gap_lock)
 {
-    if (req.Isolation() >= IsolationLevel::RepeatableRead)
+    // cce payload_status is unknown means it is a cache miss read. Hence should
+    // not acquire any lock.
+    if (req.Isolation() >= IsolationLevel::RepeatableRead &&
+        payload_status != RecordStatus::Unknown)
     {
         /*gap lock has not been implemented, just a place holder*/
         if (gap_lock)

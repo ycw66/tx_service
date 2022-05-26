@@ -1525,7 +1525,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                floor_cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -1556,6 +1557,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                floor_cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1601,7 +1603,8 @@ public:
                                             req,
                                             req.GetLockType(),
                                             req.TxTerm(),
-                                            req.NodeGroupId()))
+                                            req.NodeGroupId(),
+                                            cce->payload_status_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -1659,7 +1662,8 @@ public:
                                                     req,
                                                     req.GetLockType(),
                                                     req.TxTerm(),
-                                                    req.NodeGroupId()))
+                                                    req.NodeGroupId(),
+                                                    cce->payload_status_))
                         {
                             TX_TRACE_ACTION_WITH_CONTEXT(
                                 &req,
@@ -1694,6 +1698,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1720,7 +1725,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -1819,7 +1825,8 @@ public:
                                             req,
                                             req.GetLockType(),
                                             req.TxTerm(),
-                                            req.NodeGroupId()))
+                                            req.NodeGroupId(),
+                                            cce->payload_status_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -1856,6 +1863,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1881,7 +1889,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -1982,7 +1991,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                floor_cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -2012,6 +2022,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                floor_cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2050,7 +2061,8 @@ public:
                                             req,
                                             req.GetLockType(),
                                             req.TxTerm(),
-                                            req.NodeGroupId()))
+                                            req.NodeGroupId(),
+                                            cce->payload_status_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -2105,7 +2117,8 @@ public:
                                                     req,
                                                     req.GetLockType(),
                                                     req.TxTerm(),
-                                                    req.NodeGroupId()))
+                                                    req.NodeGroupId(),
+                                                    cce->payload_status_))
                         {
                             TX_TRACE_ACTION_WITH_CONTEXT(
                                 &req,
@@ -2138,6 +2151,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2163,7 +2177,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -2249,7 +2264,8 @@ public:
                                             req,
                                             req.GetLockType(),
                                             req.TxTerm(),
-                                            req.NodeGroupId()))
+                                            req.NodeGroupId(),
+                                            cce->payload_status_))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -2285,6 +2301,7 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
+                                                cce->payload_status_,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2310,7 +2327,8 @@ public:
                                                 req,
                                                 req.GetLockType(),
                                                 req.TxTerm(),
-                                                req.NodeGroupId()))
+                                                req.NodeGroupId(),
+                                                cce->payload_status_))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
