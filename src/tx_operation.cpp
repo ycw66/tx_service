@@ -1322,6 +1322,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (is_deleted_)
         {
+            // Store a copy of index table names for UpsertSkTable()
+            upsert_kv_table_op_.index_names_ =
+                catalog_rec_.SchemaView()->schema_->IndexNames();
+
             // For DROP TABLE operations, the data store operation of
             // deleting the k-v table happens after the commit log is
             // flushed.

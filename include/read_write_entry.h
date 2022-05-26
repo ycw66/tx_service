@@ -13,33 +13,12 @@ namespace txservice
 
 struct WriteSetEntry;
 
-struct SecondaryKeyInfo
-{
-    SecondaryKeyInfo(const std::string *sk_index_name,
-                     std::unique_ptr<TxKey> sk_key,
-                     bool is_deleted)
-        : sk_index_name_(sk_index_name),
-          sk_key_(std::move(sk_key)),
-          is_deleted_(is_deleted)
-    {
-    }
-
-    const TableName *sk_index_name_;
-    TxKeyContainer sk_key_;
-    const WriteSetEntry *parent_entry_{nullptr};
-    bool is_deleted_;
-};
-
 struct WriteSetEntry
 {
     using Uptr = std::unique_ptr<WriteSetEntry>;
 
     WriteSetEntry()
-        : key_(nullptr, ContainerType::rvalue),
-          rec_(nullptr, ContainerType::rvalue),
-          op_(DmlOperation::Upsert),
-          cce_addr_(),
-          sindx_()
+        : key_(nullptr), rec_(nullptr), op_(DmlOperation::Upsert), cce_addr_()
     {
     }
 
@@ -49,36 +28,24 @@ struct WriteSetEntry
         : key_(std::move(other.key_)),
           rec_(std::move(other.rec_)),
           op_(other.op_),
-          cce_addr_(other.cce_addr_),
-          sindx_(std::move(other.sindx_))
+          cce_addr_(other.cce_addr_)
     {
-        for (auto &sk_info_ : sindx_)
-        {
-            sk_info_.parent_entry_ = this;
-        }
     }
 
     WriteSetEntry &operator=(WriteSetEntry &&other)
     {
-        key_ = other.key_;
-        rec_ = other.rec_;
+        key_ = std::move(other.key_);
+        rec_ = std::move(other.rec_);
         op_ = other.op_;
         cce_addr_ = other.cce_addr_;
-        sindx_ = std::move(other.sindx_);
-
-        for (auto &sk_info_ : sindx_)
-        {
-            sk_info_.parent_entry_ = this;
-        }
 
         return *this;
     }
 
-    TxKeyContainer key_;
-    TxRecordContainer rec_;
+    TxKey::Uptr key_;
+    TxRecord::Uptr rec_;
     DmlOperation op_;
     CcEntryAddr cce_addr_;
-    std::vector<SecondaryKeyInfo> sindx_;
 };
 
 struct ReadSetEntry

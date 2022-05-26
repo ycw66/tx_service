@@ -30,7 +30,7 @@ enum class TxnStatus
     Committed,
     Aborted,
     /**
-     * @brief A tx starts committing after receiving the commit comand from
+     * @brief A tx starts committing after receiving the commit command from
      * query runtime. From this point forward, the tx runs toward the end,
      * either committed or aborted, and cannot be interrupted, e.g., the user
      * closes the connection to the runtime. This status marks the period

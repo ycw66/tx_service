@@ -1355,10 +1355,8 @@ struct CommitSkCc : public TemplatedCcRequest<CommitSkCc, Void>
 {
 public:
     CommitSkCc()
-        : skey_(nullptr),
-          skey_str_(nullptr),
-          pkey_(nullptr),
-          pkey_str_(nullptr),
+        : secondary_key_(nullptr),
+          secondary_key_str_(nullptr),
           ts_(0),
           is_delete_(false)
     {
@@ -1368,8 +1366,7 @@ public:
     CommitSkCc(CommitSkCc &&rhs) = delete;
 
     void Reset(const TableName *tn,
-               const TxKey *sk,
-               const TxKey *pk,
+               const TxKey *secondary_key,
                TxNumber tx_number,
                uint32_t key_shard_code,
                uint64_t ts,
@@ -1379,20 +1376,17 @@ public:
         TemplatedCcRequest<CommitSkCc, Void>::Reset(
             tn, res, key_shard_code >> 10, tx_number);
 
-        skey_ = sk;
-        skey_str_ = nullptr;
+        secondary_key_ = secondary_key;
+        secondary_key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
-        pkey_ = pk;
-        pkey_str_ = nullptr;
         ts_ = ts;
         is_delete_ = is_delete;
     }
 
     void Reset(const TableName *tn,
-               const std::string *sk,
+               const std::string *secondary_key_str,
                TxNumber tx_number,
                uint32_t key_shard_code,
-               const std::string *pk,
                uint64_t ts,
                bool is_delete,
                CcHandlerResult<Void> *res)
@@ -1400,11 +1394,9 @@ public:
         TemplatedCcRequest<CommitSkCc, Void>::Reset(
             tn, res, key_shard_code >> 10, tx_number);
 
-        skey_ = nullptr;
-        skey_str_ = sk;
+        secondary_key_ = nullptr;
+        secondary_key_str_ = secondary_key_str;
         key_shard_code_ = key_shard_code;
-        pkey_ = nullptr;
-        pkey_str_ = pk;
         ts_ = ts;
         is_delete_ = is_delete;
     }
@@ -1415,11 +1407,9 @@ public:
     }
 
 private:
-    const TxKey *skey_;
-    const std::string *skey_str_;
+    const TxKey *secondary_key_;
+    const std::string *secondary_key_str_;
     uint32_t key_shard_code_;
-    const TxKey *pkey_;
-    const std::string *pkey_str_;
     uint64_t ts_;
     bool is_delete_;
 

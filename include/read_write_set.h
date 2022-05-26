@@ -99,10 +99,9 @@ public:
     }
 
     void AddWrite(const TableName &tabname,
-                  TxKeyContainer &key_c,
-                  TxRecordContainer &rec_c,
-                  DmlOperation op_type,
-                  std::vector<SecondaryKeyInfo> *skeys = nullptr)
+                  TxKey::Uptr key,
+                  TxRecord::Uptr rec,
+                  DmlOperation op_type)
     {
         auto table_iter = wset_.find(tabname);
         if (table_iter == wset_.end())
@@ -110,23 +109,24 @@ public:
             auto iter = wset_.try_emplace(tabname);
             table_iter = iter.first;
         }
-
         TableWriteSet &tws = table_iter->second;
 
         WriteSetEntry wset_entry;
-        wset_entry.key_ = key_c;
-        wset_entry.rec_ = rec_c;
+        wset_entry.key_ = std::move(key);
+        wset_entry.rec_ = std::move(rec);
         wset_entry.op_ = op_type;
-        if (skeys != nullptr && skeys->size() > 0)
-        {
-            wset_entry.sindx_ = std::move(*skeys);
-        }
 
-        auto [it, is_insert] =
-            tws.insert_or_assign(wset_entry.key_.get(), std::move(wset_entry));
-        if (is_insert)
+        auto [it, inserted] =
+            tws.try_emplace(wset_entry.key_.get(), std::move(wset_entry));
+        if (inserted)
         {
             ++wset_cnt_;
+        }
+        else
+        {
+            // Modify old WriteSetEntry.
+            it->second.rec_ = std::move(wset_entry.rec_);
+            it->second.op_ = wset_entry.op_;
         }
     }
 

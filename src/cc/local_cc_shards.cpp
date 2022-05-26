@@ -164,11 +164,17 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames()
 {
     std::unordered_set<TableName> table_set;
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
-    for (auto catalog_it = table_catalogs_.begin();
-         catalog_it != table_catalogs_.end();
-         ++catalog_it)
+    for (auto &[base_table_name, catalog_entry] : table_catalogs_)
     {
-        table_set.emplace(catalog_it->first);
+        table_set.emplace(base_table_name);
+        if (catalog_entry.schema_.get() != nullptr)
+        {
+            for (txservice::TableName &index_table_name :
+                 catalog_entry.schema_->IndexNames())
+            {
+                table_set.emplace(index_table_name);
+            }
+        }
     }
 
     return table_set;

@@ -149,33 +149,25 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     UpsertTxRequest(const TableName *tab_name,
                     TxKey *key,
                     TxRecord *rec,
-                    std::vector<SecondaryKeyInfo> *sks = nullptr,
                     bool is_del = false)
-        : tab_name_(tab_name),
-          key_(key),
-          rec_(rec),
-          skeys_(sks),
-          is_delete_(is_del)
+        : tab_name_(tab_name), key_(key), rec_(rec), is_delete_(is_del)
     {
     }
 
     UpsertTxRequest(const TableName *tab_name,
                     TxKey::Uptr key,
                     TxRecord::Uptr rec,
-                    std::vector<SecondaryKeyInfo> *sks = nullptr,
                     bool is_del = false)
         : tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
-          skeys_(sks),
           is_delete_(is_del)
     {
     }
 
     const TableName *tab_name_;
-    TxKeyContainer key_;
-    TxRecordContainer rec_;
-    std::vector<SecondaryKeyInfo> *skeys_;
+    TxKey::Uptr key_;
+    TxRecord::Uptr rec_;
     bool is_delete_;
 };
 

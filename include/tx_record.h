@@ -25,7 +25,7 @@ enum struct RecordStatus
     /// <summary>
     /// A tx sends a read request to bring the record into a remote cc map for
     /// caching. The read request does not wait for the response, so the remote
-    /// record's newest status is known (which may have changed since the
+    /// record's newest status is unknown (which may have changed since the
     /// initial read that starts concurrency control).
     /// </summary>
     RemoteUnknown

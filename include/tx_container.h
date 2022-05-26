@@ -163,6 +163,7 @@ public:
             return *this;
         }
 
+        // value-copy with two rvalues not working
         // if (owner_ != nullptr)
         // {
         //     *owner_ = *rhs.ptr_;

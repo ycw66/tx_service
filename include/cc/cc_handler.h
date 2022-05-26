@@ -293,8 +293,7 @@ public:
     virtual void CommitSecondaryKey(TxNumber txn,
                                     int64_t tx_term,
                                     const TableName &table_name,
-                                    const TxKey &sk,
-                                    const TxKey &pk,
+                                    const TxKey &secondary_key,
                                     bool is_delete,
                                     uint64_t ts,
                                     CcHandlerResult<Void> &) = 0;
@@ -349,11 +348,13 @@ public:
                              std::vector<int> &vct_node_id,
                              CcHandlerResult<bool> &hres) = 0;
 
-    virtual void DataStoreUpsertTable(const TableName &table_name,
-                                      const TableSchema *schema,
-                                      bool is_deleted,
-                                      uint64_t commit_ts,
-                                      CcHandlerResult<Void> &hres) = 0;
+    virtual void DataStoreUpsertTable(
+        const TableName &table_name,
+        const TableSchema *schema,
+        const std::vector<txservice::TableName> *indexes,
+        bool is_deleted,
+        uint64_t commit_ts,
+        CcHandlerResult<Void> &hres) = 0;
 
     virtual uint32_t GetNodeId() const = 0;
 };

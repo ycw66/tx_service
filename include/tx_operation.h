@@ -290,6 +290,8 @@ struct DsUpsertTableOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
+    // Store a copy of index table names for DDL
+    std::vector<txservice::TableName> index_names_;
     bool is_deleted_{false};
     CcHandlerResult<Void> hd_result_;
 };

@@ -369,9 +369,8 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
     void_resp_ = &upsert_req.tx_result_;
     void_resp_->Reset();
     Upsert(*upsert_req.tab_name_,
-           upsert_req.key_,
-           upsert_req.rec_,
-           upsert_req.skeys_,
+           std::move(upsert_req.key_),
+           std::move(upsert_req.rec_),
            upsert_req.is_delete_ ? DmlOperation::Delete : DmlOperation::Upsert);
 }
 
@@ -1218,37 +1217,32 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 }
 
 void TransactionExecution::Update(const TableName &table_name,
-                                  TxKeyContainer &key,
-                                  TxRecordContainer &rec,
-                                  std::vector<SecondaryKeyInfo> *skeys)
+                                  TxKey::Uptr key,
+                                  TxRecord::Uptr rec)
 {
-    Upsert(table_name, key, rec, skeys, DmlOperation::Update);
+    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Update);
 }
 
 void TransactionExecution::Insert(const TableName &table_name,
-                                  TxKeyContainer &key,
-                                  TxRecordContainer &rec,
-                                  std::vector<SecondaryKeyInfo> *skeys)
+                                  TxKey::Uptr key,
+                                  TxRecord::Uptr rec)
 {
-    Upsert(table_name, key, rec, skeys, DmlOperation::Insert);
+    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Insert);
 }
 
-void TransactionExecution::Delete(const TableName &table_name,
-                                  TxKeyContainer &key,
-                                  std::vector<SecondaryKeyInfo> *skeys)
+void TransactionExecution::Delete(const TableName &table_name, TxKey::Uptr key)
 {
-    TxRecordContainer rcon(nullptr);
-    Upsert(table_name, key, rcon, skeys, DmlOperation::Delete);
+    TxRecord::Uptr rec{nullptr};
+    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Delete);
 }
 
 // Upsert modify tuple without locking in OCC protocol.
 void TransactionExecution::Upsert(const TableName &table_name,
-                                  TxKeyContainer &key,
-                                  TxRecordContainer &rec,
-                                  std::vector<SecondaryKeyInfo> *skeys,
+                                  TxKey::Uptr key,
+                                  TxRecord::Uptr rec,
                                   DmlOperation op)
 {
-    rw_set_.AddWrite(table_name, key, rec, op, skeys);
+    rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op);
     void_resp_->Finish(void_);
 }
 
@@ -1298,19 +1292,24 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 
     size_t idx = 0;
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
-    for (auto table_it = wset.begin(); table_it != wset.end(); ++table_it)
+    for (auto &[table_name, table_write_set] : wset)
     {
-        for (auto key_it = table_it->second.begin();
-             key_it != table_it->second.end();
-             ++key_it)
+        // Skip acquire write for secondary index table.
+        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+        if (pos != std::string::npos)
+        {
+            acquire_write.acquire_write_cnt_ -= table_write_set.size();
+            continue;
+        }
+
+        for (auto &[key_ptr, write_entry] : table_write_set)
         {
             CcHandlerResult<AcquireKeyResult> &hres =
                 acquire_write.results_[idx];
             hres.Reset();
             hres.Value().remote_ack_cnt_ = &acquire_write.remote_ack_cnt_;
-            WriteSetEntry &write_entry = key_it->second;
             acquire_write.acquire_write_entries_.at(idx) = &write_entry;
-            handler->AcquireWrite(table_it->first,
+            handler->AcquireWrite(table_name,
                                   *write_entry.key_.get(),
                                   txid_,
                                   tx_term_,
@@ -1545,73 +1544,53 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     // new structure
     std::unordered_map<
         NodeGroupId,
-        std::unordered_map<TableName,
-                           std::vector<std::variant<const WriteSetEntry *,
-                                                    const SecondaryKeyInfo *>>>>
+        std::unordered_map<TableName, std::vector<const WriteSetEntry *>>>
         ng_table_rec_set;
 
     // reorganize all WriteSetEntries from old structure to new structure
     for (const auto &[table_name, table_write_set] : wset)
     {
-        for (const auto &[key_ptr, write_set_entry] : table_write_set)
+        for (const auto &[key_ptr, wset_entry] : table_write_set)
         {
-            const CcEntryAddr &addr = write_set_entry.cce_addr_;
+            uint32_t cc_node_id;
 
-            auto shard_term_it = shard_terms->find(addr.NodeGroupId());
-            if (shard_term_it == shard_terms->end())
+            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+            if (pos != std::string::npos)
             {
-                (*shard_terms)[addr.NodeGroupId()] = addr.Term();
+                uint32_t shard_code =
+                    Sharder::Instance().ShardCode(key_ptr->Hash());
+                cc_node_id = Sharder::Instance().LeaderNodeId(shard_code >> 10);
             }
-            else if (shard_term_it->second != addr.Term())
+            else
             {
-                // Two keys in the tx's write set refer to the same cc node
-                // group, but have different terms. It means that the cc node
-                // must have failed over at least once and the tx have obtained
-                // a write intention before the failure. The tx must abort
-                // because the write intention obtained before the failure have
-                // been invalidated.
-                write_log.hd_result_.SetError(1);
-                return;
+                const CcEntryAddr &addr = wset_entry.cce_addr_;
+                cc_node_id = addr.NodeGroupId();
+
+                // Only fills WriteLogRequest::node_terms for base table.
+                auto shard_term_it = shard_terms->find(cc_node_id);
+                if (shard_term_it == shard_terms->end())
+                {
+                    (*shard_terms)[cc_node_id] = addr.Term();
+                }
+                else if (shard_term_it->second != addr.Term())
+                {
+                    // Two keys in the tx's write set refer to the same cc node
+                    // group, but have different terms. It means that the cc
+                    // node must have failed over at least once and the tx have
+                    // obtained a write intention before the failure. The tx
+                    // must abort because the write intention obtained before
+                    // the failure have been invalidated.
+                    write_log.hd_result_.SetError(1);
+                    return;
+                }
             }
 
-            auto table_rec_it =
-                ng_table_rec_set.try_emplace(addr.NodeGroupId());
-            std::unordered_map<
-                TableName,
-                std::vector<std::variant<const WriteSetEntry *,
-                                         const SecondaryKeyInfo *>>>
+            auto table_rec_it = ng_table_rec_set.try_emplace(cc_node_id);
+            std::unordered_map<TableName, std::vector<const WriteSetEntry *>>
                 &table_rec_set = table_rec_it.first->second;
 
             auto rec_vec_it = table_rec_set.try_emplace(table_name);
-            rec_vec_it.first->second.emplace_back(
-                std::in_place_type<const WriteSetEntry *>, &write_set_entry);
-
-            if (!write_set_entry.sindx_.empty())
-            {
-                for (auto &sk_info : write_set_entry.sindx_)
-                {
-                    // use sk and pk to get a HashCode
-                    const TxKey *sk = sk_info.sk_key_.get();
-                    const TxKey *pk = sk_info.parent_entry_->key_.get();
-
-                    // get cc_node group id for secondary index entry
-                    uint32_t shard_code = Sharder::Instance().ShardCode(
-                        TxKey::HashCode(*sk, *pk));
-                    uint32_t sk_ng_id = shard_code >> 10;
-
-                    auto table_rec_it = ng_table_rec_set.try_emplace(sk_ng_id);
-                    std::unordered_map<
-                        TableName,
-                        std::vector<std::variant<const WriteSetEntry *,
-                                                 const SecondaryKeyInfo *>>>
-                        &table_rec_set = table_rec_it.first->second;
-
-                    auto rec_vec_it =
-                        table_rec_set.try_emplace(*sk_info.sk_index_name_);
-                    rec_vec_it.first->second.emplace_back(
-                        std::in_place_type<const SecondaryKeyInfo *>, &sk_info);
-                }
-            }
+            rec_vec_it.first->second.emplace_back(&wset_entry);
         }
     }
 
@@ -1642,7 +1621,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         //   (b) A 1-byte flag to indicate if the record is normal, deleted or
         //   void.
         //   (c) The serialized record if the record is normal.
-        for (const auto &[table_name, variant_entry_vec] : table_rec_set)
+        for (const auto &[table_name, wset_entry_vec] : table_rec_set)
         {
             uint8_t tabname_len = table_name.length();
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
@@ -1659,40 +1638,19 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             // are known.
             log_ng_blob->append(ptr, sizeof(uint32_t));
 
-            for (auto variant_entry : variant_entry_vec)
+            for (const auto &wset_entry : wset_entry_vec)
             {
-                if (variant_entry.index() == 0)
+                wset_entry->key_->Serialize(*log_ng_blob);
+
+                uint8_t delete_flag =
+                    wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
+                log_ng_blob->append(
+                    reinterpret_cast<const char *>(&delete_flag), 1);
+
+                if (wset_entry->op_ != DmlOperation::Delete &&
+                    wset_entry->rec_ != nullptr)
                 {
-                    const WriteSetEntry *wset_entry =
-                        std::get<const WriteSetEntry *>(variant_entry);
-
-                    wset_entry->key_.get()->Serialize(*log_ng_blob);
-
-                    uint8_t delete_flag =
-                        wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
-                    log_ng_blob->append(
-                        reinterpret_cast<const char *>(&delete_flag), 1);
-
-                    if (wset_entry->op_ != DmlOperation::Delete &&
-                        wset_entry->rec_.get() != nullptr)
-                    {
-                        wset_entry->rec_.get()->Serialize(*log_ng_blob);
-                    }
-                }
-                else
-                {
-                    const SecondaryKeyInfo *sk_info =
-                        std::get<const SecondaryKeyInfo *>(variant_entry);
-
-                    // Serialize sk and pk into log_ng_blob.
-                    sk_info->sk_key_.get()->Serialize(*log_ng_blob);
-                    sk_info->parent_entry_->key_.get()->Serialize(*log_ng_blob);
-
-                    uint8_t delete_flag = sk_info->is_deleted_ == true ? 1 : 0;
-                    log_ng_blob->append(
-                        reinterpret_cast<const char *>(&delete_flag), 1);
-
-                    // A secondary index entry has no payload.
+                    wset_entry->rec_->Serialize(*log_ng_blob);
                 }
             }
 
@@ -1874,48 +1832,41 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         post_process.Reset(0, rw_set_.WriteSetSize());
 
         size_t idx = 0;
-        std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
-        for (auto table_it = wset.begin(); table_it != wset.end(); ++table_it)
+        const std::unordered_map<TableName, TableWriteSet> &wset =
+            rw_set_.WriteSet();
+        for (const auto &[table_name, table_write_set] : wset)
         {
-            for (auto key_it = table_it->second.begin();
-                 key_it != table_it->second.end();
-                 ++key_it, ++idx)
+            for (const auto &[key, write_entry] : table_write_set)
             {
-                WriteSetEntry &write_entry = key_it->second;
                 CcHandlerResult<Void> &hres = post_process.write_results_[idx];
                 hres.Reset();
-                if (write_entry.sindx_.size() > 0)
+
+                std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+                if (pos != std::string::npos)
                 {
-                    hres.SetRefCnt((uint32_t) write_entry.sindx_.size() + 1);
-                }
-
-                handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   commit_ts_,
-                                   write_entry.cce_addr_,
-                                   write_entry.rec_.get(),
-                                   write_entry.op_ == DmlOperation::Delete,
-                                   hres,
-                                   protocol_);
-
-                for (auto sk_iter = write_entry.sindx_.begin();
-                     sk_iter != write_entry.sindx_.end();
-                     ++sk_iter)
-                {
-                    const TableName *tn = sk_iter->sk_index_name_;
-                    const TxKey *sk = sk_iter->sk_key_.get();
-                    bool is_delete = sk_iter->is_deleted_;
-
                     handler->CommitSecondaryKey(
                         tx_number_.load(std::memory_order_relaxed),
                         tx_term_,
-                        *tn,
-                        *sk,
-                        *write_entry.key_.get(),
-                        is_delete,
+                        table_name,
+                        *key,
+                        write_entry.op_ == DmlOperation::Delete,
                         commit_ts_,
                         hres);
                 }
+                else
+                {
+                    handler->PostWrite(
+                        tx_number_.load(std::memory_order_relaxed),
+                        tx_term_,
+                        commit_ts_,
+                        write_entry.cce_addr_,
+                        write_entry.rec_.get(),
+                        write_entry.op_ == DmlOperation::Delete,
+                        hres,
+                        protocol_);
+                }
+
+                ++idx;
             }
         }
     }
@@ -1969,8 +1920,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         idx = 0;
         const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
             rw_set_.ReadSet();
-        for (auto read_it = rset.begin(); read_it != rset.end();
-             ++read_it, ++idx)
+        for (const auto &[cce_addr, read_entry] : rset)
         {
             CcHandlerResult<std::vector<TxId>> &hres =
                 post_process.read_results_[idx];
@@ -1981,10 +1931,12 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                               0,
                               0,
                               0,
-                              read_it->first,
+                              cce_addr,
                               hres,
-                              read_it->second.protocol_,
-                              read_it->second.lock_type_);
+                              read_entry.protocol_,
+                              read_entry.lock_type_);
+
+            ++idx;
         }
     }
 
@@ -2149,6 +2101,7 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
     ds_upsert_table_op.is_running_ = true;
     handler->DataStoreUpsertTable(*ds_upsert_table_op.table_name_,
                                   ds_upsert_table_op.table_schema_,
+                                  &ds_upsert_table_op.index_names_,
                                   ds_upsert_table_op.is_deleted_,
                                   commit_ts_,
                                   ds_upsert_table_op.hd_result_);

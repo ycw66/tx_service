@@ -800,10 +800,9 @@ void txservice::remote::RemoteCommitSk::Reset(
     const CommitSkRequest &req = input_msg->commit_sk_req();
 
     CommitSkCc::Reset(&req.tablename(),
-                      &req.sk(),
+                      &req.secondary_key(),
                       input_msg->tx_number(),
                       req.key_shard_code(),
-                      &req.pk(),
                       req.ts(),
                       req.is_deleted(),
                       &cc_res_);

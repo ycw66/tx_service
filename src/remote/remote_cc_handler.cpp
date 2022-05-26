@@ -429,8 +429,7 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     TxNumber txn,
     int64_t tx_term,
     const TableName &table_name,
-    const TxKey &sk,
-    const TxKey &pk,
+    const TxKey &secondary_key,
     uint32_t key_shard_code,
     bool is_delete,
     uint64_t ts,
@@ -458,9 +457,7 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     CommitSkRequest *commit_sk = send_msg.mutable_commit_sk_req();
     commit_sk->set_src_node_id(src_node_id);
     commit_sk->set_tablename(table_name);
-
-    sk.Serialize(*commit_sk->mutable_sk());
-    pk.Serialize(*commit_sk->mutable_pk());
+    secondary_key.Serialize(*commit_sk->mutable_secondary_key());
 
     commit_sk->set_key_shard_code(key_shard_code);
     commit_sk->set_ts(ts);

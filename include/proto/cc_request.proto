@@ -280,11 +280,10 @@ message ScanNextResponse {
 message CommitSkRequest {
 	uint32 src_node_id = 1;
 	string tablename = 2;
-	bytes sk = 3;
-	bytes pk = 4;
-	uint32 key_shard_code = 5;
-	uint64 ts = 6;
-	bool is_deleted = 7;
+	bytes secondary_key = 3;
+	uint32 key_shard_code = 4;
+	uint64 ts = 5;
+	bool is_deleted = 6;
 }
 
 message FaultInjectRequest {

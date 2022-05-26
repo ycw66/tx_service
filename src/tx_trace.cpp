@@ -1661,11 +1661,10 @@ std::ostream &operator<<(std::ostream &outs, txservice::CommitSkCc *r)
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
          << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"skey_\":" << FMT_POINTER_TO_UINT64T(r->skey_)
-         << ",\"skey_str_\":" << FMT_POINTER_TO_UINT64T(r->skey_str_)
+         << ",\"secondary_key_\":" << FMT_POINTER_TO_UINT64T(r->secondary_key_)
+         << ",\"secondary_key_str_\":"
+         << FMT_POINTER_TO_UINT64T(r->secondary_key_str_)
          << ",\"key_shard_code\":" << r->KeyShardCode()
-         << ",\"pkey_\":" << FMT_POINTER_TO_UINT64T(r->pkey_)
-         << ",\"pkey_str_\":" << FMT_POINTER_TO_UINT64T(r->pkey_str_)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"ts_\":" << r->ts_ << ",\"is_delete_\":" << r->is_delete_ << "}";
     return outs;

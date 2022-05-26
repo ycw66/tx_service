@@ -18,7 +18,7 @@ struct VoidKey : public TxKey
     {
         if (const VoidKey *other_ptr = static_cast<const VoidKey *>(&rhs))
         {
-            return true;
+            return *this == *other_ptr;
         }
         return false;
     }
@@ -591,28 +591,23 @@ public:
 
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
 
-        if (req.skey_ != nullptr)
+        if (req.secondary_key_ != nullptr)
         {
-            const SkT *sk = static_cast<const SkT *>(req.skey_);
-            const PkT *pk = static_cast<const PkT *>(req.pkey_);
+            const SecondaryKey<SkT, PkT> *secondary_key =
+                static_cast<const SecondaryKey<SkT, PkT> *>(req.secondary_key_);
 
-            cce = FindEmplace(*sk, *pk, req.ts_);
+            cce = FindEmplace(
+                secondary_key->SKey(), secondary_key->PKey(), req.ts_);
         }
         else
         {
-            SkT sk_obj;
+            SecondaryKey<SkT, PkT> secondary_key_obj;
             size_t offset = 0;
-            sk_obj.Deserialize(req.skey_str_->data(),
-                               offset,
-                               compound_schema_.sk_schema_.get());
+            secondary_key_obj.Deserialize(
+                req.secondary_key_str_->data(), offset, &compound_schema_);
 
-            PkT pk_obj;
-            offset = 0;
-            pk_obj.Deserialize(req.pkey_str_->data(),
-                               offset,
-                               compound_schema_.pk_schema_.get());
-
-            cce = FindEmplace(sk_obj, pk_obj, req.ts_);
+            cce = FindEmplace(
+                secondary_key_obj.SKey(), secondary_key_obj.PKey(), req.ts_);
         }
 
         if (cce == nullptr)

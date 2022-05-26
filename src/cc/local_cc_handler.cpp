@@ -727,21 +727,19 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
 void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
                                                    int64_t tx_term,
                                                    const TableName &table_name,
-                                                   const TxKey &sk,
-                                                   const TxKey &pk,
+                                                   const TxKey &secondary_key,
                                                    bool is_delete,
                                                    uint64_t ts,
                                                    CcHandlerResult<Void> &hres)
 {
-    uint64_t hash = TxKey::HashCode(sk, pk);
-    uint32_t shard_code = Sharder::Instance().ShardCode(hash);
+    uint32_t shard_code = Sharder::Instance().ShardCode(secondary_key.Hash());
 
     uint32_t node_id = Sharder::Instance().LeaderNodeId(shard_code >> 10);
     if (node_id == cc_shards_.node_id_)
     {
         CommitSkCc *req = commitsk_pool.NextRequest();
         req->Reset(
-            &table_name, &sk, &pk, txn, shard_code, ts, is_delete, &hres);
+            &table_name, &secondary_key, txn, shard_code, ts, is_delete, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -752,8 +750,7 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
                                       txn,
                                       tx_term,
                                       table_name,
-                                      sk,
-                                      pk,
+                                      secondary_key,
                                       shard_code,
                                       is_delete,
                                       ts,
@@ -889,12 +886,13 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 void txservice::LocalCcHandler::DataStoreUpsertTable(
     const TableName &table_name,
     const TableSchema *schema,
+    const std::vector<txservice::TableName> *indexes,
     bool is_deleted,
     uint64_t commit_ts,
     CcHandlerResult<Void> &hres)
 {
     cc_shards_.store_hd_->UpsertTable(
-        table_name, schema, is_deleted, commit_ts, &hres);
+        table_name, schema, indexes, is_deleted, commit_ts, &hres);
 }
 
 /*

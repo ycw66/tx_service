@@ -92,6 +92,21 @@ void Checkpointer::Ckpt()
             continue;
         }
 
+        // Only issue tx_request using base table name
+        const TableName *base_table_name_;
+        TableName sk_base_table_name_;
+        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+        if (pos != std::string::npos)
+        {
+            sk_base_table_name_ = table_name;
+            sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
+            base_table_name_ = &sk_base_table_name_;
+        }
+        else
+        {
+            base_table_name_ = &table_name;
+        }
+
         // Init a tx_request to acquire read lock on catalog cc_entry in one
         // shard, which is good enough to block schema change.
         TransactionExecution *ckpt_txm = tx_service_->NewTx();
@@ -112,7 +127,7 @@ void Checkpointer::Ckpt()
 
         // If table_name has been dropped at this point, read lock would not be
         // acquired.
-        CatalogKey table_key(table_name);
+        CatalogKey table_key(*base_table_name_);
         CatalogRecord catalog_rec;
 
         ReadTxRequest read_req;

@@ -24,6 +24,7 @@ public:
 
     virtual void UpsertTable(const TableName &ccm_table_name,
                              const TableSchema *table_schema,
+                             const std::vector<txservice::TableName> *indexes,
                              bool is_deleted,
                              uint64_t commit_ts,
                              CcHandlerResult<Void> *hd_res) = 0;

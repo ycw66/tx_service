@@ -189,24 +189,19 @@ private:
                              const ScanTuple *cc_scan_tuple);
 
     void Update(const TableName &table_name,
-                TxKeyContainer &key,
-                TxRecordContainer &rec,
-                std::vector<SecondaryKeyInfo> *skeys = nullptr);
+                TxKey::Uptr key,
+                TxRecord::Uptr rec);
 
-    void Delete(const TableName &table_name,
-                TxKeyContainer &key,
-                std::vector<SecondaryKeyInfo> *skeys = nullptr);
+    void Delete(const TableName &table_name, TxKey::Uptr key);
 
     void Upsert(const TableName &table_name,
-                TxKeyContainer &key,
-                TxRecordContainer &rec,
-                std::vector<SecondaryKeyInfo> *skeys = nullptr,
+                TxKey::Uptr key,
+                TxRecord::Uptr rec,
                 DmlOperation op = DmlOperation::Upsert);
 
     void Insert(const TableName &table_name,
-                TxKeyContainer &key,
-                TxRecordContainer &rec,
-                std::vector<SecondaryKeyInfo> *skeys = nullptr);
+                TxKey::Uptr key,
+                TxRecord::Uptr rec);
 
     void Commit();
     void Abort();
