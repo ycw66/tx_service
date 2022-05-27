@@ -289,6 +289,7 @@ public:
     ~TxService()
     {
         ckpt_.Terminate();
+        ckpt_.Join();
 
         Sharder::Instance().Shutdown();
 

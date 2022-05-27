@@ -64,8 +64,6 @@ public:
                         ccs.CreateRangeCcMap(*table_name_, node_group_id_);
                         ccm_ = ccs.GetCcm(
                             *table_name_, node_group_id_, error_code);
-
-                        ccm_->commit_ts_ = 1;
                     }
                     else
                     {

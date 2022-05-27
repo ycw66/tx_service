@@ -16,11 +16,13 @@ public:
     virtual bool PutAll(const TableName &table_name,
                         std::vector<LruEntry *> &batch,
                         const Schema *key_schema,
-                        const Schema *rec_schema) = 0;
+                        const Schema *rec_schema,
+                        uint64_t schema_ts) = 0;
 
     virtual bool PutSkAll(const TableName &table_name,
                           std::vector<LruEntry *> &batch,
-                          const SkSchema *sk_schema) = 0;
+                          const SkSchema *sk_schema,
+                          uint64_t schema_ts) = 0;
 
     virtual void UpsertTable(const TableName &ccm_table_name,
                              const TableSchema *table_schema,

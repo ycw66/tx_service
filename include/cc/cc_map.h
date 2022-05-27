@@ -42,7 +42,7 @@ public:
     using uptr = std::unique_ptr<CcMap>;
 
     CcMap(CcShard *shard, uint64_t schema_ts)
-        : shard_(shard), commit_ts_(schema_ts)
+        : shard_(shard), schema_ts_(schema_ts)
     {
     }
 
@@ -129,10 +129,21 @@ public:
     void RecoverWriteLock(const TxNumber &tx_number, uint32_t node_group_id);
     void RecoverWriteIntent(LruEntry &cce, uint32_t node_group_id);
 
+    uint64_t SchemaTs() const
+    {
+        return schema_ts_;
+    }
+
     CcShard *const shard_;
-    uint64_t commit_ts_;
 
 protected:
+    enum struct ScanType
+    {
+        ScanKey = 0,
+        ScanGap,
+        ScanBoth
+    };
+
     /**
      * @brief After the input request is executed at the current shard, moves
      * the request to another shard for execution.
@@ -142,5 +153,7 @@ protected:
      * is moved.
      */
     void MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id);
+
+    uint64_t schema_ts_{1};
 };
 }  // namespace txservice

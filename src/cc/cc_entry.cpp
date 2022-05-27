@@ -43,6 +43,16 @@ LruEntry::~LruEntry()
     {
         parent_map_->shard_->DeleteLockHolidngTx(txn, this);
     }
+
+    for (const TxNumber &txn : key_lock_.ReadIntents())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+    }
+
+    for (const TxNumber &txn : gap_lock_.ReadIntents())
+    {
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+    }
 }
 
 LruEntry::LruEntry(CcMap *parent) : parent_map_(parent)

@@ -36,6 +36,11 @@ public:
 
     void Terminate();
 
+    void Join()
+    {
+        thd_.join();
+    }
+
 private:
     enum struct Status
     {

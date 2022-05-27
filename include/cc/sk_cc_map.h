@@ -695,7 +695,7 @@ public:
         // if replay record's commit_ts is smaller than ccmap's commit_ts,
         // this record is generated before the latest schema of the table
         // and hence should skip the replay process.
-        if (req.CommitTs() < commit_ts_)
+        if (req.CommitTs() < schema_ts_)
         {
             req.SetFinish();
             return false;
@@ -921,7 +921,7 @@ public:
     {
         return std::make_unique<SkCcMap<SkT, PkT>>(
             shard_,
-            commit_ts_,
+            schema_ts_,
             compound_schema_.sk_schema_.get(),
             compound_schema_.pk_schema_.get());
     }

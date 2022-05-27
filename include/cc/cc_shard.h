@@ -52,6 +52,19 @@ struct TxLockInfo
     {
     }
 
+    bool HasWriteLock() const
+    {
+        for (const auto &cce : cce_list_)
+        {
+            if (cce->key_lock_.HasWriteLock())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // tx coordinator's term.
     int64_t tx_coord_term_;
     // The timestamp when the tx acquires the first lock in the cc shard.
@@ -242,7 +255,16 @@ public:
 
     uint64_t ActiveTxMinTs()
     {
-        if (lock_holding_txs_.size() == 0)
+        uint64_t min_ts = UINT64_MAX;
+        for (const auto &tx_pair : lock_holding_txs_)
+        {
+            if (tx_pair.second.HasWriteLock())
+            {
+                min_ts = std::min(min_ts, tx_pair.second.ts_ - 1);
+            }
+        }
+
+        if (min_ts == UINT64_MAX)
         {
             // When there is no active tx, since the local ts base is only
             // synced with the clock in every 2 sec, the local ts may fall a
@@ -266,15 +288,6 @@ public:
             // would be possible to trigger assert(ckpt_ts >= last_ckpt_ts_); if
             // we return max_ts directly.
             return max_ts - 1;
-        }
-        else
-        {
-            uint64_t min_ts = UINT64_MAX;
-            for (const auto &tx_pair : lock_holding_txs_)
-            {
-                min_ts = std::min(min_ts, tx_pair.second.ts_);
-            }
-            return min_ts - 1;
         }
     }
 

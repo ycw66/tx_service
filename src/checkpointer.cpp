@@ -25,8 +25,6 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 
 Checkpointer::~Checkpointer()
 {
-    thd_.join();
-
     /*std::unique_lock<std::mutex> lk(mux_);
     if (status_ == Status::Active)
     {
@@ -183,8 +181,11 @@ void Checkpointer::Ckpt()
             {
                 const Schema *key_schema = ccm->KeySchema();
                 const Schema *rec_schema = ccm->RecordSchema();
-                ckpt_ret = store_hd_->PutAll(
-                    table_name, ckpt_vec, key_schema, rec_schema);
+                ckpt_ret = store_hd_->PutAll(table_name,
+                                             ckpt_vec,
+                                             key_schema,
+                                             rec_schema,
+                                             ccm->SchemaTs());
 
                 // fault injection to prolong the process of ckpt flush
                 ACTION_FAULT_INJECTOR("after_ckpt_flush");
@@ -193,7 +194,8 @@ void Checkpointer::Ckpt()
             {
                 const SkSchema *sk_schema =
                     static_cast<const SkSchema *>(ccm->KeySchema());
-                ckpt_ret = store_hd_->PutSkAll(table_name, ckpt_vec, sk_schema);
+                ckpt_ret = store_hd_->PutSkAll(
+                    table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
             }
 
             // If flush to data store succeeds, update the ckpt_ts for
@@ -241,11 +243,14 @@ void Checkpointer::Run()
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
-        lk.unlock();
-        Ckpt();
-        lk.lock();
+        if (request_ckpt_)
+        {
+            lk.unlock();
+            Ckpt();
+            lk.lock();
 
-        request_ckpt_ = false;
+            request_ckpt_ = false;
+        }
     }
 
     // ensure normal shutdown execute checkpoint since we could receive

@@ -482,4 +482,9 @@ const std::unordered_set<TxNumber> &NonBlockingLock::ReadLocks() const
 {
     return read_locks_;
 }
+
+const std::unordered_set<TxNumber> &NonBlockingLock::ReadIntents() const
+{
+    return read_intentions_;
+}
 }  // namespace txservice

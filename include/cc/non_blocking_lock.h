@@ -97,6 +97,7 @@ public:
     void ClearTx(TxNumber tx_number, CcShard *ccs);
 
     const std::unordered_set<TxNumber> &ReadLocks() const;
+    const std::unordered_set<TxNumber> &ReadIntents() const;
 
     size_t MemUsage() const
     {
