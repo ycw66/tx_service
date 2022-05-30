@@ -243,12 +243,12 @@ void Checkpointer::Run()
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
+        lk.unlock();
+        Ckpt();
+        lk.lock();
+
         if (request_ckpt_)
         {
-            lk.unlock();
-            Ckpt();
-            lk.lock();
-
             request_ckpt_ = false;
         }
     }
