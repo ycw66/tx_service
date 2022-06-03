@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>  //unique_ptr
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -201,12 +202,16 @@ private:
 class CcScanner
 {
 public:
+    using Uptr = std::unique_ptr<CcScanner>;
+
     CcScanner(ScanDirection direction, ScanIndexType index_type)
         : direct_(direction), index_type_(index_type), is_ckpt_delta_(false)
     {
     }
 
     virtual ~CcScanner() = default;
+
+    virtual CcScanner::Uptr Clone() const = 0;
 
     // virtual ScannerStatus MoveNext(const ScanTuple *&tuple) = 0;
     virtual uint32_t BlockedShard() const = 0;
@@ -251,6 +256,12 @@ public:
           status_(ScannerStatus::Open),
           key_schema_(schema)
     {
+    }
+
+    CcScanner::Uptr Clone() const override
+    {
+        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
+            direct_, index_type_, key_schema_);
     }
 
     ScanCache *AddShard(uint32_t shard_code) override

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>  //unique_ptr
 
 #include "cc/cc_entry.h"
 
@@ -47,6 +48,31 @@ struct ReadKeyResult
 
 struct ScanOpenResult
 {
+    ScanOpenResult()
+    {
+    }
+
+    ScanOpenResult(const ScanOpenResult &other)
+    {
+        scan_alias_ = other.scan_alias_;
+        cc_node_terms_ = other.cc_node_terms_;
+        cc_node_returned_ = other.cc_node_returned_;
+        scanner_ = other.scanner_->Clone();
+    }
+    ScanOpenResult &operator=(const ScanOpenResult &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        scan_alias_ = rhs.scan_alias_;
+        cc_node_terms_ = rhs.cc_node_terms_;
+        cc_node_returned_ = rhs.cc_node_returned_;
+        scanner_ = rhs.scanner_->Clone();
+
+        return *this;
+    }
     void Reset(size_t cc_node_cnt)
     {
         cc_node_terms_.resize(cc_node_cnt);
@@ -58,8 +84,8 @@ struct ScanOpenResult
         }
     }
 
-    std::unique_ptr<CcScanner> scanner_;
-    size_t scan_alias_;
+    std::unique_ptr<CcScanner> scanner_{nullptr};
+    size_t scan_alias_{0};
     // The terms of all cc node groups. As cc node groups currently employ the
     // hash partition function, a scan is directed to all cc node groups. For
     // locking-based protocols, the scan request in a cc node group may be

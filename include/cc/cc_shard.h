@@ -289,6 +289,8 @@ public:
             // we return max_ts directly.
             return max_ts - 1;
         }
+
+        return min_ts;
     }
 
     const TableSchemaView *CreateCatalog(const TableName &table_name,

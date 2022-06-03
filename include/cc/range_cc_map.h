@@ -188,6 +188,7 @@ public:
                 return false;
             }
         }
+        return true;
     }
 };
 }  // namespace txservice

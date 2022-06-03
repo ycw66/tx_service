@@ -156,8 +156,8 @@ public:
                           << shard.core_id_ << ": " << map_iter->second->size()
                           << std::endl;
 
-                size_t order_cnt = map_iter->second->VerifyOrdering();
-                assert(order_cnt == map_iter->second->size());
+                assert(map_iter->second->VerifyOrdering() ==
+                       map_iter->second->size());
             }
 
             size_t list_cnt = 0;

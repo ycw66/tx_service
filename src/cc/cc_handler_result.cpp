@@ -131,21 +131,18 @@ bool CcHandlerResult<T>::ForceError()
 
     return success;
 };
-}  // namespace txservice
 
-// Resolve linker issue
-void link_resolver()
-{
-    txservice::CcHandlerResult<txservice::InitTxResult> r1(nullptr);
-    txservice::CcHandlerResult<txservice::ReadKeyResult> r2(nullptr);
-    txservice::CcHandlerResult<txservice::ScanNextResult> r3(nullptr);
-    txservice::CcHandlerResult<txservice::ScanOpenResult> r4(nullptr);
-    txservice::CcHandlerResult<txservice::AcquireAllResult> r5(nullptr);
-    txservice::CcHandlerResult<txservice::AcquireKeyResult> r6(nullptr);
-    txservice::CcHandlerResult<txservice::Void> r7(nullptr);
-    txservice::CcHandlerResult<txservice::TxId> r8(nullptr);
-    txservice::CcHandlerResult<std::vector<txservice::TxId>> r9(nullptr);
-    txservice::CcHandlerResult<bool> r10(nullptr);
-    txservice::CcHandlerResult<uint64_t> r11(nullptr);
-    txservice::CcHandlerResult<int8_t> r12(nullptr);
-};
+template class CcHandlerResult<InitTxResult>;
+template class CcHandlerResult<ReadKeyResult>;
+template class CcHandlerResult<ScanNextResult>;
+template class CcHandlerResult<ScanOpenResult>;
+template class CcHandlerResult<AcquireAllResult>;
+template class CcHandlerResult<AcquireKeyResult>;
+template class CcHandlerResult<Void>;
+template class CcHandlerResult<TxId>;
+template class CcHandlerResult<std::vector<txservice::TxId>>;
+template class CcHandlerResult<bool>;
+template class CcHandlerResult<uint64_t>;
+template class CcHandlerResult<int8_t>;
+
+}  // namespace txservice
