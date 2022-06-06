@@ -296,7 +296,10 @@ public:
         for (size_t thd_idx = 0; thd_idx < thd_pool_.size(); ++thd_idx)
         {
             pool_[thd_idx]->terminate_.store(true);
-            thd_pool_[thd_idx].join();
+        }
+        for (auto &thd_idx : thd_pool_)
+        {
+            thd_idx.join();
         }
     }
 

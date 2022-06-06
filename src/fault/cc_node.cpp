@@ -109,6 +109,11 @@ int CcNode::Start()
     return 0;
 }
 
+void CcNode::Stop()
+{
+    delete node_;
+}
+
 int CcNode::TransferLeader()
 {
     // By default, the first node in a cc node group is expected to be the

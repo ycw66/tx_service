@@ -45,15 +45,11 @@ public:
                     fault::ReplayService *replay_service,
                     uint32_t log_group_cnt);
 
-    ~CcNode()
-    {
-        if (node_ != nullptr)
-        {
-            delete node_;
-        }
-    }
+    ~CcNode() = default;
 
     int Start();
+
+    void Stop();
 
     int TransferLeader();
 

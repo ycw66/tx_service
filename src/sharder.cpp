@@ -62,10 +62,16 @@ void Sharder::Shutdown()
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
     cc_node_service_ = nullptr;
-    cc_nodes_.clear();
 
-    // destruct log_replay_service_ after destructing cc_nodes_ as they contain
-    // pointers to the former
+    // stop but not destruct each cc_node
+    for (auto &cc_node : cc_nodes_)
+    {
+        cc_node.second->Stop();
+    }
+
+    // CcNode will access log_replay_service_ to replay log when becoming node
+    // group leader, so log_replay_service_ should be destructed after all
+    // CcNodes are stopped.
     log_replay_service_ = nullptr;
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
