@@ -48,16 +48,21 @@ public:
 
     // Invoked by a failing over cc node group to replay log and notify all log
     // groups the raft term of the group's new leader.
+    // If log_group >= 0, send ReplayLogRequest to specified log_group, else
+    // send to all log groups.
     virtual void ReplayLog(uint32_t cc_node_group_id,
                            int64_t term,
                            const std::string &source_ip,
                            uint16_t source_port,
+                           int log_group,
                            std::atomic<bool> &interrupt) = 0;
 
     virtual RecoverTxStatus RecoverTx(uint64_t tx_number,
                                       int64_t tx_term,
                                       uint32_t cc_ng_id,
-                                      int64_t cc_ng_term) = 0;
+                                      int64_t cc_ng_term,
+                                      const std::string &source_ip,
+                                      uint16_t source_port) = 0;
 
     virtual void TransferLeader(uint32_t log_group_id, uint32_t leader_idx) = 0;
 

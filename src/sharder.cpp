@@ -58,12 +58,15 @@ void Sharder::Shutdown()
     log_replay_service_->Shutdown();
     log_replay_server_.Stop(0);
     log_replay_server_.Join();
-    log_replay_service_ = nullptr;
 
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
     cc_node_service_ = nullptr;
     cc_nodes_.clear();
+
+    // destruct log_replay_service_ after destructing cc_nodes_ as they contain
+    // pointers to the former
+    log_replay_service_ = nullptr;
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
 }
@@ -78,6 +81,20 @@ void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 
 int Sharder::Init(const std::string &path)
 {
+    // construct log_replay_service_ before cc_nodes_
+    log_replay_service_ = std::make_unique<fault::ReplayService>(
+        local_shards_,
+        GetLogAgent(),
+        ips_.at(node_id_),
+        GET_LOG_REPLAY_RPC_PORT(ports_.at(node_id_)));
+    if (log_replay_server_.AddService(log_replay_service_.get(),
+                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
+    {
+        LOG(FATAL) << "Fail to start add the log replay service to the log "
+                      "replay server.";
+        return -1;
+    }
+
     uint32_t rep_group_cnt = fault::CcNode::rep_group_cnt < ips_.size()
                                  ? fault::CcNode::rep_group_cnt
                                  : ips_.size();
@@ -126,6 +143,7 @@ int Sharder::Init(const std::string &path)
                                             group_ports,
                                             store_path,
                                             local_shards_,
+                                            log_replay_service_.get(),
                                             log_agent_->LogGroupCount()));
 
         // cc_nodes contains all the raft groups in which the current
@@ -203,15 +221,6 @@ int Sharder::Init(const std::string &path)
     }
 
     ConfigRouteTable();
-
-    log_replay_service_ = std::make_unique<fault::ReplayService>(local_shards_);
-    if (log_replay_server_.AddService(log_replay_service_.get(),
-                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
-    {
-        LOG(FATAL) << "Fail to start add the log replay service to the log "
-                      "replay server.";
-        return -1;
-    }
 
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
@@ -351,16 +360,11 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
                         uint32_t lock_cc_ng_id,
                         int64_t lock_cc_ng_term)
 {
-    auto cc_ng_it = cc_nodes_.find(lock_cc_ng_id);
-    if (cc_ng_it == cc_nodes_.end())
+    if (LeaderTerm(lock_cc_ng_id) > 0)
     {
-        LOG(ERROR) << "RecoverTx(): the specified cc node group ng#"
-                   << lock_cc_ng_id << " does not exist at this node.";
-        return;
+        log_replay_service_->RecoverTx(
+            lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
     }
-
-    cc_ng_it->second->RecoverTx(
-        lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
 }
 
 void Sharder::ConfigRouteTable()

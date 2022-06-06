@@ -13,6 +13,7 @@ CcNode::CcNode(const uint32_t ng_id,
                const std::vector<uint16_t> &ng_ports,
                std::string storage_path,
                LocalCcShards &local_shards,
+               fault::ReplayService *replay_service,
                uint32_t log_group_cnt)
     : ng_id_(ng_id),
       node_id_(node_id),
@@ -24,6 +25,7 @@ CcNode::CcNode(const uint32_t ng_id,
       leader_term_(-1),
       candidate_leader_term_(-1),
       local_cc_shards_(local_shards),
+      replay_service_(replay_service),
       log_group_cnt_(log_group_cnt)
 {
     // FIXME: in which case the node_idx_ is not zero? should be failover
@@ -183,23 +185,6 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     }
 }
 
-void CcNode::RecoverTx(uint64_t lock_tx_number,
-                       int64_t lock_tx_coord_term,
-                       uint32_t lock_cc_ng_id,
-                       int64_t lock_cc_ng_term)
-{
-    // Only if a cc node is the leader does it have an active recovery handler.
-    // Recovering a tx's locks in a non-leader cc node is meaningless. Failover
-    // of cc nodes assumes all locks in the old leader are permanently lost and
-    // hence will re-install committed records and abort unfinished tx's to
-    // ensure correctness.
-    if (leader_term_.load(std::memory_order_acquire) >= 0)
-    {
-        recovery_hd_->RecoverTx(
-            lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
-    }
-}
-
 /**
  * @brief Notify all the nodes that the node_id of the new leader in node
  * group leader_ng_id, and request these nodes to update their leader cache.
@@ -282,11 +267,7 @@ void CcNode::on_leader_start(int64_t term)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
 
-    // A log notify handler starts a background thread that notifies all log
-    // groups the new leader's term. The cc node becomes the real leader, only
-    // after it receives log records from all log groups.
-    recovery_hd_ = std::make_unique<fault::CcNodeRecoveryAgent>(
-        ng_id_, term, ip_, port_ + 2, local_cc_shards_);
+    replay_service_->ReplayLog(ng_id_, term);
 
     NotifyNewLeaderStart(ng_id_, node_id_);
 }

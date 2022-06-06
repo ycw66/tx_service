@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "cc_node_recovery.h"
+#include "log_replay_service.h"
 #include "proto/cc_request.pb.h"
 
 namespace txservice::fault
@@ -42,12 +42,11 @@ public:
                     const std::vector<uint16_t> &ng_ports,
                     std::string storage_path,
                     LocalCcShards &local_shards,
+                    fault::ReplayService *replay_service,
                     uint32_t log_group_cnt);
 
     ~CcNode()
     {
-        recovery_hd_ = nullptr;
-
         if (node_ != nullptr)
         {
             delete node_;
@@ -71,11 +70,6 @@ public:
     {
         return candidate_leader_term_;
     }
-
-    void RecoverTx(uint64_t tx_number,
-                   int64_t tx_term,
-                   uint32_t cc_ng_id,
-                   int64_t cc_ng_term);
 
 private:
     static braft::NodeOptions BaseNodeOptions()
@@ -138,7 +132,9 @@ private:
     int64_t candidate_leader_term_;
 
     LocalCcShards &local_cc_shards_;
-    std::unique_ptr<CcNodeRecoveryAgent> recovery_hd_;
+
+    // for replay log and recover txn
+    fault::ReplayService *replay_service_;
 
     // recovered_log_groups_ records the log groups which have finished the
     // recovery.
