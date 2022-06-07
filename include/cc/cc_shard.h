@@ -340,6 +340,9 @@ public:
                          uint64_t schema_ts);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
+
+    void CleanCcm(const TableName &table_name);
+
     /**
      * @brief Drops all cc maps associated with a cc node group. The method is
      * called when this node steps down as the leader of the specified cc node

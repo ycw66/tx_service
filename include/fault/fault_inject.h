@@ -27,7 +27,9 @@ enum struct FaultAction
     STATUS,
     WAIT_UNTIL_TRIGGER,
     REMOTE,
-    LOG_TRANSFER
+    LOG_TRANSFER,
+    CLEAN_PKMAP,
+    NOTIFY_CHECKPOINTER
 };
 static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
     {"UNKNOWN", FaultAction::NOOP},
@@ -43,7 +45,9 @@ static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
     {"STATUS", FaultAction::STATUS},
     {"WAIT_UNTIL_TRIGGER", FaultAction::WAIT_UNTIL_TRIGGER},
     {"REMOTE", FaultAction::REMOTE},
-    {"LOG_TRANSFER", FaultAction::LOG_TRANSFER}};
+    {"LOG_TRANSFER", FaultAction::LOG_TRANSFER},
+    {"CLEAN_PKMAP", FaultAction::CLEAN_PKMAP},
+    {"NOTIFY_CHECKPOINTER", FaultAction::NOTIFY_CHECKPOINTER}};
 
 class FaultEntry
 {

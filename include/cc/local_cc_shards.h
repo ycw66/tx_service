@@ -123,6 +123,29 @@ public:
         }
     }
 
+    /**
+     * @brief Clean the ccentries from the ccmap in each ccshards.
+     * Note that this function is not thread safe and should only be used by
+     * test case.
+     *
+     * @param tabname
+     */
+    void CleanCcTable(const TableName &tabname)
+    {
+        for (uint32_t i = 0; i < cc_shards_.size(); i++)
+        {
+            cc_shards_[i]->CleanCcm(tabname);
+        }
+    }
+
+    void NotifyCheckPointer()
+    {
+        for (uint32_t i = 0; i < cc_shards_.size(); i++)
+        {
+            cc_shards_[i]->NotifyCkpt();
+        }
+    }
+
     void PrintCcMap()
     {
         std::unordered_map<TableName, size_t> mapsizes;

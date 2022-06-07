@@ -207,6 +207,15 @@ void FaultInject::TriggerAction(FaultEntry *entry)
             Sharder::Instance().LogTransferLeader(log_group_id, leader_idx);
             break;
         }
+        case FaultAction::CLEAN_PKMAP:
+        {
+            Sharder::Instance().CleanCcTable(para);
+            break;
+        }
+        case FaultAction::NOTIFY_CHECKPOINTER:
+        {
+            Sharder::Instance().NotifyCheckPointer();
+        }
         default:
             break;
         }

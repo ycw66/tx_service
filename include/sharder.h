@@ -219,6 +219,10 @@ public:
         return log_agent_->GetLogGroupId(cc_ng_id);
     }
 
+    void CleanCcTable(const TableName &tabname);
+
+    void NotifyCheckPointer();
+
 private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,

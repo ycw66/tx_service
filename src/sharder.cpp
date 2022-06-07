@@ -424,4 +424,15 @@ void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
 {
     log_agent_->TransferLeader(log_group_id, leader_idx);
 }
+
+void Sharder::CleanCcTable(const TableName &tabname)
+{
+    return local_shards_.CleanCcTable(tabname);
+}
+
+void Sharder::NotifyCheckPointer()
+{
+    return local_shards_.NotifyCheckPointer();
+}
+
 }  // namespace txservice
