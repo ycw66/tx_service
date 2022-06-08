@@ -41,8 +41,10 @@ class CcMap
 public:
     using uptr = std::unique_ptr<CcMap>;
 
-    CcMap(CcShard *shard, uint64_t schema_ts)
-        : shard_(shard), schema_ts_(schema_ts)
+    CcMap(CcShard *shard, uint64_t schema_ts, bool ccm_has_full_entries = false)
+        : shard_(shard),
+          ccm_has_full_entries_(ccm_has_full_entries),
+          schema_ts_(schema_ts)
     {
     }
 
@@ -135,6 +137,11 @@ public:
     }
 
     CcShard *const shard_;
+    // Kv store can be skipped if we know ccm contains all the entries. This is
+    // crucial for performance. This flag is true when the table is created and
+    // no LRU kickout happens on this ccm. In future, we should make it at range
+    // level: the kv access unit is range.
+    bool ccm_has_full_entries_{false};
 
 protected:
     enum struct ScanType

@@ -221,7 +221,8 @@ public:
                 shard_->CreatePkCcMap(table_key->Name(),
                                       new_schema,
                                       req.NodeGroupId(),
-                                      schema_view->dirty_version_ts_);
+                                      schema_view->dirty_version_ts_,
+                                      true);
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
                 for (const TableName &index_name : index_names)

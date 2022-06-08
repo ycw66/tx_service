@@ -33,6 +33,7 @@ public:
 
     virtual CcMap::uptr CreatePkCcMap(const TableSchema *table_schema,
                                       uint64_t schema_ts,
+                                      bool ccm_has_full_entries,
                                       CcShard *shard) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,

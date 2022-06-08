@@ -33,8 +33,9 @@ public:
     TemplateCcMap(CcShard *shard,
                   uint64_t schema_ts,
                   const Schema *key_schema = nullptr,
-                  const Schema *rec_schema = nullptr)
-        : CcMap(shard, schema_ts),
+                  const Schema *rec_schema = nullptr,
+                  bool ccm_has_full_entries = false)
+        : CcMap(shard, schema_ts, ccm_has_full_entries),
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
@@ -1255,6 +1256,15 @@ public:
             {
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 return false;
+            }
+
+            // if ccm contains all the ccentries, then unknown status means that
+            // we can skip accessing kv store and return deleted status
+            // directly.
+            if (ccm_has_full_entries_ &&
+                cce->payload_status_ == RecordStatus::Unknown)
+            {
+                cce->payload_status_ = RecordStatus::Deleted;
             }
 
             req.SetCcePtr(cce);

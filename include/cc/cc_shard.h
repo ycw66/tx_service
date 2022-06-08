@@ -80,8 +80,8 @@ class CcShard
 public:
     // TODO put these variables into a configuration file
     static constexpr double cap_memusage_percentage = 1;
-    static constexpr size_t total_memory = MB(500);
-    static constexpr size_t log_size_limit = MB(100);
+    static constexpr size_t total_memory = MB(1000);
+    static constexpr size_t log_size_limit = MB(1000);
 
     CcShard() = delete;
     CcShard(const CcShard &other) = delete;
@@ -332,7 +332,8 @@ public:
     CcMap *CreatePkCcMap(const TableName &table_name,
                          const TableSchema *table_schema,
                          NodeGroupId ng_id,
-                         uint64_t schema_ts);
+                         uint64_t schema_ts,
+                         bool ccm_has_full_entries = false);
 
     CcMap *CreateSkCcMap(const TableName &index_name,
                          const TableSchema *table_schema,

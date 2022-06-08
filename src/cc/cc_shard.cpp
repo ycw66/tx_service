@@ -349,6 +349,7 @@ size_t CcShard::Clean()
         LruEntry *next_cce = cce->lru_next_;
         if (cce->IsFree())
         {
+            cce->parent_map_->ccm_has_full_entries_ = false;
             cce->parent_map_->Clean(cce);
             --size_;
             ++free_cnt;
@@ -454,13 +455,15 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
 CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                               const TableSchema *table_schema,
                               NodeGroupId ng_id,
-                              uint64_t schema_ts)
+                              uint64_t schema_ts,
+                              bool ccm_has_full_entries)
 {
     if (ng_id == node_id_)
     {
         auto ccm_it = native_ccms_.try_emplace(
             table_name,
-            catalog_factory_->CreatePkCcMap(table_schema, schema_ts, this));
+            catalog_factory_->CreatePkCcMap(
+                table_schema, schema_ts, ccm_has_full_entries, this));
         return ccm_it.first->second.get();
     }
     else
@@ -470,7 +473,8 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
             fail_ccm_it->second;
         auto ccm_it = ccms.try_emplace(
             ng_id,
-            catalog_factory_->CreatePkCcMap(table_schema, schema_ts, this));
+            catalog_factory_->CreatePkCcMap(
+                table_schema, schema_ts, ccm_has_full_entries, this));
         return ccm_it.first->second.get();
     }
 }
