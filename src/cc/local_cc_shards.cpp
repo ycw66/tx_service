@@ -70,11 +70,14 @@ void LocalCcShards::TimerRun()
 
 const TableSchemaView *LocalCcShards::CreateCatalog(
     const std::string &table_name,
+    NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
-    auto catalog_it = table_catalogs_.try_emplace(table_name);
+
+    auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
+    auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
     CatalogEntry &catalog_entry = catalog_it.first->second;
 
     if (catalog_it.second)
@@ -107,18 +110,16 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
 
 const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
     const std::string &table_name,
+    NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
-    auto catalog_it = table_catalogs_.find(table_name);
-    if (catalog_it == table_catalogs_.end())
-    {
-        auto em_it = table_catalogs_.try_emplace(table_name);
-        catalog_it = em_it.first;
-    }
 
-    CatalogEntry &catalog_entry = catalog_it->second;
+    auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
+    auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
+    CatalogEntry &catalog_entry = catalog_it.first->second;
+
     if (catalog_entry.schema_view_.version_ts_ < commit_ts &&
         catalog_entry.schema_view_.dirty_version_ts_ < commit_ts)
     {
@@ -135,12 +136,18 @@ const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
 }
 
 const TableSchemaView *LocalCcShards::CommitDirtyCatalog(
-    const std::string &table_name)
+    const std::string &table_name, NodeGroupId cc_ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
-    auto catalog_it = table_catalogs_.find(table_name);
 
-    if (catalog_it == table_catalogs_.end())
+    auto ng_catalog_it = table_catalogs_.find(table_name);
+    if (ng_catalog_it == table_catalogs_.end())
+    {
+        return nullptr;
+    }
+
+    auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
+    if (catalog_it == ng_catalog_it->second.end())
     {
         return nullptr;
     }
@@ -151,11 +158,19 @@ const TableSchemaView *LocalCcShards::CommitDirtyCatalog(
     return catalog_entry.SchemaView();
 }
 
-const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name)
+const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name,
+                                                 NodeGroupId cc_ng_id)
 {
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
-    auto catalog_it = table_catalogs_.find(table_name);
-    return catalog_it == table_catalogs_.end()
+
+    auto ng_catalog_it = table_catalogs_.find(table_name);
+    if (ng_catalog_it == table_catalogs_.end())
+    {
+        return nullptr;
+    }
+
+    auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
+    return catalog_it == ng_catalog_it->second.end()
                ? nullptr
                : catalog_it->second.SchemaView();
 }
@@ -164,15 +179,26 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames()
 {
     std::unordered_set<TableName> table_set;
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
-    for (auto &[base_table_name, catalog_entry] : table_catalogs_)
+    for (auto &[base_table_name, ng_catalog_map] : table_catalogs_)
     {
         table_set.emplace(base_table_name);
-        if (catalog_entry.schema_.get() != nullptr)
+
+        // The current implementation only considers native cc maps associated
+        // with the cc node group whose preferred leader is this node. This is a
+        // temporary fix. The ultimate fix is that the checkpointer at this node
+        // flushes cc entries by cc node groups, so this function takes input a
+        // the ID of a cc node group and returns cc maps associated with it.
+        auto catalog_it = ng_catalog_map.find(node_id_);
+        if (catalog_it != ng_catalog_map.end())
         {
-            for (txservice::TableName &index_table_name :
-                 catalog_entry.schema_->IndexNames())
+            const CatalogEntry &catalog_entry = catalog_it->second;
+            if (catalog_entry.schema_.get() != nullptr)
             {
-                table_set.emplace(index_table_name);
+                for (txservice::TableName &index_table_name :
+                     catalog_entry.schema_->IndexNames())
+                {
+                    table_set.emplace(index_table_name);
+                }
             }
         }
     }
@@ -271,6 +297,16 @@ void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
         LOG(INFO) << "cc shard on core: " << cc_shard->core_id_
                   << " set next_tx_ident_ to " << latest_committed_tx_no + 1;
         cc_shard->next_tx_ident_ = latest_committed_tx_no + 1;
+    }
+}
+
+void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
+{
+    for (auto node_catalog_it = table_catalogs_.begin();
+         node_catalog_it != table_catalogs_.end();
+         ++node_catalog_it)
+    {
+        node_catalog_it->second.erase(cc_ng_id);
     }
 }
 }  // namespace txservice

@@ -64,7 +64,7 @@ public:
 
     int64_t CandidateTerm() const
     {
-        return candidate_leader_term_;
+        return candidate_leader_term_.load(std::memory_order_acquire);
     }
 
 private:
@@ -125,7 +125,7 @@ private:
 
     braft::Node *volatile node_;
     std::atomic<int64_t> leader_term_;
-    int64_t candidate_leader_term_;
+    std::atomic<int64_t> candidate_leader_term_;
 
     LocalCcShards &local_cc_shards_;
 

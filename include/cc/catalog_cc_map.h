@@ -121,6 +121,7 @@ public:
 
                 const TableSchemaView *schema_view =
                     shard_->CreateDirtyCatalog(table_key->Name(),
+                                               req.NodeGroupId(),
                                                schema_rec->SchemaImage(),
                                                req.CommitTs());
 
@@ -158,7 +159,7 @@ public:
                 }
 
                 schema_rec->SetSchemaView(
-                    shard_->GetCatalog(table_key->Name()));
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId()));
             }
             else
             {
@@ -242,10 +243,9 @@ public:
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&
-            shard_->core_id_ == shard_->core_cnt_ - 1 &&
-            schema_view->dirty_version_ts_ > 0)
+            shard_->core_id_ == 0 && schema_view->dirty_version_ts_ > 0)
         {
-            shard_->CommitDirtyCatalog(table_key->Name());
+            shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
 
         return TemplateCcMap::Execute(req);
@@ -294,13 +294,14 @@ public:
         if (req.Type() == ReadType::OutsideNormal)
         {
             const TableSchemaView *schema_view =
-                shard_->GetCatalog(table_key->Name());
+                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
             if (schema_view == nullptr)
             {
                 assert(schema_rec->SchemaImage().size() > 0);
 
                 schema_view = shard_->CreateCatalog(table_key->Name(),
+                                                    req.NodeGroupId(),
                                                     schema_rec->SchemaImage(),
                                                     req.ReadTimestamp());
             }
@@ -365,6 +366,7 @@ public:
 
                 schema_view =
                     shard_->CreateCatalog(schema_op_msg.table_name(),
+                                          req.NodeGroupId(),
                                           schema_op_msg.catalog_blob(),
                                           commit_ts);
 
@@ -391,13 +393,15 @@ public:
             {
                 schema_view =
                     shard_->CreateDirtyCatalog(schema_op_msg.table_name(),
+                                               req.NodeGroupId(),
                                                schema_op_msg.catalog_blob(),
                                                req.CommitTs());
             }
         }
         else
         {
-            schema_view = shard_->GetCatalog(schema_op_msg.table_name());
+            schema_view = shard_->GetCatalog(schema_op_msg.table_name(),
+                                             req.NodeGroupId());
         }
 
         CatalogKey table_key(schema_op_msg.table_name());
@@ -440,17 +444,26 @@ public:
         }
         else
         {
-            req.SetFinish();
-
             uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
 
             if (tx_node_id == req.NodeGroupId())
             {
-                // If the coordinating tx is bound to the recoverying cc node,
-                // re-resumes the tx.
-                shard_->local_shards_.CreateSchemaRecoveryTx(
-                    schema_op_msg, req.Txn(), 0, req.CommitTs());
+                int64_t tx_candidate_term =
+                    Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+
+                if (tx_candidate_term >= 0)
+                {
+                    // If the coordinating tx is bound to the recoverying cc
+                    // node, re-resumes the tx.
+                    shard_->local_shards_.CreateSchemaRecoveryTx(
+                        schema_op_msg,
+                        req.Txn(),
+                        tx_candidate_term,
+                        req.CommitTs());
+                }
             }
+
+            req.SetFinish();
         }
 
         return false;

@@ -25,7 +25,7 @@ public:
         wset_cnt_ = 0;
         wset_.clear();
         rset_.clear();
-        cache_table_.clear();
+        read_cache_.clear();
 
         // sset_cnt_ = 0;
         // sset_.clear();
@@ -240,14 +240,41 @@ public:
         return wset_;
     }
 
-    std::string cache_table_;
-    TxKey::Uptr cache_key_;
-    TxRecord::Uptr cache_rec_;
+    void AddCacheRead(const TableName &table_name,
+                      const TxKey &key,
+                      const TxRecord &record)
+    {
+        auto key_rec_it = read_cache_.find(table_name);
+        if (key_rec_it != read_cache_.end())
+        {
+            key_rec_it->second.first->Copy(key);
+            key_rec_it->second.second->Copy(record);
+        }
+        else
+        {
+            read_cache_.try_emplace(table_name, key.Clone(), record.Clone());
+        }
+    }
+
+    const TxRecord *FindCacheRead(const TableName &table_name, const TxKey &key)
+    {
+        auto key_rec_it = read_cache_.find(table_name);
+        if (key_rec_it != read_cache_.end() && *key_rec_it->second.first == key)
+        {
+            return key_rec_it->second.second.get();
+        }
+        else
+        {
+            return nullptr;
+        }
+    }
 
 private:
     std::unordered_map<CcEntryAddr, ReadSetEntry> rset_;
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
+    std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>
+        read_cache_;
     /*std::unordered_map<TableName,
         std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>>
         sset_;

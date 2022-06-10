@@ -79,6 +79,12 @@ TxKey::Uptr CatalogKey::Clone() const
     return std::make_unique<CatalogKey>(table_name_);
 }
 
+void CatalogKey::Copy(const TxKey &rhs)
+{
+    const CatalogKey &typed_rhs = static_cast<const CatalogKey &>(rhs);
+    table_name_ = typed_rhs.table_name_;
+}
+
 std::string CatalogKey::ToString() const
 {
     return table_name_;
@@ -128,11 +134,15 @@ void CatalogRecord::Deserialize(const char *buf, size_t &offset)
 
 TxRecord::Uptr CatalogRecord::Clone() const
 {
-    return nullptr;
+    std::unique_ptr<CatalogRecord> rec = std::make_unique<CatalogRecord>();
+    rec->schema_view_ = schema_view_;
+    return rec;
 }
 
 void CatalogRecord::Copy(const TxRecord &rhs)
 {
+    const CatalogRecord &typed_rhs = static_cast<const CatalogRecord &>(rhs);
+    schema_view_ = typed_rhs.schema_view_;
 }
 
 std::string CatalogRecord::ToString() const

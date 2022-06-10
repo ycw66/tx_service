@@ -71,7 +71,7 @@ public:
                         const txservice::TableName base_table_name =
                             GetTablenameFromRangeTablename(*table_name_);
                         const TableSchemaView *schema_view =
-                            ccs.GetCatalog(base_table_name);
+                            ccs.GetCatalog(base_table_name, node_group_id_);
                         // When a tx sends a request toward a table's range
                         // cc map, either to look up the range containing the
                         // input key or to lock a range for splitting/merging,
@@ -98,7 +98,7 @@ public:
                 else
                 {
                     const TableSchemaView *schema_view =
-                        ccs.GetCatalog(*table_name_);
+                        ccs.GetCatalog(*table_name_, node_group_id_);
 
                     if (schema_view != nullptr)
                     {
@@ -139,7 +139,7 @@ public:
                         // async request toward the data store to fetch the
                         // catalog. After fetching is finished, this cc request
                         // is re-enqueued for re-execution.
-                        ccs.FetchCatalog(*table_name_, this);
+                        ccs.FetchCatalog(*table_name_, node_group_id_, this);
                         return false;
                     }
                 }
@@ -215,7 +215,8 @@ protected:
             base_table_name_ = table_name_;
         }
 
-        const TableSchemaView *schema_view = ccs.GetCatalog(*base_table_name_);
+        const TableSchemaView *schema_view =
+            ccs.GetCatalog(*base_table_name_, node_group_id_);
 
         if (schema_view != nullptr)
         {
@@ -243,7 +244,7 @@ protected:
             // FetchCatalog() method sends an async request toward the data
             // store to fetch the catalog. After fetching is finished, this cc
             // request is re-enqueued for re-execution.
-            ccs.FetchCatalog(*base_table_name_, this);
+            ccs.FetchCatalog(*base_table_name_, node_group_id_, this);
         }
 
         return schema_view;
@@ -1722,54 +1723,6 @@ private:
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
-};
-
-/**
- * @brief The request sent by a cc node when the cc node steps down as the
- * leader of its node group, so as to clear cc maps associated with the cc node
- * group at this node.
- *
- */
-struct ClearCcNodeGroup : public CcRequestBase
-{
-public:
-    ClearCcNodeGroup(uint32_t cc_ng_id, uint16_t core_cnt)
-        : cc_ng_id_(cc_ng_id), core_cnt_(core_cnt)
-    {
-    }
-
-    ClearCcNodeGroup() = delete;
-    ClearCcNodeGroup(const ClearCcNodeGroup &) = delete;
-
-    bool Execute(CcShard &ccs) override
-    {
-        ccs.DropCcms(cc_ng_id_);
-
-        std::unique_lock<std::mutex> lk(mux_);
-        ++finish_cnt_;
-        if (finish_cnt_ == core_cnt_)
-        {
-            wait_cv_.notify_one();
-        }
-
-        // The owner of this request is the raft thread that downgrades the cc
-        // ng leader to a non-leader node. The request is not in a resource pool
-        // and re-used. So, always returns false.
-        return false;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        wait_cv_.wait(lk, [this]() { return finish_cnt_ == core_cnt_; });
-    }
-
-private:
-    const uint32_t cc_ng_id_;
-    const uint16_t core_cnt_;
-    uint16_t finish_cnt_{0};
-    std::mutex mux_;
-    std::condition_variable wait_cv_;
 };
 
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>

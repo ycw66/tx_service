@@ -33,6 +33,7 @@ public:
                              const Schema *key_schema) = 0;
     virtual TxKey::Uptr Clone() const = 0;
     virtual std::string ToString() const = 0;
+    virtual void Copy(const TxKey &rhs) = 0;
 
     virtual KeyType Type() const
     {

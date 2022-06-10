@@ -377,29 +377,34 @@ void CcShard::NotifyCkpt()
 }
 
 const TableSchemaView *CcShard::CreateCatalog(const TableName &table_name,
+                                              NodeGroupId cc_ng_id,
                                               const std::string &catalog_image,
                                               uint64_t commit_ts)
 {
-    return local_shards_.CreateCatalog(table_name, catalog_image, commit_ts);
+    return local_shards_.CreateCatalog(
+        table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
 const TableSchemaView *CcShard::CreateDirtyCatalog(
     const std::string &table_name,
+    NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
 {
     return local_shards_.CreateDirtyCatalog(
-        table_name, catalog_image, commit_ts);
+        table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
-const TableSchemaView *CcShard::CommitDirtyCatalog(const TableName &table_name)
+const TableSchemaView *CcShard::CommitDirtyCatalog(const TableName &table_name,
+                                                   NodeGroupId cc_ng_id)
 {
-    return local_shards_.CommitDirtyCatalog(table_name);
+    return local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
 }
 
-const TableSchemaView *CcShard::GetCatalog(const std::string &table_name)
+const TableSchemaView *CcShard::GetCatalog(const std::string &table_name,
+                                           NodeGroupId cc_ng_id)
 {
-    return local_shards_.GetCatalog(table_name);
+    return local_shards_.GetCatalog(table_name, cc_ng_id);
 }
 
 void CcShard::InitTableRanges(const TableName &table_name,
@@ -415,10 +420,12 @@ const std::map<uint32_t, TableRangeEntry> *CcShard::GetTableRanges(
 }
 
 void CcShard::FetchCatalog(const TableName &table_name,
+                           NodeGroupId cc_ng_id,
                            CcRequestBase *requester)
 {
     auto tab_it = fetch_reqs_.try_emplace(
-        table_name, std::make_unique<FetchCatalogCc>(table_name, *this));
+        table_name,
+        std::make_unique<FetchCatalogCc>(table_name, *this, cc_ng_id));
     FetchCatalogCc *fetch_req =
         static_cast<FetchCatalogCc *>(tab_it.first->second.get());
 

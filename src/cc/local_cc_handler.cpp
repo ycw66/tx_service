@@ -125,8 +125,7 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
                                              DmlOperation dml_op,
                                              PostWriteType post_write_type)
 {
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-    if (dest_node_id == cc_shards_.node_id_)
+    if (ng_id == cc_shards_.node_id_)
     {
         PostWriteAllCc *req = postwrite_all_pool_.NextRequest();
         req->Reset(&table_name,

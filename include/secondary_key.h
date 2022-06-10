@@ -92,6 +92,15 @@ public:
         return std::make_unique<SecondaryKey<SkT, PkT>>(sk_, pk_);
     }
 
+    void Copy(const TxKey &rhs) override
+    {
+        const SecondaryKey<SkT, PkT> &typed_rhs =
+            static_cast<const SecondaryKey<SkT, PkT> &>(rhs);
+
+        sk_ = typed_rhs.sk_;
+        pk_ = typed_rhs.pk_;
+    }
+
     std::string ToString() const override
     {
         return sk_.ToString() + "," + pk_.ToString();

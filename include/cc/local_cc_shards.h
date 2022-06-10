@@ -219,16 +219,20 @@ public:
     static uint64_t ClockTs();
 
     const TableSchemaView *CreateCatalog(const std::string &table_name,
+                                         NodeGroupId cc_ng_id,
                                          const std::string &catalog_image,
                                          uint64_t commit_ts);
 
     const TableSchemaView *CreateDirtyCatalog(const std::string &table_name,
+                                              NodeGroupId cc_ng_id,
                                               const std::string &catalog_image,
                                               uint64_t commit_ts);
 
-    const TableSchemaView *CommitDirtyCatalog(const std::string &table_name);
+    const TableSchemaView *CommitDirtyCatalog(const std::string &table_name,
+                                              NodeGroupId cc_ng_id);
 
-    const TableSchemaView *GetCatalog(const std::string &table_name);
+    const TableSchemaView *GetCatalog(const std::string &table_name,
+                                      NodeGroupId cc_ng_id);
 
     std::unordered_set<TableName> CatalogTableNames();
 
@@ -249,6 +253,16 @@ public:
                                             uint64_t commit_ts);
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
+
+    /**
+     * @brief Drops all tables' catalogs associated with the specified cc node
+     * group. The function is called when this node steps down from the leader
+     * of the specified cc node group.
+     *
+     * @param cc_ng_id The cc node group whose leader has transferred to another
+     * node.
+     */
+    void DropCatalogs(NodeGroupId cc_ng_id);
 
     store::DataStoreWriteHandler *const store_hd_;
 
@@ -337,7 +351,8 @@ private:
     };
 
     CatalogFactory *const catalog_factory_;
-    std::unordered_map<TableName, CatalogEntry> table_catalogs_;
+    std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
+        table_catalogs_;
     std::unordered_map<TableName, std::map<uint32_t, TableRangeEntry>>
         table_ranges_;
     std::shared_mutex catalog_mux_;

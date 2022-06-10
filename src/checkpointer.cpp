@@ -247,10 +247,7 @@ void Checkpointer::Run()
         Ckpt();
         lk.lock();
 
-        if (request_ckpt_)
-        {
-            request_ckpt_ = false;
-        }
+        request_ckpt_ = false;
     }
 
     // ensure normal shutdown execute checkpoint since we could receive

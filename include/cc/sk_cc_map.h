@@ -52,6 +52,10 @@ struct VoidKey : public TxKey
         return std::make_unique<VoidKey>(*this);
     }
 
+    void Copy(const TxKey &rhs) override
+    {
+    }
+
     std::string ToString() const override
     {
         return std::string("");

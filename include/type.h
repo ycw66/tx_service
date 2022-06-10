@@ -39,7 +39,14 @@ enum class TxnStatus
      *
      */
     Committing,
-    // transaction is finished and can be recycled.
+    /**
+     * @brief A tx has committed or aborted and finished post-processing. This
+     * state signals that the tx state machine can be recycled. Note that this
+     * state shall not be uploaded to the tx entry in the tx service, which
+     * notifies other (local or remote) participants in the service the fate of
+     * the tx, i.e., committed or aborted.
+     *
+     */
     Finished,
     /**
      * @brief A tx in the recovering state resumes execution of unfinished,

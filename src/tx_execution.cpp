@@ -585,11 +585,10 @@ void TransactionExecution::Process(ReadOperation &read)
             }
 
             // Step 2: fast path if key is the same as last read key.
-            if (rw_set_.cache_table_ == table_name &&
-                rw_set_.cache_key_ != nullptr && *rw_set_.cache_key_ == key &&
-                rw_set_.cache_rec_ != nullptr)
+            const TxRecord *cache_rec = rw_set_.FindCacheRead(table_name, key);
+            if (cache_rec != nullptr)
             {
-                rec.Copy(*rw_set_.cache_rec_);
+                rec.Copy(*cache_rec);
                 state_stack_.pop_back();
                 assert(state_stack_.empty());
                 rec_resp_->Finish(RecordStatus::Normal);
@@ -598,10 +597,6 @@ void TransactionExecution::Process(ReadOperation &read)
 
             read.protocol_ = protocol_;
             read.iso_level_ = iso_level_;
-
-            rw_set_.cache_table_.clear();
-            rw_set_.cache_table_ = table_name;
-            rw_set_.cache_key_ = key.Clone();
 
             handler->Read(table_name,
                           key,
@@ -624,7 +619,6 @@ void TransactionExecution::Process(ReadOperation &read)
     {
         TxRecord &record = read.read_outside_tx_req_->rec_;
         bool is_deleted = read.read_outside_tx_req_->is_deleted_;
-        rw_set_.cache_rec_ = record.Clone();
 
         rw_set_.UpdateRead(cache_miss_read_cce_addr_,
                            read.read_outside_tx_req_->commit_ts_);
@@ -657,8 +651,6 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
     if (read_.hd_result_.IsError())
     {
-        rw_set_.cache_table_.clear();
-        rw_set_.cache_key_ = nullptr;
         rec_resp_->FinishError();
     }
     else
@@ -669,7 +661,9 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         // especially speed up remote read. e.g. Read A, Write B, Read A.
         if (read_res.rec_status_ == RecordStatus::Normal)
         {
-            rw_set_.cache_rec_ = read_res.rec_->Clone();
+            const ReadTxRequest *read_req = read.read_tx_req_;
+            rw_set_.AddCacheRead(
+                *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
         if (read_.read_type_ == ReadType::Inside &&

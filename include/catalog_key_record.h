@@ -29,6 +29,7 @@ public:
     void Deserialize(const char *buf, size_t &offset, const Schema *) override;
     TxKey::Uptr Clone() const override;
     std::string ToString() const override;
+    void Copy(const TxKey &rhs) override;
 
     KeyType Type() const override
     {

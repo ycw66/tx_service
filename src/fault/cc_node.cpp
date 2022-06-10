@@ -159,7 +159,9 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
 
     // ignore the FinishReplayMsg whose ng_term is smaller than the current
     // candidate_leader_term_ or if this cc node is not recovering.
-    if (candidate_leader_term_ < 0 || candidate_leader_term_ > ng_term)
+    int64_t candidate_term =
+        candidate_leader_term_.load(std::memory_order_acquire);
+    if (candidate_term < 0 || candidate_term > ng_term)
     {
         return;
     }
@@ -182,11 +184,13 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
         // work for the current term.
         recovered_log_groups_.clear();
 
-        leader_term_.store(candidate_leader_term_, std::memory_order_release);
+        leader_term_.store(
+            candidate_leader_term_.load(std::memory_order_acquire),
+            std::memory_order_release);
         LOG(INFO) << "The leader of cc node group ng#" << ng_id_
                   << " with the term " << candidate_leader_term_
                   << " has been recovered.";
-        candidate_leader_term_ = -1;
+        candidate_leader_term_.store(-1, std::memory_order_release);
     }
 }
 
@@ -262,7 +266,7 @@ void CcNode::on_leader_start(int64_t term)
         // candidate_leader_term_ and recovered_log_groups_ concurrently.
         std::lock_guard<std::mutex> lk(recovery_mux_);
 
-        candidate_leader_term_ = term;
+        candidate_leader_term_.store(term, std::memory_order_release);
 
         // new leader will send ReplayLog request to logservice to replay logs.
         // It should reset the recovered_log_groups_ ahead.
@@ -283,6 +287,7 @@ void CcNode::on_leader_stop(const butil::Status &status)
               << " steps down as the leader of ng#" << ng_id_ << ".";
 
     leader_term_.store(-1, std::memory_order_release);
+    candidate_leader_term_.store(-1, std::memory_order_release);
 
     uint16_t core_cnt = local_cc_shards_.Count();
     ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);

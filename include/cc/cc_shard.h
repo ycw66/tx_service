@@ -287,23 +287,27 @@ public:
             // the next ckpt_ts could be read from lock_holding_txs_. Hence it
             // would be possible to trigger assert(ckpt_ts >= last_ckpt_ts_); if
             // we return max_ts directly.
-            return max_ts - 1;
+            min_ts = max_ts - 1;
         }
 
         return min_ts;
     }
 
     const TableSchemaView *CreateCatalog(const TableName &table_name,
+                                         NodeGroupId cc_ng_id,
                                          const std::string &catalog_image,
                                          uint64_t commit_ts);
 
     const TableSchemaView *CreateDirtyCatalog(const TableName &table_name,
+                                              NodeGroupId cc_ng_id,
                                               const std::string &catalog_image,
                                               uint64_t commit_ts);
 
-    const TableSchemaView *CommitDirtyCatalog(const TableName &table_name);
+    const TableSchemaView *CommitDirtyCatalog(const TableName &table_name,
+                                              NodeGroupId cc_ng_id);
 
-    const TableSchemaView *GetCatalog(const TableName &table_name);
+    const TableSchemaView *GetCatalog(const TableName &table_name,
+                                      NodeGroupId cc_ng_id);
 
     void InitTableRanges(const TableName &table_name,
                          std::vector<InitRangeEntry> &init_ranges);
@@ -321,7 +325,9 @@ public:
      * @param requester The cc request that needs to access the input table's cc
      * map but the cc map does not exist due to the missing of the catalog.
      */
-    void FetchCatalog(const TableName &table_name, CcRequestBase *requester);
+    void FetchCatalog(const TableName &table_name,
+                      NodeGroupId cc_ng_id,
+                      CcRequestBase *requester);
 
     void FetchTableRanges(const TableName &range_table_name,
                           const Schema *key_schema,

@@ -1300,12 +1300,23 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (failed)
         {
-            // After the prepare log is flushed, the schema op is guaranteed
-            // to succeed and can only roll forward. Retry this step to
-            // install the dirty schema in the tx service, unless the tx
-            // node is not the leader anymore.
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
+            // When a cc node leader begins recovery, the candidate term is set
+            // to the Raft term. When recovery finishes, the candidate term is
+            // set to -1 after the leader term. So, obtains the candidate term
+            // before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // After the prepare log is flushed, the schema op is guaranteed to
+            // succeed and can only roll forward. Retry this step to install the
+            // dirty schema in the tx service, if the tx node is still the
+            // leader. The tx is also allowed to proceed if the tx is in the
+            // recovery mode and the tx node is a leader candidate.
+
+            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                         tx_node_candid_term >= 0)
             {
                 // set catalog_rec_'s binary_value_ to image_str since it
                 // could be set to TableSchemaView pointer in localshard.
@@ -1315,8 +1326,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                txm->bool_resp_->SetErrorCode(
-                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1349,18 +1358,28 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
-            // The data store operation failed. Retry the operation if the
-            // tx node is still the leader.
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
+            // The candidate term is set when the cc node becomes the Raft
+            // leader of the cc node group. It is set to -1 after the cc node
+            // leader has replayed the log and the leader term is set. Since the
+            // candidate term is set to -1 after the leader term , obtains
+            // the candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // The data store operation failed. Retries the operation if the
+            // tx node is the leader or the tx is in the recovery mode and the
+            // cc node is a leader candidate.
+
+            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                         tx_node_candid_term >= 0)
             {
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
             else
             {
-                txm->bool_resp_->SetErrorCode(
-                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1385,19 +1404,27 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_acquire) > 0)
         {
+            // When a cc node leader begins recovery, the candidate term is set
+            // to the Raft term. When recovery finishes, the candidate term is
+            // set to -1 after the leader term. So, obtains the candidate term
+            // before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
             // Fails to acquire the write lock. The schema operation can
             // only roll forward after flushing the prepare log. Retries the
-            // request if the tx node is still the leader.
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
+            // request if the tx node is still the leader or the tx is in the
+            // recovery mode and the cc node is a leader candidate.
+            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                         tx_node_candid_term >= 0)
             {
                 txm->PushOperation(&acquire_all_lock_op_);
                 txm->Process(acquire_all_lock_op_);
             }
             else
             {
-                txm->bool_resp_->SetErrorCode(
-                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1413,18 +1440,26 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // Fails to flush the commit log. Retries the operation if the
-            // tx node is still the leader.
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
+            // When a cc node leader begins recovery, the candidate term is set
+            // to the Raft term. When recovery finishes, the candidate term is
+            // set to -1 after the leader term. So, obtains the candidate term
+            // before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // Fails to flush the commit log. Retries the operation if the tx
+            // node is still the leader or the tx is in the  recovery mode and
+            // the cc node is a leader candidate.
+            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                         tx_node_candid_term >= 0)
             {
                 txm->PushOperation(&commit_log_op_);
                 txm->Process(commit_log_op_);
             }
             else
             {
-                txm->bool_resp_->SetErrorCode(
-                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1462,20 +1497,28 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (failed)
         {
-            // After the prepare log is flushed, the schema op is guaranteed
-            // to succeed and can only roll forward. Retry this step to
-            // install the committed schema and remove write locks, if the
-            // tx node is still the leader.
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
+            // When a cc node leader begins recovery, the candidate term is set
+            // to the Raft term. When recovery finishes, the candidate term is
+            // set to -1 after the leader term. So, obtains the candidate term
+            // before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // After the prepare log is flushed, the schema op is guaranteed to
+            // succeed and can only roll forward. Retry this step to install the
+            // committed schema and remove write locks, if the tx node is still
+            // the leader or the tx is in the recovery mode and the cc node is a
+            // leader candidate.
+            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                         tx_node_candid_term >= 0)
             {
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);
             }
             else
             {
-                txm->bool_resp_->SetErrorCode(
-                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
                 ForceToFinish(txm);
             }
         }
@@ -1510,15 +1553,27 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &clean_log_op_)
     {
+        // When a cc node leader begins recovery, the candidate term is set
+        // to the Raft term. When recovery finishes, the candidate term is
+        // set to -1 after the leader term. So, obtains the candidate term
+        // before the leader term.
+        int64_t tx_node_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+        int64_t tx_node_term =
+            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
         if (clean_log_op_.hd_result_.IsError() &&
-            Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                txm->tx_term_))
+            (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
+                                      tx_node_candid_term >= 0))
         {
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
         else if (txm->tx_status_ == TxnStatus::Recovering)
         {
+            // When the tx is in the recovery state, no external caller is
+            // waiting for the response. So, txm->bool_resp_ is null.
+
             txm->Reset();
             // Setting the tx's status to finished signals that this tx
             // state machine can be recycled for a new tx.
