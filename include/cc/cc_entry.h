@@ -406,7 +406,7 @@ public:
 
     CcEntryAddr(const CcEntryAddr &rhs)
         : cce_ptr_(rhs.cce_ptr_),
-          insert_ptr_(rhs.cce_ptr_),
+          insert_ptr_(rhs.insert_ptr_),
           node_group_id_(rhs.node_group_id_),
           term_(rhs.term_.load(std::memory_order_acquire))
     {

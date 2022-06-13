@@ -173,6 +173,7 @@ public:
     void TriggerAction(FaultEntry *entry);
     void InjectFault(std::string fault_name, std::string paras)
     {
+        LOG(INFO) << "FaultInject name=" << fault_name << "  paras=" << paras;
         // To remove the pointed fault inject.
         if (paras.compare("remove") == 0)
         {

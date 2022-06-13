@@ -119,6 +119,7 @@ public:
                                 int64_t tx_term,
                                 uint32_t cce_node_group_id,
                                 RecordStatus payload_status,
+                                int64_t ng_term,
                                 bool gap_lock = false);
 
     bool ReadLockCce(LruEntry *cce,

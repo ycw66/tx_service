@@ -7,6 +7,7 @@
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_request.h"
+#include "fault_inject.h"
 #include "local_cc_shards.h"
 #include "non_blocking_lock.h"
 #include "sharder.h"
@@ -53,6 +54,13 @@ public:
             });
         TX_TRACE_DUMP(&req);
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_PostWriteAllCc", {
+            LOG(INFO)
+                << "FaultInject  term_CatalogCcMap_Execute_PostWriteAllCc";
+            ng_term = -1;
+            FaultInject::Instance().InjectFault(
+                "term_CatalogCcMap_Execute_PostWriteAllCc", "remove");
+        });
         if (ng_term < 0)
         {
             req.Result()->SetError(-1);
@@ -266,6 +274,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_ReadCc", {
+            LOG(INFO) << "FaultInject  term_CatalogCcMap_Execute_ReadCc";
+            ng_term = -1;
+            FaultInject::Instance().InjectFault(
+                "term_CatalogCcMap_Execute_ReadCc", "remove");
+        });
         if (ng_term < 0)
         {
             req.Result()->SetError(-1);
@@ -326,7 +340,42 @@ public:
             }
         }
 
-        return TemplateCcMap::Execute(req);
+        bool ret = TemplateCcMap::Execute(req);
+
+        ReadKeyResult &read_result = req.Result()->Value();
+        if (ret && req.Type() == ReadType::Inside &&
+            read_result.rec_status_ == RecordStatus::Unknown)
+        {
+            const TableSchemaView *schema_view =
+                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
+            // If the read toward the catalog cc entry acquires the read lock
+            // but the cc entry does not contain the value, checks if the
+            // catalog has been constructed at this node. If so, turns this
+            // request into a read-outside request that installs the value in
+            // the cc entry.
+            if (schema_view != nullptr)
+            {
+                if (schema_view->schema_ != nullptr)
+                {
+                    req.SetReadType(ReadType::OutsideNormal);
+                    read_result.rec_status_ = RecordStatus::Normal;
+                }
+                else
+                {
+                    req.SetReadType(ReadType::OutsideDeleted);
+                    read_result.rec_status_ = RecordStatus::Deleted;
+                }
+
+                schema_rec->SetSchemaView(schema_view);
+                read_result.ts_ = schema_view->version_ts_;
+
+                TemplateCcMap::Execute(req);
+                req.SetReadType(ReadType::Inside);
+            }
+        }
+
+        return ret;
     }
 
     bool Execute(ReplayLogCc &req) override

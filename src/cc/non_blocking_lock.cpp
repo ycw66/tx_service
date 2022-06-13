@@ -196,7 +196,6 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
                                        CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
-
     // fast path for lock is already held.
     if (write_lock_tx_ == tx_number)
     {
@@ -373,7 +372,6 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
                                          CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
-
     // fast path for lock is already held.
     if ((!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
         (!is_write_lock_empty_ && write_lock_tx_ == tx_number))

@@ -287,8 +287,6 @@ private:
     bool is_ckpt_delta_{false};
     CcHandlerResult<Void> cc_res_{nullptr};
     std::atomic<uint32_t> unfinish_cnt_{0};
-    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
-    CcProtocol protocol_{CcProtocol::OCC};
     int64_t tx_term_{0};
     enum LockType lock_type_
     {
@@ -359,8 +357,6 @@ private:
     bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
-    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
-    CcProtocol protocol_{CcProtocol::OCC};
     int64_t tx_term_{0};
     enum LockType lock_type_
     {

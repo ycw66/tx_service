@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "cc_entry.h"
 #include "cc_map.h"
@@ -85,6 +86,10 @@ public:
         KeyT decoded_key;
 
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireCc", {
+            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireCc";
+            ng_term = -1;
+        });
         if (ng_term < 0)
         {
             hd_res->SetError(-1);
@@ -214,7 +219,8 @@ public:
 
             if (lock_success)
             {
-                shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), cce_ptr);
+                shard_->UpsertLockHoldingTx(
+                    req.Txn(), req.TxTerm(), cce_ptr, true);
                 // for mvcc
                 uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
                 cc_entry.wlock_ts_ = lock_ts;
@@ -332,6 +338,13 @@ public:
         TX_TRACE_DUMP(&req);
 
         const CcEntryAddr &cce_addr = *req.CceAddr();
+
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_PostWriteCc", {
+            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_PostWriteCc";
+            req.Result()->SetError(-1);
+            return true;
+        });
+
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
@@ -426,7 +439,7 @@ public:
             req.Result()->SetFinished();
             prior_cce.gap_lock_.ReleaseWriteLock(txn, shard_);
             // The insert places a write lock on the prior cc entry's gap.
-            shard_->DeleteLockHolidngTx(txn, &prior_cce);
+            shard_->DeleteLockHolidngTx(txn, &prior_cce, true);
             return true;
         }
         else
@@ -483,7 +496,7 @@ public:
             req.Result()->SetFinished();
             cce.key_lock_.ReleaseWriteLock(txn, shard_);
             cce.wlock_ts_ = 0;
-            shard_->DeleteLockHolidngTx(txn, &cce);
+            shard_->DeleteLockHolidngTx(txn, &cce, true);
             return true;
         }
     }
@@ -508,6 +521,12 @@ public:
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         bool resume = false;
         const KeyT *target_key = nullptr;
+
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
+            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
+            hd_res->SetError(-1);
+            return true;
+        });
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
@@ -660,6 +679,10 @@ public:
                     lock_success = cc_entry.key_lock_.AcquireWriteLock(
                         &req, tx_term, req.Protocol());
                 }
+                else
+                {
+                    abort();
+                }
             }
             else
             {
@@ -668,7 +691,11 @@ public:
 
             if (lock_success)
             {
-                shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), cce_ptr);
+                shard_->UpsertLockHoldingTx(
+                    req.Txn(),
+                    req.TxTerm(),
+                    cce_ptr,
+                    req.GetLockType() == LockType::WriteLock);
 
                 // Updates last_vali_ts such that it is no smaller than (1) all
                 // read transactions that have read the item in all shards, and
@@ -969,7 +996,7 @@ public:
             {
                 cce_ptr->gap_lock_.ReleaseWriteLock(txn, shard_);
                 // The insert places a write lock on the prior cc entry's gap.
-                shard_->DeleteLockHolidngTx(txn, cce_ptr);
+                shard_->DeleteLockHolidngTx(txn, cce_ptr, false);
             }
 
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
@@ -1035,12 +1062,12 @@ public:
                     if (lk_type == LockType::WriteLock)
                     {
                         cce_ptr->key_lock_.ReleaseWriteLock(txn, shard_);
-                        shard_->DeleteLockHolidngTx(txn, cce_ptr);
+                        shard_->DeleteLockHolidngTx(txn, cce_ptr, true);
                     }
                     else if (lk_type == LockType::WriteIntent)
                     {
                         cce_ptr->key_lock_.ReleaseWriteIntent(txn, shard_);
-                        shard_->DeleteLockHolidngTx(txn, cce_ptr);
+                        shard_->DeleteLockHolidngTx(txn, cce_ptr, false);
                     }
                 }
             }
@@ -1076,6 +1103,17 @@ public:
 
         ACTION_FAULT_INJECTOR("before_post_read");
         auto hd_res = req.Result();
+
+        CODE_FAULT_INJECTOR(
+            "term_TemplateCcMap_Execute_PostReadCc", {
+                if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
+                {
+                    LOG(INFO)
+                        << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
+                    hd_res->SetError(-1);
+                    return true;
+                }
+            });
 
         const CcEntryAddr &cce_addr = *req.CceAddr();
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
@@ -1147,6 +1185,12 @@ public:
 
                 if (cc_entry.key_lock_.HasWriteLock())
                 {
+                    int64_t ng_term =
+                        Sharder::Instance().LeaderTerm(req.NodeGroupId());
+                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
+                                           req.NodeGroupId(),
+                                           ng_term);
+
                     conflicting_txs.emplace_back(
                         cc_entry.key_lock_.WriteLockTx());
                 }
@@ -1195,7 +1239,7 @@ public:
             cc_entry.gap_lock_.ReleaseLock(txn, shard_, req.GetLockType());
         }
 
-        shard_->DeleteLockHolidngTx(txn, &cc_entry);
+        shard_->DeleteLockHolidngTx(txn, &cc_entry, false);
         return true;
     }
 
@@ -1215,6 +1259,14 @@ public:
         TX_TRACE_DUMP(&req);
 
         auto hd_res = req.Result();
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ReadCc", {
+            if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
+            {
+                LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ReadCc";
+                hd_res->SetError(-1);
+                return true;
+            }
+        });
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
@@ -1281,7 +1333,6 @@ public:
                 {
                     bool lock_success =
                         ReadLockCce(cce, req, tx_term, cce_node_group_id);
-
                     if (!lock_success)
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1318,7 +1369,7 @@ public:
                     cce->key_lock_.AcquireReadIntent(tx_number);
                 }
 
-                shard_->UpsertLockHoldingTx(tx_number, tx_term, cce);
+                shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
             }
         }
         else
@@ -1497,6 +1548,19 @@ public:
         const KeyT *look_key = static_cast<const KeyT *>(req.start_key_);
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ScanOpenBatchCc", {
+            LOG(INFO) << "FaultInject  "
+                         "term_TemplateCcMap_Execute_ScanOpenBatchCc";
+            ng_term = -1;
+            FaultInject::Instance().InjectFault(
+                "term_TemplateCcMap_Execute_ScanOpenBatchCc", "remove");
+        });
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(-1);
+            return true;
+        }
 
         Iterator scan_ccm_it;
 
@@ -1541,7 +1605,8 @@ public:
                                         req.GetLockType(),
                                         req.TxTerm(),
                                         req.NodeGroupId(),
-                                        cce->payload_status_))
+                                        cce->payload_status_,
+                                        ng_term))
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
@@ -1582,7 +1647,8 @@ public:
                                             req.GetLockType(),
                                             req.TxTerm(),
                                             req.NodeGroupId(),
-                                            cce->payload_status_))
+                                            cce->payload_status_,
+                                            ng_term))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -1623,7 +1689,8 @@ public:
                                             req.GetLockType(),
                                             req.TxTerm(),
                                             req.NodeGroupId(),
-                                            cce->payload_status_))
+                                            cce->payload_status_,
+                                            ng_term))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -1720,7 +1787,8 @@ public:
                                             req.GetLockType(),
                                             req.TxTerm(),
                                             req.NodeGroupId(),
-                                            cce->payload_status_))
+                                            cce->payload_status_,
+                                            term))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -1758,6 +1826,7 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
+                                                term,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1784,7 +1853,8 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
-                                                cce->payload_status_))
+                                                cce->payload_status_,
+                                                term))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -1825,6 +1895,13 @@ public:
         TX_TRACE_DUMP(&req);
 
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_RemoteScanOpen", {
+            LOG(INFO) << "FaultInject  "
+                         "term_TemplateCcMap_Execute_RemoteScanOpen";
+            term = -1;
+            FaultInject::Instance().InjectFault(
+                "term_TemplateCcMap_Execute_RemoteScanOpen", "remove");
+        });
         if (term < 0)
         {
             req.Result()->SetError(-1);
@@ -1886,7 +1963,8 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
-                                                floor_cce->payload_status_))
+                                                floor_cce->payload_status_,
+                                                term))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -1917,6 +1995,7 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 floor_cce->payload_status_,
+                                                term,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1956,7 +2035,8 @@ public:
                                             req.GetLockType(),
                                             req.TxTerm(),
                                             req.NodeGroupId(),
-                                            cce->payload_status_))
+                                            cce->payload_status_,
+                                            term))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -2012,7 +2092,8 @@ public:
                                                     req.GetLockType(),
                                                     req.TxTerm(),
                                                     req.NodeGroupId(),
-                                                    cce->payload_status_))
+                                                    cce->payload_status_,
+                                                    term))
                         {
                             TX_TRACE_ACTION_WITH_CONTEXT(
                                 &req,
@@ -2046,6 +2127,7 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
+                                                term,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2072,7 +2154,8 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
-                                                cce->payload_status_))
+                                                cce->payload_status_,
+                                                term))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -2159,7 +2242,8 @@ public:
                                             req.GetLockType(),
                                             req.TxTerm(),
                                             req.NodeGroupId(),
-                                            cce->payload_status_))
+                                            cce->payload_status_,
+                                            term))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -2196,6 +2280,7 @@ public:
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
+                                                term,
                                                 true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2222,7 +2307,8 @@ public:
                                                 req.GetLockType(),
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
-                                                cce->payload_status_))
+                                                cce->payload_status_,
+                                                term))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -2295,6 +2381,13 @@ public:
         // other transaction for a long time, we only process CkptScanBatch
         // number of entries in each round.
         size_t cnt = 0;
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.GetNodeGroup());
+        if (ng_term < 0)
+        {
+            req.Notify();
+            return true;
+        }
+
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
@@ -2456,7 +2549,7 @@ public:
                     // the lock holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
-                    shard_->DeleteLockHolidngTx(txn, cce);
+                    shard_->DeleteLockHolidngTx(txn, cce, true);
                     // cce->key_lock_.ClearTx(txn);
                 }
             }

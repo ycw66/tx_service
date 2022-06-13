@@ -50,11 +50,13 @@ struct RecoverTxInfo
     RecoverTxInfo(uint64_t tx_number,
                   int64_t tx_term,
                   uint32_t cc_ng_id,
-                  int64_t cc_ng_term)
+                  int64_t cc_ng_term,
+                  int32_t key_write_lock_count)
         : tx_number_(tx_number),
           tx_term_(tx_term),
           cc_ng_id_(cc_ng_id),
-          cc_ng_term_(cc_ng_term)
+          cc_ng_term_(cc_ng_term),
+          key_write_lock_count_(key_write_lock_count)
     {
     }
 
@@ -67,6 +69,8 @@ struct RecoverTxInfo
     uint32_t cc_ng_id_;
     // The term of the cc node group in which the lock/intention resides.
     int64_t cc_ng_term_;
+    // How many key write locks in this tx for current shard
+    int32_t key_write_lock_count_;
 };
 
 class ReplayService : public brpc::StreamInputHandler,
@@ -104,7 +108,8 @@ public:
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
                    uint32_t cc_ng_id,
-                   int64_t cc_ng_term);
+                   int64_t cc_ng_term,
+                   int32_t write_lock_count);
 
     int on_received_messages(brpc::StreamId stream_id,
                              butil::IOBuf *const messages[],

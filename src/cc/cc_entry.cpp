@@ -9,49 +9,51 @@ LruEntry::~LruEntry()
     // Deletes key write lock.
     if (key_lock_.HasWriteLock())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(key_lock_.WriteLockTx(), this);
+        parent_map_->shard_->DeleteLockHolidngTx(
+            key_lock_.WriteLockTx(), this, true);
     }
     // Deletes gap write lock.
     if (gap_lock_.HasWriteLock())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(gap_lock_.WriteLockTx(), this);
+        parent_map_->shard_->DeleteLockHolidngTx(
+            gap_lock_.WriteLockTx(), this, false);
     }
 
     // Deletes key write intent.
     if (key_lock_.HasWriteIntent())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(key_lock_.WriteIntentTx(),
-                                                 this);
+        parent_map_->shard_->DeleteLockHolidngTx(
+            key_lock_.WriteIntentTx(), this, false);
     }
     // Deletes gap write intent.
     if (gap_lock_.HasWriteIntent())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(gap_lock_.WriteIntentTx(),
-                                                 this);
+        parent_map_->shard_->DeleteLockHolidngTx(
+            gap_lock_.WriteIntentTx(), this, false);
     }
 
     // Deletes key read locks.
     const std::unordered_set<TxNumber> &key_read_locks = key_lock_.ReadLocks();
     for (const TxNumber &txn : key_read_locks)
     {
-        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this, false);
     }
 
     // Deletes gap read locks.
     const std::unordered_set<TxNumber> &gap_read_locks = gap_lock_.ReadLocks();
     for (const TxNumber &txn : gap_read_locks)
     {
-        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this, false);
     }
 
     for (const TxNumber &txn : key_lock_.ReadIntents())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this, false);
     }
 
     for (const TxNumber &txn : gap_lock_.ReadIntents())
     {
-        parent_map_->shard_->DeleteLockHolidngTx(txn, this);
+        parent_map_->shard_->DeleteLockHolidngTx(txn, this, false);
     }
 }
 

@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "catalog.h"
 #include "catalog_factory.h"
@@ -17,6 +18,7 @@
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "secondary_key.h"
+#include "sharder.h"
 #include "table_lock.h"
 #include "tentry.h"
 
@@ -48,21 +50,14 @@ struct TxLockInfo
         : tx_coord_term_(tx_coord_term),
           ts_(ts),
           last_recover_ts_(0),
-          cce_list_()
+          cce_list_(),
+          key_write_lock_count_(0)
     {
     }
 
     bool HasWriteLock() const
     {
-        for (const auto &cce : cce_list_)
-        {
-            if (cce->key_lock_.HasWriteLock())
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return (key_write_lock_count_ > 0);
     }
 
     // tx coordinator's term.
@@ -73,6 +68,8 @@ struct TxLockInfo
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     std::unordered_set<LruEntry *> cce_list_;
+    // How many write locks in this tx for current shard
+    int32_t key_write_lock_count_;
 };
 
 class CcShard
@@ -235,9 +232,12 @@ public:
 
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
                                     int64_t tx_term,
-                                    LruEntry *cce_ptr);
+                                    LruEntry *cce_ptr,
+                                    bool is_key_write_lock);
 
-    void DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr);
+    void DeleteLockHolidngTx(TxNumber txn,
+                             LruEntry *cce_ptr,
+                             bool is_key_write_lock);
 
     /**
      * @brief When a tx fails to acquire a lock, it invokes this method to check
@@ -288,6 +288,33 @@ public:
             // would be possible to trigger assert(ckpt_ts >= last_ckpt_ts_); if
             // we return max_ts directly.
             min_ts = max_ts - 1;
+        }
+
+        if (lock_holding_txs_.size() > 0)
+        {
+            std::unordered_set<uint32_t> set;
+            set.insert(node_id_);
+            for (auto iter = failover_ccms_.begin();
+                 iter != failover_ccms_.end();
+                 iter++)
+            {
+                for (auto it = iter->second.begin(); it != iter->second.end();
+                     it++)
+                {
+                    set.insert(it->first);
+                }
+            }
+
+            for (uint32_t ng_id : set)
+            {
+                int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+                for (auto iter = lock_holding_txs_.begin();
+                     iter != lock_holding_txs_.end();
+                     iter++)
+                {
+                    CheckRecoverTx(iter->first, ng_id, ng_term);
+                }
+            }
         }
 
         return min_ts;
@@ -407,7 +434,6 @@ private:
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
-
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array
     // and find an available one.

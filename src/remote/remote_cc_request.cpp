@@ -603,6 +603,11 @@ void txservice::remote::RemoteScanOpen::Reset(
     table_name_ = &scan_open.tablename();
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_open.lock_type());
+    isolation_level_ =
+        CcStreamReceiver::ConvertIsolation(scan_open.iso_level());
+    proto_ = CcStreamReceiver::ConvertProtocol(scan_open.protocol());
+    tx_number_ = input_msg->tx_number();
+
     ccm_ = nullptr;
     cce_ptr_ = nullptr;
 
@@ -627,8 +632,6 @@ void txservice::remote::RemoteScanOpen::Reset(
     direct_ = scan_open.direction() ? ScanDirection::Forward
                                     : ScanDirection::Backward;
 
-    iso_level_ = CcStreamReceiver::ConvertIsolation(scan_open.iso_level());
-    protocol_ = CcStreamReceiver::ConvertProtocol(scan_open.protocol());
     is_ckpt_delta_ = scan_open.ckpt();
 
     output_msg_.clear_tx_number();
@@ -732,6 +735,10 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_next.lock_type());
+    isolation_level_ =
+        CcStreamReceiver::ConvertIsolation(scan_next.iso_level());
+    proto_ = CcStreamReceiver::ConvertProtocol(scan_next.protocol());
+    tx_number_ = input_msg->tx_number();
     cce_ptr_ = nullptr;
 
     const LruEntry *prior_lru_entry =
@@ -752,8 +759,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
         scan_cache_.emplace_back(tuple);
     }
 
-    iso_level_ = CcStreamReceiver::ConvertIsolation(scan_next.iso_level());
-    protocol_ = CcStreamReceiver::ConvertProtocol(scan_next.protocol());
     is_ckpt_delta_ = scan_next.ckpt();
 
     input_msg_ = std::move(input_msg);

@@ -100,44 +100,79 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     uint32_t tx_ng = (recover_tx_info.tx_number_ >> 32L) >> 10;
                     uint32_t tx_leader =
                         Sharder::Instance().LeaderNodeId(tx_ng);
+                    remote::CheckTxStatusResponse_TxStatus tx_status;
 
-                    std::string tx_ip;
-                    uint16_t tx_port;
-                    Sharder::Instance().GetNodeAddress(
-                        tx_leader, tx_ip, tx_port);
-
-                    if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+                    if (tx_leader == Sharder::Instance().NodeId())
                     {
-                        // Fails to establish the channel to the tx node.
-                        // Silently returns. The tx will be recovered again by
-                        // next conflicting tx.
-                        LOG(ERROR)
-                            << "Fail to init the channel to the leader of ng#"
-                            << tx_ng << " for tx lock recovery.";
-                        continue;
+                        CheckTxStatusCc check_tx_cc(recover_tx_info.tx_number_);
+                        local_shards_.EnqueueCcRequest(
+                            recover_tx_info.tx_number_ >> 32L, &check_tx_cc);
+                        check_tx_cc.Wait();
+
+                        if (check_tx_cc.Exists())
+                        {
+                            switch (check_tx_cc.TxStatus())
+                            {
+                            case TxnStatus::Committed:
+                                tx_status = remote::
+                                    CheckTxStatusResponse_TxStatus_COMMITTED;
+                                break;
+                            case TxnStatus::Aborted:
+                                tx_status = remote::
+                                    CheckTxStatusResponse_TxStatus_ABORTED;
+                                break;
+                            default:
+                                tx_status = remote::
+                                    CheckTxStatusResponse_TxStatus_ONGOING;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            tx_status = remote::
+                                CheckTxStatusResponse_TxStatus_NOT_FOUND;
+                        }
                     }
-
-                    remote::CcRpcService_Stub stub(&channel);
-
-                    remote::CheckTxStatusRequest req;
-                    req.set_tx_number(recover_tx_info.tx_number_);
-                    req.set_tx_term(recover_tx_info.tx_term_);
-                    remote::CheckTxStatusResponse res;
-
-                    brpc::Controller cntl;
-                    stub.CheckTxStatus(&cntl, &req, &res, nullptr);
-
-                    if (cntl.Failed())
+                    else
                     {
-                        LOG(ERROR)
-                            << "Fail to check the tx status in ng#" << tx_ng
-                            << ". Error code: " << cntl.ErrorCode()
-                            << ". Msg: " << cntl.ErrorText();
-                        continue;
-                    }
+                        std::string tx_ip;
+                        uint16_t tx_port;
+                        Sharder::Instance().GetNodeAddress(
+                            tx_leader, tx_ip, tx_port);
 
-                    remote::CheckTxStatusResponse_TxStatus tx_status =
-                        res.tx_status();
+                        if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) !=
+                            0)
+                        {
+                            // Fails to establish the channel to the tx node.
+                            // Silently returns. The tx will be recovered again
+                            // by next conflicting tx.
+                            LOG(ERROR) << "Fail to init the channel to the "
+                                          "leader of ng#"
+                                       << tx_ng << " for tx lock recovery.";
+                            continue;
+                        }
+
+                        remote::CcRpcService_Stub stub(&channel);
+
+                        remote::CheckTxStatusRequest req;
+                        req.set_tx_number(recover_tx_info.tx_number_);
+                        req.set_tx_term(recover_tx_info.tx_term_);
+                        remote::CheckTxStatusResponse res;
+
+                        brpc::Controller cntl;
+                        stub.CheckTxStatus(&cntl, &req, &res, nullptr);
+
+                        if (cntl.Failed())
+                        {
+                            LOG(ERROR)
+                                << "Fail to check the tx status in ng#" << tx_ng
+                                << ". Error code: " << cntl.ErrorCode()
+                                << ". Msg: " << cntl.ErrorText();
+                            continue;
+                        }
+
+                        tx_status = res.tx_status();
+                    }
 
                     if (tx_status ==
                         remote::CheckTxStatusResponse_TxStatus_ONGOING)
@@ -146,8 +181,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                                   << " is ongoing. Does nothing for recovery.";
                         continue;
                     }
-                    else if (tx_status ==
-                             remote::CheckTxStatusResponse_TxStatus_ABORTED)
+                    else if (recover_tx_info.key_write_lock_count_ == 0 ||
+                             tx_status ==
+                                 remote::CheckTxStatusResponse_TxStatus_ABORTED)
                     {
                         LOG(INFO) << "The tx" << recover_tx_info.tx_number_
                                   << " has aborted. Clears the tx's lock.";
@@ -337,10 +373,12 @@ void ReplayService::ReplayLog(uint32_t cc_ng_id,
 void ReplayService::RecoverTx(uint64_t tx_number,
                               int64_t tx_term,
                               uint32_t cc_ng_id,
-                              int64_t cc_ng_term)
+                              int64_t cc_ng_term,
+                              int32_t write_lock_count)
 {
     std::unique_lock lk(queue_mux_);
-    recover_tx_queue_.emplace_back(tx_number, tx_term, cc_ng_id, cc_ng_term);
+    recover_tx_queue_.emplace_back(
+        tx_number, tx_term, cc_ng_id, cc_ng_term, write_lock_count);
     queue_cv_.notify_one();
 }
 

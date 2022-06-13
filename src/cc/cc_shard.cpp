@@ -260,14 +260,21 @@ void CcShard::UpdateEstimateLogSize(LruEntry *entry,
 
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
-                                         LruEntry *cce_ptr)
+                                         LruEntry *cce_ptr,
+                                         bool is_key_write_lock)
 {
     auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
     em_it.first->second.cce_list_.emplace(cce_ptr);
+    if (is_key_write_lock)
+    {
+        em_it.first->second.key_write_lock_count_++;
+    }
     return &em_it.first->second;
 }
 
-void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
+void CcShard::DeleteLockHolidngTx(TxNumber txn,
+                                  LruEntry *cce_ptr,
+                                  bool is_key_write_lock)
 {
     auto tx_it = lock_holding_txs_.find(txn);
     if (tx_it == lock_holding_txs_.end())
@@ -277,6 +284,11 @@ void CcShard::DeleteLockHolidngTx(TxNumber txn, LruEntry *cce_ptr)
 
     TxLockInfo &lk_info = tx_it->second;
     lk_info.cce_list_.erase(cce_ptr);
+    if (is_key_write_lock)
+    {
+        lk_info.key_write_lock_count_--;
+    }
+
     if (lk_info.cce_list_.empty())
     {
         lock_holding_txs_.erase(tx_it);
@@ -299,6 +311,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::seconds(5))
             .count();
+
     uint64_t now_ts = Now();
 
     // If the tx has been holding a lock/intention for an extended period of
@@ -308,8 +321,11 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
     if (now_ts - lk_info.ts_ >= ts_gap &&
         now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
-        Sharder::Instance().RecoverTx(
-            lock_holding_txn, lk_info.tx_coord_term_, cc_ng_id, cc_ng_term);
+        Sharder::Instance().RecoverTx(lock_holding_txn,
+                                      lk_info.tx_coord_term_,
+                                      cc_ng_id,
+                                      cc_ng_term,
+                                      lk_info.key_write_lock_count_);
 
         // Updates the last_recover_ts field, so that following
         // conflicting tx's will not try recovery immediately,
@@ -331,7 +347,6 @@ void CcShard::ClearTx(TxNumber txn)
     {
         lru_ptr->key_lock_.ClearTx(txn, this);
     }
-
     lock_holding_txs_.erase(tx_it);
 }
 

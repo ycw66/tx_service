@@ -176,7 +176,19 @@ void Checkpointer::Ckpt()
             // Flushes to the data store
             bool ckpt_ret = false;
 
-            CcMap *ccm = shard.native_ccms_.at(table_name).get();
+            CcMap *ccm;
+            auto iter = shard.native_ccms_.find(table_name);
+            if (iter == shard.native_ccms_.end())
+            {
+                auto it = shard.failover_ccms_.find(table_name);
+                assert(it != shard.failover_ccms_.end());
+                ccm = it->second.begin()->second.get();
+            }
+            else
+            {
+                ccm = iter->second.get();
+            }
+
             if (ccm->Type() == TableType::Primary)
             {
                 const Schema *key_schema = ccm->KeySchema();

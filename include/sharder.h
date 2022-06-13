@@ -189,7 +189,8 @@ public:
     void RecoverTx(uint64_t lock_tx_number,
                    int64_t lock_tx_coord_term,
                    uint32_t lock_cc_ng_id,
-                   int64_t lock_cc_ng_term);
+                   int64_t lock_cc_ng_term,
+                   int32_t write_lock_count);
     /**
      * @brief Transfer the leader for the log group. This function is developed
      * for test

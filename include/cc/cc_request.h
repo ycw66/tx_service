@@ -1314,6 +1314,11 @@ public:
         cv_.notify_one();
     }
 
+    uint32_t GetNodeGroup()
+    {
+        return node_group_;
+    }
+
 private:
     const TableName &table_name_;
     const uint64_t ckpt_ts_;

@@ -45,6 +45,7 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
                                    int64_t tx_term,
                                    uint32_t cce_node_group_id,
                                    RecordStatus payload_status,
+                                   int64_t ng_term,
                                    bool gap_lock)
 {
     // cce payload_status is unknown means it is a cache miss read. Hence should
@@ -77,7 +78,7 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
             cce->key_lock_.AcquireReadIntent(tx_number);
         }
 
-        shard_->UpsertLockHoldingTx(tx_number, tx_term, cce);
+        shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
         return true;
     }
     else
