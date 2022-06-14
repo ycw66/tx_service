@@ -267,6 +267,12 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     em_it.first->second.cce_list_.emplace(cce_ptr);
     if (is_key_write_lock)
     {
+        // write lock should update ts if the txn exists, or the CkptTsCc
+        // request may get an older ckpt_ts.
+        if (!em_it.second)
+        {
+            em_it.first->second.ts_ = Now();
+        }
         em_it.first->second.key_write_lock_count_++;
     }
     return &em_it.first->second;

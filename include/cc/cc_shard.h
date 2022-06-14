@@ -77,7 +77,7 @@ class CcShard
 public:
     // TODO put these variables into a configuration file
     static constexpr double cap_memusage_percentage = 1;
-    static constexpr size_t total_memory = MB(1000);
+    static constexpr size_t total_memory = MB(2000);
     static constexpr size_t log_size_limit = MB(1000);
 
     CcShard() = delete;

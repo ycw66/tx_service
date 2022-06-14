@@ -1864,6 +1864,14 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             rw_set_.WriteSet();
         for (const auto &[table_name, table_write_set] : wset)
         {
+            // skip secondary index table when postprocess of abort op since sk
+            // will not acquire write lock.
+            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+            if (pos != std::string::npos)
+            {
+                continue;
+            }
+
             for (const auto &[key, write_entry] : table_write_set)
             {
                 if (acquire_write_.results_[idx].IsError())
