@@ -255,6 +255,11 @@ void Checkpointer::Run()
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
+        CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
+            LOG(INFO) << "FaultInject  checkpointer_skip_ckpt";
+            continue;
+        });
+
         lk.unlock();
         Ckpt();
         lk.lock();
