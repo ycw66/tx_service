@@ -31,17 +31,23 @@ public:
     virtual Schema::Uptr Clone() const = 0;
 };
 
-struct SkSchema : public Schema
+struct SecondaryKeySchema : public Schema
 {
 public:
-    SkSchema() = delete;
+    SecondaryKeySchema() = delete;
 
-    SkSchema(const Schema *sk_sch, const Schema *pk_sch)
+    SecondaryKeySchema(const Schema *sk_sch, const Schema *pk_sch)
         : sk_schema_(sk_sch->Clone()), pk_schema_(pk_sch->Clone())
     {
     }
 
-    SkSchema(const SkSchema &sch)
+    SecondaryKeySchema(std::unique_ptr<const Schema> sk_sch,
+                       std::unique_ptr<const Schema> pk_sch)
+        : sk_schema_(std::move(sk_sch)), pk_schema_(std::move(pk_sch))
+    {
+    }
+
+    SecondaryKeySchema(const SecondaryKeySchema &sch)
         : sk_schema_(sch.sk_schema_->Clone()),
           pk_schema_(sch.pk_schema_->Clone())
     {
@@ -49,7 +55,7 @@ public:
 
     Schema::Uptr Clone() const override
     {
-        return std::make_unique<SkSchema>(*this);
+        return std::make_unique<SecondaryKeySchema>(*this);
     }
 
     std::unique_ptr<const Schema> sk_schema_;

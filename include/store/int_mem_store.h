@@ -48,7 +48,7 @@ public:
 
     bool PutSkAll(const TableName &table_name,
                   std::vector<LruEntry *> &batch,
-                  const SkSchema *sk_schema) override
+                  const SecondaryKeySchema *sk_schema) override
     {
         for (const auto &entry : batch)
         {

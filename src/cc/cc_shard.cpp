@@ -428,10 +428,10 @@ const TableSchemaView *CcShard::GetCatalog(const std::string &table_name,
     return local_shards_.GetCatalog(table_name, cc_ng_id);
 }
 
-void CcShard::InitTableRanges(const TableName &table_name,
+void CcShard::InitTableRanges(const TableName &range_table_name,
                               std::vector<InitRangeEntry> &init_ranges)
 {
-    local_shards_.InitTableRanges(table_name, init_ranges);
+    local_shards_.InitTableRanges(range_table_name, init_ranges);
 }
 
 const std::map<uint32_t, TableRangeEntry> *CcShard::GetTableRanges(

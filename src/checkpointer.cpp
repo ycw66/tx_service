@@ -204,8 +204,8 @@ void Checkpointer::Ckpt()
             }
             else
             {
-                const SkSchema *sk_schema =
-                    static_cast<const SkSchema *>(ccm->KeySchema());
+                const SecondaryKeySchema *sk_schema =
+                    static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
                 ckpt_ret = store_hd_->PutSkAll(
                     table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
             }

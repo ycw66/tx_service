@@ -21,7 +21,7 @@ public:
 
     virtual bool PutSkAll(const TableName &table_name,
                           std::vector<LruEntry *> &batch,
-                          const SkSchema *sk_schema,
+                          const SecondaryKeySchema *sk_schema,
                           uint64_t schema_ts) = 0;
 
     virtual void UpsertTable(const TableName &ccm_table_name,
@@ -83,7 +83,7 @@ public:
 //
 //    bool PutSkAll(const TableName &table_name,
 //                  std::vector<LruEntry *> &batch,
-//                  const SkSchema *sk_schema) override
+//                  const SecondaryKeySchema *sk_schema) override
 //    {
 //        for (const auto &entry : batch)
 //        {

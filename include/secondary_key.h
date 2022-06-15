@@ -78,7 +78,8 @@ public:
 
         if (schema != nullptr)
         {
-            const SkSchema *sk_sch = static_cast<const SkSchema *>(schema);
+            const SecondaryKeySchema *sk_sch =
+                static_cast<const SecondaryKeySchema *>(schema);
             sk_schema = sk_sch->sk_schema_.get();
             pk_schema = sk_sch->pk_schema_.get();
         }

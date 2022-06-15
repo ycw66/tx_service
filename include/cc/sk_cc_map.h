@@ -831,6 +831,11 @@ public:
             auto sk_it = sk_index_.find(*cce->payload_.sk_);
             assert(sk_it != sk_index_.end());
             sk_it->second.erase(*cce->payload_.pk_);
+
+            if (sk_it->second.empty())
+            {
+                sk_index_.erase(*cce->payload_.sk_);
+            }
         }
         else
         {
@@ -1230,6 +1235,6 @@ private:
     std::map<SkT, std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
         sk_index_;
     CcEntry<VoidKey, SkRecord<SkT, PkT>> neg_inf_, pos_inf_;
-    const SkSchema compound_schema_;
+    const SecondaryKeySchema compound_schema_;
 };
 }  // namespace txservice

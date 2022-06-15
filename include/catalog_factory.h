@@ -41,7 +41,7 @@ public:
                                       uint64_t schema_ts,
                                       CcShard *shard) = 0;
 
-    virtual CcMap::uptr CreatePkRangeMap(const TableName &base_table,
+    virtual CcMap::uptr CreatePkRangeMap(const TableName &range_pk_table_name,
                                          CcShard *shard) = 0;
 };
 }  // namespace txservice
