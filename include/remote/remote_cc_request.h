@@ -1,11 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <memory>  // unique_ptr
 
 #include "butil/logging.h"
 #include "cc/cc_request.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
+#include "tx_record.h"  // RecordStatus
 #include "type.h"
 
 namespace txservice
@@ -168,14 +170,28 @@ public:
         return commit_ts_;
     }
 
+    ::txservice::RecordStatus RecordStatus() const
+    {
+        return rec_status_;
+    }
+
+    const std::vector<VersionedRecord> &Archives()
+    {
+        return archives_;
+    }
+
 private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
     const std::string *rec_str_{nullptr};
-    bool is_deleted_{false};
+    // bool is_deleted_{false};
+    ::txservice::RecordStatus rec_status_;
+
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
+
+    std::vector<VersionedRecord> archives_;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -436,5 +452,39 @@ private:
 
     friend class RemoteCcHandler;
 };
+
+struct RemoteCleanArchivesForTestCc : public CleanArchivesForTestCc
+{
+public:
+    RemoteCleanArchivesForTestCc();
+
+    RemoteCleanArchivesForTestCc(const RemoteCleanArchivesForTestCc &rhs) =
+        delete;
+    RemoteCleanArchivesForTestCc(RemoteCleanArchivesForTestCc &&rhs) = delete;
+
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+
+    CcHandlerResult<bool> cc_res_{nullptr};
+
+    friend class RemoteCcHandler;
+};
+
 }  // namespace remote
 }  // namespace txservice

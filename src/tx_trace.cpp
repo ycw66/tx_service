@@ -139,6 +139,11 @@ template std::string tx_trace_associate(
     std::string,
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
+    txservice::CleanArchivesOp *,
+    txservice::CcHandlerResult<bool> *,
+    std::string,
+    std::function<std::string()> context_func);
+template std::string tx_trace_associate(
     txservice::ScanOpenOperation *,
     txservice::CcHandlerResult<ScanOpenResult> *,
     std::string,
@@ -247,6 +252,11 @@ template std::string tx_trace_associate(
     txservice::remote::RemoteFaultInjectCC *,
     std::string,
     std::function<std::string()> context_func);
+template std::string tx_trace_associate(
+    txservice::remote::CcMessage *,
+    txservice::remote::RemoteCleanArchivesForTestCc *,
+    std::string,
+    std::function<std::string()> context_func);
 /**
  * tx_trace_action
  */
@@ -349,6 +359,10 @@ template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
                                      txservice::FaultInjectTxRequest *,
                                      std::function<std::string()>);
+template std::string tx_trace_action(txservice::TransactionExecution *,
+                                     std::string,
+                                     txservice::CleanArchivesTxRequest *,
+                                     std::function<std::string()>);
 // Tx and Op
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
@@ -397,6 +411,10 @@ template std::string tx_trace_action(txservice::TransactionExecution *,
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
                                      txservice::FaultInjectOp *,
+                                     std::function<std::string()>);
+template std::string tx_trace_action(txservice::TransactionExecution *,
+                                     std::string,
+                                     txservice::CleanArchivesOp *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
@@ -465,6 +483,10 @@ template std::string tx_trace_action(txservice::SleepOperation *,
                                      txservice::TransactionExecution *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::FaultInjectOp *,
+                                     std::string,
+                                     txservice::TransactionExecution *,
+                                     std::function<std::string()>);
+template std::string tx_trace_action(txservice::CleanArchivesOp *,
                                      std::string,
                                      txservice::TransactionExecution *,
                                      std::function<std::string()>);
@@ -666,6 +688,10 @@ template std::string tx_trace_action(txservice::LocalCcHandler *,
                                      std::string,
                                      txservice::FaultInjectCC *,
                                      std::function<std::string()>);
+template std::string tx_trace_action(txservice::LocalCcHandler *,
+                                     std::string,
+                                     txservice::CleanArchivesForTestCc *,
+                                     std::function<std::string()>);
 
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
@@ -714,6 +740,10 @@ template std::string tx_trace_action(txservice::CcMap *,
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
                                      txservice::FaultInjectCC *,
+                                     std::function<std::string()>);
+template std::string tx_trace_action(txservice::CcMap *,
+                                     std::string,
+                                     txservice::CleanArchivesForTestCc *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
@@ -1036,6 +1066,14 @@ std::string cc_message_type_to_string(
     case txservice::remote::CcMessage::MessageType::
         CcMessage_MessageType_FaultInjectResponse:
         msg_type = "CcMessage_MessageType_FaultInjectResponse";
+        break;
+    case txservice::remote::CcMessage::MessageType::
+        CcMessage_MessageType_CleanArchivesRequest:
+        msg_type = "CcMessage_MessageType_CleanArchivesRequest";
+        break;
+    case txservice::remote::CcMessage::MessageType::
+        CcMessage_MessageType_CleanArchivesResponse:
+        msg_type = "CcMessage_MessageType_CleanArchivesResponse";
         break;
     case txservice::remote::CcMessage::MessageType::
         CcMessage_MessageType_AcquireAllRequest:
@@ -1758,6 +1796,29 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
 }
+std::ostream &operator<<(std::ostream &outs,
+                         txservice::CleanArchivesForTestCc *r)
+{
+    if (!r)
+    {
+        return outs << "{}";
+    }
+
+    outs << "{\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key()) << "}";
+    return outs;
+}
+std::ostream &operator<<(std::ostream &outs,
+                         txservice::remote::RemoteCleanArchivesForTestCc *r)
+{
+    if (!r)
+    {
+        return outs << "{}";
+    }
+    outs << "{\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
+         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key()) << "}";
+    return outs;
+}
 // template tx_trace_dump
 template <typename T>
 std::string tx_trace_dump(T *t, std::function<std::string()> context_func)
@@ -1819,6 +1880,8 @@ template std::string tx_trace_dump(txservice::NegotiateCc *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::FaultInjectCC *,
                                    std::function<std::string()>);
+template std::string tx_trace_dump(txservice::CleanArchivesForTestCc *,
+                                   std::function<std::string()>);
 template std::string tx_trace_dump(txservice::CkptScanCc *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::ReplayLogCc *,
@@ -1845,6 +1908,9 @@ template std::string tx_trace_dump(txservice::remote::RemoteCommitSk *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::remote::RemoteFaultInjectCC *,
                                    std::function<std::string()>);
+template std::string tx_trace_dump(
+    txservice::remote::RemoteCleanArchivesForTestCc *,
+    std::function<std::string()>);
 // Other dump
 template std::string tx_trace_dump(txservice::TxId *,
                                    std::function<std::string()>);

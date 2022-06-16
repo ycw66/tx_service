@@ -134,14 +134,21 @@ struct ReadOutsideTxRequest
     : public TemplateTxRequest<ReadOutsideTxRequest, RecordStatus>
 {
 public:
-    ReadOutsideTxRequest(TxRecord &rec, bool is_deleted, uint64_t commit_ts)
-        : rec_(rec), is_deleted_(is_deleted), commit_ts_(commit_ts)
+    ReadOutsideTxRequest(TxRecord &rec,
+                         bool is_deleted,
+                         uint64_t commit_ts,
+                         std::vector<VersionedRecord> *archives = nullptr)
+        : rec_(rec),
+          is_deleted_(is_deleted),
+          commit_ts_(commit_ts),
+          archives_(archives)
     {
     }
 
     TxRecord &rec_;
     bool is_deleted_;
     uint64_t commit_ts_;
+    const std::vector<VersionedRecord> *archives_;
 };
 
 struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
@@ -272,4 +279,19 @@ struct FaultInjectTxRequest
     const std::string fault_paras_;
     std::vector<int> vct_node_id_;
 };
+
+// for test
+struct CleanArchivesTxRequest
+    : public TemplateTxRequest<CleanArchivesTxRequest, bool>
+{
+    CleanArchivesTxRequest(const TableName *tab_name = nullptr,
+                           const TxKey *key = nullptr)
+        : tab_name_(tab_name), key_(key)
+    {
+    }
+
+    const TableName *tab_name_;
+    const TxKey *key_;
+};
+
 }  // namespace txservice

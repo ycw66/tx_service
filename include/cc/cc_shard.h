@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -15,6 +16,7 @@
 #include "cc_map.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
+#include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "secondary_key.h"
@@ -168,6 +170,8 @@ public:
 
     size_t Clean();
 
+    bool FlushEntry(LruEntry *entry, bool only_archives = true);
+
     void NotifyCkpt();
 
     /**
@@ -320,6 +324,12 @@ public:
         return min_ts;
     }
 
+    // Statistic the min start ts of active transactions on this shard and
+    // cache to "min_tx_start_ts_".
+    uint64_t StatMinTxStartTs();
+
+    uint64_t GlobalMinTxStartTs();
+
     const TableSchemaView *CreateCatalog(const TableName &table_name,
                                          NodeGroupId cc_ng_id,
                                          const std::string &catalog_image,
@@ -399,6 +409,10 @@ public:
     // Estimate size: Key + Value
     size_t estimate_ccshard_log_size_{0};
 
+    // cache min{start_ts of all tx in this shard, ts_base} last calculated
+    std::atomic<uint64_t> min_tx_start_ts_{0U};
+    std::atomic<int64_t> min_tx_start_ts_term_{-1};
+
 private:
     /**
      * @brief The method invoked by the processing thread to notify the cc shard
@@ -453,7 +467,7 @@ private:
      * Reservation simplifies handling of empty and one-element lists.
      *
      */
-    LruEntry head_cce_, tail_cce_;
+    CcEntry<VoidKey, VoidRecord> head_cce_, tail_cce_;
 
     // the number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;

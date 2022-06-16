@@ -44,6 +44,16 @@ message NotifyNewLeaderStartResponse {
   bool error = 1;
 }
 
+message GetMinTxStartTsRequest {
+	uint32 ng_id = 1;
+}
+
+message GetMinTxStartTsResponse {
+	int64 term = 1;
+	uint64 ts = 2;
+	bool error = 3;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -52,6 +62,7 @@ service CcRpcService {
 	rpc Transfer(TransferRequest) returns (TransferResponse);
 	rpc CheckTxStatus(CheckTxStatusRequest) returns (CheckTxStatusResponse);
 	rpc NotifyNewLeaderStart(NotifyNewLeaderStartRequest) returns (NotifyNewLeaderStartResponse);
+	rpc GetMinTxStartTs(GetMinTxStartTsRequest) returns (GetMinTxStartTsResponse);
 }
 
 message TxId_msg {
@@ -87,6 +98,12 @@ enum CcLockType {
 	WriteIntent = 2;
 	ReadLock = 3;
 	WriteLock = 4;
+}
+
+enum RecordStatusType {
+	NORMAL = 0;
+	UNDEFINED = 1;
+	DELETED = 2;
 }
 
 enum CommitType {
@@ -154,6 +171,12 @@ message PostprocessResponse {
 	int32 error_code = 1;
 }
 
+message VersionedRecord_msg {
+	bytes record = 1;
+	RecordStatusType rec_status = 2;
+	uint64 version_ts = 3;
+}
+
 message ReadRequest {
 	uint32 src_node_id = 1;
 	string tablename = 2;
@@ -175,12 +198,7 @@ message ReadRequest {
 message ReadResponse {
 	int32 error_code = 1;
 	bytes record = 2;
-	enum RecordStatus {
-		NORMAL = 0;
-		UNDEFINED = 1;
-		DELETED = 2;
-	}
-	RecordStatus rec_status = 3;
+	RecordStatusType rec_status = 3;
 	uint64 ts = 4;
 	CceAddr_msg cce_addr = 5;
 	// The response is an acknowledgement or the result
@@ -190,9 +208,10 @@ message ReadResponse {
 message ReadOutsideRequest {
     uint32 node_group_id = 1;
 	bytes record = 2;
-	bool is_deleted = 3;
+	RecordStatusType rec_status = 3;
 	uint64 commit_ts = 4;
 	CceAddr_msg cce_addr = 5;
+	repeated VersionedRecord_msg archives = 6;
 }
 
 message PostCommitRequest {
@@ -219,12 +238,7 @@ message PostWriteAllRequest {
 message ScanTuple_msg {
 	bytes key = 1;
 	bytes record = 2;
-	enum RecordStatus {
-		NORMAL = 0;
-		UNDEFINED = 1;
-		DELETED = 2;
-	}
-	RecordStatus rec_status = 3;
+	RecordStatusType rec_status = 3;
 	uint64 key_ts = 4;
 	uint64 gap_ts = 5;
 	CceAddr_msg cce_addr = 6;
@@ -296,6 +310,17 @@ message FaultInjectResponse {
   int32 error_code = 1;
 }
 
+message CleanArchivesRequest {
+  uint32 src_node_id = 1;
+  string tablename = 2;
+  bytes key = 3;
+  uint32 key_shard_code = 4;
+}
+
+message CleanArchivesResponse {
+  int32 error_code = 1;
+}
+
 message CcMessage {
 	enum MessageType {
 		Shutdown = 0;
@@ -318,6 +343,8 @@ message CcMessage {
 		AcquireAllRequest = 28;
 		AcquireAllResponse = 29;
 		PostWriteAllRequest = 30;
+		CleanArchivesRequest = 32;
+		CleanArchivesResponse = 33;
 	}
 
 	MessageType type = 1;
@@ -345,5 +372,7 @@ message CcMessage {
 		AcquireAllRequest acquire_all_req = 36;
 		AcquireAllResponse acquire_all_resp = 37;
 		PostWriteAllRequest post_write_all_req = 38;
+		CleanArchivesRequest clean_archives_req = 40;
+		CleanArchivesResponse clean_archives_resp= 41;
 	}
 }

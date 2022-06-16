@@ -1,9 +1,12 @@
 #include "cc/cc_shard.h"
 
+#include "archives_flusher.h"
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
 #include "checkpointer.h"
+#include "sharder.h"  // Sharder
+#include "tx_start_ts_collector.h"
 
 namespace txservice
 {
@@ -49,8 +52,9 @@ CcShard::CcShard(uint16_t core_id,
         thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
     }
 
-    native_ccms_.try_emplace(catalog_ccm_name,
-                             std::make_unique<CatalogCcMap>(this));
+    native_ccms_.try_emplace(
+        catalog_ccm_name,
+        std::make_unique<CatalogCcMap>(this, catalog_ccm_name));
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name,
@@ -129,6 +133,7 @@ TEntry &CcShard::NewTx()
 {
     // allocate start timestamp.
     uint64_t start_ts = ts_base_.load(std::memory_order_relaxed);
+    int64_t term = Sharder::Instance().LeaderTerm(node_id_);
 
     // Cicurlar iteration to find an available transaction entry.
     size_t cnt = 0;
@@ -167,7 +172,7 @@ TEntry &CcShard::NewTx()
 
     TEntry &tentry = tx_vec_.at(next_tx_idx_);
     // Reset() set lower_bound ts and commit ts.
-    tentry.Reset(start_ts, next_tx_ident_);
+    tentry.Reset(start_ts, next_tx_ident_, term);
     ++next_tx_ident_;
     ++next_tx_idx_;
     next_tx_idx_ = next_tx_idx_ == tx_vec_.size() ? 0 : next_tx_idx_;
@@ -356,6 +361,39 @@ void CcShard::ClearTx(TxNumber txn)
     lock_holding_txs_.erase(tx_it);
 }
 
+uint64_t CcShard::StatMinTxStartTs()
+{
+    const int64_t term = Sharder::Instance().LeaderTerm(node_id_);
+    if (tx_vec_.size() == 0)
+    {
+        min_tx_start_ts_term_.store(term);
+        min_tx_start_ts_ = ts_base_.load(std::memory_order_acquire);
+    }
+    else
+    {
+        uint64_t min_ts = ts_base_.load(std::memory_order_acquire);
+        for (const auto &tx : tx_vec_)
+        {
+            if (tx.term_ != term || tx.status_ == TxnStatus::Finished ||
+                tx.status_ == TxnStatus::Aborted ||
+                tx.status_ == TxnStatus::Committed)
+            {
+                continue;
+            }
+            min_ts = std::min(min_ts, tx.lower_bound_);
+        }
+
+        min_tx_start_ts_term_.store(term);
+        min_tx_start_ts_.store(min_ts);
+    }
+    return min_tx_start_ts_;
+}
+
+uint64_t CcShard::GlobalMinTxStartTs()
+{
+    return TxStartTsCollector::Instance().GlobalMinTxStartTs();
+}
+
 /**
  * @brief Kick out freeable entries from ccmap.
  *
@@ -364,11 +402,18 @@ void CcShard::ClearTx(TxNumber txn)
 size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;
+
+    // 1- Clean the lru entry which is free and has no historical versions.
     size_t free_cnt = 0;
-    while (free_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
+    size_t mem_size = 0;
+    size_t scan_cnt = 0;
+    size_t scan_batch_size = CcShard::freeBatchSize * 2;
+    uint64_t recyle_ts = GlobalMinTxStartTs();
+    while (scan_cnt < scan_batch_size && cce != &tail_cce_)
     {
         LruEntry *next_cce = cce->lru_next_;
-        if (cce->IsFree())
+        mem_size += cce->KickOutArchiveRecords(recyle_ts);
+        if (cce->IsFree() && cce->ArchiveRecordsCount() == 0)
         {
             cce->parent_map_->ccm_has_full_entries_ = false;
             cce->parent_map_->Clean(cce);
@@ -377,16 +422,50 @@ size_t CcShard::Clean()
         }
 
         cce = next_cce;
+        scan_cnt++;
     }
 
-    // notify the checkpointer thread to do checkpoint if there is not freeable
-    // entries to be kicked out from ccmap.
+    if (mem_size > 0 || free_cnt > 0)
+    {
+        mem_usage_ -= mem_size;
+        return 1;
+    }
+
+    // 2- Flush historical versions and clean entry.
+    scan_cnt = 0;
+    cce = head_cce_.lru_next_;
+    while (scan_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
+    {
+        LruEntry *next_cce = cce->lru_next_;
+        if (cce->IsFree())
+        {
+            // Save archives to data store.
+            ArchivesFlusher::Instance().AddTask(cce);
+            ++scan_cnt;
+        }
+
+        cce = next_cce;
+    }
+
+    // 3- Notify the checkpointer thread to do checkpoint if there is not
+    // freeable entries to be kicked out from ccmap.
     if (free_cnt == 0)
     {
         NotifyCkpt();
     }
 
     return free_cnt;
+}
+
+/**
+ * @brief Flush Entry to KvStore. Now, only used for test.
+ *
+ */
+bool CcShard::FlushEntry(LruEntry *entry, bool only_archives)
+{
+    // Now, only flush archives synchronously for test.
+    // TODO(lzx): Add Flush latest version asynchronously.
+    return ArchivesFlusher::Instance().Flush(entry);
 }
 
 void CcShard::NotifyCkpt()
@@ -490,8 +569,11 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
     {
         auto ccm_it = native_ccms_.try_emplace(
             table_name,
-            catalog_factory_->CreatePkCcMap(
-                table_schema, schema_ts, ccm_has_full_entries, this));
+            catalog_factory_->CreatePkCcMap(table_name,
+                                            table_schema,
+                                            schema_ts,
+                                            ccm_has_full_entries,
+                                            this));
         return ccm_it.first->second.get();
     }
     else
@@ -501,8 +583,11 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
             fail_ccm_it->second;
         auto ccm_it = ccms.try_emplace(
             ng_id,
-            catalog_factory_->CreatePkCcMap(
-                table_schema, schema_ts, ccm_has_full_entries, this));
+            catalog_factory_->CreatePkCcMap(table_name,
+                                            table_schema,
+                                            schema_ts,
+                                            ccm_has_full_entries,
+                                            this));
         return ccm_it.first->second.get();
     }
 }
@@ -637,4 +722,5 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
             ng_id, catalog_factory_->CreatePkRangeMap(range_table_name, this));
     }
 }
+
 }  // namespace txservice

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <shared_mutex>
@@ -12,6 +14,7 @@
 #include "local_cc_handler.h"
 #include "raft_log.pb.h"
 #include "sk_cc_map.h"
+#include "store/data_store_handler.h"
 #include "table_lock.h"
 #include "template_cc_map.h"
 
@@ -263,6 +266,23 @@ public:
      * node.
      */
     void DropCatalogs(NodeGroupId cc_ng_id);
+
+    uint64_t MinStartTsOfLocalActiveTxs(int64_t term)
+    {
+        uint64_t min_ts = UINT64_MAX;
+        for (auto &ccs : cc_shards_)
+        {
+            if (ccs->min_tx_start_ts_term_.load() == term)
+            {
+                min_ts = std::min(ccs->min_tx_start_ts_.load(), min_ts);
+            }
+            else
+            {
+                min_ts = std::min(ccs->ts_base_.load(), min_ts);
+            }
+        }
+        return min_ts;
+    }
 
     store::DataStoreWriteHandler *const store_hd_;
 

@@ -36,6 +36,11 @@ public:
                               const NotifyNewLeaderStartRequest *request,
                               NotifyNewLeaderStartResponse *response,
                               ::google::protobuf::Closure *done) override;
+    void GetMinTxStartTs(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::GetMinTxStartTsRequest *request,
+        ::txservice::remote::GetMinTxStartTsResponse *response,
+        ::google::protobuf::Closure *done) override;
 
 private:
     LocalCcShards &local_shards_;

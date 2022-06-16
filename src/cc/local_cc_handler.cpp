@@ -335,7 +335,8 @@ void txservice::LocalCcHandler::ReadOutside(
     bool is_deleted,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<ReadKeyResult> &hres)
+    CcHandlerResult<ReadKeyResult> &hres,
+    const std::vector<VersionedRecord> *archives)
 {
     assert(cce_addr.CcePtr() != 0);
 
@@ -371,7 +372,9 @@ void txservice::LocalCcHandler::ReadOutside(
                    &hres,
                    IsolationLevel::ReadCommitted,
                    CcProtocol::OCC,
-                   LockType::NoLock);
+                   LockType::NoLock,
+                   archives);
+
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -778,7 +781,7 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
         InitTxResult &init_tx_res = hres.Value();
         init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId());
         init_tx_res.start_ts_ = tx.lower_bound_;
-        init_tx_res.term_ = term;
+        init_tx_res.term_ = tx.term_;
         hres.SetFinished();
     }
     else
@@ -892,6 +895,39 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 {
     cc_shards_.store_hd_->UpsertTable(
         table_name, schema, indexes, is_deleted, commit_ts, &hres);
+}
+
+void txservice::LocalCcHandler::CleanArchives(const TableName &table_name,
+                                              const TxKey &key,
+                                              uint64_t tx_number,
+                                              int64_t tx_term,
+                                              CcHandlerResult<bool> &hres)
+{
+    uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
+    uint32_t shard_id = shard_code >> 10;
+    // CcEntryAddr &cce_addr = hres.Value().cce_addr_;
+    // cce_addr.SetNodeGroupId(shard_id);
+    // cce_addr.SetCce(0, -1);
+
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(shard_id);
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        CleanArchivesForTestCc *req = clean_akv_pool.NextRequest();
+        req->Reset(&table_name, &key, shard_code, tx_number, &hres);
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+    }
+    else
+    {
+        remote_hd_.CleanArchives(cc_shards_.node_id_,
+                                 table_name,
+                                 key,
+                                 shard_code,
+                                 tx_number,
+                                 tx_term,
+                                 hres);
+    }
 }
 
 /*

@@ -27,8 +27,8 @@ public:
      *
      * @param shard
      */
-    CatalogCcMap(CcShard *shard)
-        : TemplateCcMap<CatalogKey, CatalogRecord>(shard, 1)
+    CatalogCcMap(CcShard *shard, const std::string &table_name)
+        : TemplateCcMap<CatalogKey, CatalogRecord>(shard, table_name, 1)
     {
     }
 
@@ -36,7 +36,7 @@ public:
 
     std::unique_ptr<CcMap> Clone() const override
     {
-        return std::make_unique<CatalogCcMap>(shard_);
+        return std::make_unique<CatalogCcMap>(shard_, table_name_);
     }
 
     bool Execute(PostWriteAllCc &req) override

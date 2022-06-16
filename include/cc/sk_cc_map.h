@@ -5,67 +5,11 @@
 
 #include "secondary_key.h"
 #include "template_cc_map.h"
+#include "tx_key.h"  // VoidKey
+#include "type.h"    // TableName
 
 namespace txservice
 {
-struct VoidKey : public TxKey
-{
-    VoidKey()
-    {
-    }
-
-    bool operator==(const TxKey &rhs) const override
-    {
-        if (const VoidKey *other_ptr = static_cast<const VoidKey *>(&rhs))
-        {
-            return *this == *other_ptr;
-        }
-        return false;
-    }
-
-    bool operator<(const TxKey &rhs) const override
-    {
-        return false;
-    }
-
-    size_t Hash() const override
-    {
-        return 0;
-    }
-
-    void Serialize(std::vector<char> &buf, size_t &offset) const override
-    {
-    }
-
-    void Serialize(std::string &str) const override
-    {
-    }
-
-    void Deserialize(const char *buf,
-                     size_t &offset,
-                     const txservice::Schema *key_schema) override
-    {
-    }
-
-    TxKey::Uptr Clone() const override
-    {
-        return std::make_unique<VoidKey>(*this);
-    }
-
-    void Copy(const TxKey &rhs) override
-    {
-    }
-
-    std::string ToString() const override
-    {
-        return std::string("");
-    }
-
-    size_t MemUsage() const override
-    {
-        return 0;
-    }
-};
 
 template <typename SkT, typename PkT>
 struct SkRecord : public TxRecord
@@ -126,10 +70,11 @@ public:
     SkCcMap(SkCcMap &&rhs) = delete;
 
     SkCcMap(CcShard *shard,
+            const TableName &index_name,
             uint64_t schema_ts,
             const Schema *sk_schema = nullptr,
             const Schema *pk_schema = nullptr)
-        : CcMap(shard, schema_ts),
+        : CcMap(shard, index_name, schema_ts),
           neg_inf_(this),
           pos_inf_(this),
           compound_schema_(sk_schema, pk_schema)
@@ -783,6 +728,11 @@ public:
         return true;
     }
 
+    bool Execute(CleanArchivesForTestCc &req) override
+    {
+        return true;
+    }
+
     std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const override
     {
@@ -930,6 +880,7 @@ public:
     {
         return std::make_unique<SkCcMap<SkT, PkT>>(
             shard_,
+            table_name_,
             schema_ts_,
             compound_schema_.sk_schema_.get(),
             compound_schema_.pk_schema_.get());
@@ -967,16 +918,13 @@ private:
         switch (cce->payload_status_)
         {
         case RecordStatus::Normal:
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_NORMAL);
+            tuple->set_rec_status(remote::RecordStatusType::NORMAL);
             break;
         case RecordStatus::Deleted:
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_DELETED);
+            tuple->set_rec_status(remote::RecordStatusType::DELETED);
             break;
         case RecordStatus::Unknown:
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_UNDEFINED);
+            tuple->set_rec_status(remote::RecordStatusType::UNDEFINED);
             break;
         default:
             break;

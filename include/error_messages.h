@@ -38,7 +38,13 @@ enum struct TxErrorCode
     WRITE_LOG_FAIL,
     UPSERT_TABLE_PREPARE_FAIL,
     TRANSACTION_NODE_NOT_LEADER,
-    UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL
+    UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
+    // Under MVCC protocol, if write transaction has acquired the write
+    // lock, then it will generate its commit_ts without knowing the later
+    // read. Hence the writer's commit_ts may be smaller than the reader's
+    // snapshot_ts which will break the snapshot isolation level.
+    CC_ERR_MVCC_READ_MUST_WAIT_WRITE,
+    CC_ERR_MVCC_VERSION_PREMATURELY_KICKED
 };
 
 static const std::map<TxErrorCode, std::string> error_messages{

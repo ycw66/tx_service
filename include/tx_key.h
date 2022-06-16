@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 #include "schema.h"
 #include "tx_serialize.h"
@@ -339,6 +340,14 @@ public:
         return std::make_unique<CompositeKey<Types...>>(*this);
     }
 
+    void Copy(const TxKey &rhs) override
+    {
+        const CompositeKey<Types...> &typed_rhs =
+            static_cast<const CompositeKey<Types...> &>(rhs);
+        fields_ = typed_rhs.fields_;
+        field_cnt_ = typed_rhs.field_cnt_;
+    }
+
     const std::tuple<Types...> &Tuple() const
     {
         return fields_;
@@ -361,6 +370,66 @@ private:
     std::tuple<Types...> fields_;
     size_t field_cnt_;
 };
+
+struct VoidKey : public TxKey
+{
+    VoidKey()
+    {
+    }
+
+    bool operator==(const TxKey &rhs) const override
+    {
+        if (const VoidKey *other_ptr = static_cast<const VoidKey *>(&rhs))
+        {
+            return *this == *other_ptr;
+        }
+        return false;
+    }
+
+    bool operator<(const TxKey &rhs) const override
+    {
+        return false;
+    }
+
+    size_t Hash() const override
+    {
+        return 0;
+    }
+
+    void Serialize(std::vector<char> &buf, size_t &offset) const override
+    {
+    }
+
+    void Serialize(std::string &str) const override
+    {
+    }
+
+    void Deserialize(const char *buf,
+                     size_t &offset,
+                     const txservice::Schema *key_schema) override
+    {
+    }
+
+    TxKey::Uptr Clone() const override
+    {
+        return std::make_unique<VoidKey>(*this);
+    }
+
+    void Copy(const TxKey &rhs) override
+    {
+    }
+
+    std::string ToString() const override
+    {
+        return std::string("");
+    }
+
+    size_t MemUsage() const override
+    {
+        return 0;
+    }
+};
+
 }  // namespace txservice
 
 namespace std

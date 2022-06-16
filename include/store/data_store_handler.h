@@ -36,6 +36,35 @@ public:
 
     virtual void FetchTableRanges(const TableName &range_table_name,
                                   void *fetch_req) = 0;
+
+    /**
+     * @brief Write historical versions into DataStore.
+     *
+     */
+    virtual bool PutArchives(
+        const txservice::TableName &table_name,
+        const txservice::TxKey &key,
+        const std::vector<txservice::VersionedRecord> &archives) = 0;
+
+    /**
+     * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
+     * version.
+     */
+    virtual bool FetchVisibleArchive(const txservice::TableName &table_name,
+                                     const txservice::TxKey &key,
+                                     const uint64_t upper_bound_ts,
+                                     txservice::TxRecord &rec,
+                                     txservice::RecordStatus &rec_status,
+                                     uint64_t &commit_ts) = 0;
+
+    /**
+     * @brief  Fetch all archives whose commit_ts >= from_ts.
+     */
+    virtual bool FetchArchives(
+        const txservice::TableName &table_name,
+        const txservice::TxKey &key,
+        std::vector<txservice::VersionedRecord> &archives,
+        uint64_t from_ts) = 0;
 };
 
 // class IntMemoryStore : public DataStoreWriteHandler

@@ -103,5 +103,31 @@ void CcNodeService::NotifyNewLeaderStart(
     response->set_error(false);
 }
 
+/**
+ * @brief RPC service: get min start_ts of all active transactions on the node.
+ */
+void CcNodeService::GetMinTxStartTs(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::GetMinTxStartTsRequest *request,
+    ::txservice::remote::GetMinTxStartTsResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    uint32_t ng_id = request->ng_id();
+    uint64_t min_ts = UINT64_MAX;
+    if (Sharder::Instance().LeaderNodeId(ng_id) == local_shards_.NodeId())
+    {
+        auto term = Sharder::Instance().LeaderTerm(ng_id);
+        min_ts = local_shards_.MinStartTsOfLocalActiveTxs(term);
+
+        response->set_term(term);
+        response->set_ts(min_ts);
+        response->set_error(false);
+    }
+    else
+    {
+        response->set_error(true);
+    }
+}
+
 }  // namespace remote
 }  // namespace txservice

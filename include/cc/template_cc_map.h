@@ -15,6 +15,7 @@
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_request.h"
 #include "sharder.h"
+#include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
@@ -32,11 +33,12 @@ public:
     explicit TemplateCcMap(CcMap &&rhs) = delete;
 
     TemplateCcMap(CcShard *shard,
+                  const TableName &table_name,
                   uint64_t schema_ts,
                   const Schema *key_schema = nullptr,
                   const Schema *rec_schema = nullptr,
                   bool ccm_has_full_entries = false)
-        : CcMap(shard, schema_ts, ccm_has_full_entries),
+        : CcMap(shard, table_name, schema_ts, ccm_has_full_entries),
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
@@ -236,6 +238,7 @@ public:
                 acquire_key_result.last_vali_ts_ =
                     std::max(cc_entry.last_read_ts_, lock_ts);
                 acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
+
                 hd_res->SetFinished();
             }
             else
@@ -461,10 +464,8 @@ public:
                 // for mvcc
                 if (req.Protocol() == CcProtocol::MVCC)
                 {
-                    // recycle before archive
-                    // TODO(lzx): use scheduled tasks to perform recycling
-                    shard_->mem_usage_ -= cce.KickOutArchiveRecords(commit_ts);
-
+                    uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
+                    cce.KickOutArchiveRecords(recycle_ts);
                     size_t added_mem_usage = cce.ArchiveBeforeUpdate();
                     shard_->mem_usage_ += added_mem_usage;
                 }
@@ -1144,17 +1145,6 @@ public:
             // validating version stability.
             assert(req.Protocol() == CcProtocol::OCC);
 
-            // Releases intentions for OCC protocols.
-            if (key_ts > 0)
-            {
-                cc_entry.key_lock_.ReleaseReadIntent(txn);
-            }
-
-            if (gap_ts > 0)
-            {
-                cc_entry.gap_lock_.ReleaseReadIntent(txn);
-            }
-
             hd_res->SetError(1);  // broken repeatable read, set error.
         }
         else if (req.Protocol() == CcProtocol::OCC)
@@ -1176,7 +1166,6 @@ public:
                     conflicting_txs.emplace_back(it->second->tx_id_);
                 }
             }
-            cc_entry.gap_lock_.ReleaseReadIntent(txn);
 
             if (key_ts > 0)
             {
@@ -1195,11 +1184,11 @@ public:
                         cc_entry.key_lock_.WriteLockTx());
                 }
             }
-            cc_entry.key_lock_.ReleaseReadIntent(txn);
 
             hd_res->SetFinished();
         }
-        else if (req.Protocol() == CcProtocol::Locking)
+        else if (req.Protocol() == CcProtocol::Locking ||
+                 req.Protocol() == CcProtocol::MVCC)
         {
             // For 2PL, read validation is equivalent to releasing the read
             // lock. In contrast to the conventional 2PL where read locks
@@ -1230,16 +1219,21 @@ public:
             // from a different core or a remote node, their tx's can move
             // forward immediately.
             hd_res->SetFinished();
-
-            // ReadCc may use different lock type when acquiring the lock, for
-            // example, select for update would acquire write intent. As a
-            // result, we should also release the corresponding lock/intent as
-            // well.
-            cc_entry.key_lock_.ReleaseLock(txn, shard_, req.GetLockType());
-            cc_entry.gap_lock_.ReleaseLock(txn, shard_, req.GetLockType());
         }
 
-        shard_->DeleteLockHolidngTx(txn, &cc_entry, false);
+        // ReadCc may use different lock type when acquiring the lock, for
+        // example, select for update would acquire write intent. As a
+        // result, we should also release the corresponding lock/intent as
+        // well.
+        bool is_write_lock = (cc_entry.key_lock_.HasWriteLock() &&
+                              cc_entry.key_lock_.WriteLockTx() == txn) ||
+                             (cc_entry.gap_lock_.HasWriteLock() &&
+                              cc_entry.gap_lock_.WriteLockTx() == txn);
+
+        cc_entry.key_lock_.ClearTx(txn, shard_);
+        cc_entry.gap_lock_.ClearTx(txn, shard_);
+
+        shard_->DeleteLockHolidngTx(txn, &cc_entry, is_write_lock);
         return true;
     }
 
@@ -1371,6 +1365,43 @@ public:
 
                 shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
             }
+
+            if (req.GetLockType() == LockType::WriteIntent)
+            {
+                TxNumber tx_number = req.Txn();
+                int64_t tx_term = req.TxTerm();
+                uint32_t cce_node_group_id = req.NodeGroupId();
+
+                bool lock_success = cce->key_lock_.AcquireWriteIntent(
+                    &req, req.Txn(), req.Protocol());
+
+                if (!lock_success)
+                {
+                    if (req.Protocol() == CcProtocol::Locking)
+                    {
+                        // For 2PL, a conflict blocks the tx by putting it into
+                        // the lock's blocking queue.
+
+                        uint32_t tx_node = (req.Txn() >> 32L) >> 10;
+                        if (tx_node != cce_node_group_id)
+                        {
+                            // If the read request comes from a remote node,
+                            // sends acknowledgement to the sender when the
+                            // request is blocked.
+                            remote::RemoteRead &remote_req =
+                                static_cast<remote::RemoteRead &>(req);
+                            remote_req.Acknowledge();
+                        }
+                        return false;
+                    }
+                    else
+                    {
+                        hd_res->SetError(1);
+                        return true;
+                    }
+                }
+                shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
+            }
         }
         else
         {
@@ -1412,7 +1443,17 @@ public:
             }
         }
 
-        if (req.Isolation() == IsolationLevel::Snapshot)
+        // Refill mvcc archives
+        if ((req.Type() == ReadType::OutsideNormal ||
+             req.Type() == ReadType::OutsideDeleted) &&
+            req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
+        {
+            cce->AddArchiveRecords(*req.ArchivesPtr());
+        }
+
+        // WriteIntent means it is 'SelectForUpdate', should read latest version
+        if (req.Isolation() == IsolationLevel::Snapshot &&
+            req.GetLockType() != LockType::WriteIntent)
         {
             assert(req.Protocol() == CcProtocol::MVCC);
             assert(req.Type() == ReadType::Inside);
@@ -1472,6 +1513,7 @@ public:
         hd_res->Value().rec_status_ = cce->payload_status_;
 
         hd_res->SetFinished();
+
         return true;
     }
 
@@ -1503,17 +1545,19 @@ public:
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
             assert(cce->commit_ts_ == 1);
-            if (req.is_deleted_)
-            {
-                cce->payload_status_ = RecordStatus::Deleted;
-            }
-            else
+            if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
                 cce->payload_.Deserialize(req.rec_str_->data(), offset);
                 cce->payload_status_ = RecordStatus::Normal;
             }
             cce->commit_ts_ = req.CommitTs();
+            cce->payload_status_ = req.RecordStatus();
+        }
+        // Refill mvcc archives.
+        if (req.Archives().size() > 0)
+        {
+            cce->AddArchiveRecords(req.Archives());
         }
 
         req.Finish();
@@ -2568,6 +2612,31 @@ public:
         return false;
     }
 
+    bool Execute(CleanArchivesForTestCc &req) override
+    {
+        const TxKey *key_ptr = req.Key();
+        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        if (key_ptr != nullptr)
+        {
+            // find cc entry
+            const KeyT *typed_key_ptr = dynamic_cast<const KeyT *>(key_ptr);
+            const KeyT &key = *typed_key_ptr;
+            auto lb_it = ccm_.lower_bound(key);
+            if (lb_it != ccm_.end() && lb_it->first == key)
+            {
+                cce_ptr = &lb_it->second;
+            }
+            if (cce_ptr != nullptr)
+            {
+                shard_->FlushEntry(cce_ptr, true);
+                cce_ptr->archives_.clear();
+            }
+        }
+        req.Result()->SetValue(true);
+        req.Result()->SetFinished();
+        return true;
+    }
+
     size_t size() const override
     {
         return ccm_.size();
@@ -2676,7 +2745,7 @@ public:
     std::unique_ptr<CcMap> Clone() const override
     {
         return std::make_unique<TemplateCcMap<KeyT, ValueT>>(
-            shard_, schema_ts_, key_schema_, record_schema_);
+            shard_, table_name_, schema_ts_, key_schema_, record_schema_);
     }
 
 protected:
@@ -3303,8 +3372,7 @@ protected:
         case RecordStatus::Normal:
             tuple->clear_record();
             cce->payload_.Serialize(*tuple->mutable_record());
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_NORMAL);
+            tuple->set_rec_status(remote::RecordStatusType::NORMAL);
             break;
         case RecordStatus::Deleted:
             if (is_ckpt_delta)
@@ -3312,12 +3380,10 @@ protected:
                 tuple->clear_record();
                 cce->payload_.Serialize(*tuple->mutable_record());
             }
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_DELETED);
+            tuple->set_rec_status(remote::RecordStatusType::DELETED);
             break;
         case RecordStatus::Unknown:
-            tuple->set_rec_status(remote::ScanTuple_msg::RecordStatus::
-                                      ScanTuple_msg_RecordStatus_UNDEFINED);
+            tuple->set_rec_status(remote::RecordStatusType::UNDEFINED);
             break;
         default:
             break;

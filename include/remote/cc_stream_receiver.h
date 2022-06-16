@@ -9,6 +9,7 @@
 #include "cc_req_pool.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
+#include "tx_record.h"
 #include "type.h"
 
 namespace txservice
@@ -48,6 +49,7 @@ public:
     static CcProtocol ConvertProtocol(CcProtocolType proto);
     static LockType ConvertLockType(CcLockType lock_type);
     static PostWriteType ConvertCommitType(CommitType commit_type);
+    static RecordStatus ConvertRecordStatusType(RecordStatusType status_type);
 
 private:
     std::unique_ptr<CcMessage> GetCcMsg();

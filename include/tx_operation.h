@@ -390,4 +390,31 @@ public:
 
     int sleep_secs_{0};
 };
+
+struct CleanArchivesOp : TransactionOperation
+{
+public:
+    explicit CleanArchivesOp(TransactionExecution *txm);
+
+    void Set(const TableName *tn, const TxKey *key)
+    {
+        tab_name_ = tn;
+        key_ = key;
+        succeed_ = false;
+    }
+
+    void Reset()
+    {
+        succeed_ = false;
+        hd_result_.Reset();
+    }
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName *tab_name_{nullptr};
+    const TxKey *key_{nullptr};
+
+    bool succeed_{false};
+    CcHandlerResult<bool> hd_result_;
+};
+
 }  // namespace txservice

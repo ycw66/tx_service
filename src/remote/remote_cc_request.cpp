@@ -278,16 +278,13 @@ txservice::remote::RemoteRead::RemoteRead()
             switch (read_result.rec_status_)
             {
             case RecordStatus::Normal:
-                resp->set_rec_status(ReadResponse::RecordStatus::
-                                         ReadResponse_RecordStatus_NORMAL);
+                resp->set_rec_status(RecordStatusType::NORMAL);
                 break;
             case RecordStatus::Deleted:
-                resp->set_rec_status(ReadResponse::RecordStatus::
-                                         ReadResponse_RecordStatus_DELETED);
+                resp->set_rec_status(RecordStatusType::DELETED);
                 break;
             case RecordStatus::Unknown:
-                resp->set_rec_status(ReadResponse::RecordStatus::
-                                         ReadResponse_RecordStatus_UNDEFINED);
+                resp->set_rec_status(RecordStatusType::UNDEFINED);
                 break;
             default:
                 break;
@@ -461,6 +458,7 @@ void txservice::remote::RemotePostWrite::Reset(
     uint64_t commit_ts = post_commit.commit_ts();
     const std::string *rec_str =
         commit_ts > 0 ? &post_commit.record() : nullptr;
+    proto_ = CcStreamReceiver::ConvertProtocol(post_commit.protocol());
     PostWriteCc::Reset(&cce_addr_,
                        input_msg->tx_number(),
                        commit_ts,
@@ -830,9 +828,20 @@ void txservice::remote::RemoteReadOutside::Reset(
     assert(req.cce_addr().cce_ptr() != 0);
     cce_addr_.SetCce(
         req.cce_addr().cce_ptr(), req.cce_addr().term(), req.node_group_id());
-    is_deleted_ = req.is_deleted();
+    rec_status_ = CcStreamReceiver::ConvertRecordStatusType(req.rec_status());
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
+
+    // set archives_
+    archives_.clear();
+    for (auto &vrec_msg : req.archives())
+    {
+        auto &v_rec = archives_.emplace_back();
+        v_rec.commit_ts_ = vrec_msg.version_ts();
+        v_rec.record_status_ =
+            CcStreamReceiver::ConvertRecordStatusType(vrec_msg.rec_status());
+        v_rec.record_blob_ = &vrec_msg.record();
+    }
 
     input_msg_ = std::move(input_msg);
 
@@ -844,6 +853,7 @@ void txservice::remote::RemoteReadOutside::Reset(
 
 void txservice::remote::RemoteReadOutside::Finish()
 {
+    archives_.clear();
     hd_->RecycleCcMsg(std::move(input_msg_));
 }
 
@@ -883,6 +893,56 @@ void txservice::remote::RemoteFaultInjectCC::Reset(
     const FaultInjectRequest &req = input_msg->fault_inject_req();
 
     FaultInjectCC::Reset(&req.fault_name(), &req.fault_paras(), &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+txservice::remote::RemoteCleanArchivesForTestCc::RemoteCleanArchivesForTestCc()
+    : cc_res_(nullptr)
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_CleanArchivesResponse);
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<bool> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        CleanArchivesResponse *resp = output_msg_.mutable_clean_archives_resp();
+        resp->set_error_code(res->ErrorCode());
+
+        const CleanArchivesRequest &req = input_msg_->clean_archives_req();
+        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteCleanArchivesForTestCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_clean_archives_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+
+    const CleanArchivesRequest &req = input_msg->clean_archives_req();
+
+    CleanArchivesForTestCc::Reset(&req.tablename(),
+                                  &req.key(),
+                                  req.key_shard_code(),
+                                  input_msg->tx_number(),
+                                  &cc_res_);
 
     input_msg_ = std::move(input_msg);
 

@@ -1,6 +1,12 @@
 #pragma once
 
+#include <map>
+#include <utility>  //pair
+#include <vector>
+
 #include "data_store_handler.h"
+#include "tx_key.h"     //CompositeKey
+#include "tx_record.h"  //CompositeRecord,VersionedRecord
 
 namespace txservice::store
 {
@@ -14,7 +20,8 @@ public:
     bool PutAll(const TableName &table_name,
                 std::vector<LruEntry *> &batch,
                 const Schema *key_schema,
-                const Schema *rec_schema) override
+                const Schema *rec_schema,
+                uint64_t schema_ts) override
     {
         for (const auto &entry : batch)
         {
@@ -48,7 +55,8 @@ public:
 
     bool PutSkAll(const TableName &table_name,
                   std::vector<LruEntry *> &batch,
-                  const SecondaryKeySchema *sk_schema) override
+                  const SecondaryKeySchema *sk_schema,
+                  uint64_t schema_ts) override
     {
         for (const auto &entry : batch)
         {
@@ -85,6 +93,92 @@ public:
         return true;
     }
 
+    void UpsertTable(
+        const txservice::TableName &ccm_table_name,
+        const txservice::TableSchema *table_schema,
+        const std::vector<txservice::TableName> *indexes,
+        bool is_deleted,
+        uint64_t commit_ts,
+        txservice::CcHandlerResult<txservice::Void> *hd_res) override
+    {
+    }
+
+    void FetchTableCatalog(const TableName &ccm_table_name, void *fetch_req)
+    {
+    }
+
+    void FetchTableRanges(const TableName &range_table_name, void *fetch_req)
+    {
+    }
+
+    /**
+     * @brief Write historical versions into DataStore.
+     *
+     */
+    bool PutArchives(const txservice::TableName &table_name,
+                     const txservice::TxKey &key,
+                     const std::vector<txservice::VersionedRecord> &archives)
+    {
+        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
+        int int_key = std::get<0>(typed_key.Tuple());
+        int_archives_[std::pair<TableName, int>(table_name, int_key)] =
+            archives;
+
+        return true;
+    }
+
+    /**
+     * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
+     * version.
+     */
+    bool FetchVisibleArchive(const txservice::TableName &table_name,
+                             const txservice::TxKey &key,
+                             const uint64_t upper_bound_ts,
+                             txservice::TxRecord &rec,
+                             txservice::RecordStatus &rec_status,
+                             uint64_t &commit_ts)
+    {
+        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
+        int int_key = std::get<0>(typed_key.Tuple());
+        auto &ref =
+            int_archives_[std::pair<TableName, int>(table_name, int_key)];
+        for (size_t i = 0; i < ref.size(); i++)
+        {
+            if (ref[i].commit_ts_ <= upper_bound_ts)
+            {
+                rec = *ref[i].record_;
+                rec_status = ref[i].record_status_;
+                commit_ts = ref[i].commit_ts_;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @brief  Fetch all archives whose commit_ts >= from_ts.
+     */
+    bool FetchArchives(const txservice::TableName &table_name,
+                       const txservice::TxKey &key,
+                       std::vector<txservice::VersionedRecord> &archives,
+                       uint64_t from_ts)
+    {
+        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
+        int int_key = std::get<0>(typed_key.Tuple());
+        auto &ref =
+            int_archives_[std::pair<TableName, int>(table_name, int_key)];
+        for (size_t i = 0; i < ref.size(); i++)
+        {
+            if (ref[i].commit_ts_ >= from_ts)
+            {
+                archives.emplace_back(ref[i]);
+            }
+        }
+
+        return true;
+    }
+
     size_t Size() const
     {
         return int_store_.size();
@@ -103,5 +197,7 @@ public:
 private:
     std::map<int, int> int_store_;
     std::map<std::pair<int, int>, Void> int_index_;
+    std::map<std::pair<TableName, int>, std::vector<VersionedRecord>>
+        int_archives_;
 };
 }  // namespace txservice::store

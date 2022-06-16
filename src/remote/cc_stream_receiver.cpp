@@ -24,6 +24,7 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteCommitSk> commit_sk_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
+thread_local CcRequestPool<RemoteCleanArchivesForTestCc> clean_akv_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -507,8 +508,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             {
                 switch (read_res.rec_status())
                 {
-                case ReadResponse::RecordStatus::
-                    ReadResponse_RecordStatus_NORMAL:
+                case RecordStatusType::NORMAL:
                 {
                     read_result.rec_status_ = RecordStatus::Normal;
 
@@ -518,14 +518,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
                     break;
                 }
-                case ReadResponse::RecordStatus::
-                    ReadResponse_RecordStatus_DELETED:
+                case RecordStatusType::DELETED:
                 {
                     read_result.rec_status_ = RecordStatus::Deleted;
                     break;
                 }
-                case ReadResponse::RecordStatus::
-                    ReadResponse_RecordStatus_UNDEFINED:
+                case RecordStatusType::UNDEFINED:
                 {
                     read_result.rec_status_ = RecordStatus::Unknown;
                     break;
@@ -663,25 +661,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     const ScanTuple_msg &tuple_msg = cache_msg.scan_tuple(idx);
                     term = tuple_msg.cce_addr().term();
 
-                    RecordStatus rec_status;
-                    switch (tuple_msg.rec_status())
-                    {
-                    case ScanTuple_msg::RecordStatus::
-                        ScanTuple_msg_RecordStatus_NORMAL:
-                        rec_status = RecordStatus::Normal;
-                        break;
-                    case ScanTuple_msg::RecordStatus::
-                        ScanTuple_msg_RecordStatus_DELETED:
-                        rec_status = RecordStatus::Deleted;
-                        break;
-                    case ScanTuple_msg::RecordStatus::
-                        ScanTuple_msg_RecordStatus_UNDEFINED:
-                        rec_status = RecordStatus::Unknown;
-                        break;
-                    default:
-                        rec_status = RecordStatus::Normal;
-                        break;
-                    }
+                    RecordStatus rec_status =
+                        ConvertRecordStatusType(tuple_msg.rec_status());
 
                     shard_cache->AddScanTuple(tuple_msg.key(),
                                               tuple_msg.key_ts(),
@@ -766,25 +747,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 const ScanTuple_msg &tuple_msg = scan_next_res.scan_tuple(idx);
                 hd_res->Value().term_ = tuple_msg.cce_addr().term();
 
-                RecordStatus rec_status;
-                switch (tuple_msg.rec_status())
-                {
-                case ScanTuple_msg::RecordStatus::
-                    ScanTuple_msg_RecordStatus_NORMAL:
-                    rec_status = RecordStatus::Normal;
-                    break;
-                case ScanTuple_msg::RecordStatus::
-                    ScanTuple_msg_RecordStatus_DELETED:
-                    rec_status = RecordStatus::Deleted;
-                    break;
-                case ScanTuple_msg::RecordStatus::
-                    ScanTuple_msg_RecordStatus_UNDEFINED:
-                    rec_status = RecordStatus::Unknown;
-                    break;
-                default:
-                    rec_status = RecordStatus::Normal;
-                    break;
-                }
+                RecordStatus rec_status =
+                    ConvertRecordStatusType(tuple_msg.rec_status());
 
                 shard_cache->AddScanTuple(tuple_msg.key(),
                                           tuple_msg.key_ts(),
@@ -842,6 +806,45 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (fi_res.error_code() != 0)
         {
             hd_res->SetError(fi_res.error_code());
+        }
+        else
+        {
+            hd_res->SetFinished();
+        }
+
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_CleanArchivesRequest:
+    {
+        RemoteCleanArchivesForTestCc *clean_req = clean_akv_pool_.NextRequest();
+        TX_TRACE_ASSOCIATE(msg.get(), clean_req);
+        clean_req->Reset(std::move(msg));
+        local_shards_.EnqueueCcRequest(0, clean_req);
+
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_CleanArchivesResponse:
+    {
+        assert(msg->has_clean_archives_resp());
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx node has failed. Pointer stability does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        CcHandlerResult<bool> *hd_res =
+            reinterpret_cast<CcHandlerResult<bool> *>(msg->handler_addr());
+
+        const CleanArchivesResponse &clean_res = msg->clean_archives_resp();
+
+        if (clean_res.error_code() != 0)
+        {
+            hd_res->SetError(clean_res.error_code());
         }
         else
         {
@@ -924,5 +927,22 @@ PostWriteType CcStreamReceiver::ConvertCommitType(CommitType commit_type)
         return PostWriteType::PostCommit;
     }
 }
+
+RecordStatus CcStreamReceiver::ConvertRecordStatusType(
+    RecordStatusType status_type)
+{
+    switch (status_type)
+    {
+    case RecordStatusType::NORMAL:
+        return RecordStatus::Normal;
+    case RecordStatusType::DELETED:
+        return RecordStatus::Deleted;
+    case RecordStatusType::UNDEFINED:
+        return RecordStatus::Unknown;
+    default:
+        return RecordStatus::Unknown;
+    }
+}
+
 }  // namespace remote
 }  // namespace txservice

@@ -1,5 +1,6 @@
 #include "cc/local_cc_shards.h"
 
+#include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_service.h"
 

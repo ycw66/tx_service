@@ -8,14 +8,17 @@
 #include <thread>
 #include <vector>
 
+#include "archives_flusher.h"
 #include "catalog.h"
 #include "catalog_factory.h"
 #include "checkpointer.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "moodycamelqueue.h"
+#include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_request.h"
+#include "tx_start_ts_collector.h"
 #include "txlog.h"
 
 namespace txservice
@@ -284,12 +287,17 @@ public:
             tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
+
+        TxStartTsCollector::Instance(&local_cc_shards_).Start();
+        ArchivesFlusher::Instance(local_cc_shards_.store_hd_).Start();
     }
 
     ~TxService()
     {
         ckpt_.Terminate();
         ckpt_.Join();
+        TxStartTsCollector::Instance().Shutdown();
+        ArchivesFlusher::Instance().Shutdown();
 
         Sharder::Instance().Shutdown();
 

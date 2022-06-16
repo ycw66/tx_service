@@ -1,11 +1,13 @@
 #pragma once
 
+#include <algorithm>  // std::min
 #include <condition_variable>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -840,7 +842,8 @@ public:
                CcHandlerResult<ReadKeyResult> *res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type)
+               LockType lock_type,
+               const std::vector<VersionedRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
@@ -855,6 +858,7 @@ public:
         type_ = read_type;
         lock_type_ = lock_type;
         cce_ptr_ = nullptr;
+        archives_ = archives;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -882,7 +886,8 @@ public:
                CcHandlerResult<ReadKeyResult> *res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type)
+               LockType lock_type,
+               const std::vector<VersionedRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
@@ -897,6 +902,7 @@ public:
         type_ = read_type;
         lock_type_ = lock_type;
         cce_ptr_ = nullptr;
+        archives_ = archives;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -978,6 +984,16 @@ public:
         return cce_ptr_;
     }
 
+    void SetArchivesPtr(const std::vector<VersionedRecord> *ptr)
+    {
+        archives_ = ptr;
+    }
+
+    const std::vector<VersionedRecord> *ArchivesPtr() const
+    {
+        return archives_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
@@ -994,6 +1010,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+
+    const std::vector<VersionedRecord> *archives_{nullptr};
 };
 
 struct ScanOpenBatchCc
@@ -1234,7 +1252,7 @@ private:
     uint64_t ckpt_ts_;
     std::mutex mux_;
     std::condition_variable cv_;
-    size_t finish_cnt_;
+    std::atomic<size_t> finish_cnt_;
     size_t shard_cnt_;
 };
 
@@ -1289,8 +1307,6 @@ public:
 
     void Wait()
     {
-        using namespace std::chrono_literals;
-
         std::unique_lock<std::mutex> lk(mux_);
         if (status_ != CkptScanStatus::Finish)
         {
@@ -1773,4 +1789,162 @@ private:
     const std::string *fault_name_;
     const std::string *fault_paras_;
 };
+
+struct StatMinTxStartTsCc : public CcRequestBase
+{
+public:
+    explicit StatMinTxStartTsCc(size_t shard_cnt)
+        : min_start_ts_(UINT64_MAX),
+          mux_(),
+          cv_(),
+          finish_cnt_(0),
+          shard_cnt_(shard_cnt)
+    {
+    }
+
+    StatMinTxStartTsCc() = delete;
+    StatMinTxStartTsCc(const StatMinTxStartTsCc &) = delete;
+    StatMinTxStartTsCc(StatMinTxStartTsCc &&) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        min_start_ts_ = std::min(min_start_ts_, ccs.StatMinTxStartTs());
+        assert(finish_cnt_ < shard_cnt_);
+        ++finish_cnt_;
+        if (finish_cnt_ == shard_cnt_)
+        {
+            cv_.notify_one();
+        }
+
+        // return false since StatMinTxStartTsCc is not reused and does not need
+        // to call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return finish_cnt_ == shard_cnt_; });
+    }
+
+    uint64_t GetMinStartTs() const
+    {
+        return min_start_ts_;
+    }
+
+private:
+    uint64_t min_start_ts_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+    std::atomic<size_t> finish_cnt_;
+    size_t shard_cnt_;
+};
+
+struct KickoutArchivesCc : public CcRequestBase
+{
+public:
+    KickoutArchivesCc()
+    {
+    }
+
+    void Set(LruEntry *entry,
+             uint32_t ng_id,
+             int64_t term,
+             uint64_t upper_bound_ts)
+    {
+        lru_entry_ = entry;
+        node_grou_id_ = ng_id;
+        term_ = term;
+        upper_bound_ts_ = upper_bound_ts;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (Sharder::Instance().CheckLeaderTerm(node_grou_id_, term_))
+        {
+            ccs.mem_usage_ -=
+                lru_entry_->KickOutFlushedArchiveRecords(upper_bound_ts_);
+        }
+
+        delete this;
+        return false;
+    }
+
+    LruEntry *lru_entry_;
+    uint32_t node_grou_id_{0};
+    int64_t term_{-1};
+    uint64_t upper_bound_ts_;
+};
+
+struct CleanArchivesForTestCc
+    : public TemplatedCcRequest<CleanArchivesForTestCc, bool>
+{
+public:
+    CleanArchivesForTestCc()
+        : key_(nullptr), key_str_(nullptr), key_shard_code_(0U)
+    {
+    }
+
+    CleanArchivesForTestCc(const CleanArchivesForTestCc &rhs) = delete;
+    CleanArchivesForTestCc(CleanArchivesForTestCc &&rhs) = delete;
+
+    void Reset(const TableName *tn,
+               const TxKey *key,
+               uint32_t key_shard_code,
+               uint64_t tx_number,
+               CcHandlerResult<bool> *res)
+    {
+        TemplatedCcRequest<CleanArchivesForTestCc, bool>::Reset(
+            tn, res, key_shard_code >> 10, tx_number);
+        key_ = key;
+        key_str_ = nullptr;
+        key_shard_code_ = key_shard_code;
+        res_ = res;
+        // cce_ptr_ = nullptr;
+    }
+
+    void Reset(const TableName *tn,
+               const std::string *key_str,
+               uint32_t key_shard_code,
+               uint64_t tx_number,
+               CcHandlerResult<bool> *res)
+    {
+        TemplatedCcRequest<CleanArchivesForTestCc, bool>::Reset(
+            tn, res, key_shard_code >> 10, tx_number);
+        key_ = nullptr;
+        key_str_ = key_str;
+        key_shard_code_ = key_shard_code;
+        res_ = res;
+        // cce_ptr_ = nullptr;
+    }
+
+    // const TableName *Table() const
+    // {
+    //     return table_name_;
+    // }
+
+    const TxKey *Key() const
+    {
+        return key_;
+    }
+
+    // void SetCcePtr(LruEntry *ptr)
+    // {
+    //     cce_ptr_ = ptr;
+    // }
+
+    // LruEntry *CcePtr() const
+    // {
+    //     return cce_ptr_;
+    // }
+
+private:
+    const TxKey *key_;
+    const std::string *key_str_;
+    uint32_t key_shard_code_;
+
+    // LruEntry *cce_ptr_{nullptr};
+};
+
 }  // namespace txservice

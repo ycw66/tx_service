@@ -299,7 +299,8 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     const TxRecord &record,
     bool is_deleted,
     uint64_t commit_ts,
-    const CcEntryAddr &cce_addr)
+    const CcEntryAddr &cce_addr,
+    const std::vector<VersionedRecord> *archives)
 {
     CcMessage send_msg;
 
@@ -316,13 +317,26 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     cce_msg->set_cce_ptr(cce_addr.CcePtr());
     cce_msg->set_term(cce_addr.Term());
 
-    read_outside->set_is_deleted(is_deleted);
+    read_outside->set_rec_status(is_deleted ? RecordStatusType::DELETED
+                                            : RecordStatusType::NORMAL);
     read_outside->set_commit_ts(commit_ts);
 
     read_outside->clear_record();
     if (!is_deleted)
     {
         record.Serialize(*read_outside->mutable_record());
+    }
+
+    if (archives != nullptr)
+    {
+        for (const VersionedRecord &vrecord : *archives)
+        {
+            VersionedRecord_msg *vrec_msg = read_outside->add_archives();
+            vrec_msg->set_version_ts(vrecord.commit_ts_);
+            vrec_msg->set_rec_status(
+                ConvertRecordStatus(vrecord.record_status_));
+            vrecord.record_->Serialize(*vrec_msg->mutable_record());
+        }
     }
 
     // ReadOutside doesn't care the execution of fill tuple succeeds or not.
@@ -491,6 +505,33 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     stream_sender_.SendMessage(node_id, send_msg, &hres);
 }
 
+void txservice::remote::RemoteCcHandler::CleanArchives(
+    uint32_t src_node_id,
+    const TableName &table_name,
+    const TxKey &key,
+    uint32_t key_shard_code,
+    uint64_t tx_number,
+    int64_t tx_term,
+    CcHandlerResult<bool> &hres)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_CleanArchivesRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_tx_number(tx_number);
+
+    CleanArchivesRequest *clean_req = send_msg.mutable_clean_archives_req();
+    clean_req->set_src_node_id(src_node_id);
+    clean_req->set_tablename(table_name);
+    clean_req->clear_key();
+    key.Serialize(*clean_req->mutable_key());
+    clean_req->set_key_shard_code(key_shard_code);
+
+    stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
+}
+
 txservice::remote::IsolationType
 txservice::remote::RemoteCcHandler::ConvertIsolation(IsolationLevel iso_level)
 {
@@ -562,5 +603,23 @@ txservice::remote::RemoteCcHandler::ConvertPostWriteType(
     else
     {
         return CommitType::PostCommit;
+    }
+}
+
+txservice::remote::RecordStatusType
+txservice::remote::RemoteCcHandler::ConvertRecordStatus(RecordStatus rec_status)
+{
+    switch (rec_status)
+    {
+    case RecordStatus::Normal:
+        return RecordStatusType::NORMAL;
+    case RecordStatus::Deleted:
+        return RecordStatusType::DELETED;
+    case RecordStatus::Unknown:
+        return RecordStatusType::UNDEFINED;
+    case RecordStatus::RemoteUnknown:
+        return RecordStatusType::UNDEFINED;
+    default:
+        return RecordStatusType::UNDEFINED;
     }
 }

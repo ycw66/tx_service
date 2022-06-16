@@ -184,15 +184,19 @@ public:
      * @param tx_term Term of the tx node
      * @param rec Record to be cached
      * @param is_deleted Whether or not the record is deleted
+     * @param commit_ts Commit Timestamp
      * @param cce_addr Address of the key's cc entry
      * @param hres Result handler of the request
+     * @param archives Historical versions
      */
-    virtual void ReadOutside(int64_t tx_term,
-                             TxRecord &rec,
-                             bool is_deleted,
-                             uint64_t commit_ts,
-                             const CcEntryAddr &cce_addr,
-                             CcHandlerResult<ReadKeyResult> &hres) = 0;
+    virtual void ReadOutside(
+        int64_t tx_term,
+        TxRecord &rec,
+        bool is_deleted,
+        uint64_t commit_ts,
+        const CcEntryAddr &cce_addr,
+        CcHandlerResult<ReadKeyResult> &hres,
+        const std::vector<VersionedRecord> *archives = nullptr) = 0;
 
     /**
      * @brief ReadLocal is used to read replicated cc maps, which contain a cc
@@ -357,6 +361,12 @@ public:
         CcHandlerResult<Void> &hres) = 0;
 
     virtual uint32_t GetNodeId() const = 0;
+
+    virtual void CleanArchives(const TableName &table_name,
+                               const TxKey &key,
+                               uint64_t tx_number,
+                               int64_t tx_term,
+                               CcHandlerResult<bool> &hres) = 0;
 };
 
 }  // namespace txservice

@@ -27,6 +27,7 @@ struct CommitTxRequest;
 struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct FaultInjectTxRequest;
+struct CleanArchivesTxRequest;
 
 class TransactionExecution
 {
@@ -88,6 +89,7 @@ public:
     void ProcessTxRequest(AbortTxRequest &abort_req);
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
+    void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
 
     /**
      * Interface for storage engine runtime.
@@ -120,6 +122,21 @@ public:
     CcProtocol GetCcProtocol() const
     {
         return protocol_;
+    }
+
+    IsolationLevel GetIsolationLevel() const
+    {
+        return iso_level_;
+    }
+
+    uint64_t GetStartTs() const
+    {
+        return start_ts_;
+    }
+
+    void SetStartTs(uint64_t ts)
+    {
+        start_ts_ = ts;
     }
 
 private:
@@ -173,6 +190,8 @@ private:
     void PostProcess(WriteToLogOp &write_log);
     void Process(FaultInjectOp &fault_inject_op);
     void PostProcess(FaultInjectOp &fault_inject_op);
+    void Process(CleanArchivesOp &clean_akv_op);
+    void PostProcess(CleanArchivesOp &clean_akv_op);
 
     void Process(AcquireAllOp &acq_all_op);
     void PostProcess(AcquireAllOp &acq_all_op);
@@ -311,6 +330,9 @@ private:
     // fault inject
     FaultInjectOp fault_inject_op_;
 
+    // clean archives
+    CleanArchivesOp clean_akv_op_;
+
     friend struct TransactionOperation;
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;
@@ -329,6 +351,7 @@ private:
     friend struct UpsertTableOp;
     friend struct DsUpsertTableOp;
     friend struct SleepOperation;
+    friend struct CleanArchivesOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

@@ -40,6 +40,7 @@ void CatalogKey::Serialize(std::vector<char> &buf, size_t &offset) const
     // A 2-byte integer represents lengths up to 65535, which is far more enough
     // for table names.
     uint16_t len_val = (uint16_t) table_name_.size();
+    buf.resize(offset + sizeof(uint16_t) + len_val);
     const char *val_ptr =
         static_cast<const char *>(static_cast<const void *>(&len_val));
     std::copy(val_ptr, val_ptr + sizeof(uint16_t), buf.begin() + offset);
@@ -103,6 +104,7 @@ TableName &CatalogKey::Name()
 void CatalogRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 {
     uint32_t len_val = (uint32_t) schema_image_.size();
+    buf.reserve(offset + sizeof(uint32_t) + len_val);
     const char *val_ptr =
         static_cast<const char *>(static_cast<const void *>(&len_val));
     std::copy(val_ptr, val_ptr + sizeof(uint32_t), buf.begin() + offset);
@@ -128,6 +130,8 @@ void CatalogRecord::Deserialize(const char *buf, size_t &offset)
     uint32_t len_val = *len_ptr;
     offset += sizeof(uint32_t);
 
+    schema_image_.clear();
+    schema_image_.reserve(len_val);
     schema_image_.append(buf + offset, len_val);
     offset += len_val;
 }

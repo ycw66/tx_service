@@ -5,7 +5,9 @@
 #include <cassert>
 #include <deque>
 #include <map>
+#include <memory>  // std::make_shared
 #include <unordered_set>
+#include <vector>
 
 #include "cc_req_base.h"
 #include "circular_queue.h"
@@ -67,10 +69,13 @@ public:
 
     LruEntry(CcMap *parent);
 
-    virtual size_t GetCcEntryMemUsage() const
-    {
-        return 0;
-    }
+    virtual size_t GetCcEntryMemUsage() const = 0;
+
+    virtual size_t ArchiveRecordsCount() const = 0;
+    virtual size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) = 0;
+    virtual size_t KickOutFlushedArchiveRecords(uint64_t upper_bound_ts) = 0;
+    virtual void ExportArchives(std::vector<VersionedRecord> &akvs) const = 0;
+    virtual TxKey::Uptr ExportKey() const = 0;
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
@@ -145,6 +150,63 @@ public:
     }
 };
 
+// for mvcc
+template <typename ValueT>
+struct ArchiveRecord
+{
+public:
+    std::shared_ptr<ValueT> payload_;
+    uint64_t commit_ts_;
+    RecordStatus payload_status_;
+
+    ArchiveRecord()
+        : payload_(nullptr),
+          commit_ts_(0),
+          payload_status_(RecordStatus::Unknown)
+    {
+    }
+
+    ArchiveRecord(std::shared_ptr<ValueT> payload,
+                  uint64_t commit_ts,
+                  RecordStatus status)
+        : payload_(payload), commit_ts_(commit_ts), payload_status_(status)
+    {
+    }
+
+    ArchiveRecord(const ArchiveRecord<ValueT> &rhs)
+    {
+        payload_ = rhs.payload_;
+        commit_ts_ = rhs.commit_ts_;
+        payload_status_ = rhs.payload_status_;
+    }
+
+    ArchiveRecord &operator=(const ArchiveRecord<ValueT> &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        payload_ = rhs.payload_;
+        commit_ts_ = rhs.commit_ts_;
+        payload_status_ = rhs.payload_status_;
+
+        return *this;
+    }
+
+    size_t MemUsage() const
+    {
+        size_t mem_usage_ = 0;
+        if (payload_ != nullptr)
+        {
+            mem_usage_ += payload_->MemUsage();
+        }
+        mem_usage_ += sizeof(uint64_t);
+        mem_usage_ += sizeof(RecordStatus);
+        return mem_usage_;
+    }
+};
+
 /**
  * @brief A map entry in the concurrency control map. An entry governs
  * concurrency control of a data item and caches the data item's newest
@@ -173,7 +235,8 @@ public:
           payload_status_(RecordStatus::Unknown),
           payload_ckpt_(),
           map_prev_(nullptr),
-          map_next_(nullptr)
+          map_next_(nullptr),
+          archives_()
     {
     }
 
@@ -236,61 +299,8 @@ public:
     CcEntry<KeyT, ValueT> *map_prev_;
     CcEntry<KeyT, ValueT> *map_next_;
 
-    // for mvcc
-    struct ArchiveRecord
-    {
-    public:
-        ValueT payload_;
-        uint64_t commit_ts_;
-        RecordStatus payload_status_;
-
-        ArchiveRecord()
-            : payload_(), commit_ts_(0), payload_status_(RecordStatus::Unknown)
-        {
-        }
-
-        ArchiveRecord(ValueT payload, uint64_t commit_ts, RecordStatus status)
-            : payload_(std::move(payload)),
-              commit_ts_(commit_ts),
-              payload_status_(status)
-        {
-        }
-
-        ArchiveRecord(const ArchiveRecord &rhs) = delete;
-
-        ArchiveRecord(ArchiveRecord &&rhs)
-            : payload_(std::move(rhs.payload_)),
-              commit_ts_(rhs.commit_ts_),
-              payload_status_(rhs.payload_status_)
-        {
-        }
-
-        ArchiveRecord &operator=(ArchiveRecord &&rhs)
-        {
-            if (this == &rhs)
-            {
-                return *this;
-            }
-
-            payload_ = std::move(rhs.payload_);
-            commit_ts_ = rhs.commit_ts_;
-            payload_status_ = rhs.payload_status_;
-
-            return *this;
-        }
-
-        size_t MemUsage() const
-        {
-            size_t mem_usage_ = 0;
-            mem_usage_ += payload_.MemUsage();
-            mem_usage_ += sizeof(uint64_t);
-            mem_usage_ += sizeof(RecordStatus);
-            return mem_usage_;
-        }
-    };
-
-    // save versions exclude the current version
-    std::deque<ArchiveRecord> archives_;
+    // save versions exclude the current version.(descending order)
+    std::deque<ArchiveRecord<ValueT>> archives_;
     // The time when a write tx acquires the write lock/intent on this cc entry.
     uint64_t wlock_ts_;
 
@@ -307,29 +317,142 @@ public:
             return 0;
         }
 
-        archives_.emplace_back(
-            std::move(payload_), commit_ts_, payload_status_);
+        if (archives_.size() > 0)
+        {
+            assert(commit_ts_ > archives_[0].commit_ts_);
+        }
+
+        std::shared_ptr<ValueT> payload_ptr =
+            std::make_shared<ValueT>(std::move(payload_));
+
+        archives_.emplace_front(payload_ptr, commit_ts_, payload_status_);
 
         return sizeof(commit_ts_) + sizeof(payload_status_);
     }
 
     /**
-     * @brief kick out records from archives_;
+     * @brief Add a batch of historical versions.
+     *@param v_recs versions descending ordered by commit_ts
+     * @return New memory usage caused by archive
+     */
+    size_t AddArchiveRecords(const std::vector<VersionedRecord> &v_recs)
+    {
+        if (v_recs.size() == 0)
+        {
+            return 0;
+        }
+
+        auto it = archives_.begin();
+        for (; it != archives_.end(); it++)
+        {
+            if (it->commit_ts_ <= v_recs[0].commit_ts_)
+            {
+                break;
+            }
+        }
+        size_t mem_usage = 0U;
+        for (auto &vrec : v_recs)
+        {
+            if (it == archives_.end() || it->commit_ts_ != vrec.commit_ts_)
+            {
+                it = archives_.emplace(it);
+                it->commit_ts_ = vrec.commit_ts_;
+                it->payload_status_ = vrec.record_status_;
+                if (vrec.record_status_ == RecordStatus::Normal)
+                {
+                    if (vrec.record_ != nullptr)
+                    {
+                        it->payload_ =
+                            std::static_pointer_cast<ValueT>(vrec.record_);
+                    }
+                    else
+                    {
+                        size_t offset = 0;
+                        ValueT *typed_rec = new ValueT();
+                        typed_rec->Deserialize(vrec.record_blob_->data(),
+                                               offset);
+                    }
+                }
+                mem_usage += it->MemUsage();
+            }
+            it++;
+        }
+        return mem_usage;
+    }
+
+    /**
+     *
+     * @brief Kick out historical versions that won't be used according to
+     * 'oldest_active_tx_ts'.
+     * eg:  achives[10,8,4,3,1], oldest_active_tx_ts= 5;
+     * after kicking out, archives will be [10,8,4].
      *
      * @return mem usage of archive records kicked out
      */
-    size_t KickOutArchiveRecords(uint64_t current_ts)
+    size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) override
     {
-        // Remove records submitted 5 seconds ago
-        // TODO(lzx): optimize recycle way
-        uint64_t bound_ts = current_ts - 5000000;
-        size_t mem_usage = 0;
-        auto it = archives_.begin();
-        for (; it != archives_.end() && it->commit_ts_ < bound_ts; it++)
+        if (commit_ts_ <= oldest_active_tx_ts)
         {
-            mem_usage += it->MemUsage();
+            size_t mem_usage = GetArchiveMemUsage();
+            archives_.clear();
+            return mem_usage;
         }
-        archives_.erase(archives_.begin(), it);
+
+        if (archives_.size() <= 1)
+        {
+            return 0;
+        }
+
+        auto it = archives_.begin();
+        for (; it != archives_.end(); it++)
+        {
+            if (it->commit_ts_ <= oldest_active_tx_ts)
+            {
+                break;
+            }
+        }
+        if (it == archives_.end())
+        {
+            return 0;
+        }
+        it++;
+        size_t mem_usage = 0U;
+        for (auto it1 = it; it1 != archives_.end(); it1++)
+        {
+            mem_usage += it1->MemUsage();
+        }
+        archives_.erase(it, archives_.end());
+
+        return mem_usage;
+    }
+
+    /**
+     *
+     * @brief Kick out historical versions after being flushed to kvstore.
+     * eg:  achives[10,8,4,3,1], upper_bound_ts= 4;
+     * after kicking out, archives will be [10,8].
+     *
+     * @param upper_bound_ts the max verion has been flushed
+     * @return mem usage of archive records kicked out
+     */
+    size_t KickOutFlushedArchiveRecords(uint64_t upper_bound_ts) override
+    {
+        auto it = archives_.begin();
+        for (; it != archives_.end(); it++)
+        {
+            if (it->commit_ts_ <= upper_bound_ts)
+            {
+                break;
+            }
+        }
+
+        size_t mem_usage = 0U;
+        for (auto it1 = it; it1 != archives_.end(); it1++)
+        {
+            mem_usage += it1->MemUsage();
+        }
+        archives_.erase(it, archives_.end());
+
         return mem_usage;
     }
 
@@ -344,16 +467,20 @@ public:
     }
 
     /**
-     * @brief Gets the newest version whose version (commit_ts_) is no less than
-     * the input timestamp.
+     * @brief Gets the visible version according to read timestamp.
      *
      * @return true : if find the record; false: not found or has write_lock
      */
     bool MvccGet(uint64_t ts, VersionRecord<ValueT> &rec)
     {
+        if (payload_status_ == RecordStatus::Unknown)
+        {
+            rec.payload_status_ = RecordStatus::Unknown;
+            return true;
+        }
         if (commit_ts_ <= ts)
         {
-            if ((key_lock_.HasWriteLock() && wlock_ts_ < ts))
+            if (key_lock_.HasWriteLock() && wlock_ts_ < ts)
             {
                 // Having write lock means the ccentry will be updated soon.
                 // If wlock_ts_ < ts, the future 'commit_ts' is may also less
@@ -380,20 +507,47 @@ public:
             rec.payload_status_ = payload_status_;
             return true;
         }
-        for (auto it = archives_.crbegin(); it != archives_.crend(); it++)
+        for (auto it = archives_.cbegin(); it != archives_.cend(); it++)
         {
             if (it->commit_ts_ <= ts)
             {
                 if (it->payload_status_ == RecordStatus::Normal)
                 {
-                    rec.payload_ptr_ = &(it->payload_);
+                    rec.payload_ptr_ = it->payload_.get();
                 }
                 rec.commit_ts_ = it->commit_ts_;
                 rec.payload_status_ = it->payload_status_;
                 return true;
             }
         }
-        return false;
+        rec.commit_ts_ = 0;
+        rec.payload_status_ = RecordStatus::VersionUnknown;
+        return true;
+    }
+
+    void ExportArchives(std::vector<VersionedRecord> &akvs) const override
+    {
+        if (archives_.size() > 0)
+        {
+            akvs.reserve(archives_.size());
+            for (auto &rec : archives_)
+            {
+                auto &ref = akvs.emplace_back();
+                ref.record_ = rec.payload_;
+                ref.record_status_ = rec.payload_status_;
+                ref.commit_ts_ = rec.commit_ts_;
+            }
+        }
+    }
+
+    TxKey::Uptr ExportKey() const override
+    {
+        return key_->Clone();
+    }
+
+    size_t ArchiveRecordsCount() const override
+    {
+        return archives_.size();
     }
 };
 

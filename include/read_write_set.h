@@ -51,7 +51,14 @@ public:
                  CcProtocol proto,
                  LockType lock_type)
     {
-        rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
+        auto [it, inserted] =
+            rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
+        if (!inserted)
+        {
+            it->second.version_ts_ = read_ts;
+            it->second.protocol_ = proto;
+            it->second.lock_type_ = lock_type;
+        }
     }
 
     /**

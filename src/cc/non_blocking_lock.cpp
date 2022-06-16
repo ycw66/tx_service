@@ -347,6 +347,11 @@ void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
     write_lock_tx_ = 0;
     is_write_lock_empty_ = true;
 
+    if (ccs == nullptr)
+    {
+        return;  // warning: just for unit-tests.
+    }
+
     TryPopBlockingQueue(ccs);
 }
 
@@ -468,6 +473,10 @@ void NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
     if (!is_write_lock_empty_ && write_lock_tx_ == tx_number)
     {
         ReleaseWriteLock(tx_number, ccs);
+    }
+    else if (!is_write_intent_empty_ && write_intent_tx_ == tx_number)
+    {
+        ReleaseWriteIntent(tx_number, ccs);
     }
     else
     {

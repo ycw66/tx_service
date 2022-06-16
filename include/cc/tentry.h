@@ -33,12 +33,13 @@ public:
     {
     }
 
-    void Reset(uint64_t start_ts, uint32_t tx_ident)
+    void Reset(uint64_t start_ts, uint32_t tx_ident, int64_t term)
     {
         ident_ = tx_ident;
         commit_ts_ = 0;
         lower_bound_ = start_ts;
         status_ = TxnStatus::Ongoing;
+        term_ = term;
     }
 
     TxId GetTxId(uint32_t core_id) const
@@ -51,5 +52,6 @@ public:
     TxnStatus status_;
     uint32_t ident_;
     const uint32_t vec_idx_;
+    int64_t term_;
 };
 }  // namespace txservice

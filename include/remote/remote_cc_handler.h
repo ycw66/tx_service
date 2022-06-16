@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "cc/cc_req_pool.h"
 #include "moodycamelqueue.h"
@@ -8,6 +9,7 @@
 #include "remote/cc_stream_sender.h"
 #include "remote_cc_request.h"
 #include "tx_operation_result.h"
+#include "tx_record.h"  // RecordStatus;VersionedRecord
 
 namespace txservice
 {
@@ -94,7 +96,8 @@ public:
                      const TxRecord &record,
                      bool is_deleted,
                      uint64_t commit_ts,
-                     const CcEntryAddr &cce_addr);
+                     const CcEntryAddr &cce_addr,
+                     const std::vector<VersionedRecord> *archives = nullptr);
 
     void ScanOpen(uint32_t src_node_id,
                   const TableName &table_name,
@@ -172,11 +175,20 @@ public:
                      int node_id,
                      CcHandlerResult<bool> &hres);
 
+    void CleanArchives(uint32_t src_node_id,
+                       const TableName &table_name,
+                       const TxKey &key,
+                       uint32_t key_shard_code,
+                       uint64_t tx_number,
+                       int64_t tx_term,
+                       CcHandlerResult<bool> &hres);
+
 private:
     static IsolationType ConvertIsolation(IsolationLevel iso_level);
     static CcProtocolType ConvertProtocol(CcProtocol proto);
     static CcLockType ConvertLockType(LockType lock_type);
     static CommitType ConvertPostWriteType(PostWriteType write_type);
+    static RecordStatusType ConvertRecordStatus(RecordStatus rec_status);
 
     CcStreamSender &stream_sender_;
 };

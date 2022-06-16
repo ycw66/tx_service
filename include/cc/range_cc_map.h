@@ -43,7 +43,7 @@ public:
      * @param shard
      */
     RangeCcMap(const TableName &range_table_name, CcShard *shard)
-        : TemplateCcMap<KeyT, RangeRecord>(shard, 1)
+        : TemplateCcMap<KeyT, RangeRecord>(shard, range_table_name, 1)
     {
         const std::map<uint32_t, TableRangeEntry> *ranges =
             CcMap::shard_->GetTableRanges(range_table_name);

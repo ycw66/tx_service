@@ -53,7 +53,8 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       post_process_(this),
       write_log_(this),
       sleep_op_(this),
-      fault_inject_op_(this)
+      fault_inject_op_(this),
+      clean_akv_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, handler);
 }
@@ -667,7 +668,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
 
         if (read_.read_type_ == ReadType::Inside &&
-            read_.iso_level_ >= IsolationLevel::RepeatableRead)
+            (read_.read_tx_req_->lock_type_ == LockType::WriteIntent ||
+             read_.iso_level_ >= IsolationLevel::RepeatableRead))
         {
             const ReadSetEntry *prev_read =
                 rw_set_.FindRead(read_res.cce_addr_);
@@ -688,7 +690,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
 
         if (read_.read_type_ == ReadType::Inside &&
-            read_res.rec_status_ == RecordStatus::Unknown)
+            (read_res.rec_status_ == RecordStatus::Unknown ||
+             read_res.rec_status_ == RecordStatus::VersionUnknown))
         {
             // If the read does not retrieve the value, the tx user is likely to
             // read the data store and brings in the value for caching. Cache
@@ -1346,9 +1349,11 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
     set_ts.is_running_ = true;
     for (size_t idx = 0; idx < acquire_write_.acquire_write_cnt_; ++idx)
     {
-        uint64_t acquire_write_ts =
-            acquire_write_.results_[idx].Value().last_vali_ts_;
-        candidate = std::max(candidate, acquire_write_ts + 1);
+        candidate = std::max(
+            candidate, acquire_write_.results_[idx].Value().last_vali_ts_ + 1);
+
+        candidate = std::max(
+            candidate, acquire_write_.results_[idx].Value().commit_ts_ + 1);
     }
 
     const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
@@ -2145,4 +2150,66 @@ void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)
 
     bool_resp_->Finish(fault_inject_op_.succeed_);
 }
+
+void TransactionExecution::ProcessTxRequest(CleanArchivesTxRequest &clean_req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &clean_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    bool_resp_ = &clean_req.tx_result_;
+    bool_resp_->Reset();
+
+    clean_akv_op_.Set(clean_req.tab_name_, clean_req.key_);
+    PushOperation(&clean_akv_op_);
+    Process(clean_akv_op_);
+}
+
+void TransactionExecution::Process(CleanArchivesOp &clean_akv_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &clean_akv_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    clean_akv_op_.Reset();
+    clean_akv_op_.is_running_ = true;
+
+    handler->CleanArchives(*clean_akv_op_.tab_name_,
+                           *clean_akv_op_.key_,
+                           tx_number_.load(std::memory_order_relaxed),
+                           tx_term_,
+                           clean_akv_op_.hd_result_);
+    return;
+}
+
+void TransactionExecution::PostProcess(CleanArchivesOp &clean_akv_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &clean_akv_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    bool_resp_->Finish(clean_akv_op.succeed_);
+}
+
 }  // namespace txservice

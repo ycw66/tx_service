@@ -33,6 +33,7 @@ struct CkptUpdateCc;
 struct CkptTs;
 struct ReplayLogCc;
 struct FaultInjectCC;
+struct CleanArchivesForTestCc;
 
 class CcShard;
 
@@ -41,8 +42,12 @@ class CcMap
 public:
     using uptr = std::unique_ptr<CcMap>;
 
-    CcMap(CcShard *shard, uint64_t schema_ts, bool ccm_has_full_entries = false)
+    CcMap(CcShard *shard,
+          const TableName &table_name,
+          uint64_t schema_ts,
+          bool ccm_has_full_entries = false)
         : shard_(shard),
+          table_name_(table_name),
           ccm_has_full_entries_(ccm_has_full_entries),
           schema_ts_(schema_ts)
     {
@@ -66,6 +71,7 @@ public:
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
+    virtual bool Execute(CleanArchivesForTestCc &req) = 0;
 
     virtual std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const = 0;
@@ -138,6 +144,7 @@ public:
     }
 
     CcShard *const shard_;
+    TableName table_name_;
     // Kv store can be skipped if we know ccm contains all the entries. This is
     // crucial for performance. This flag is true when the table is created and
     // no LRU kickout happens on this ccm. In future, we should make it at range

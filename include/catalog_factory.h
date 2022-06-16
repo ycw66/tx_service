@@ -31,7 +31,8 @@ public:
         const std::string &catalog_image,
         uint64_t version) = 0;
 
-    virtual CcMap::uptr CreatePkCcMap(const TableSchema *table_schema,
+    virtual CcMap::uptr CreatePkCcMap(const TableName &table_name,
+                                      const TableSchema *table_schema,
                                       uint64_t schema_ts,
                                       bool ccm_has_full_entries,
                                       CcShard *shard) = 0;

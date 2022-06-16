@@ -2,8 +2,6 @@
 
 #include <memory>
 
-#include "store/data_store_handler.h"
-
 namespace txservice
 {
 /*

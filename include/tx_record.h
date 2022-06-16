@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <variant>
 
 #include "tx_key.h"
 #include "tx_serialize.h"
@@ -28,7 +30,15 @@ enum struct RecordStatus
     /// record's newest status is unknown (which may have changed since the
     /// initial read that starts concurrency control).
     /// </summary>
-    RemoteUnknown
+    RemoteUnknown,
+    /// <summary>
+    /// Under MVCC-SnapshotIsolation, a tx read one of the historical
+    /// versions of a key, but the historical version is unknown and needs
+    /// to be retrieved from the data store.
+    //  Also, the historical version may be not in data store if the historical
+    //  versions are not flushed into data store before node crashing.
+    /// </summary>
+    VersionUnknown
 };
 
 struct TxRecord
@@ -149,6 +159,11 @@ public:
         field_cnt_ = typed_rhs.field_cnt_;
     }
 
+    size_t MemUsage() const override
+    {
+        return sizeof(field_cnt_) + sizeof(fields_);
+    }
+
     CompositeRecord &operator=(const CompositeRecord &rhs)
     {
         if (this == &rhs)
@@ -215,6 +230,28 @@ public:
     {
         return std::string("");
     }
+};
+
+/**
+ * @brief A wrap type of TxRecord with version and status.
+ * @param record_status_ : txservice::RecordStatus
+ * @param commit_ts_ : uint64_t
+ */
+struct VersionedRecord
+{
+public:
+    VersionedRecord()
+        : record_(nullptr),
+          record_blob_(nullptr),
+          record_status_(RecordStatus::Unknown),
+          commit_ts_(0UL)
+    {
+    }
+
+    std::shared_ptr<TxRecord> record_;
+    const std::string *record_blob_;
+    RecordStatus record_status_;
+    uint64_t commit_ts_;
 };
 
 }  // namespace txservice
