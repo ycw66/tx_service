@@ -24,7 +24,6 @@ namespace remote
 {
 class RemoteCcHandler;
 };
-
 class Checkpointer;
 class TxService;
 
@@ -34,7 +33,7 @@ public:
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
                   CatalogFactory *catalog_factory = nullptr,
-                  store::DataStoreWriteHandler *store_hd = nullptr,
+                  store::DataStoreHandler *store_hd = nullptr,
                   TxService *tx_service = nullptr);
 
     ~LocalCcShards();
@@ -284,7 +283,7 @@ public:
         return min_ts;
     }
 
-    store::DataStoreWriteHandler *const store_hd_;
+    store::DataStoreHandler *const store_hd_;
 
 private:
     void TimerRun();

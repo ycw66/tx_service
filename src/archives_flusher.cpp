@@ -2,11 +2,12 @@
 
 #include "cc/cc_request.h"
 #include "sharder.h"
+#include "store/data_store_handler.h"
 
 namespace txservice
 {
 
-ArchivesFlusher::ArchivesFlusher(store::DataStoreWriteHandler *store_hd)
+ArchivesFlusher::ArchivesFlusher(store::DataStoreHandler *store_hd)
     : store_hd_(store_hd), flush_map_(), mux_(), cv_()
 {
 }

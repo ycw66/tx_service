@@ -4,13 +4,13 @@
 #include <utility>  //pair
 #include <vector>
 
-#include "data_store_handler.h"
+#include "store/data_store_handler.h"
 #include "tx_key.h"     //CompositeKey
 #include "tx_record.h"  //CompositeRecord,VersionedRecord
 
 namespace txservice::store
 {
-class IntMemoryStore : public DataStoreWriteHandler
+class IntMemoryStore : public DataStoreHandler
 {
 public:
     IntMemoryStore()

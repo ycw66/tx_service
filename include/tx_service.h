@@ -15,7 +15,6 @@
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "moodycamelqueue.h"
-#include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_start_ts_collector.h"
@@ -259,7 +258,7 @@ public:
               uint16_t core_cnt = 1,
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
-              store::DataStoreWriteHandler *store_hd = nullptr,
+              store::DataStoreHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr)
         : local_cc_shards_(node_id, core_cnt, catalog_factory, store_hd, this),
           ckpt_(local_cc_shards_, store_hd)

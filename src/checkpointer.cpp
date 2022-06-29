@@ -5,7 +5,7 @@
 namespace txservice
 {
 Checkpointer::Checkpointer(LocalCcShards &shards,
-                           store::DataStoreWriteHandler *write_hd)
+                           store::DataStoreHandler *write_hd)
     : local_shards_(shards),
       last_ckpt_ts_(0),
       mux_(),

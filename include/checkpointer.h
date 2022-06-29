@@ -8,17 +8,17 @@
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
-#include "store/data_store_handler.h"
 #include "util.h"
 
 using namespace std::chrono;
 
 namespace txservice
 {
+
 class Checkpointer
 {
 public:
-    Checkpointer(LocalCcShards &shards, store::DataStoreWriteHandler *write_hd);
+    Checkpointer(LocalCcShards &shards, store::DataStoreHandler *write_hd);
     ~Checkpointer();
 
     void Ckpt();
@@ -54,7 +54,7 @@ private:
     std::mutex mux_;
     std::condition_variable cv_;
     bool request_ckpt_;
-    store::DataStoreWriteHandler *store_hd_;
+    store::DataStoreHandler *store_hd_;
     std::thread thd_;
     Status status_;
 

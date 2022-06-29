@@ -1,3 +1,5 @@
+#pragma once
+
 #include <atomic>
 #include <condition_variable>
 #include <map>
@@ -5,11 +7,15 @@
 #include <thread>
 
 #include "cc/cc_entry.h"
-#include "store/data_store_handler.h"
 #include "type.h"  // TableName
 
 namespace txservice
 {
+
+namespace store
+{
+class DataStoreHandler;
+}
 
 struct ArchiveFlushTask
 {
@@ -24,7 +30,7 @@ class ArchivesFlusher
 {
 public:
     static ArchivesFlusher &Instance(
-        store::DataStoreWriteHandler *store_hd = nullptr)
+        store::DataStoreHandler *store_hd = nullptr)
     {
         static ArchivesFlusher instance_(store_hd);
         return instance_;
@@ -40,11 +46,11 @@ public:
     void Shutdown();
 
 private:
-    ArchivesFlusher(store::DataStoreWriteHandler *store_hd);
+    ArchivesFlusher(store::DataStoreHandler *store_hd);
     void HandleTask();
     void Run();
 
-    store::DataStoreWriteHandler *store_hd_;
+    store::DataStoreHandler *store_hd_;
     std::map<LruEntry *, ArchiveFlushTask> flush_map_;
 
     std::atomic<bool> active_;

@@ -11,7 +11,7 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
                              CatalogFactory *catalog_factory,
-                             store::DataStoreWriteHandler *store_hd,
+                             store::DataStoreHandler *store_hd,
                              TxService *tx_service)
     : store_hd_(store_hd),
       node_id_(node_id),

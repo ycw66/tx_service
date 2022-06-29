@@ -2,40 +2,104 @@
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
+#include "store/data_store_scanner.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
 
-namespace txservice::store
+namespace txservice
 {
-class DataStoreWriteHandler
+class TxService;
+
+namespace store
+{
+class DataStoreHandler
 {
 public:
-    virtual ~DataStoreWriteHandler() = default;
+    virtual ~DataStoreHandler() = default;
 
-    virtual bool PutAll(const TableName &table_name,
-                        std::vector<LruEntry *> &batch,
-                        const Schema *key_schema,
-                        const Schema *rec_schema,
+    virtual bool Connect() = 0;
+
+    virtual bool PutAll(const txservice::TableName &table_name,
+                        std::vector<txservice::LruEntry *> &batch,
+                        const txservice::Schema *key_schema,
+                        const txservice::Schema *rec_schema,
                         uint64_t schema_ts) = 0;
 
-    virtual bool PutSkAll(const TableName &table_name,
-                          std::vector<LruEntry *> &batch,
-                          const SecondaryKeySchema *sk_schema,
+    virtual bool PutSkAll(const txservice::TableName &table_name,
+                          std::vector<txservice::LruEntry *> &batch,
+                          const txservice::SecondaryKeySchema *sk_schema,
                           uint64_t schema_ts) = 0;
 
-    virtual void UpsertTable(const TableName &ccm_table_name,
-                             const TableSchema *table_schema,
-                             const std::vector<txservice::TableName> *indexes,
-                             bool is_deleted,
-                             uint64_t commit_ts,
-                             CcHandlerResult<Void> *hd_res) = 0;
+    virtual void UpsertTable(
+        const txservice::TableName &ccm_table_name,
+        const txservice::TableSchema *table_schema,
+        const std::vector<txservice::TableName> *indexes,
+        bool is_deleted,
+        uint64_t commit_ts,
+        txservice::CcHandlerResult<txservice::Void> *hd_res) = 0;
 
-    virtual void FetchTableCatalog(const TableName &ccm_table_name,
+    virtual void FetchTableCatalog(const txservice::TableName &ccm_table_name,
                                    void *fetch_req) = 0;
 
-    virtual void FetchTableRanges(const TableName &range_table_name,
+    virtual void FetchTableRanges(const txservice::TableName &range_table_name,
                                   void *fetch_req) = 0;
+
+    virtual bool Read(const txservice::TableName &table_name,
+                      const txservice::TxKey &key,
+                      txservice::TxRecord &rec,
+                      bool &found,
+                      uint64_t &version_ts,
+                      const txservice::Schema *key_schema,
+                      const txservice::Schema *rec_schema,
+                      uint64_t table_schema_ts) = 0;
+
+    virtual bool FetchTable(const txservice::TableName &table_name,
+                            std::string &schema_image,
+                            bool &found,
+                            uint64_t &version_ts) const = 0;
+
+    virtual bool FetchTable(const txservice::TableName &table_name,
+                            std::string &schema_image,
+                            bool &found) const = 0;
+
+    virtual bool DiscoverAllTableNames(
+        std::vector<std::string> &norm_name_vec) const = 0;
+
+    //-- database
+    virtual bool UpsertDatabase(std::string_view db,
+                                std::string_view definition) const = 0;
+    virtual bool DropDatabase(std::string_view db) const = 0;
+    virtual bool FetchDatabase(std::string_view db,
+                               std::string &definition,
+                               bool &found) const = 0;
+    virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
+
+    //-- view
+    virtual bool UpsertView(std::string_view view,
+                            std::string_view definition) const = 0;
+    virtual bool DropView(std::string_view view) const = 0;
+    virtual bool FetchView(std::string_view view,
+                           std::string &definition,
+                           bool &found) const = 0;
+    virtual bool DiscoverAllViewNames(
+        std::vector<std::string> &view_names) const = 0;
+
+    virtual std::unique_ptr<DataStoreScanner> ScanForward(
+        const txservice::TableName &table_name,
+        const txservice::TxKey &start_key,
+        bool inclusive,
+        uint8_t key_parts,
+        const txservice::Schema *key_schema,
+        const txservice::Schema *rec_schema,
+        bool scan_foward) = 0;
+
+    virtual std::unique_ptr<DataStoreScanner> ScanForward(
+        const txservice::TableName &table_name,
+        const std::string &search_cond,
+        const txservice::Schema *key_schema,
+        const txservice::Schema *rec_schema,
+        bool scan_foward) = 0;
 
     /**
      * @brief Write historical versions into DataStore.
@@ -65,108 +129,14 @@ public:
         const txservice::TxKey &key,
         std::vector<txservice::VersionedRecord> &archives,
         uint64_t from_ts) = 0;
-};
 
-// class IntMemoryStore : public DataStoreWriteHandler
-//{
-// public:
-//    IntMemoryStore()
-//    {
-//    }
-//
-//    bool PutAll(const TableName &table_name,
-//                std::vector<LruEntry *> &batch,
-//                const Schema *key_schema,
-//                const Schema *rec_schema) override
-//    {
-//        for (const auto &entry : batch)
-//        {
-//            CcEntry<CompositeKey<int>, CompositeRecord<int>> *cce =
-//                static_cast<CcEntry<CompositeKey<int>, CompositeRecord<int>>
-//                *>(
-//                    entry);
-//
-//            const CompositeKey<int> &key = *cce->key_;
-//            const CompositeRecord<int> &rec = cce->payload_ckpt_.first;
-//            bool is_deleted = cce->payload_ckpt_.second;
-//
-//            int key_val = std::get<0>(key.Tuple());
-//            if (is_deleted)
-//            {
-//                int_store_.erase(key_val);
-//            }
-//            else
-//            {
-//                int rec_val = std::get<0>(rec.Tuple());
-//                int_store_.insert_or_assign(key_val, rec_val);
-//            }
-//
-//            if (int_store_.size() > 1000)
-//            {
-//                int_store_.erase(int_store_.begin());
-//            }
-//        }
-//
-//        return true;
-//    }
-//
-//    bool PutSkAll(const TableName &table_name,
-//                  std::vector<LruEntry *> &batch,
-//                  const SecondaryKeySchema *sk_schema) override
-//    {
-//        for (const auto &entry : batch)
-//        {
-//            using KeyPair = std::pair<CompositeKey<int>, CompositeKey<int>>;
-//            using KeyPtrPair =
-//                std::pair<const CompositeKey<int> *, const CompositeKey<int>
-//                *>;
-//
-//            CcEntry<KeyPair, KeyPtrPair> *cce =
-//                static_cast<CcEntry<KeyPair, KeyPtrPair> *>(entry);
-//
-//            const CompositeKey<int> &sk = *cce->payload_ckpt_.first.first;
-//            const CompositeKey<int> &pk = *cce->payload_ckpt_.first.second;
-//            bool is_del = cce->payload_ckpt_.second;
-//
-//            int sk_val = std::get<0>(sk.Tuple());
-//            int pk_val = std::get<0>(pk.Tuple());
-//
-//            std::pair<int, int> key(sk_val, pk_val);
-//            if (is_del)
-//            {
-//                int_index_.erase(key);
-//            }
-//            else
-//            {
-//                int_index_.try_emplace(key);
-//            }
-//
-//            if (int_index_.size() > 1000)
-//            {
-//                int_index_.erase(int_index_.begin());
-//            }
-//        }
-//
-//        return true;
-//    }
-//
-//    size_t Size() const
-//    {
-//        return int_store_.size();
-//    }
-//
-//    int MinKey() const
-//    {
-//        return int_store_.begin()->first;
-//    }
-//
-//    int MaxKey() const
-//    {
-//        return int_store_.rbegin()->first;
-//    }
-//
-// private:
-//    std::map<int, int> int_store_;
-//    std::map<std::pair<int, int>, Void> int_index_;
-//};
-}  // namespace txservice::store
+    void SetTxService(txservice::TxService *tx_service)
+    {
+        tx_service_ = tx_service;
+    }
+
+protected:
+    txservice::TxService *tx_service_;
+};
+}  // namespace store
+}  // namespace txservice
