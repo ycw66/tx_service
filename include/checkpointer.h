@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -18,7 +19,9 @@ namespace txservice
 class Checkpointer
 {
 public:
-    Checkpointer(LocalCcShards &shards, store::DataStoreHandler *write_hd);
+    Checkpointer(LocalCcShards &shards,
+                 store::DataStoreHandler *write_hd,
+                 const uint32_t &checkpoint_interval);
     ~Checkpointer();
 
     void Ckpt();
@@ -57,6 +60,7 @@ private:
     store::DataStoreHandler *store_hd_;
     std::thread thd_;
     Status status_;
+    const uint32_t checkpoint_interval_;
 
     TxService *tx_service_;
 };

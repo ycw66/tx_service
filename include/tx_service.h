@@ -254,15 +254,22 @@ class TxService
 public:
     TxService(const std::string &local_path,
               CatalogFactory *catalog_factory,
+              const std::map<std::string, uint32_t> &conf,
               uint32_t node_id = 0,
-              uint16_t core_cnt = 1,
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr)
-        : local_cc_shards_(node_id, core_cnt, catalog_factory, store_hd, this),
-          ckpt_(local_cc_shards_, store_hd)
+        : local_cc_shards_(node_id,
+                           conf.find("core_num")->second,
+                           catalog_factory,
+                           store_hd,
+                           this),
+          ckpt_(local_cc_shards_,
+                store_hd,
+                conf.find("checkpointer_interval")->second)
     {
+        uint32_t core_cnt = conf.find("core_num")->second;
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
 

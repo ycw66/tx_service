@@ -5,14 +5,16 @@
 namespace txservice
 {
 Checkpointer::Checkpointer(LocalCcShards &shards,
-                           store::DataStoreHandler *write_hd)
+                           store::DataStoreHandler *write_hd,
+                           const uint32_t &checkpoint_interval)
     : local_shards_(shards),
       last_ckpt_ts_(0),
       mux_(),
       cv_(),
       request_ckpt_(false),
       store_hd_(write_hd),
-      status_(Status::Active)
+      status_(Status::Active),
+      checkpoint_interval_(checkpoint_interval)
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -251,7 +253,7 @@ void Checkpointer::Run()
         {
             cv_.wait_for(
                 lk,
-                10s,
+                chrono::seconds(checkpoint_interval_),
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
