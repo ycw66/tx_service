@@ -109,9 +109,27 @@ int CcNode::Start()
     return 0;
 }
 
-void CcNode::Stop()
+CcNode::~CcNode()
 {
     delete node_;
+}
+
+// Shut this node down.
+void CcNode::Shutdown()
+{
+    if (node_)
+    {
+        node_->shutdown(NULL);
+    }
+}
+
+// Blocking this thread until the node is eventually down.
+void CcNode::Join()
+{
+    if (node_)
+    {
+        node_->join();
+    }
 }
 
 int CcNode::TransferLeader()

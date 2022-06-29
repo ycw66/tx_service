@@ -45,11 +45,14 @@ public:
                     fault::ReplayService *replay_service,
                     uint32_t log_group_cnt);
 
-    ~CcNode() = default;
+    ~CcNode();
 
     int Start();
 
-    void Stop();
+    void Shutdown();
+
+    // Blocking this thread until the node is eventually down.
+    void Join();
 
     int TransferLeader();
 

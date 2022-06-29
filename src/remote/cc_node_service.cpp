@@ -112,6 +112,8 @@ void CcNodeService::GetMinTxStartTs(
     ::txservice::remote::GetMinTxStartTsResponse *response,
     ::google::protobuf::Closure *done)
 {
+    brpc::ClosureGuard done_guard(done);
+
     uint32_t ng_id = request->ng_id();
     uint64_t min_ts = UINT64_MAX;
     if (Sharder::Instance().LeaderNodeId(ng_id) == local_shards_.NodeId())

@@ -59,15 +59,20 @@ void Sharder::Shutdown()
     log_replay_server_.Stop(0);
     log_replay_server_.Join();
 
-    cc_node_server_.Stop(0);
-    cc_node_server_.Join();
-    cc_node_service_ = nullptr;
-
-    // stop but not destruct each cc_node
+    // shutdown braft node.
     for (auto &cc_node : cc_nodes_)
     {
-        cc_node.second->Stop();
+        cc_node.second->Shutdown();
     }
+    cc_node_server_.Stop(0);
+
+    // join braft node.
+    for (auto &cc_node : cc_nodes_)
+    {
+        cc_node.second->Join();
+    }
+    cc_node_server_.Join();
+    cc_node_service_ = nullptr;
 
     // CcNode will access log_replay_service_ to replay log when becoming node
     // group leader, so log_replay_service_ should be destructed after all
