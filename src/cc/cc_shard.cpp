@@ -57,21 +57,17 @@ CcShard::CcShard(uint16_t core_id,
         std::make_unique<CatalogCcMap>(this, catalog_ccm_name));
 }
 
-CcMap *CcShard::GetCcm(const TableName &table_name,
-                       uint32_t node_group,
-                       int8_t &error_code)
+CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
 {
     if (node_group == node_id_)
     {
         auto table_it = native_ccms_.find(table_name);
         if (table_it == native_ccms_.end())
         {
-            error_code = 1;
             return nullptr;
         }
         else
         {
-            error_code = 0;
             return table_it->second.get();
         }
     }
@@ -86,18 +82,21 @@ CcMap *CcShard::GetCcm(const TableName &table_name,
         {
             return ccm_it->second.get();
         }
+        else if (table_name == catalog_ccm_name)
+        {
+            // The catalog cc map "___catalog" is initialized as one of native
+            // cc maps when the cc shard is initialized. The cc map in failed
+            // over cc node is initialized lazily, when the cc node becomes the
+            // leader.
+            auto catalog_it = ng_ccm.try_emplace(
+                node_group,
+                std::make_unique<CatalogCcMap>(this, catalog_ccm_name));
+
+            return catalog_it.first->second.get();
+        }
         else
         {
-            auto native_table_it = native_ccms_.find(table_name);
-            if (native_table_it == native_ccms_.end())
-            {
-                error_code = 1;
-                return nullptr;
-            }
-
-            auto new_ccm_it = ng_ccm.try_emplace(
-                node_group, native_table_it->second->Clone());
-            return new_ccm_it.first->second.get();
+            return nullptr;
         }
     }
 }
@@ -192,8 +191,8 @@ TEntry *CcShard::LocateTx(const TxId &tx_id)
 
 TEntry *CcShard::LocateTx(TxNumber tx_number)
 {
-    // The lower 4 bytes represent the identity on a core, while the higher 4
-    // bytes represent the global core ID.
+    // The lower 4 bytes represent the identity on a core, while the higher
+    // 4 bytes represent the global core ID.
     uint32_t identity = tx_number & 0xFFFFFFFF;
 
     for (TEntry &tx_entry : tx_vec_)
@@ -327,8 +326,8 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
     // If the tx has been holding a lock/intention for an extended period of
     // time (more than 5 seconds), inquires the tx's status. If the tx has
-    // failed or committed, recovers the orphan lock/intention. Or, does nothing
-    // and waits for the tx to make further actions.
+    // failed or committed, recovers the orphan lock/intention. Or, does
+    // nothing and waits for the tx to make further actions.
     if (now_ts - lk_info.ts_ >= ts_gap &&
         now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
@@ -427,7 +426,7 @@ size_t CcShard::Clean()
 
     if (mem_size > 0 || free_cnt > 0)
     {
-        mem_usage_ -= mem_size;
+        DecrementMemory(mem_size);
         return 1;
     }
 
@@ -720,6 +719,18 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
             fail_range_it->second;
         range_maps.try_emplace(
             ng_id, catalog_factory_->CreatePkRangeMap(range_table_name, this));
+    }
+}
+
+void CcShard::DecrementMemory(size_t mem_size)
+{
+    if (mem_usage_ >= mem_size)
+    {
+        mem_usage_ -= mem_size;
+    }
+    else
+    {
+        mem_usage_ = 0;
     }
 }
 

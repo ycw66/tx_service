@@ -85,10 +85,15 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
     {
         // A new catalog entry is created in LocalCcShards.
         catalog_entry.InitSchema(
-            catalog_image.empty() ? nullptr
-                                  : catalog_factory_->CreateTableSchema(
-                                        table_name, catalog_image, commit_ts),
+            catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, catalog_image, commit_ts, cc_ng_id),
             commit_ts);
+
+        auto ng_catalog_it = table_catalogs_.find(table_name);
+        auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
+        auto result_view = catalog_it->second.SchemaView();
     }
     else
     {
@@ -101,7 +106,7 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
                 catalog_image.empty()
                     ? nullptr
                     : catalog_factory_->CreateTableSchema(
-                          table_name, catalog_image, commit_ts),
+                          table_name, catalog_image, commit_ts, cc_ng_id),
                 commit_ts);
         }
     }
@@ -127,9 +132,10 @@ const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
-            catalog_image.empty() ? nullptr
-                                  : catalog_factory_->CreateTableSchema(
-                                        table_name, catalog_image, commit_ts),
+            catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, catalog_image, commit_ts, cc_ng_id),
             commit_ts);
     }
 

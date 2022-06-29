@@ -10,6 +10,11 @@ CatalogKey::CatalogKey(const TableName &name) : table_name_(name)
 {
 }
 
+CatalogKey::CatalogKey(const CatalogKey &rhs, const Schema *)
+    : table_name_(rhs.table_name_)
+{
+}
+
 bool CatalogKey::operator==(const TxKey &rhs) const
 {
     return false;
@@ -139,14 +144,19 @@ void CatalogRecord::Deserialize(const char *buf, size_t &offset)
 TxRecord::Uptr CatalogRecord::Clone() const
 {
     std::unique_ptr<CatalogRecord> rec = std::make_unique<CatalogRecord>();
-    rec->schema_view_ = schema_view_;
+
+    rec->schema_ = schema_;
+    rec->dirty_schema_ = dirty_schema_;
+    rec->schema_ts_ = schema_ts_;
+    rec->schema_image_ = schema_image_;
+
     return rec;
 }
 
 void CatalogRecord::Copy(const TxRecord &rhs)
 {
     const CatalogRecord &typed_rhs = static_cast<const CatalogRecord &>(rhs);
-    schema_view_ = typed_rhs.schema_view_;
+    *this = typed_rhs;
 }
 
 std::string CatalogRecord::ToString() const
@@ -154,14 +164,11 @@ std::string CatalogRecord::ToString() const
     return std::string();
 }
 
-const TableSchemaView *CatalogRecord::SchemaView() const
-{
-    return schema_view_;
-}
-
 void CatalogRecord::SetSchemaView(const TableSchemaView *view)
 {
-    schema_view_ = view;
+    schema_ = view->schema_;
+    dirty_schema_ = view->dirty_schema_;
+    schema_ts_ = view->version_ts_;
 }
 
 const std::string &CatalogRecord::SchemaImage() const
@@ -179,6 +186,21 @@ void CatalogRecord::SetSchemaImage(std::string &schema_image)
     schema_image_ = schema_image;
 }
 
+const TableSchema *CatalogRecord::Schema() const
+{
+    return schema_;
+}
+
+uint64_t CatalogRecord::SchemaTs() const
+{
+    return schema_ts_;
+}
+
+const TableSchema *CatalogRecord::DirtySchema() const
+{
+    return dirty_schema_;
+}
+
 CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
 {
     if (this == &rhs)
@@ -186,7 +208,9 @@ CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
         return *this;
     }
 
-    schema_view_ = rhs.schema_view_;
+    schema_ = rhs.schema_;
+    dirty_schema_ = rhs.dirty_schema_;
+    schema_ts_ = rhs.schema_ts_;
     schema_image_ = rhs.schema_image_;
 
     return *this;

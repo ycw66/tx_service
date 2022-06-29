@@ -149,14 +149,13 @@ int CcNode::TransferLeader()
         butil::str2endpoint(ng_ips_.at(0).c_str(), ng_ports_.at(0), &addr);
         braft::PeerId first_peer(addr, 0);
 
-        using namespace std::chrono_literals;
-        std::this_thread::sleep_for(5s);
         int err = node_->transfer_leadership_to(first_peer);
 
         size_t retry = 3;
         while (retry > 0 && err != 0)
         {
-            std::this_thread::sleep_for(5s);
+            using namespace std::chrono_literals;
+            std::this_thread::sleep_for(1s);
             err = node_->transfer_leadership_to(first_peer);
             --retry;
         }
@@ -345,7 +344,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
         res.set_error(false);
 
         brpc::Controller cntl;
-        cntl.set_timeout_ms(100);
+        cntl.set_timeout_ms(3000);
         stub.Transfer(&cntl, &req, &res, nullptr);
 
         if (cntl.Failed())

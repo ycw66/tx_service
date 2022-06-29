@@ -1333,7 +1333,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             // Store a copy of index table names for UpsertSkTable()
             upsert_kv_table_op_.index_names_ =
-                catalog_rec_.SchemaView()->schema_->IndexNames();
+                catalog_rec_.Schema()->IndexNames();
 
             // For DROP TABLE operations, the data store operation of
             // deleting the k-v table happens after the commit log is
@@ -1348,8 +1348,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // The post write request right after flushing the prepare log
             // installs the dirty schema in the tx service and returns a
             // local view (pointer) of the committed and dirty schema.
-            upsert_kv_table_op_.table_schema_ =
-                catalog_rec_.SchemaView()->dirty_schema_;
+            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
             txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }

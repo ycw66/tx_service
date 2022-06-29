@@ -29,21 +29,30 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
 
 bool FetchCatalogCc::Execute(CcShard &ccs)
 {
-    if (status_ == RecordStatus::Normal)
+    int64_t cc_ng_candid_term =
+        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+    if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
     {
-        assert(commit_ts_ > 0);
-        ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, commit_ts_);
-    }
-    else if (status_ == RecordStatus::Deleted)
-    {
-        assert(catalog_image_.empty());
-        ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, ccs.Now());
-    }
-    else
-    {
-        // Timestamp being 0 means that there is an error when fetching from the
-        // data store and the catalog status is unknown.
-        ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 0);
+        if (status_ == RecordStatus::Normal)
+        {
+            assert(commit_ts_ > 0);
+            ccs.CreateCatalog(
+                table_name_, cc_ng_id_, catalog_image_, commit_ts_);
+        }
+        else if (status_ == RecordStatus::Deleted)
+        {
+            assert(catalog_image_.empty());
+            ccs.CreateCatalog(
+                table_name_, cc_ng_id_, catalog_image_, ccs.Now());
+        }
+        else
+        {
+            // Timestamp being 0 means that there is an error when fetching from
+            // the data store and the catalog status is unknown.
+            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 0);
+        }
     }
 
     for (CcRequestBase *&req : requesters_)

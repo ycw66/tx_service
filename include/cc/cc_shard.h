@@ -98,12 +98,9 @@ public:
      *
      * @param table_name The table name.
      * @param node_group The ID of the cc node group.
-     * @param error_code
      * @return CcMap* The pointer to the cc map.
      */
-    CcMap *GetCcm(const TableName &table_name,
-                  uint32_t node_group,
-                  int8_t &error_code);
+    CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
     bool Full() const
     {
@@ -398,6 +395,8 @@ public:
     void DropCcms(NodeGroupId ng_id);
 
     void CreateRangeCcMap(const TableName &range_table_name, NodeGroupId ng_id);
+
+    void DecrementMemory(size_t mem_size);
 
     const uint32_t node_id_;
     const uint16_t core_id_;

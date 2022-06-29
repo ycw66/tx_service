@@ -18,6 +18,7 @@ struct TableSchema
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
     virtual std::vector<TableName> IndexNames() const = 0;
+    virtual const Schema *IndexKeySchema(const TableName &index_name) const = 0;
 };
 
 class CatalogFactory
@@ -29,7 +30,8 @@ public:
     virtual TableSchema::uptr CreateTableSchema(
         const std::string &table_name,
         const std::string &catalog_image,
-        uint64_t version) = 0;
+        uint64_t version,
+        NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreatePkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
@@ -44,5 +46,11 @@ public:
 
     virtual CcMap::uptr CreatePkRangeMap(const TableName &range_pk_table_name,
                                          CcShard *shard) = 0;
+
+    virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
+        ScanDirection direction, const Schema *key_schema) = 0;
+
+    virtual std::unique_ptr<CcScanner> CreateSkCcmScanner(
+        ScanDirection direction, const Schema *compound_key_schema) = 0;
 };
 }  // namespace txservice

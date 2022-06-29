@@ -775,8 +775,8 @@ public:
              *cce->payload_.sk_ == *next_cce->payload_.sk_))
         {
             // delete secondary map of sk_index_
-            shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
-            shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
+            shard_->DecrementMemory(cce->GetCcEntryMemUsage() +
+                                    cce->payload_.pk_->MemUsage());
 
             auto sk_it = sk_index_.find(*cce->payload_.sk_);
             assert(sk_it != sk_index_.end());
@@ -790,9 +790,9 @@ public:
         else
         {
             // delete sk_index_
-            shard_->mem_usage_ -= cce->GetCcEntryMemUsage();
-            shard_->mem_usage_ -= cce->payload_.pk_->MemUsage();
-            shard_->mem_usage_ -= cce->payload_.sk_->MemUsage();
+            shard_->DecrementMemory(cce->GetCcEntryMemUsage() +
+                                    cce->payload_.pk_->MemUsage() +
+                                    cce->payload_.sk_->MemUsage());
 
             // The (sk,pk) pair is the last entry of this sk group. Removes the
             // sk from the index.
@@ -874,16 +874,6 @@ public:
         }
 
         return cnt;
-    }
-
-    std::unique_ptr<CcMap> Clone() const override
-    {
-        return std::make_unique<SkCcMap<SkT, PkT>>(
-            shard_,
-            table_name_,
-            schema_ts_,
-            compound_schema_.sk_schema_.get(),
-            compound_schema_.pk_schema_.get());
     }
 
 private:

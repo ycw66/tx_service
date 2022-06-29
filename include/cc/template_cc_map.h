@@ -400,7 +400,7 @@ public:
                 assert(ite != prior_cce.insert_intention_set_.end());
                 assert(ite->second->tx_id_.TxNumber() == txn);
 
-                shard_->mem_usage_ -= new_cce->payload_.MemUsage();
+                shard_->DecrementMemory(new_cce->payload_.MemUsage());
                 if (payload_str == nullptr)
                 {
                     new_cce->payload_ = *commit_val;
@@ -472,7 +472,8 @@ public:
 
                 cce.commit_ts_ = commit_ts;
 
-                shard_->mem_usage_ -= cce.payload_.MemUsage();
+                shard_->DecrementMemory(cce.payload_.MemUsage());
+
                 if (payload_str == nullptr && !is_del)
                 {
                     cce.payload_ = *commit_val;
@@ -1032,25 +1033,20 @@ public:
             {
                 if (commit_ts > 0)
                 {
-                    if (req.CommitType() == PostWriteType::PrepareCommit)
-                    {
-                        cce_ptr->payload_ = *payload;
-                    }
-                    else
-                    {
-                        cce_ptr->commit_ts_ = commit_ts;
-                        if (req.DmlOp() == DmlOperation::Delete)
-                        {
-                            cce_ptr->payload_status_ = RecordStatus::Deleted;
-                        }
-                        else
-                        {
-                            cce_ptr->payload_ = *payload;
-                            cce_ptr->payload_status_ = RecordStatus::Normal;
-                        }
-                    }
+                    cce_ptr->commit_ts_ = commit_ts;
+                    cce_ptr->payload_ = *payload;
 
-                    TryInsertCkptList(cce_ptr);
+                    // A prepare commit request only installs the dirty value,
+                    // and does not change the record status.
+                    if (req.CommitType() == PostWriteType::PostCommit)
+                    {
+                        cce_ptr->payload_status_ =
+                            req.DmlOp() == DmlOperation::Delete
+                                ? RecordStatus::Deleted
+                                : RecordStatus::Normal;
+
+                        TryInsertCkptList(cce_ptr);
+                    }
                 }
 
                 // When commit_ts = 0, the request removes the write lock
@@ -2437,7 +2433,7 @@ public:
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
-                shard_->mem_usage_ -= cce->payload_ckpt_.first.MemUsage();
+                shard_->DecrementMemory(cce->payload_ckpt_.first.MemUsage());
                 cce->payload_ckpt_.first = cce->payload_;
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
@@ -2689,7 +2685,7 @@ public:
         prior->map_next_ = next;
         next->map_prev_ = prior;
 
-        shard_->mem_usage_ -= cc_entry->GetCcEntryMemUsage();
+        shard_->DecrementMemory(cc_entry->GetCcEntryMemUsage());
 
         ccm_.erase(*cc_entry->key_);
     }
@@ -2742,12 +2738,6 @@ public:
         return record_schema_;
     }
 
-    std::unique_ptr<CcMap> Clone() const override
-    {
-        return std::make_unique<TemplateCcMap<KeyT, ValueT>>(
-            shard_, table_name_, schema_ts_, key_schema_, record_schema_);
-    }
-
 protected:
     CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, uint64_t ts)
     {
@@ -2772,10 +2762,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.emplace_hint(lb_it,
-                                       std::piecewise_construct,
-                                       std::forward_as_tuple(key),
-                                       std::forward_as_tuple(this));
+        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key, key_schema_), this);
         new_cce_ptr = &em_it->second;
         new_cce_ptr->key_ = &em_it->first;
 
@@ -2824,7 +2811,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.try_emplace(key, this);
+        auto em_it = ccm_.try_emplace(KeyT(key, key_schema_), this);
         new_cce_ptr = &em_it.first->second;
 
         if (em_it.second)

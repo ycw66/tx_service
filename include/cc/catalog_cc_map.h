@@ -34,11 +34,6 @@ public:
 
     using TemplateCcMap::Execute;
 
-    std::unique_ptr<CcMap> Clone() const override
-    {
-        return std::make_unique<CatalogCcMap>(shard_, table_name_);
-    }
-
     bool Execute(PostWriteAllCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -92,6 +87,8 @@ public:
         }
 
         CatalogRecord *schema_rec = nullptr;
+        const TableSchemaView *schema_view = nullptr;
+
         switch (req.CommitType())
         {
         case PostWriteType::PrepareCommit:
@@ -127,7 +124,7 @@ public:
                     req.SetDecodedPayload(std::move(decoded_rec));
                 }
 
-                const TableSchemaView *schema_view =
+                schema_view =
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                req.NodeGroupId(),
                                                schema_rec->SchemaImage(),
@@ -139,12 +136,17 @@ public:
             {
                 assert(req.Payload() != nullptr);
                 schema_rec = static_cast<CatalogRecord *>(req.Payload());
+                schema_view =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
             }
 
             break;
         }
         case PostWriteType::PostCommit:
         {
+            schema_view =
+                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
             if (shard_->core_id_ == 0)
             {
                 // For post commit, retrieves the current and dirty schema pair
@@ -166,8 +168,13 @@ public:
                     req.SetDecodedPayload(std::move(empty_rec));
                 }
 
-                schema_rec->SetSchemaView(
-                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId()));
+                TableSchemaView committed_view;
+                committed_view.schema_ = schema_view->dirty_schema_;
+                committed_view.version_ts_ = schema_view->dirty_version_ts_;
+                committed_view.dirty_schema_ = nullptr;
+                committed_view.dirty_version_ts_ = 0;
+
+                schema_rec->SetSchemaView(&committed_view);
             }
             else
             {
@@ -184,8 +191,7 @@ public:
             break;
         }
 
-        assert(schema_rec->SchemaView() != nullptr);
-        const TableSchemaView *schema_view = schema_rec->SchemaView();
+        assert(schema_view != nullptr);
 
         // When the request commits the schema operation, modifies the cc
         // map(s) at this shard.
@@ -251,7 +257,8 @@ public:
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&
-            shard_->core_id_ == 0 && schema_view->dirty_version_ts_ > 0)
+            shard_->core_id_ == shard_->core_cnt_ - 1 &&
+            schema_view->dirty_version_ts_ > 0)
         {
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
@@ -358,6 +365,21 @@ public:
             {
                 if (schema_view->schema_ != nullptr)
                 {
+                    shard_->CreatePkCcMap(table_key->Name(),
+                                          schema_view->schema_,
+                                          req.NodeGroupId(),
+                                          schema_view->version_ts_);
+
+                    std::vector<TableName> index_names =
+                        schema_view->schema_->IndexNames();
+                    for (const TableName &index_name : index_names)
+                    {
+                        shard_->CreateSkCcMap(index_name,
+                                              schema_view->schema_,
+                                              req.NodeGroupId(),
+                                              schema_view->version_ts_);
+                    }
+
                     req.SetReadType(ReadType::OutsideNormal);
                     read_result.rec_status_ = RecordStatus::Normal;
                 }

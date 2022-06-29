@@ -47,12 +47,17 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        int8_t error_code = 0;
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cc_ng_term < 0)
+        {
+            res_->SetError(-1);
+            return true;
+        }
 
         if (ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_, error_code);
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 
             if (ccm_ == nullptr)
             {
@@ -64,8 +69,7 @@ public:
                     if (ranges != nullptr)
                     {
                         ccs.CreateRangeCcMap(*table_name_, node_group_id_);
-                        ccm_ = ccs.GetCcm(
-                            *table_name_, node_group_id_, error_code);
+                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                     else
                     {
@@ -122,8 +126,7 @@ public:
                                                   schema_view->version_ts_);
                             }
 
-                            ccm_ = ccs.GetCcm(
-                                *table_name_, node_group_id_, error_code);
+                            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                         }
                         else
                         {
@@ -203,29 +206,29 @@ protected:
      */
     const TableSchemaView *InitCcm(CcShard &ccs)
     {
-        const TableName *base_table_name_;
-        TableName sk_base_table_name_;
+        const TableName *base_table_name = nullptr;
+        TableName sk_base_table_name;
         std::string::size_type pos = table_name_->find(INDEX_NAME_PREFIX);
         if (pos != std::string::npos)
         {
-            sk_base_table_name_ = *table_name_;
-            sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
-            base_table_name_ = &sk_base_table_name_;
+            // The target ccm is an index.
+            sk_base_table_name = table_name_->substr(0, pos);
+            base_table_name = &sk_base_table_name;
         }
         else
         {
-            base_table_name_ = table_name_;
+            base_table_name = table_name_;
         }
 
         const TableSchemaView *schema_view =
-            ccs.GetCatalog(*base_table_name_, node_group_id_);
+            ccs.GetCatalog(*base_table_name, node_group_id_);
 
         if (schema_view != nullptr)
         {
             const TableSchema *curr_schema = schema_view->schema_;
             if (curr_schema != nullptr && schema_view->version_ts_ > 0)
             {
-                ccs.CreatePkCcMap(*base_table_name_,
+                ccs.CreatePkCcMap(*base_table_name,
                                   curr_schema,
                                   node_group_id_,
                                   schema_view->version_ts_);
@@ -246,7 +249,7 @@ protected:
             // FetchCatalog() method sends an async request toward the data
             // store to fetch the catalog. After fetching is finished, this cc
             // request is re-enqueued for re-execution.
-            ccs.FetchCatalog(*base_table_name_, node_group_id_, this);
+            ccs.FetchCatalog(*base_table_name, node_group_id_, this);
         }
 
         return schema_view;
@@ -645,6 +648,30 @@ public:
     }
 
     void Reset(const TableName *tname,
+               const TxKey *key,
+               uint32_t node_group_id,
+               uint64_t tx_number,
+               uint64_t ts,
+               std::unique_ptr<TxRecord> rec,
+               DmlOperation dml_op,
+               CcHandlerResult<Void> *res,
+               PostWriteType commit_type)
+    {
+        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+            tname, res, node_group_id, tx_number, CcProtocol::OCC);
+
+        key_ = key;
+        key_str_ = nullptr;
+        decoded_key_ = nullptr;
+        commit_ts_ = ts;
+        payload_ = rec.get();
+        payload_str_ = nullptr;
+        decoded_payload_ = std::move(rec);
+        dml_op_ = dml_op;
+        commit_type_ = commit_type;
+    }
+
+    void Reset(const TableName *tname,
                const std::string *key_str,
                uint32_t node_group_id,
                uint64_t tx_number,
@@ -737,6 +764,12 @@ private:
     uint64_t commit_ts_{0};
     TxRecord *payload_{nullptr};
     const std::string *payload_str_{nullptr};
+    /**
+     * @brief When the PostWriteAllCc request is a remote request or is a local
+     * request but dispatched to a non-native cc node group, decoded_payload_
+     * owns a record on which the request is executed.
+     *
+     */
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     DmlOperation dml_op_{DmlOperation::Update};
     PostWriteType commit_type_;
@@ -1286,10 +1319,9 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        int8_t error_code = 0;
         if (ccm_ == nullptr)
         {
-            ccm_ = ccs.GetCcm(table_name_, node_group_, error_code);
+            ccm_ = ccs.GetCcm(table_name_, node_group_);
         }
 
         if (ccm_ != nullptr)
@@ -1653,12 +1685,19 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        int8_t error_code = 0;
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cc_ng_candid_term < 0 && cc_ng_term < 0)
+        {
+            res_->SetFinished();
+            return false;
+        }
 
         if (ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_, error_code);
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 
             if (ccm_ == nullptr)
             {
@@ -1677,8 +1716,7 @@ public:
                     }
                     else if (schema_view->schema_ != nullptr)
                     {
-                        ccm_ = ccs.GetCcm(
-                            *table_name_, node_group_id_, error_code);
+                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 
                         // Replaying records from a dropped table.
                         if (ccm_ == nullptr)
@@ -1863,8 +1901,8 @@ public:
     {
         if (Sharder::Instance().CheckLeaderTerm(node_grou_id_, term_))
         {
-            ccs.mem_usage_ -=
-                lru_entry_->KickOutFlushedArchiveRecords(upper_bound_ts_);
+            ccs.DecrementMemory(
+                lru_entry_->KickOutFlushedArchiveRecords(upper_bound_ts_));
         }
 
         delete this;

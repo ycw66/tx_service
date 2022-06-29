@@ -117,7 +117,6 @@ public:
     virtual TableType Type() const = 0;
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
-    virtual std::unique_ptr<CcMap> Clone() const = 0;
 
     bool ConditionalReadLockCce(LruEntry *cce,
                                 CcRequestBase &req,

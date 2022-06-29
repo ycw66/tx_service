@@ -125,18 +125,42 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
                                              DmlOperation dml_op,
                                              PostWriteType post_write_type)
 {
-    if (ng_id == cc_shards_.node_id_)
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.node_id_)
     {
         PostWriteAllCc *req = postwrite_all_pool_.NextRequest();
-        req->Reset(&table_name,
-                   &key,
-                   ng_id,
-                   tx_number,
-                   commit_ts,
-                   &rec,
-                   dml_op,
-                   &hres,
-                   post_write_type);
+
+        // When PostWriteAll is directed to leaders of two cc node groups in
+        // same physical node, the two cc requests should reference their own
+        // records. The record of a PostWriteAllCc has two roles: (1) upload a
+        // serialized schema image, (2) return a pointer to the schema object
+        // cached in the tx service.
+        if (ng_id == cc_shards_.node_id_)
+        {
+            req->Reset(&table_name,
+                       &key,
+                       ng_id,
+                       tx_number,
+                       commit_ts,
+                       &rec,
+                       dml_op,
+                       &hres,
+                       post_write_type);
+        }
+        else
+        {
+            std::unique_ptr<TxRecord> dup_rec = rec.Clone();
+            req->Reset(&table_name,
+                       &key,
+                       ng_id,
+                       tx_number,
+                       commit_ts,
+                       std::move(dup_rec),
+                       dml_op,
+                       &hres,
+                       post_write_type);
+        }
+
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         // The request is dispatched to the first core and then passed to
@@ -444,8 +468,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
-    int8_t err_code = 0;
-    CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id, err_code);
+    CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id);
 
     if (ccm != nullptr)
     {  //__catalog table will be preloaded when ccshard constructed
@@ -473,12 +496,46 @@ void txservice::LocalCcHandler::ScanOpen(
     bool is_ckpt_delta)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
-    int8_t err_code = 0;
-    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_, err_code);
-    if (ccm == nullptr)
+
+    std::unique_ptr<CcScanner> ccm_scanner = nullptr;
+    std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+    if (pos != std::string::npos)
     {
-        hd_res.SetError(1);
-        return;
+        // The target ccm is an index.
+        TableName sk_base_table_name = table_name.substr(0, pos);
+        const TableSchemaView *schema_view =
+            local_shard.GetCatalog(sk_base_table_name, local_shard.node_id_);
+
+        if (schema_view == nullptr || schema_view->schema_ == nullptr)
+        {
+            hd_res.SetError(1);
+            return;
+        }
+
+        const Schema *index_key_schema =
+            schema_view->schema_->IndexKeySchema(table_name);
+        if (index_key_schema == nullptr)
+        {
+            hd_res.SetError(1);
+            return;
+        }
+
+        ccm_scanner = local_shard.catalog_factory_->CreateSkCcmScanner(
+            direction, index_key_schema);
+    }
+    else
+    {
+        const TableSchemaView *schema_view =
+            local_shard.GetCatalog(table_name, local_shard.node_id_);
+
+        if (schema_view == nullptr || schema_view->schema_ == nullptr)
+        {
+            hd_res.SetError(1);
+            return;
+        }
+
+        ccm_scanner = local_shard.catalog_factory_->CreatePkCcmScanner(
+            direction, schema_view->schema_->KeySchema());
     }
 
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
@@ -490,7 +547,7 @@ void txservice::LocalCcHandler::ScanOpen(
     ScanOpenResult &open_result = hd_res.Value();
     open_result.Reset(ng_cnt);
 
-    open_result.scanner_ = ccm->CreateScanner(direction);
+    open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
     open_result.scan_alias_ = scan_alias_cnt_;
     ++scan_alias_cnt_;
@@ -603,8 +660,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     // Check if the table exists
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
-    int8_t err_code = 0;
-    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_, err_code);
+    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_);
 
     if (ccm == nullptr)
     {

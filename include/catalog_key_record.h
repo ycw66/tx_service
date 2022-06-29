@@ -19,6 +19,7 @@ struct CatalogKey : public TxKey
 public:
     CatalogKey();
     CatalogKey(const TableName &name);
+    CatalogKey(const CatalogKey &rhs, const Schema *);
     ~CatalogKey() = default;
 
     bool operator==(const TxKey &rhs) const override;
@@ -83,29 +84,33 @@ public:
     void Copy(const TxRecord &rhs) override;
     std::string ToString() const override;
 
-    const TableSchemaView *SchemaView() const;
     void SetSchemaView(const TableSchemaView *view);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
     void SetSchemaImage(std::string &schema_image);
+    const TableSchema *Schema() const;
+    uint64_t SchemaTs() const;
+    const TableSchema *DirtySchema() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
 
 private:
     /**
      * @brief The CatalogRecord serves three purposes:
-     * (1) a tx looks up a table's schema. The schema_view_ points to a pair of
-     * current and dirty schemas of the table. Allowing ongoing tx's to see the
-     * dirty schema is crucial to make schema operations non-blocking. (2)
-     * Initialization of a table's catalog at a node reads the table's schema
-     * the data store and instantiates the schema instance in memory. The
-     * schema_image_ in this case contains serialized images of the schema. (3)
-     * A tx modifies a table's schema and uses the catalog record to install a
-     * dirty version of the schema in the tx service. The schema_image_ is the
-     * binary image of the dirty schema.
+     * (1) a tx looks up a table's schema. schema_ points to the current schema
+     * and dirty_schema_ points to the dirty schema of the table. Allowing
+     * ongoing tx's to see the dirty schema is crucial to make schema operations
+     * non-blocking. (2) Initialization of a table's catalog at a node reads the
+     * table's schema from the data store and instantiates the schema instance
+     * in memory. The schema_image_ in this case contains serialized images of
+     * the schema. (3) A tx modifies a table's schema and uses the catalog
+     * record to install a dirty version of the schema in the tx service. The
+     * schema_image_ is the binary image of the dirty schema.
      *
      */
-    const TableSchemaView *schema_view_{nullptr};
+    const TableSchema *schema_{nullptr};
+    const TableSchema *dirty_schema_{nullptr};
+    uint64_t schema_ts_{0};
     std::string schema_image_{""};
 };
 }  // namespace txservice
