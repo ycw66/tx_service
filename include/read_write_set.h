@@ -242,6 +242,18 @@ public:
         wset_cnt_ = 0;
     }
 
+    void ClearTable(const TableName &table_name)
+    {
+        auto tab_it = wset_.find(table_name);
+        if (tab_it != wset_.end())
+        {
+            const TableWriteSet &tab_wset = tab_it->second;
+            assert(wset_cnt_ >= tab_wset.size());
+            wset_cnt_ -= tab_wset.size();
+            wset_.erase(tab_it);
+        }
+    }
+
     std::unordered_map<TableName, TableWriteSet> &WriteSet()
     {
         return wset_;

@@ -1562,8 +1562,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
         if (clean_log_op_.hd_result_.IsError() &&
-            (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                      tx_node_candid_term >= 0))
+            (tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
+                                   tx_node_candid_term >= 0)))
         {
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
@@ -1581,6 +1581,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            if (is_deleted_)
+            {
+                txm->rw_set_.ClearTable(table_key_.Name());
+            }
+
             txm->bool_resp_->Finish(true);
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());

@@ -181,7 +181,7 @@ void CatalogRecord::SetSchemaImage(std::string &&schema_image)
     schema_image_ = std::move(schema_image);
 }
 
-void CatalogRecord::SetSchemaImage(std::string &schema_image)
+void CatalogRecord::SetSchemaImage(const std::string &schema_image)
 {
     schema_image_ = schema_image;
 }

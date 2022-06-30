@@ -87,7 +87,7 @@ public:
     void SetSchemaView(const TableSchemaView *view);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
-    void SetSchemaImage(std::string &schema_image);
+    void SetSchemaImage(const std::string &schema_image);
     const TableSchema *Schema() const;
     uint64_t SchemaTs() const;
     const TableSchema *DirtySchema() const;
