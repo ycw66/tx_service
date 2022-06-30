@@ -143,11 +143,11 @@ void Checkpointer::Ckpt()
         if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
         {
             // Use CommitTxRequest to release read lock.
-            CommitTxRequest commit_req;
-            commit_req.Reset();
-            ckpt_txm->Execute(&commit_req);
-            commit_req.Wait();
-            assert(commit_req.Result() == true);
+            AbortTxRequest abort_req;
+            abort_req.Reset();
+            ckpt_txm->Execute(&abort_req);
+            abort_req.Wait();
+            assert(abort_req.Result() == false);
             flushed = false;
             continue;
         }

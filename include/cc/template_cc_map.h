@@ -1033,13 +1033,13 @@ public:
             {
                 if (commit_ts > 0)
                 {
-                    cce_ptr->commit_ts_ = commit_ts;
                     cce_ptr->payload_ = *payload;
 
                     // A prepare commit request only installs the dirty value,
-                    // and does not change the record status.
+                    // and does not change the record status and commit_ts.
                     if (req.CommitType() == PostWriteType::PostCommit)
                     {
+                        cce_ptr->commit_ts_ = commit_ts;
                         cce_ptr->payload_status_ =
                             req.DmlOp() == DmlOperation::Delete
                                 ? RecordStatus::Deleted
