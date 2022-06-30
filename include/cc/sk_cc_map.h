@@ -57,8 +57,8 @@ struct SkRecord : public TxRecord
         return 2 * sizeof(nullptr);
     }
 
-    const SkT *sk_;
-    const PkT *pk_;
+    const SkT *sk_{nullptr};
+    const PkT *pk_{nullptr};
 };
 
 template <typename SkT, typename PkT>
@@ -201,6 +201,19 @@ public:
 
     bool Execute(ScanOpenBatchCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -214,81 +227,143 @@ public:
                 TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *>(
                 req.scan_cache_);
 
-        if (req.direct_ == ScanDirection::Forward)
+        Iterator scan_ccm_it;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
+
+        if (req.CcePtr() != nullptr)
         {
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *floor_cce =
-                look_sk == NegativeInfinity<SkT>::Instance()
-                    ? &neg_inf_
-                    : Floor(*look_sk, req.direct_, req.inclusive_);
-            assert(floor_cce != nullptr);
+            cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> start_pair =
+                req.direct_ == ScanDirection::Forward
+                    ? FowardScanStart(*look_sk, req.inclusive_)
+                    : BackwardScanStart(*look_sk, req.inclusive_);
+
+            scan_ccm_it = start_pair.first;
+            cce = std::get<2>(*scan_ccm_it);
 
             TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *scan_tuple =
-                typed_cache->AddScanTuple();
-
-            if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                *look_sk == *floor_cce->payload_.sk_)
+                nullptr;
+            scan_tuple = typed_cache->AddScanTuple();
+            switch (start_pair.second)
             {
-                // The forward scan's starting point is inclusive and matches a
-                // cc entry's key. The scan starts from this cc entry,
-                // including the entry's key and the gap.
-                ScanKey(floor_cce, scan_tuple, true, req.node_group_id_, term);
+            case ScanType::ScanGap:
+                ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
+                break;
+            case ScanType::ScanBoth:
+                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                break;
+            case ScanType::ScanKey:
+                ScanKey(cce, scan_tuple, false, req.node_group_id_, req.term_);
+                break;
+            default:
+                break;
             }
-            else
-            {
-                // The forward scan's starting point is exclusive or falls into
-                // the gap of a cc entry. The scan starts from the cc entry and
-                // only includes the entry's gap.
-                ScanGap(floor_cce, scan_tuple, req.node_group_id_, term);
-            }
+            req.SetCcePtr(cce);
 
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = floor_cce->map_next_;
-            while (cce != &pos_inf_ && !typed_cache->Full())
+            // sk only needs to acquire read intention
+            if (!ConditionalReadLockCce(cce,
+                                        req,
+                                        LockType::ReadIntent,
+                                        req.TxTerm(),
+                                        req.NodeGroupId(),
+                                        cce->payload_status_,
+                                        term))
             {
-                scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
-                cce = cce->map_next_;
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireReadIntent.Fail",
+                    reinterpret_cast<LruEntry *>(cce),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
+                return false;
+            }
+        }
+
+        if (req.direct_ == ScanDirection::Forward)
+        {
+            ++scan_ccm_it;
+
+            Iterator pos_inf_it = End();
+
+            for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
+                 ++scan_ccm_it)
+            {
+                cce = std::get<2>(*scan_ccm_it);
+                TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
+                    *scan_tuple = typed_cache->AddScanTuple();
+                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntentOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
+                }
             }
         }
         else
         {
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
-                look_sk == PositiveInfinity<SkT>::Instance()
-                    ? pos_inf_.map_prev_
-                    : Floor(*look_sk, req.direct_, req.inclusive_);
+            --scan_ccm_it;
 
-            assert(cce != nullptr);
-
-            // The backward scan's starting point coincides with a cc entry's
-            // key. If the starting point is inclusive, the scan includes the
-            // entry's key. If the point is exclusive, the scan starts from the
-            // prior entry, including both the key and the gap.
-            if (cce != &neg_inf_ && *look_sk == *cce->payload_.sk_)
+            Iterator neg_inf_it = Begin();
+            for (; scan_ccm_it != neg_inf_it && !typed_cache->Full();
+                 --scan_ccm_it)
             {
-                if (req.inclusive_)
-                {
-                    TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
-                        *scan_tuple = typed_cache->AddScanTuple();
-
-                    ScanKey(cce, scan_tuple, false, req.node_group_id_, term);
-                }
-                cce = cce->map_prev_;
-            }
-
-            while (cce != nullptr && !typed_cache->Full())
-            {
+                cce = std::get<2>(*scan_ccm_it);
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
                     *scan_tuple = typed_cache->AddScanTuple();
+                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                req.SetCcePtr(cce);
 
-                if (cce == &neg_inf_)
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
                 {
-                    ScanGap(cce, scan_tuple, req.node_group_id_, term);
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntentOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
                 }
-                else
-                {
-                    ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
-                }
-
-                cce = cce->map_prev_;
             }
         }
 
@@ -298,35 +373,90 @@ public:
 
     bool Execute(ScanNextBatchCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
+        req.Result()->Value().term_ = term;
 
         TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *typed_cache =
             static_cast<
                 TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *>(
                 req.scan_cache_);
-
         assert(typed_cache->Full());
 
-        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce =
-            reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
-                typed_cache->Last()->cce_addr_.CcePtr());
-
         ScanDirection direction = typed_cache->Scanner()->Direction();
-        typed_cache->Reset();
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce = nullptr;
+        if (req.CcePtr() != nullptr)
+        {
+            prior_cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired
+        }
+        else
+        {
+            prior_cce =
+                reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                    typed_cache->Last()->cce_addr_.CcePtr());
+            typed_cache->Reset();
+        }
 
         if (direction == ScanDirection::Forward)
         {
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_next_;
             while (cce != &pos_inf_ && !typed_cache->Full())
             {
+                if (req.is_ckpt_delta_ &&
+                    cce->commit_ts_ <=
+                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                {
+                    cce = cce->map_next_;
+                    continue;
+                }
+
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
                     *scan_tuple = typed_cache->AddScanTuple();
                 ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntent.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
+                }
+
                 cce = cce->map_next_;
             }
         }
@@ -341,10 +471,58 @@ public:
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, req.node_group_id_, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                LockType::ReadIntent,
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                cce->payload_status_,
+                                                term,
+                                                true))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadIntentOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                LockType::ReadIntent,
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                cce->payload_status_,
+                                                term,
+                                                true))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadIntentOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
+                        return false;
+                    }
                 }
 
                 cce = cce->map_prev_;
@@ -357,6 +535,19 @@ public:
 
     bool Execute(remote::RemoteScanOpen &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -364,111 +555,184 @@ public:
             return true;
         }
 
-        SkT look_sk;
+        const SkT *look_sk;
+        SkT sk_obj;
+
+        switch (req.key_type_)
+        {
+        case KeyType::NegativeInf:
+            look_sk = NegativeInfinity<SkT>::Instance();
+            break;
+        case KeyType::PostiveInf:
+            look_sk = PositiveInfinity<SkT>::Instance();
+            break;
+        default:
+            size_t offset = 0;
+            sk_obj.Deserialize(req.start_key_str_->data(),
+                               offset,
+                               compound_schema_.sk_schema_.get());
+            look_sk = &sk_obj;
+            break;
+        }
 
         std::vector<remote::ScanTuple_msg *> &cache =
             req.scan_caches_.at(shard_->LocalCoreId());
 
-        if (req.direct_ == ScanDirection::Forward)
+        Iterator scan_ccm_it;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
+        remote::ScanTuple_msg *tuple = nullptr;
+        size_t tuple_idx = 0;
+
+        if (req.CcePtr() != nullptr)
         {
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *floor_cce = nullptr;
-
-            if (req.key_type_ == KeyType::NegativeInf)
-            {
-                floor_cce = &neg_inf_;
-            }
-            else
-            {
-                size_t offset = 0;
-                look_sk.Deserialize(req.start_key_str_->data(),
-                                    offset,
-                                    compound_schema_.sk_schema_.get());
-                floor_cce = Floor(look_sk, req.direct_, req.inclusive_);
-            }
-
-            assert(floor_cce != nullptr);
-
-            remote::ScanTuple_msg *tuple = cache.at(0);
-
-            if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                look_sk == *floor_cce->payload_.sk_)
-            {
-                // The scan's starting point is inclusive and matches a cc
-                // entry's key. The scan start from this cc entry,
-                // including the entry's key and the gap.
-                ScanKey(floor_cce, tuple, true, term);
-            }
-            else
-            {
-                // The scan's starting point is exclusive or falls into the gap
-                // of a cc entry. The scan starts from the cc entry and only
-                // includes the entry's gap.
-                ScanGap(floor_cce, tuple, term);
-            }
-
-            size_t idx = 1;
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = floor_cce->map_next_;
-            while (cce != &pos_inf_ && idx < cache.size())
-            {
-                tuple = cache.at(idx);
-                ScanKey(cce, tuple, true, term);
-                cce = cce->map_next_;
-                ++idx;
-            }
-
-            cache.resize(idx);
+            cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
         }
         else
         {
-            CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
+            std::pair<Iterator, ScanType> start_pair =
+                req.direct_ == ScanDirection::Forward
+                    ? FowardScanStart(*look_sk, req.inclusive_)
+                    : BackwardScanStart(*look_sk, req.inclusive_);
 
-            if (req.key_type_ == KeyType::PostiveInf)
-            {
-                cce = pos_inf_.map_prev_;
-            }
-            else
-            {
-                size_t offset = 0;
-                look_sk.Deserialize(req.start_key_str_->data(),
-                                    offset,
-                                    compound_schema_.sk_schema_.get());
-                cce = Floor(look_sk, req.direct_, req.inclusive_);
-            }
+            scan_ccm_it = start_pair.first;
+            cce = std::get<2>(*scan_ccm_it);
 
-            assert(cce != nullptr);
-
-            size_t idx = 0;
-            // The backward scan's starting point coincides with a cc entry's
-            // key. If the starting point is inclusive, the scan includes the
-            // entry's key. If the point is exclusive, the scan starts from the
-            // prior entry, including its both the key and the gap.
-            if (cce != &neg_inf_ && look_sk == *cce->payload_.sk_)
+            remote::ScanTuple_msg *tuple = cache.at(0);
+            switch (start_pair.second)
             {
-                if (req.inclusive_)
+            case ScanType::ScanGap:
+                if (!req.is_ckpt_delta_)
                 {
-                    remote::ScanTuple_msg *scan_tuple = cache.at(0);
-                    ScanKey(cce, scan_tuple, false, term);
-                    ++idx;
+                    ScanGap(cce, tuple, term);
                 }
-                cce = cce->map_prev_;
+                break;
+            case ScanType::ScanBoth:
+                ScanKey(cce, tuple, true, term);
+                break;
+            case ScanType::ScanKey:
+                ScanKey(cce, tuple, false, term);
+                break;
+            default:
+                break;
             }
 
-            while (cce != nullptr && idx < cache.size())
+            req.SetCcePtr(cce);
+            if (!ConditionalReadLockCce(cce,
+                                        req,
+                                        LockType::ReadIntent,
+                                        req.TxTerm(),
+                                        req.NodeGroupId(),
+                                        cce->payload_status_,
+                                        term))
             {
-                remote::ScanTuple_msg *scan_tuple = cache.at(idx);
-                if (cce == &neg_inf_)
-                {
-                    ScanGap(cce, scan_tuple, term);
-                }
-                else
-                {
-                    ScanKey(cce, scan_tuple, true, term);
-                }
-                cce = cce->map_prev_;
-                ++idx;
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireReadIntent.Fail",
+                    reinterpret_cast<LruEntry *>(cce),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
+                return false;
             }
+        }
 
-            cache.resize(idx);
+        if (req.direct_ == ScanDirection::Forward)
+        {
+            ++scan_ccm_it;
+
+            Iterator pos_inf_it = End();
+            for (; scan_ccm_it != pos_inf_it && tuple_idx < cache.size();
+                 ++scan_ccm_it)
+            {
+                cce = std::get<2>(*scan_ccm_it);
+                if (req.is_ckpt_delta_ &&
+                    cce->commit_ts_ <=
+                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                {
+                    ++scan_ccm_it;
+                    continue;
+                }
+                tuple = cache.at(tuple_idx);
+                ScanKey(cce, tuple, true, term);
+
+                ++tuple_idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntentOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            --scan_ccm_it;
+
+            Iterator neg_inf_it = Begin();
+            for (; scan_ccm_it != neg_inf_it && tuple_idx < cache.size();
+                 --scan_ccm_it)
+            {
+                cce = std::get<2>(*scan_ccm_it);
+                if (req.is_ckpt_delta_ &&
+                    cce->commit_ts_ <=
+                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                {
+                    --scan_ccm_it;
+                    continue;
+                }
+                tuple = cache.at(tuple_idx);
+                ScanKey(cce, tuple, true, term);
+
+                ++tuple_idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntentOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
+                }
+            }
         }
 
         req.Result()->SetFinished();
@@ -477,6 +741,19 @@ public:
 
     bool Execute(remote::RemoteScanNextBatch &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
         if (term < 0)
         {
@@ -484,9 +761,18 @@ public:
             return true;
         }
 
-        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce =
-            reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
-                req.prior_cce_addr_);
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce = nullptr;
+        if (req.CcePtr() != nullptr)
+        {
+            prior_cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                req.CcePtr());
+        }
+        else
+        {
+            prior_cce =
+                reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                    req.prior_cce_addr_);
+        }
 
         ScanDirection direction = req.direct_;
 
@@ -496,10 +782,42 @@ public:
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_next_;
             while (cce != &pos_inf_ && idx < req.scan_cache_.size())
             {
+                if (req.is_ckpt_delta_ &&
+                    cce->commit_ts_ <=
+                        cce->ckpt_ts_.load(std::memory_order_acquire))
+                {
+                    cce = cce->map_next_;
+                    continue;
+                }
+
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
                 ScanKey(cce, scan_tuple, true, term);
-                cce = cce->map_next_;
                 ++idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            LockType::ReadIntent,
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadIntentOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
+                }
+
+                cce = cce->map_next_;
             }
         }
         else
@@ -512,14 +830,62 @@ public:
                 if (cce == &neg_inf_)
                 {
                     ScanGap(cce, scan_tuple, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                LockType::ReadIntent,
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                cce->payload_status_,
+                                                term,
+                                                true))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadIntentOnGap.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
+                        return false;
+                    }
                 }
                 else
                 {
                     ScanKey(cce, scan_tuple, true, term);
+                    req.SetCcePtr(cce);
+
+                    if (!ConditionalReadLockCce(cce,
+                                                req,
+                                                LockType::ReadIntent,
+                                                req.TxTerm(),
+                                                req.NodeGroupId(),
+                                                cce->payload_status_,
+                                                term,
+                                                true))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            &req,
+                            "AcquireReadIntentOnKey.Fail",
+                            reinterpret_cast<LruEntry *>(cce),
+                            [&req]() -> std::string
+                            {
+                                return std::string(",\"tx_number\":")
+                                    .append(std::to_string(req.Txn()))
+                                    .append(",\"term\":")
+                                    .append(std::to_string(req.TxTerm()));
+                            });
+                        return false;
+                    }
                 }
 
-                cce = cce->map_prev_;
                 ++idx;
+                cce = cce->map_prev_;
             }
         }
         req.scan_cache_.resize(idx);
@@ -530,9 +896,22 @@ public:
 
     bool Execute(CommitSkCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         uint32_t ng_id = req.key_shard_code_ >> 10;
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0)
+        int64_t term = Sharder::Instance().LeaderTerm(ng_id);
+        if (term < 0)
         {
             req.Result()->SetError(-1);
             return true;
@@ -581,6 +960,19 @@ public:
 
     bool Execute(CkptScanCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
                                                         : req.start_entry_;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
@@ -638,6 +1030,19 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
         size_t offset = 0;
         const std::string_view &log_blob = req.LogContentView();
 
@@ -1168,6 +1573,538 @@ private:
         }
 
         return floor_cce;
+    }
+
+    class Iterator
+    {
+        using iterator_category = std::bidirectional_iterator_tag;
+        using difference_type = std::ptrdiff_t;
+        using value_type =
+            const std::tuple<const SkT *,
+                             const PkT *,
+                             CcEntry<VoidKey, SkRecord<SkT, PkT>> *>;
+        using pointer = value_type *;    // or also value_type*
+        using reference = value_type &;  // or also value_type&
+
+    public:
+        Iterator() = default;
+
+        Iterator(
+            typename std::map<
+                SkT,
+                std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>::iterator
+                &sk_map_it,
+            CcEntry<VoidKey, SkRecord<SkT, PkT>> *neg_inf_cce)
+            : internal_sk_it_(sk_map_it), neg_inf_cce_(neg_inf_cce)
+        {
+            // When constructing Iterator using a sk_map_it, internal_pk_it_
+            // should always point to the last entry of current pk map. Under no
+            // circumstances should a scan starts from the beginning of a pk
+            // map.
+            internal_pk_it_ = std::prev(internal_sk_it_->second.end(), 1);
+            UpdateCurrent();
+        }
+
+        Iterator(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
+                 CcEntry<VoidKey, SkRecord<SkT, PkT>> *neg_inf_cce,
+                 CcEntry<VoidKey, SkRecord<SkT, PkT>> *pos_inf_cce = nullptr)
+            : neg_inf_cce_(neg_inf_cce)
+        {
+            // internal_map has at least 1 entry
+            std::map<SkT, std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+                &internal_map =
+                    static_cast<SkCcMap<SkT, PkT> *>(cce->parent_map_)
+                        ->sk_index_;
+
+            if (cce == neg_inf_cce)
+            {
+                std::get<0>(current_) = NegativeInfinity<SkT>::Instance();
+                std::get<1>(current_) = NegativeInfinity<PkT>::Instance();
+                std::get<2>(current_) = neg_inf_cce_;
+                internal_sk_it_ = internal_map.begin();
+                internal_pk_it_ = internal_sk_it_->second.begin();
+            }
+            else if (cce == pos_inf_cce)
+            {
+                std::get<0>(current_) = PositiveInfinity<SkT>::Instance();
+                std::get<1>(current_) = PositiveInfinity<PkT>::Instance();
+                std::get<2>(current_) = nullptr;
+                internal_sk_it_ = internal_map.end();
+                if (!internal_map.empty())
+                {
+                    internal_pk_it_ =
+                        std::prev(internal_map.end(), 1)->second.end();
+                }
+            }
+            else
+            {
+                internal_sk_it_ = internal_map.find(*cce->payload_.sk_);
+                internal_pk_it_ =
+                    internal_sk_it_->second.find(*cce->payload_.pk_);
+                assert(internal_sk_it_ != internal_map.end());
+                assert(internal_pk_it_ != internal_sk_it_->second.end());
+
+                UpdateCurrent();
+            }
+        }
+
+        Iterator(Iterator &&rhs)
+            : internal_sk_it_(rhs.internal_sk_it_),
+              internal_pk_it_(rhs.internal_pk_it_),
+              current_(rhs.current_),
+              neg_inf_cce_(rhs.neg_inf_cce_)
+        {
+        }
+
+        Iterator(const Iterator &rhs)
+            : internal_sk_it_(rhs.internal_sk_it_),
+              internal_pk_it_(rhs.internal_pk_it_),
+              current_(rhs.current_),
+              neg_inf_cce_(rhs.neg_inf_cce_)
+        {
+        }
+
+        Iterator &operator=(const Iterator &rhs)
+        {
+            internal_sk_it_ = rhs.internal_sk_it_;
+            internal_pk_it_ = rhs.internal_pk_it_;
+            current_ = rhs.current_;
+            neg_inf_cce_ = rhs.neg_inf_cce_;
+            return *this;
+        }
+
+        reference operator*() const
+        {
+            return current_;
+        }
+
+        pointer operator->()
+        {
+            return &current_;
+        }
+
+        // Prefix increment
+        Iterator &operator++()
+        {
+            if (std::get<0>(current_) == NegativeInfinity<SkT>::Instance())
+            {
+                // The iterator points to negative infinity. Increments the
+                // iterator to the first entry in the map, if the map is not
+                // empty.
+
+                std::map<SkT,
+                         std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+                    &internal_map = static_cast<SkCcMap<SkT, PkT> *>(
+                                        neg_inf_cce_->parent_map_)
+                                        ->sk_index_;
+
+                // move from neg_inf_cce_ to internal_map.begin()
+                internal_sk_it_ = internal_map.begin();
+
+                if (internal_sk_it_ != internal_map.end())
+                {
+                    internal_pk_it_ = internal_sk_it_->second.begin();
+                    UpdateCurrent();
+                }
+                else
+                {
+                    // The map is empty. The next entry of negative infinity is
+                    // positive infinity.
+                    std::get<0>(current_) = PositiveInfinity<SkT>::Instance();
+                    std::get<1>(current_) = PositiveInfinity<PkT>::Instance();
+                    std::get<2>(current_) = nullptr;
+                }
+            }
+            else if (std::get<0>(current_) != PositiveInfinity<SkT>::Instance())
+            {
+                std::map<SkT,
+                         std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+                    &internal_map = static_cast<SkCcMap<SkT, PkT> *>(
+                                        std::get<2>(current_)->parent_map_)
+                                        ->sk_index_;
+
+                ++internal_pk_it_;
+                if (internal_pk_it_ != internal_sk_it_->second.end())
+                {
+                    UpdateCurrent();
+                }
+                else
+                {
+                    // The pk_it points to the end of current pk map.
+                    ++internal_sk_it_;
+
+                    if (internal_sk_it_ == internal_map.end())
+                    {
+                        std::get<0>(current_) =
+                            PositiveInfinity<SkT>::Instance();
+                        std::get<1>(current_) =
+                            PositiveInfinity<PkT>::Instance();
+                        std::get<2>(current_) = nullptr;
+                    }
+                    else
+                    {
+                        internal_pk_it_ = internal_sk_it_->second.begin();
+                        UpdateCurrent();
+                    }
+                }
+            }
+
+            // If the current points to positive infinity, keeps the
+            // iterator unchanged.
+            return *this;
+        }
+
+        // Prefix decrement
+        Iterator &operator--()
+        {
+            if (std::get<0>(current_) == PositiveInfinity<SkT>::Instance())
+            {
+                // The sk_it points to positive infinity. Decrements the
+                // iterator to the last entry in the map, if the map is not
+                // empty.
+
+                std::map<SkT,
+                         std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+                    &internal_map = static_cast<SkCcMap<SkT, PkT> *>(
+                                        neg_inf_cce_->parent_map_)
+                                        ->sk_index_;
+
+                internal_sk_it_ = internal_map.end();
+
+                if (internal_sk_it_ != internal_map.begin())
+                {
+                    // Sk map is not empty
+                    --internal_sk_it_;
+                    internal_pk_it_ =
+                        std::prev(internal_sk_it_->second.end(), 1);
+                    UpdateCurrent();
+                }
+                else
+                {
+                    // Sk map is empty. The prior entry of positive infinity is
+                    // negative infinity.
+                    std::get<0>(current_) = NegativeInfinity<SkT>::Instance();
+                    std::get<1>(current_) = NegativeInfinity<PkT>::Instance();
+                    std::get<2>(current_) = neg_inf_cce_;
+                }
+            }
+            else if (std::get<0>(current_) != NegativeInfinity<SkT>::Instance())
+            {
+                std::map<SkT,
+                         std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>
+                    &internal_map = static_cast<SkCcMap<SkT, PkT> *>(
+                                        std::get<2>(current_)->parent_map_)
+                                        ->sk_index_;
+
+                if (internal_sk_it_ == internal_map.begin())
+                {
+                    if (internal_pk_it_ != internal_sk_it_->second.begin())
+                    {
+                        --internal_pk_it_;
+                        UpdateCurrent();
+                    }
+                    else
+                    {
+                        // If the current sk_it points to the beginning of the
+                        // map, the prior entry is negative infinity.
+                        std::get<0>(current_) =
+                            NegativeInfinity<SkT>::Instance();
+                        std::get<1>(current_) =
+                            NegativeInfinity<PkT>::Instance();
+                        std::get<2>(current_) = neg_inf_cce_;
+                    }
+                }
+                else
+                {
+                    if (internal_pk_it_ != internal_sk_it_->second.begin())
+                    {
+                        --internal_pk_it_;
+                        UpdateCurrent();
+                    }
+                    else
+                    {
+                        // If the current pk_it points to the beginning of the
+                        // pk map, decrement internal_sk_it_ and let pk_it
+                        // points to the last item of current pk map.
+                        --internal_sk_it_;
+                        internal_pk_it_ =
+                            std::prev(internal_sk_it_->second.end(), 1);
+                        UpdateCurrent();
+                    }
+                }
+            }
+
+            // If the current sk_it points to negative infinity, keeps the
+            // iterator unchanged.
+            return *this;
+        }
+
+        // Postfix increment
+        Iterator operator++(int)
+        {
+            Iterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        // Postfix increment
+        Iterator operator--(int)
+        {
+            Iterator tmp = *this;
+            --(*this);
+            return tmp;
+        }
+
+        friend bool operator==(const Iterator &lhs, const Iterator &rhs)
+        {
+            // The two iterators are equal, if they point to the same cc entry.
+            // Note that when the iterator points to positive infinity, the
+            // pointed cc entry is null.
+            return std::get<2>(lhs.current_) == std::get<2>(rhs.current_);
+        };
+
+        friend bool operator!=(const Iterator &lhs, const Iterator &rhs)
+        {
+            return std::get<2>(lhs.current_) != std::get<2>(rhs.current_);
+        };
+
+    private:
+        void UpdateCurrent()
+        {
+            std::get<0>(current_) = &internal_sk_it_->first;
+            std::get<1>(current_) = &internal_pk_it_->first;
+            std::get<2>(current_) = &internal_pk_it_->second;
+        }
+
+        typename std::map<SkT,
+                          std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>::
+            iterator internal_sk_it_;
+        typename std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>::iterator
+            internal_pk_it_;
+        std::tuple<const SkT *,
+                   const PkT *,
+                   CcEntry<VoidKey, SkRecord<SkT, PkT>> *>
+            current_{nullptr, nullptr, nullptr};
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *neg_inf_cce_{nullptr};
+    };
+
+    /**
+     * @brief Returns an iterator that points to negative infinity.
+     *
+     * @return Iterator
+     */
+    Iterator Begin()
+    {
+        return Iterator(&neg_inf_, &neg_inf_, &pos_inf_);
+    }
+
+    /**
+     * @brief Returns an iterator that points to positive infinity.
+     *
+     * @return Iterator
+     */
+    Iterator End()
+    {
+        return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
+    }
+
+    /**
+     * @brief Searches the start cc entry of a forward scan.
+     *
+     * @param key Search key
+     * @param inclusive Whether or not the start key is included in the scan
+     * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
+     * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
+     * starting from the start cc entry and whether the scan includes the start
+     * cc entry's key or gap or both.
+     */
+    std::pair<Iterator, ScanType> FowardScanStart(const SkT &key,
+                                                  bool inclusive)
+    {
+        if (key.Type() == KeyType::NegativeInf)
+        {
+            return std::make_pair(Begin(), ScanType::ScanGap);
+        }
+
+        // The key equal to or greater than the search key.
+        auto sk_lower_it = sk_index_.lower_bound(key);
+
+        if (sk_lower_it == sk_index_.end())
+        {
+            if (sk_index_.empty())
+            {
+                return std::make_pair(Begin(), ScanType::ScanGap);
+            }
+            else
+            {
+                // sk_lower_it must be pointing to the end of the map. The start
+                // entry is the last in the map, only including the gap.
+                --sk_lower_it;
+                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                      ScanType::ScanGap);
+            }
+        }
+
+        if (sk_lower_it->first == key)
+        {
+            // The search key may match more than one cc entry. Even though
+            // each cc map's key is unique, this is possible when the search
+            // key is a prefix of a compound key. For example, the cc map's
+            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
+            // (30,'d'), and the search condition is 20: WEHRE pk >= 20 or WHERE
+            // pk > 20. The search key is considered equal to both (20, 'b') and
+            // (20, 'c').
+            if (inclusive)
+            {
+                // WEHRE pk >= 20. The start entry is the entry before lower
+                // bound, i.e., (10, 'a'), including the gap, which may contain
+                // (20, 'a').
+
+                if (sk_lower_it == sk_index_.begin())
+                {
+                    return std::make_pair(Begin(), ScanType::ScanGap);
+                }
+                else
+                {
+                    --sk_lower_it;
+                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                          ScanType::ScanGap);
+                }
+            }
+            else
+            {
+                auto next_it = std::next(sk_lower_it, 1);
+                if (next_it != sk_index_.end() && next_it->first == key)
+                {
+                    // The search key matches more than one entry, e.g., WEHRE
+                    // pk > 20. The start entry is the end of the repeated
+                    // entries, i.e., (20, 'c').
+
+                    // The key greater than the search key, i.e., (30, 'd').
+                    auto sk_upper_it = sk_index_.upper_bound(key);
+
+                    // The start entry is the one prior to (30, 'd'), including
+                    // the gap but not the key.
+                    --sk_upper_it;
+                    return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
+                                          ScanType::ScanGap);
+                }
+                else
+                {
+                    // The search key matches only one entry.
+                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                          ScanType::ScanGap);
+                }
+            }
+        }
+        else
+        {
+            // The search key falls into a gap between two existing keys. The
+            // start entry precedes the lower bound, excluding the key.
+            if (sk_lower_it == sk_index_.begin())
+            {
+                return std::make_pair(Begin(), ScanType::ScanGap);
+            }
+            else
+            {
+                --sk_lower_it;
+                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                      ScanType::ScanGap);
+            }
+        }
+    }
+
+    std::pair<Iterator, ScanType> BackwardScanStart(const SkT &key,
+                                                    bool inclusive)
+    {
+        if (key.Type() == KeyType::PostiveInf)
+        {
+            auto start_it = End();
+            --start_it;
+            return std::make_pair(start_it, ScanType::ScanBoth);
+        }
+
+        // The key equal to or greater than the search key.
+        auto sk_lower_it = sk_index_.lower_bound(key);
+
+        if (sk_lower_it == sk_index_.end())
+        {
+            if (sk_index_.empty())
+            {
+                return std::make_pair(Begin(), ScanType::ScanGap);
+            }
+            else
+            {
+                --sk_lower_it;
+                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                      ScanType::ScanBoth);
+            }
+        }
+
+        if (sk_lower_it->first == key)
+        {
+            // The search key may match more than one cc entry. Even though
+            // each cc map's key is unique, this is possible when the search
+            // key is a prefix of a compound key. For example, the cc map's
+            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
+            // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or WHERE
+            // pk < 20. The search key is considered equal to both (20, 'b') and
+            // (20, 'c').
+
+            if (inclusive)
+            {
+                auto next_it = std::next(sk_lower_it, 1);
+                if (next_it != sk_index_.end() && next_it->first == key)
+                {
+                    // The search key matches more than one entry, e.g., WEHRE
+                    // pk <= 20. The start entry is the end of the repeated
+                    // entries, i.e., (20, 'c'), including the key and the gap
+                    // (gap may have entry (20, 'd')).
+
+                    auto sk_upper_it = sk_index_.upper_bound(key);
+                    --sk_upper_it;
+                    return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
+                                          ScanType::ScanBoth);
+                }
+                else
+                {
+                    // WHERE pk <= 10.
+                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                          ScanType::ScanBoth);
+                }
+            }
+            else
+            {
+                // WHERE pk < 10. The start entry precedes the lower bound.
+                if (sk_lower_it == sk_index_.begin())
+                {
+                    return std::make_pair(Begin(), ScanType::ScanGap);
+                }
+                else
+                {
+                    --sk_lower_it;
+                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                          ScanType::ScanBoth);
+                }
+            }
+        }
+        else
+        {
+            // The search key falls into a gap between two existing keys. The
+            // start entry precedes the lower bound, including the key and the
+            // gap.
+
+            if (sk_lower_it == sk_index_.begin())
+            {
+                return std::make_pair(Begin(), ScanType::ScanGap);
+            }
+            else
+            {
+                --sk_lower_it;
+                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
+                                      ScanType::ScanBoth);
+            }
+        }
     }
 
     std::map<SkT, std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>>>

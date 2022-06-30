@@ -283,7 +283,7 @@ public:
     }
 
     void ShardCacheSizes(
-        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes)
+        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) override
     {
         std::unique_lock<std::mutex> lock(mutex_);
         for (const auto &[shard_code, cache] : scans_)

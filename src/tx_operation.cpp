@@ -1315,8 +1315,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // leader. The tx is also allowed to proceed if the tx is in the
             // recovery mode and the tx node is a leader candidate.
 
-            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                         tx_node_candid_term >= 0)
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
             {
                 // set catalog_rec_'s binary_value_ to image_str since it
                 // could be set to TableSchemaView pointer in localshard.
@@ -1371,8 +1372,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // tx node is the leader or the tx is in the recovery mode and the
             // cc node is a leader candidate.
 
-            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                         tx_node_candid_term >= 0)
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
             {
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
@@ -1416,8 +1418,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // only roll forward after flushing the prepare log. Retries the
             // request if the tx node is still the leader or the tx is in the
             // recovery mode and the cc node is a leader candidate.
-            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                         tx_node_candid_term >= 0)
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
             {
                 txm->PushOperation(&acquire_all_lock_op_);
                 txm->Process(acquire_all_lock_op_);
@@ -1451,8 +1454,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // Fails to flush the commit log. Retries the operation if the tx
             // node is still the leader or the tx is in the  recovery mode and
             // the cc node is a leader candidate.
-            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                         tx_node_candid_term >= 0)
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
             {
                 txm->PushOperation(&commit_log_op_);
                 txm->Process(commit_log_op_);
@@ -1510,8 +1514,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // committed schema and remove write locks, if the tx node is still
             // the leader or the tx is in the recovery mode and the cc node is a
             // leader candidate.
-            if (tx_node_term >= 0 || txm->tx_status_ == TxnStatus::Recovering &&
-                                         tx_node_candid_term >= 0)
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
             {
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);

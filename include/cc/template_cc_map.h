@@ -1585,9 +1585,7 @@ public:
         // node's terms repeatedly in each core, as the scan request is
         // dispatched to all cores.
 
-        const KeyT *look_key = static_cast<const KeyT *>(req.start_key_);
-        TemplateScanCache<KeyT, ValueT> *typed_cache =
-            static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
+        // fault inject
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ScanOpenBatchCc", {
             LOG(INFO) << "FaultInject  "
@@ -1601,6 +1599,10 @@ public:
             req.Result()->SetError(-1);
             return true;
         }
+
+        const KeyT *look_key = static_cast<const KeyT *>(req.start_key_);
+        TemplateScanCache<KeyT, ValueT> *typed_cache =
+            static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
 
         Iterator scan_ccm_it;
 
@@ -1622,8 +1624,8 @@ public:
             scan_ccm_it = start_pair.first;
             cce = scan_ccm_it->second;
 
-            TemplateScanTuple<KeyT, ValueT> *scan_tuple = nullptr;
-            scan_tuple = typed_cache->AddScanTuple();
+            TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+                typed_cache->AddScanTuple();
             switch (start_pair.second)
             {
             case ScanType::ScanGap:
@@ -1650,7 +1652,7 @@ public:
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
-                    "AcquireReadLockOnKey.Fail",
+                    "AcquireReadLock.Fail",
                     reinterpret_cast<LruEntry *>(cce),
                     [&req]() -> std::string
                     {
@@ -1773,8 +1775,8 @@ public:
             req.Result()->SetError(-1);
             return false;
         }
-
         req.Result()->Value().term_ = term;
+
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
         assert(typed_cache->Full());
@@ -1809,7 +1811,6 @@ public:
                     continue;
                 }
 
-                // Return first available scan_tuple in scan_cache.
                 TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                     typed_cache->AddScanTuple();
 
@@ -1970,103 +1971,90 @@ public:
         std::vector<remote::ScanTuple_msg *> &cache =
             req.scan_caches_.at(shard_->LocalCoreId());
 
+        Iterator scan_ccm_it;
+        CcEntry<KeyT, ValueT> *cce = nullptr;
+        remote::ScanTuple_msg *tuple = nullptr;
+        size_t tuple_idx = 0;
+
+        if (req.CcePtr() != nullptr)
+        {
+            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> start_pair =
+                req.direct_ == ScanDirection::Forward
+                    ? FowardScanStart(*look_key, req.inclusive_)
+                    : BackwardScanStart(*look_key, req.inclusive_);
+
+            scan_ccm_it = start_pair.first;
+            cce = scan_ccm_it->second;
+
+            remote::ScanTuple_msg *tuple = cache.at(0);
+            switch (start_pair.second)
+            {
+            case ScanType::ScanGap:
+                if (!req.is_ckpt_delta_)
+                {
+                    ScanGap(cce, tuple, term);
+                }
+                break;
+            case ScanType::ScanBoth:
+                ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
+                break;
+            case ScanType::ScanKey:
+                ScanKey(cce, tuple, false, term, req.is_ckpt_delta_);
+                break;
+            default:
+                break;
+            }
+
+            req.SetCcePtr(cce);
+            if (!ConditionalReadLockCce(cce,
+                                        req,
+                                        req.GetLockType(),
+                                        req.TxTerm(),
+                                        req.NodeGroupId(),
+                                        cce->payload_status_,
+                                        term))
+            {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    &req,
+                    "AcquireReadLock.Fail",
+                    reinterpret_cast<LruEntry *>(cce),
+                    [&req]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(req.Txn()))
+                            .append(",\"term\":")
+                            .append(std::to_string(req.TxTerm()));
+                    });
+                return false;
+            }
+        }
+
         if (req.direct_ == ScanDirection::Forward)
         {
-            CcEntry<KeyT, ValueT> *floor_cce = nullptr;
-            remote::ScanTuple_msg *tuple = nullptr;
-            size_t tuple_idx = 0;
+            ++scan_ccm_it;
 
-            if (req.CcePtr() != nullptr)
+            Iterator pos_inf_it = End();
+            for (; scan_ccm_it != pos_inf_it && tuple_idx < cache.size();
+                 ++scan_ccm_it)
             {
-                floor_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-                req.SetCcePtr(nullptr);
-            }
-            else
-            {
-                floor_cce = Floor(*look_key);
-                assert(floor_cce != nullptr);
-
-                remote::ScanTuple_msg *tuple = cache.at(0);
-
-                if (floor_cce != &neg_inf_ && req.inclusive_ == true &&
-                    *look_key == *floor_cce->key_)
-                {
-                    // The scan's starting point is inclusive and matches a cc
-                    // entry's key. The scan results start from this cc entry,
-                    // including the entry's key and the gap.
-                    ScanKey(floor_cce, tuple, true, term);
-                    ++tuple_idx;
-                    req.SetCcePtr(floor_cce);
-
-                    if (!ConditionalReadLockCce(floor_cce,
-                                                req,
-                                                req.GetLockType(),
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                floor_cce->payload_status_,
-                                                term))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnKey.Fail",
-                            reinterpret_cast<LruEntry *>(floor_cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
-                }
-                else if (!req.is_ckpt_delta_)
-                {
-                    // The scan's starting point is exclusive or falls into the
-                    // gap of a cc entry. The scan starts from the cc entry and
-                    // only includes the entry's gap.
-                    ScanGap(floor_cce, tuple, term);
-                    ++tuple_idx;
-                    req.SetCcePtr(floor_cce);
-
-                    if (!ConditionalReadLockCce(floor_cce,
-                                                req,
-                                                req.GetLockType(),
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                floor_cce->payload_status_,
-                                                term,
-                                                true))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnGap.Fail",
-                            reinterpret_cast<LruEntry *>(floor_cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
-                }
-            }
-
-            CcEntry<KeyT, ValueT> *cce = floor_cce->map_next_;
-            while (cce != &pos_inf_ && tuple_idx < cache.size())
-            {
+                cce = scan_ccm_it->second;
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
                 {
-                    cce = cce->map_next_;
+                    ++scan_ccm_it;
                     continue;
                 }
-
                 tuple = cache.at(tuple_idx);
                 ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
+
                 ++tuple_idx;
                 req.SetCcePtr(cce);
 
@@ -2091,131 +2079,52 @@ public:
                         });
                     return false;
                 }
-
-                cce = cce->map_next_;
             }
-
-            cache.resize(tuple_idx);
         }
         else
         {
-            CcEntry<KeyT, ValueT> *cce = nullptr;
-            size_t idx = 0;
+            --scan_ccm_it;
 
-            if (req.CcePtr() != nullptr)
+            Iterator neg_inf_it = Begin();
+            for (; scan_ccm_it != neg_inf_it && tuple_idx < cache.size();
+                 --scan_ccm_it)
             {
-                cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-                req.SetCcePtr(nullptr);
-                // Lock has been acquired
-            }
-            else
-            {
-                cce = Floor(*look_key);
-                assert(cce != nullptr);
-
-                // The backward scan's starting point coincides with a cc
-                // entry's key. If the starting point is inclusive, the scan
-                // includes the entry's key. If the point is exclusive, the scan
-                // starts from the prior entry, including its both the key and
-                // the gap.
-                if (cce != &neg_inf_ && *look_key == *cce->key_)
+                cce = scan_ccm_it->second;
+                if (req.is_ckpt_delta_ &&
+                    cce->commit_ts_ <=
+                        cce->ckpt_ts_.load(std::memory_order_acquire))
                 {
-                    if (req.inclusive_)
-                    {
-                        remote::ScanTuple_msg *scan_tuple = cache.at(0);
-                        ScanKey(cce, scan_tuple, false, term);
-                        ++idx;
-                        req.SetCcePtr(cce);
+                    --scan_ccm_it;
+                    continue;
+                }
+                tuple = cache.at(tuple_idx);
+                ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
 
-                        if (!ConditionalReadLockCce(cce,
-                                                    req,
-                                                    req.GetLockType(),
-                                                    req.TxTerm(),
-                                                    req.NodeGroupId(),
-                                                    cce->payload_status_,
-                                                    term))
+                ++tuple_idx;
+                req.SetCcePtr(cce);
+
+                if (!ConditionalReadLockCce(cce,
+                                            req,
+                                            req.GetLockType(),
+                                            req.TxTerm(),
+                                            req.NodeGroupId(),
+                                            cce->payload_status_,
+                                            term))
+                {
+                    TX_TRACE_ACTION_WITH_CONTEXT(
+                        &req,
+                        "AcquireReadLockOnKey.Fail",
+                        reinterpret_cast<LruEntry *>(cce),
+                        [&req]() -> std::string
                         {
-                            TX_TRACE_ACTION_WITH_CONTEXT(
-                                &req,
-                                "AcquireReadLockOnKey.Fail",
-                                reinterpret_cast<LruEntry *>(cce),
-                                [&req]() -> std::string
-                                {
-                                    return std::string(",\"tx_number\":")
-                                        .append(std::to_string(req.Txn()))
-                                        .append(",\"term\":")
-                                        .append(std::to_string(req.TxTerm()));
-                                });
-                            return false;
-                        }
-                    }
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(req.Txn()))
+                                .append(",\"term\":")
+                                .append(std::to_string(req.TxTerm()));
+                        });
+                    return false;
                 }
             }
-
-            cce = cce->map_prev_;
-            while (cce != nullptr && idx < cache.size())
-            {
-                remote::ScanTuple_msg *scan_tuple = cache.at(idx);
-                if (cce == &neg_inf_)
-                {
-                    ScanGap(cce, scan_tuple, term);
-                    req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                req.GetLockType(),
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term,
-                                                true))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnGap.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
-                }
-                else
-                {
-                    ScanKey(cce, scan_tuple, true, term);
-                    req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                req.GetLockType(),
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnKey.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
-                }
-                cce = cce->map_prev_;
-                ++idx;
-            }
-
-            cache.resize(idx);
         }
 
         req.Result()->SetFinished();
@@ -2245,7 +2154,6 @@ public:
         }
 
         CcEntry<KeyT, ValueT> *prior_cce = nullptr;
-
         if (req.CcePtr() != nullptr)
         {
             prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
@@ -2365,8 +2273,8 @@ public:
                     }
                 }
 
-                cce = cce->map_prev_;
                 ++idx;
+                cce = cce->map_prev_;
             }
         }
         req.scan_cache_.resize(idx);
@@ -3185,10 +3093,20 @@ protected:
             // (20, 'c').
             if (inclusive)
             {
-                // WEHRE pk >= 20. The start entry is the lower bound, i.e.,
-                // (20, 'b'), including the key and the gap.
-                return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                      ScanType::ScanBoth);
+                // WEHRE pk >= 20. The start entry is the entry before lower
+                // bound, i.e., (10, 'a'), including the gap, which may contain
+                // (20, 'a').
+
+                if (lower_it == ccm_.begin())
+                {
+                    return std::make_pair(Begin(), ScanType::ScanGap);
+                }
+                else
+                {
+                    --lower_it;
+                    return std::make_pair(Iterator(lower_it, &neg_inf_),
+                                          ScanType::ScanGap);
+                }
             }
             else
             {
@@ -3276,20 +3194,21 @@ protected:
                 auto next_it = std::next(lower_it, 1);
                 if (next_it != ccm_.end() && next_it->first == key)
                 {
-                    // The search key matches more than one entry, e.g., WEHRE
-                    // pk <= 20. The start entry is the end of the repeated
-                    // entries, i.e., (20, 'c'), only including the key.
+                    // The search key matches more than one entry, e.g.,
+                    // WEHRE pk <= 20. The start entry is the end of the
+                    // repeated entries, i.e., (20, 'c'), including the key
+                    // and the gap (gap may have entry (20, 'd')).
 
                     auto upper_it = ccm_.upper_bound(key);
                     --upper_it;
                     return std::make_pair(Iterator(upper_it, &neg_inf_),
-                                          ScanType::ScanKey);
+                                          ScanType::ScanBoth);
                 }
                 else
                 {
                     // WHERE pk <= 10.
                     return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                          ScanType::ScanKey);
+                                          ScanType::ScanBoth);
                 }
             }
             else
