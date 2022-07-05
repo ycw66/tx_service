@@ -1,5 +1,6 @@
 #include "remote/cc_stream_sender.h"
 
+#include <chrono>
 #include <string>
 
 #include "sharder.h"
@@ -154,13 +155,24 @@ void CcStreamSender::AddRemoteNode(uint32_t node_id,
     out_cv_.notify_one();
 }
 
+void CcStreamSender::NotifyConnectStream()
+{
+    std::lock_guard<std::mutex> lk(outbound_mux_);
+    out_cv_.notify_one();
+}
+
 void CcStreamSender::ConnectStreams()
 {
+    using namespace std::chrono_literals;
     std::unique_lock<std::mutex> lk(outbound_mux_);
     while (!terminate_)
     {
-        out_cv_.wait(
-            lk, [this] { return to_connect_nodes_.size() != 0 || terminate_; });
+        out_cv_.wait_for(lk, 5s, [this] { return terminate_; });
+
+        if (to_connect_nodes_.size() == 0)
+        {
+            continue;
+        }
 
         if (terminate_)
         {
@@ -190,9 +202,9 @@ void CcStreamSender::ConnectStreams()
 
         // release lock before resend queued messages.
         lk.unlock();
-        ResendMessage::Uptr messages[100];
         while (!resend_message_list_.is_empty())
         {
+            ResendMessage::Uptr messages[100];
             size_t msg_cnt =
                 resend_message_list_.try_dequeue_bulk(messages, 100);
             for (size_t i = 0; i < msg_cnt; ++i)
@@ -204,14 +216,6 @@ void CcStreamSender::ConnectStreams()
             }
         }
         lk.lock();
-
-        if (to_connect_nodes_.size() > 0)
-        {
-            using namespace std::chrono_literals;
-            lk.unlock();
-            std::this_thread::sleep_for(5s);
-            lk.lock();
-        }
     }
 }
 

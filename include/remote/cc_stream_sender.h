@@ -52,6 +52,12 @@ public:
                      bool resend = false);
     void AddRemoteNode(uint32_t node_id, const std::string &ip, uint16_t port);
 
+    /**
+     * @brief Used by cc_stream_receiver. Nofity to setup stream to peer when
+     * receiving peer's connect request.
+     */
+    void NotifyConnectStream();
+
 private:
     void ConnectStreams();
     int ConnectStream(uint32_t node_id, int64_t version);

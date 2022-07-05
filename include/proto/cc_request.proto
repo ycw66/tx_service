@@ -321,6 +321,16 @@ message CleanArchivesResponse {
   int32 error_code = 1;
 }
 
+message RecoverStateCheckRequest {
+  uint32 src_node_id = 1;
+  uint32 node_group_id = 2;
+}
+
+message RecoverStateCheckResponse {
+  int32 error_code = 1;
+  uint32 node_group_id = 2;
+}
+
 message CcMessage {
 	enum MessageType {
 		Shutdown = 0;
@@ -345,6 +355,8 @@ message CcMessage {
 		PostWriteAllRequest = 30;
 		CleanArchivesRequest = 32;
 		CleanArchivesResponse = 33;
+		RecoverStateCheckRequest = 34;
+		RecoverStateCheckResponse = 35;
 	}
 
 	MessageType type = 1;
@@ -374,5 +386,7 @@ message CcMessage {
 		PostWriteAllRequest post_write_all_req = 38;
 		CleanArchivesRequest clean_archives_req = 40;
 		CleanArchivesResponse clean_archives_resp= 41;
+		RecoverStateCheckRequest recover_state_check_req = 42;
+		RecoverStateCheckResponse recover_state_check_resp = 43;
 	}
 }

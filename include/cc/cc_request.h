@@ -103,15 +103,20 @@ public:
                 }
                 else
                 {
+                    // Find base table name for index table.
+                    // Fecth/Get Catalog is based on base table name, but Get
+                    // ccmap is based on the real table name, for example, index
+                    // should get the correspond sk_ccmap.
+                    TableName base_table_name = GetBaseTableName(*table_name_);
                     const TableSchemaView *schema_view =
-                        ccs.GetCatalog(*table_name_, node_group_id_);
+                        ccs.GetCatalog(base_table_name, node_group_id_);
 
                     if (schema_view != nullptr)
                     {
                         const TableSchema *curr_schema = schema_view->schema_;
                         if (curr_schema != nullptr)
                         {
-                            ccs.CreatePkCcMap(*table_name_,
+                            ccs.CreatePkCcMap(base_table_name,
                                               curr_schema,
                                               node_group_id_,
                                               schema_view->version_ts_);
@@ -144,7 +149,7 @@ public:
                         // async request toward the data store to fetch the
                         // catalog. After fetching is finished, this cc request
                         // is re-enqueued for re-execution.
-                        ccs.FetchCatalog(*table_name_, node_group_id_, this);
+                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
                         return false;
                     }
                 }
@@ -206,29 +211,17 @@ protected:
      */
     const TableSchemaView *InitCcm(CcShard &ccs)
     {
-        const TableName *base_table_name = nullptr;
-        TableName sk_base_table_name;
-        std::string::size_type pos = table_name_->find(INDEX_NAME_PREFIX);
-        if (pos != std::string::npos)
-        {
-            // The target ccm is an index.
-            sk_base_table_name = table_name_->substr(0, pos);
-            base_table_name = &sk_base_table_name;
-        }
-        else
-        {
-            base_table_name = table_name_;
-        }
+        TableName base_table_name = GetBaseTableName(*table_name_);
 
         const TableSchemaView *schema_view =
-            ccs.GetCatalog(*base_table_name, node_group_id_);
+            ccs.GetCatalog(base_table_name, node_group_id_);
 
         if (schema_view != nullptr)
         {
             const TableSchema *curr_schema = schema_view->schema_;
             if (curr_schema != nullptr && schema_view->version_ts_ > 0)
             {
-                ccs.CreatePkCcMap(*base_table_name,
+                ccs.CreatePkCcMap(base_table_name,
                                   curr_schema,
                                   node_group_id_,
                                   schema_view->version_ts_);
@@ -249,10 +242,33 @@ protected:
             // FetchCatalog() method sends an async request toward the data
             // store to fetch the catalog. After fetching is finished, this cc
             // request is re-enqueued for re-execution.
-            ccs.FetchCatalog(*base_table_name, node_group_id_, this);
+            ccs.FetchCatalog(base_table_name, node_group_id_, this);
         }
 
         return schema_view;
+    }
+
+    /**
+     * @brief Get the base table name from normal table or index table. For
+     * index table, we need to remove the suffix.
+     *
+     * @param table_name: input table name, could be normal table or index
+     * table.
+     * @return base table name
+     */
+    std::string GetBaseTableName(const std::string &table_name)
+    {
+        std::string base_table_name;
+        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+        if (pos != std::string::npos)
+        {
+            base_table_name = table_name.substr(0, pos);
+        }
+        else
+        {
+            base_table_name = table_name;
+        }
+        return base_table_name;
     }
 
     CcHandlerResult<ResultType> *res_{nullptr};

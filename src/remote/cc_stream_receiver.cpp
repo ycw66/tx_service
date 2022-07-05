@@ -65,6 +65,8 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
+    Sharder::Instance().GetCcStreamSender()->NotifyConnectStream();
+
     response->set_message("Accepted");
 
     std::lock_guard<std::mutex> guard(inbound_mux_);
@@ -852,6 +854,48 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_RecoverStateCheckRequest:
+    {
+        // this request is only used during cluster initialization.
+        const RecoverStateCheckRequest &req = msg->recover_state_check_req();
+
+        CcMessage send_msg;
+
+        send_msg.set_type(CcMessage::MessageType::
+                              CcMessage_MessageType_RecoverStateCheckResponse);
+
+        RecoverStateCheckResponse *recover_resp =
+            send_msg.mutable_recover_state_check_resp();
+
+        // error_code is set to -1 if the log replay is not finished.
+        if (Sharder::Instance().LeaderTerm(req.node_group_id()) > 0)
+        {
+            recover_resp->set_error_code(0);
+        }
+        else
+        {
+            recover_resp->set_error_code(-1);
+        }
+
+        recover_resp->set_node_group_id(req.node_group_id());
+
+        Sharder::Instance().GetCcStreamSender()->SendMessage(req.src_node_id(),
+                                                             send_msg);
+
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_RecoverStateCheckResponse:
+    {
+        // this response is only used during cluster initialization.
+        const RecoverStateCheckResponse &resp = msg->recover_state_check_resp();
+
+        if (resp.error_code() == 0)
+        {
+            Sharder::Instance().RemoteNodeFinishRecovery(resp.node_group_id());
+        }
         break;
     }
     default:

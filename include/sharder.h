@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
@@ -177,6 +178,13 @@ public:
                          uint32_t latest_txn_no);
 
     /**
+     * @brief Wait for all the tx_service nodes to finish the log recovery
+     * process and setup the cc_stream_sender.
+     *
+     */
+    void WaitClusterReady();
+
+    /**
      * @brief Recovers the input orphan lock held for an extended period of
      * time.
      *
@@ -215,6 +223,13 @@ public:
         return node_id_;
     }
 
+    void RemoteNodeFinishRecovery(uint32_t ng_id)
+    {
+        std::lock_guard<std::mutex> lk(recovery_state_mux_);
+
+        recovered_leader_set.emplace(ng_id);
+    }
+
     uint32_t LogGroupId(uint32_t cc_ng_id)
     {
         return log_agent_->GetLogGroupId(cc_ng_id);
@@ -243,11 +258,21 @@ private:
     uint32_t node_id_;
     std::vector<std::string> ips_;
     std::vector<uint16_t> ports_;
-    // we have one raft group for each logical shard(specified by ip & port)
+    // We have one raft group for each logical shard(specified by ip & port)
     // each group's current leader is stored in ng_leader_cache_.
     std::unordered_map<uint32_t, std::atomic<uint32_t>> ng_leader_cache_;
 
+    // Used to protect Sharder::UpdateLeader.
     std::mutex mux_;
+
+    // Used to protect recovered_leader_set
+    std::mutex recovery_state_mux_;
+
+    // Used at node start stage to check whether all the involed tx_nodes finish
+    // the log recovery. If some nodes stepdown during cluster startup, the
+    // normal retry logic for each operation will handle it.
+    std::unordered_set<uint32_t> recovered_leader_set;
+
     std::unordered_map<uint32_t, std::unique_ptr<fault::CcNode>> cc_nodes_;
 
     moodycamel::ConcurrentQueue<std::unique_ptr<remote::CcMessage>> msg_pool_;

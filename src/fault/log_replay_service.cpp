@@ -210,9 +210,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                         if (status == RecoverTxStatus::NotCommitted ||
                             status == RecoverTxStatus::Alive)
                         {
-                            LOG(INFO)
-                                << "The tx is to be cleared, after asking "
-                                   "the log group.";
+                            LOG(INFO) << "The tx " << recover_tx_info.tx_number_
+                                      << " is to be cleared, after asking "
+                                         "the log group.";
 
                             // If the tx is not committed, sends a cc request to
                             // local cc shards to clear write intentions left by
@@ -227,12 +227,13 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                         {
                             LOG(INFO)
                                 << "There is a tx recovery error when asking "
-                                   "the log group.";
+                                   "the log group. Tx number "
+                                << recover_tx_info.tx_number_;
                         }
                         else
                         {
-                            LOG(INFO)
-                                << "The tx to be recovered has committed.";
+                            LOG(INFO) << "The tx " << recover_tx_info.tx_number_
+                                      << " to be recovered has committed.";
                         }
                         // If the tx has committed, the log group will ship the
                         // tx's committed records to the cc node. If there is an

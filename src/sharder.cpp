@@ -1,5 +1,6 @@
 #include "sharder.h"
 
+#include "proto/cc_request.pb.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -11,6 +12,7 @@ Sharder::Sharder(uint32_t node_id,
                  std::unique_ptr<TxLog> log_agent)
     : node_id_(node_id),
       mux_(),
+      recovery_state_mux_(),
       cc_stream_sender_(nullptr),
       cc_stream_receiver_(nullptr),
       cc_node_service_(nullptr),
@@ -364,6 +366,63 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
 
     ng_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no);
+}
+
+void Sharder::WaitClusterReady()
+{
+    std::unique_lock<std::mutex> lk(recovery_state_mux_);
+
+    while (true)
+    {
+        bool recovery_all_finished = true;
+        for (const auto &ng_pair : ng_leader_cache_)
+        {
+            if (recovered_leader_set.find(ng_pair.first) ==
+                recovered_leader_set.end())
+            {
+                recovery_all_finished = false;
+
+                if (ng_pair.second.load(std::memory_order_acquire) == node_id_)
+                {
+                    if (Sharder::Instance().LeaderTerm(ng_pair.first) > 0)
+                    {
+                        recovered_leader_set.emplace(ng_pair.first);
+                    }
+                }
+                else
+                {
+                    // Send message to remote node to check whether it finish
+                    // the log recovery. we use the cc_stream_sender and
+                    // cc_stream_receiver to test whether the stream is
+                    // established or not.
+                    remote::CcMessage send_msg;
+
+                    send_msg.set_type(
+                        remote::CcMessage::MessageType::
+                            CcMessage_MessageType_RecoverStateCheckRequest);
+
+                    remote::RecoverStateCheckRequest *recover_req =
+                        send_msg.mutable_recover_state_check_req();
+                    recover_req->set_src_node_id(node_id_);
+                    recover_req->set_node_group_id(ng_pair.first);
+
+                    cc_stream_sender_->SendMessage(ng_pair.first, send_msg);
+                }
+            }
+        }
+
+        if (recovery_all_finished)
+        {
+            break;
+        }
+        else
+        {
+            using namespace std::chrono_literals;
+            lk.unlock();
+            std::this_thread::sleep_for(1s);
+            lk.lock();
+        }
+    }
 }
 
 void Sharder::RecoverTx(uint64_t lock_tx_number,

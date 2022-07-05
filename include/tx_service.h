@@ -298,6 +298,11 @@ public:
         ArchivesFlusher::Instance(local_cc_shards_.store_hd_).Start();
     }
 
+    void WaitClusterReady()
+    {
+        Sharder::Instance().WaitClusterReady();
+    }
+
     ~TxService()
     {
         ckpt_.Terminate();
