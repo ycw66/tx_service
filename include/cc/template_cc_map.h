@@ -2126,6 +2126,7 @@ public:
                 }
             }
         }
+        cache.resize(tuple_idx);
 
         req.Result()->SetFinished();
         return true;
