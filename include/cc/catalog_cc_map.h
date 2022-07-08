@@ -87,7 +87,7 @@ public:
         }
 
         CatalogRecord *schema_rec = nullptr;
-        const TableSchemaView *schema_view = nullptr;
+        const CatalogEntry *catalog_entry = nullptr;
 
         switch (req.CommitType())
         {
@@ -124,19 +124,21 @@ public:
                     req.SetDecodedPayload(std::move(decoded_rec));
                 }
 
-                schema_view =
+                catalog_entry =
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                req.NodeGroupId(),
                                                schema_rec->SchemaImage(),
                                                req.CommitTs());
 
-                schema_rec->SetSchemaView(schema_view);
+                schema_rec->Set(catalog_entry->schema_.get(),
+                                catalog_entry->dirty_schema_.get(),
+                                catalog_entry->Version());
             }
             else
             {
                 assert(req.Payload() != nullptr);
                 schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                schema_view =
+                catalog_entry =
                     shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
             }
 
@@ -144,7 +146,7 @@ public:
         }
         case PostWriteType::PostCommit:
         {
-            schema_view =
+            catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
             if (shard_->core_id_ == 0)
@@ -168,13 +170,9 @@ public:
                     req.SetDecodedPayload(std::move(empty_rec));
                 }
 
-                TableSchemaView committed_view;
-                committed_view.schema_ = schema_view->dirty_schema_;
-                committed_view.version_ts_ = schema_view->dirty_version_ts_;
-                committed_view.dirty_schema_ = nullptr;
-                committed_view.dirty_version_ts_ = 0;
-
-                schema_rec->SetSchemaView(&committed_view);
+                schema_rec->Set(catalog_entry->dirty_schema_.get(),
+                                nullptr,
+                                catalog_entry->DirtyVersion());
             }
             else
             {
@@ -191,15 +189,15 @@ public:
             break;
         }
 
-        assert(schema_view != nullptr);
+        assert(catalog_entry != nullptr);
 
         // When the request commits the schema operation, modifies the cc
         // map(s) at this shard.
         if (req.CommitType() == PostWriteType::PostCommit &&
-            schema_view->dirty_version_ts_ > 0)
+            catalog_entry->DirtyVersion() > 0)
         {
-            const TableSchema *old_schema = schema_view->schema_;
-            const TableSchema *new_schema = schema_view->dirty_schema_;
+            const TableSchema *old_schema = catalog_entry->schema_.get();
+            const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
 
             if (new_schema == nullptr)
             {
@@ -210,7 +208,7 @@ public:
                 // node-level schema view. The version timestamp of the schema
                 // is 0, if the schema is uninitialized (null). Or, the current
                 // schema must not be null.
-                assert(schema_view->version_ts_ == 0 || old_schema != nullptr);
+                assert(catalog_entry->Version() == 0 || old_schema != nullptr);
 
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
@@ -228,7 +226,7 @@ public:
             }
             else if (old_schema == nullptr)
             {
-                assert(schema_view->dirty_version_ts_ > 0 &&
+                assert(catalog_entry->DirtyVersion() > 0 &&
                        new_schema != nullptr);
 
                 // This is a CREATE TABLE statement. Creates the cc maps
@@ -236,7 +234,7 @@ public:
                 shard_->CreatePkCcMap(table_key->Name(),
                                       new_schema,
                                       req.NodeGroupId(),
-                                      schema_view->dirty_version_ts_,
+                                      catalog_entry->DirtyVersion(),
                                       true);
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
@@ -245,7 +243,7 @@ public:
                     shard_->CreateSkCcMap(index_name,
                                           new_schema,
                                           req.NodeGroupId(),
-                                          schema_view->dirty_version_ts_);
+                                          catalog_entry->DirtyVersion());
                 }
             }
         }
@@ -258,7 +256,7 @@ public:
 
         if (req.CommitType() == PostWriteType::PostCommit &&
             shard_->core_id_ == shard_->core_cnt_ - 1 &&
-            schema_view->dirty_version_ts_ > 0)
+            catalog_entry->DirtyVersion() > 0)
         {
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
@@ -314,27 +312,29 @@ public:
 
         if (req.Type() == ReadType::OutsideNormal)
         {
-            const TableSchemaView *schema_view =
+            const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
-            if (schema_view == nullptr)
+            if (catalog_entry == nullptr)
             {
                 assert(schema_rec->SchemaImage().size() > 0);
 
-                schema_view = shard_->CreateCatalog(table_key->Name(),
-                                                    req.NodeGroupId(),
-                                                    schema_rec->SchemaImage(),
-                                                    req.ReadTimestamp());
+                catalog_entry = shard_->CreateCatalog(table_key->Name(),
+                                                      req.NodeGroupId(),
+                                                      schema_rec->SchemaImage(),
+                                                      req.ReadTimestamp());
             }
-            schema_rec->SetSchemaView(schema_view);
+            schema_rec->Set(catalog_entry->schema_.get(),
+                            catalog_entry->dirty_schema_.get(),
+                            catalog_entry->Version());
 
-            const TableSchema *curr_schema = schema_view->schema_;
+            const TableSchema *curr_schema = catalog_entry->schema_.get();
             if (curr_schema != nullptr)
             {
                 shard_->CreatePkCcMap(table_key->Name(),
                                       curr_schema,
                                       req.NodeGroupId(),
-                                      schema_view->version_ts_);
+                                      catalog_entry->Version());
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
@@ -342,7 +342,7 @@ public:
                     shard_->CreateSkCcMap(index_name,
                                           curr_schema,
                                           req.NodeGroupId(),
-                                          schema_view->version_ts_);
+                                          catalog_entry->Version());
                 }
             }
         }
@@ -353,7 +353,7 @@ public:
         if (ret && req.Type() == ReadType::Inside &&
             read_result.rec_status_ == RecordStatus::Unknown)
         {
-            const TableSchemaView *schema_view =
+            const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
             // If the read toward the catalog cc entry acquires the read lock
@@ -361,23 +361,23 @@ public:
             // catalog has been constructed at this node. If so, turns this
             // request into a read-outside request that installs the value in
             // the cc entry.
-            if (schema_view != nullptr)
+            if (catalog_entry != nullptr)
             {
-                if (schema_view->schema_ != nullptr)
+                if (catalog_entry->schema_ != nullptr)
                 {
                     shard_->CreatePkCcMap(table_key->Name(),
-                                          schema_view->schema_,
+                                          catalog_entry->schema_.get(),
                                           req.NodeGroupId(),
-                                          schema_view->version_ts_);
+                                          catalog_entry->Version());
 
                     std::vector<TableName> index_names =
-                        schema_view->schema_->IndexNames();
+                        catalog_entry->schema_->IndexNames();
                     for (const TableName &index_name : index_names)
                     {
                         shard_->CreateSkCcMap(index_name,
-                                              schema_view->schema_,
+                                              catalog_entry->schema_.get(),
                                               req.NodeGroupId(),
-                                              schema_view->version_ts_);
+                                              catalog_entry->Version());
                     }
 
                     req.SetReadType(ReadType::OutsideNormal);
@@ -389,8 +389,10 @@ public:
                     read_result.rec_status_ = RecordStatus::Deleted;
                 }
 
-                schema_rec->SetSchemaView(schema_view);
-                read_result.ts_ = schema_view->version_ts_;
+                schema_rec->Set(catalog_entry->schema_.get(),
+                                catalog_entry->dirty_schema_.get(),
+                                catalog_entry->Version());
+                read_result.ts_ = catalog_entry->Version();
 
                 TemplateCcMap::Execute(req);
                 req.SetReadType(ReadType::Inside);
@@ -426,7 +428,7 @@ public:
         const std::string_view &content = req.LogContentView();
         schema_op_msg.ParseFromArray(content.data(), content.length());
 
-        const TableSchemaView *schema_view = nullptr;
+        const CatalogEntry *catalog_entry = nullptr;
         if (shard_->core_id_ == 0)
         {
             if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
@@ -435,19 +437,20 @@ public:
                 uint64_t commit_ts = req.CommitTs();
                 assert(commit_ts > 0);
 
-                schema_view =
+                catalog_entry =
                     shard_->CreateCatalog(schema_op_msg.table_name(),
                                           req.NodeGroupId(),
                                           schema_op_msg.catalog_blob(),
                                           commit_ts);
 
-                const TableSchema *committed_schema = schema_view->schema_;
+                const TableSchema *committed_schema =
+                    catalog_entry->schema_.get();
                 if (committed_schema != nullptr)
                 {
                     shard_->CreatePkCcMap(schema_op_msg.table_name(),
                                           committed_schema,
                                           req.NodeGroupId(),
-                                          schema_view->version_ts_);
+                                          catalog_entry->Version());
 
                     std::vector<TableName> index_names =
                         committed_schema->IndexNames();
@@ -456,13 +459,13 @@ public:
                         shard_->CreateSkCcMap(index_name,
                                               committed_schema,
                                               req.NodeGroupId(),
-                                              schema_view->version_ts_);
+                                              catalog_entry->Version());
                     }
                 }
             }
             else
             {
-                schema_view =
+                catalog_entry =
                     shard_->CreateDirtyCatalog(schema_op_msg.table_name(),
                                                req.NodeGroupId(),
                                                schema_op_msg.catalog_blob(),
@@ -471,8 +474,8 @@ public:
         }
         else
         {
-            schema_view = shard_->GetCatalog(schema_op_msg.table_name(),
-                                             req.NodeGroupId());
+            catalog_entry = shard_->GetCatalog(schema_op_msg.table_name(),
+                                               req.NodeGroupId());
         }
 
         CatalogKey table_key(schema_op_msg.table_name());
@@ -506,7 +509,9 @@ public:
             // node group's cc maps.
             assert(success);
         }
-        cce->payload_.SetSchemaView(schema_view);
+        cce->payload_.Set(catalog_entry->schema_.get(),
+                          catalog_entry->dirty_schema_.get(),
+                          catalog_entry->Version());
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {

@@ -164,11 +164,13 @@ std::string CatalogRecord::ToString() const
     return std::string();
 }
 
-void CatalogRecord::SetSchemaView(const TableSchemaView *view)
+void CatalogRecord::Set(TableSchema *schema,
+                        TableSchema *dirty_schema,
+                        uint64_t schema_ts)
 {
-    schema_ = view->schema_;
-    dirty_schema_ = view->dirty_schema_;
-    schema_ts_ = view->version_ts_;
+    schema_ = schema;
+    dirty_schema_ = dirty_schema;
+    schema_ts_ = schema_ts;
 }
 
 const std::string &CatalogRecord::SchemaImage() const

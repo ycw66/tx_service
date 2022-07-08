@@ -76,7 +76,7 @@ public:
                         // Get original table name for the range table name
                         const txservice::TableName base_table_name =
                             GetTablenameFromRangeTablename(*table_name_);
-                        const TableSchemaView *schema_view =
+                        const CatalogEntry *catalog_entry =
                             ccs.GetCatalog(base_table_name, node_group_id_);
                         // When a tx sends a request toward a table's range
                         // cc map, either to look up the range containing the
@@ -86,8 +86,8 @@ public:
                         // data. Initialization of the table's cc map needs to
                         // instantiate the schema instance. So, the table's
                         // schema should never be null.
-                        assert(schema_view != nullptr &&
-                               schema_view->schema_ != nullptr);
+                        assert(catalog_entry != nullptr &&
+                               catalog_entry->schema_ != nullptr);
 
                         // The local node does not contain the table's ranges.
                         // The FetchTableRanges() method will send an async
@@ -95,9 +95,10 @@ public:
                         // ranges and initializes the table's range cc map.
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
-                        ccs.FetchTableRanges(*table_name_,
-                                             schema_view->schema_->KeySchema(),
-                                             this);
+                        ccs.FetchTableRanges(
+                            *table_name_,
+                            catalog_entry->schema_->KeySchema(),
+                            this);
                         return false;
                     }
                 }
@@ -108,18 +109,19 @@ public:
                     // ccmap is based on the real table name, for example, index
                     // should get the correspond sk_ccmap.
                     TableName base_table_name = GetBaseTableName(*table_name_);
-                    const TableSchemaView *schema_view =
+                    const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
 
-                    if (schema_view != nullptr)
+                    if (catalog_entry != nullptr)
                     {
-                        const TableSchema *curr_schema = schema_view->schema_;
+                        const TableSchema *curr_schema =
+                            catalog_entry->schema_.get();
                         if (curr_schema != nullptr)
                         {
                             ccs.CreatePkCcMap(base_table_name,
                                               curr_schema,
                                               node_group_id_,
-                                              schema_view->version_ts_);
+                                              catalog_entry->Version());
 
                             std::vector<TableName> index_names =
                                 curr_schema->IndexNames();
@@ -128,7 +130,7 @@ public:
                                 ccs.CreateSkCcMap(index_name,
                                                   curr_schema,
                                                   node_group_id_,
-                                                  schema_view->version_ts_);
+                                                  catalog_entry->Version());
                             }
 
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
@@ -209,22 +211,22 @@ protected:
      * request's target cc map. Null, if the schema is not cached at the node
      * level.
      */
-    const TableSchemaView *InitCcm(CcShard &ccs)
+    const CatalogEntry *InitCcm(CcShard &ccs)
     {
         TableName base_table_name = GetBaseTableName(*table_name_);
 
-        const TableSchemaView *schema_view =
+        const CatalogEntry *catalog_entry =
             ccs.GetCatalog(base_table_name, node_group_id_);
 
-        if (schema_view != nullptr)
+        if (catalog_entry != nullptr)
         {
-            const TableSchema *curr_schema = schema_view->schema_;
-            if (curr_schema != nullptr && schema_view->version_ts_ > 0)
+            const TableSchema *curr_schema = catalog_entry->schema_.get();
+            if (curr_schema != nullptr && catalog_entry->Version() > 0)
             {
                 ccs.CreatePkCcMap(base_table_name,
                                   curr_schema,
                                   node_group_id_,
-                                  schema_view->version_ts_);
+                                  catalog_entry->Version());
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
@@ -232,7 +234,7 @@ protected:
                     ccs.CreateSkCcMap(index_name,
                                       curr_schema,
                                       node_group_id_,
-                                      schema_view->version_ts_);
+                                      catalog_entry->Version());
                 }
             }
         }
@@ -245,7 +247,7 @@ protected:
             ccs.FetchCatalog(base_table_name, node_group_id_, this);
         }
 
-        return schema_view;
+        return catalog_entry;
     }
 
     /**
@@ -1717,11 +1719,11 @@ public:
 
             if (ccm_ == nullptr)
             {
-                const TableSchemaView *schema_view = InitCcm(ccs);
+                const CatalogEntry *catalog_entry = InitCcm(ccs);
 
-                if (schema_view != nullptr)
+                if (catalog_entry != nullptr)
                 {
-                    if (schema_view->version_ts_ == 0)
+                    if (catalog_entry->Version() == 0)
                     {
                         // The schema view is initialized but the current schema
                         // is unset (version_ts is 0). This means that there is
@@ -1730,7 +1732,7 @@ public:
                         res_->SetError(100);
                         return false;
                     }
-                    else if (schema_view->schema_ != nullptr)
+                    else if (catalog_entry->schema_ != nullptr)
                     {
                         ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 

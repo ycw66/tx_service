@@ -69,7 +69,7 @@ void LocalCcShards::TimerRun()
     }
 }
 
-const TableSchemaView *LocalCcShards::CreateCatalog(
+const CatalogEntry *LocalCcShards::CreateCatalog(
     const std::string &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
@@ -93,14 +93,12 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
 
         auto ng_catalog_it = table_catalogs_.find(table_name);
         auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
-        auto result_view = catalog_it->second.SchemaView();
     }
     else
     {
-        const TableSchemaView *schema_view = catalog_entry.SchemaView();
         // If the input schema version is greater than the existing one,
         // replaces the existing schemaw with the new one.
-        if (schema_view->version_ts_ < commit_ts)
+        if (catalog_entry.Version() < commit_ts)
         {
             catalog_entry.InitSchema(
                 catalog_image.empty()
@@ -111,10 +109,10 @@ const TableSchemaView *LocalCcShards::CreateCatalog(
         }
     }
 
-    return catalog_entry.SchemaView();
+    return &catalog_entry;
 }
 
-const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
+const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const std::string &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
@@ -126,8 +124,8 @@ const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
     CatalogEntry &catalog_entry = catalog_it.first->second;
 
-    if (catalog_entry.schema_view_.version_ts_ < commit_ts &&
-        catalog_entry.schema_view_.dirty_version_ts_ < commit_ts)
+    if (catalog_entry.Version() < commit_ts &&
+        catalog_entry.DirtyVersion() < commit_ts)
     {
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
@@ -139,34 +137,34 @@ const TableSchemaView *LocalCcShards::CreateDirtyCatalog(
             commit_ts);
     }
 
-    return catalog_entry.SchemaView();
+    return &catalog_entry;
 }
 
-const TableSchemaView *LocalCcShards::CommitDirtyCatalog(
-    const std::string &table_name, NodeGroupId cc_ng_id)
+void LocalCcShards::CommitDirtyCatalog(const std::string &table_name,
+                                       NodeGroupId cc_ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
 
     auto ng_catalog_it = table_catalogs_.find(table_name);
     if (ng_catalog_it == table_catalogs_.end())
     {
-        return nullptr;
+        return;
     }
 
     auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
     if (catalog_it == ng_catalog_it->second.end())
     {
-        return nullptr;
+        return;
     }
 
     CatalogEntry &catalog_entry = catalog_it->second;
     catalog_entry.CommitDirtySchema();
 
-    return catalog_entry.SchemaView();
+    return;
 }
 
-const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name,
-                                                 NodeGroupId cc_ng_id)
+const CatalogEntry *LocalCcShards::GetCatalog(const std::string &table_name,
+                                              NodeGroupId cc_ng_id)
 {
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
 
@@ -177,9 +175,8 @@ const TableSchemaView *LocalCcShards::GetCatalog(const std::string &table_name,
     }
 
     auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
-    return catalog_it == ng_catalog_it->second.end()
-               ? nullptr
-               : catalog_it->second.SchemaView();
+    return catalog_it == ng_catalog_it->second.end() ? nullptr
+                                                     : &catalog_it->second;
 }
 
 std::unordered_set<TableName> LocalCcShards::CatalogTableNames()

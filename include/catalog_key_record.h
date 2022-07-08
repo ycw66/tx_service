@@ -46,18 +46,81 @@ private:
     TableName table_name_;
 };
 
-struct TableSchemaView
+/**
+ * @brief Owner of current and dirty schema on one node. Mutilple ccshards will
+ * have their own copies of CatalogRecord in catolog_cc_map. Their current and
+ * dirty schema point to the corresponding CatalogEntry.
+ *
+ * Note that it's possible that different shard's have different current schema
+ * or dirty schema, since CreateDirty() and CommitDirty() steps happen in
+ * parallel. But there are at most two schema on a single node, which is
+ * described by CatalogEntry.
+ *
+ */
+struct CatalogEntry
 {
-    const TableSchema *schema_{nullptr};
+    CatalogEntry() = default;
+
+    void InitSchema(std::unique_ptr<TableSchema> schema, uint64_t version_ts)
+    {
+        assert(version_ts > 0);
+
+        if (Version() < version_ts)
+        {
+            schema_ = std::move(schema);
+            schema_version_ = version_ts;
+        }
+        if (DirtyVersion() <= version_ts)
+        {
+            dirty_schema_ = nullptr;
+            dirty_schema_version_ = 0;
+        }
+    }
+
+    void SetDirtySchema(std::unique_ptr<TableSchema> dirty_schema,
+                        uint64_t dirty_version_ts)
+    {
+        if (dirty_version_ts > dirty_schema_version_ &&
+            dirty_version_ts > schema_version_)
+        {
+            dirty_schema_ = std::move(dirty_schema);
+            dirty_schema_version_ = dirty_version_ts;
+        }
+    }
+
+    void CommitDirtySchema()
+    {
+        if (dirty_schema_version_ > schema_version_)
+        {
+            schema_ = std::move(dirty_schema_);
+            schema_version_ = dirty_schema_version_;
+        }
+        else
+        {
+            dirty_schema_ = nullptr;
+        }
+    }
+
     /**
      * @brief The version of the schema, represented by the commit timestamp
      * when the schema is last modified. Timestamp being 0 means that the schema
      * is unspecified.
      *
      */
-    uint64_t version_ts_{0};
-    const TableSchema *dirty_schema_{nullptr};
-    uint64_t dirty_version_ts_{0};
+    uint64_t Version() const
+    {
+        return schema_version_;
+    }
+
+    uint64_t DirtyVersion() const
+    {
+        return dirty_schema_version_;
+    }
+
+    std::unique_ptr<TableSchema> schema_{nullptr};
+    std::unique_ptr<TableSchema> dirty_schema_{nullptr};
+    uint64_t schema_version_{0};
+    uint64_t dirty_schema_version_{0};
 };
 
 /**
@@ -84,7 +147,9 @@ public:
     void Copy(const TxRecord &rhs) override;
     std::string ToString() const override;
 
-    void SetSchemaView(const TableSchemaView *view);
+    void Set(TableSchema *schema,
+             TableSchema *dirty_schema,
+             uint64_t schema_ts);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
     void SetSchemaImage(const std::string &schema_image);

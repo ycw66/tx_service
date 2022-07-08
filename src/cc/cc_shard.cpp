@@ -475,16 +475,16 @@ void CcShard::NotifyCkpt()
     }
 }
 
-const TableSchemaView *CcShard::CreateCatalog(const TableName &table_name,
-                                              NodeGroupId cc_ng_id,
-                                              const std::string &catalog_image,
-                                              uint64_t commit_ts)
+const CatalogEntry *CcShard::CreateCatalog(const TableName &table_name,
+                                           NodeGroupId cc_ng_id,
+                                           const std::string &catalog_image,
+                                           uint64_t commit_ts)
 {
     return local_shards_.CreateCatalog(
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
-const TableSchemaView *CcShard::CreateDirtyCatalog(
+const CatalogEntry *CcShard::CreateDirtyCatalog(
     const std::string &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
@@ -494,14 +494,14 @@ const TableSchemaView *CcShard::CreateDirtyCatalog(
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
-const TableSchemaView *CcShard::CommitDirtyCatalog(const TableName &table_name,
-                                                   NodeGroupId cc_ng_id)
+void CcShard::CommitDirtyCatalog(const TableName &table_name,
+                                 NodeGroupId cc_ng_id)
 {
-    return local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
+    local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
 }
 
-const TableSchemaView *CcShard::GetCatalog(const std::string &table_name,
-                                           NodeGroupId cc_ng_id)
+const CatalogEntry *CcShard::GetCatalog(const std::string &table_name,
+                                        NodeGroupId cc_ng_id)
 {
     return local_shards_.GetCatalog(table_name, cc_ng_id);
 }

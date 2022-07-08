@@ -503,17 +503,17 @@ void txservice::LocalCcHandler::ScanOpen(
     {
         // The target ccm is an index.
         TableName sk_base_table_name = table_name.substr(0, pos);
-        const TableSchemaView *schema_view =
+        const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(sk_base_table_name, local_shard.node_id_);
 
-        if (schema_view == nullptr || schema_view->schema_ == nullptr)
+        if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
             hd_res.SetError(1);
             return;
         }
 
         const Schema *index_key_schema =
-            schema_view->schema_->IndexKeySchema(table_name);
+            catalog_entry->schema_->IndexKeySchema(table_name);
         if (index_key_schema == nullptr)
         {
             hd_res.SetError(1);
@@ -525,17 +525,17 @@ void txservice::LocalCcHandler::ScanOpen(
     }
     else
     {
-        const TableSchemaView *schema_view =
+        const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(table_name, local_shard.node_id_);
 
-        if (schema_view == nullptr || schema_view->schema_ == nullptr)
+        if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
             hd_res.SetError(1);
             return;
         }
 
         ccm_scanner = local_shard.catalog_factory_->CreatePkCcmScanner(
-            direction, schema_view->schema_->KeySchema());
+            direction, catalog_entry->schema_->KeySchema());
     }
 
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();

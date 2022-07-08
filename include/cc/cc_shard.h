@@ -327,21 +327,20 @@ public:
 
     uint64_t GlobalMinTxStartTs();
 
-    const TableSchemaView *CreateCatalog(const TableName &table_name,
-                                         NodeGroupId cc_ng_id,
-                                         const std::string &catalog_image,
-                                         uint64_t commit_ts);
+    const CatalogEntry *CreateCatalog(const TableName &table_name,
+                                      NodeGroupId cc_ng_id,
+                                      const std::string &catalog_image,
+                                      uint64_t commit_ts);
 
-    const TableSchemaView *CreateDirtyCatalog(const TableName &table_name,
-                                              NodeGroupId cc_ng_id,
-                                              const std::string &catalog_image,
-                                              uint64_t commit_ts);
+    const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
+                                           NodeGroupId cc_ng_id,
+                                           const std::string &catalog_image,
+                                           uint64_t commit_ts);
 
-    const TableSchemaView *CommitDirtyCatalog(const TableName &table_name,
-                                              NodeGroupId cc_ng_id);
+    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
-    const TableSchemaView *GetCatalog(const TableName &table_name,
-                                      NodeGroupId cc_ng_id);
+    const CatalogEntry *GetCatalog(const TableName &table_name,
+                                   NodeGroupId cc_ng_id);
 
     void InitTableRanges(const TableName &table_name,
                          std::vector<InitRangeEntry> &init_ranges);

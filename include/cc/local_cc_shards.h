@@ -220,21 +220,21 @@ public:
 
     static uint64_t ClockTs();
 
-    const TableSchemaView *CreateCatalog(const std::string &table_name,
-                                         NodeGroupId cc_ng_id,
-                                         const std::string &catalog_image,
-                                         uint64_t commit_ts);
+    const CatalogEntry *CreateCatalog(const std::string &table_name,
+                                      NodeGroupId cc_ng_id,
+                                      const std::string &catalog_image,
+                                      uint64_t commit_ts);
 
-    const TableSchemaView *CreateDirtyCatalog(const std::string &table_name,
-                                              NodeGroupId cc_ng_id,
-                                              const std::string &catalog_image,
-                                              uint64_t commit_ts);
+    const CatalogEntry *CreateDirtyCatalog(const std::string &table_name,
+                                           NodeGroupId cc_ng_id,
+                                           const std::string &catalog_image,
+                                           uint64_t commit_ts);
 
-    const TableSchemaView *CommitDirtyCatalog(const std::string &table_name,
-                                              NodeGroupId cc_ng_id);
+    void CommitDirtyCatalog(const std::string &table_name,
+                            NodeGroupId cc_ng_id);
 
-    const TableSchemaView *GetCatalog(const std::string &table_name,
-                                      NodeGroupId cc_ng_id);
+    const CatalogEntry *GetCatalog(const std::string &table_name,
+                                   NodeGroupId cc_ng_id);
 
     std::unordered_set<TableName> CatalogTableNames();
 
@@ -301,73 +301,6 @@ private:
     // local time is used by transaction state machines to determine if a lock
     // has been held too long and if so, invoke lock recovery.
     static std::atomic<uint64_t> local_clock;
-
-    struct CatalogEntry
-    {
-        CatalogEntry() = default;
-
-        void InitSchema(std::unique_ptr<TableSchema> schema,
-                        uint64_t version_ts)
-        {
-            assert(version_ts > 0);
-
-            if (schema_view_.version_ts_ < version_ts)
-            {
-                schema_ = std::move(schema);
-                schema_view_.schema_ =
-                    schema_ != nullptr ? schema_.get() : nullptr;
-                schema_view_.version_ts_ = version_ts;
-            }
-
-            if (schema_view_.dirty_version_ts_ <= version_ts)
-            {
-                dirty_schema_ = nullptr;
-                schema_view_.dirty_schema_ = nullptr;
-                schema_view_.dirty_version_ts_ = 0;
-            }
-        }
-
-        void SetDirtySchema(std::unique_ptr<TableSchema> dirty_schema,
-                            uint64_t dirty_version_ts)
-        {
-            if (dirty_version_ts > schema_view_.dirty_version_ts_ &&
-                dirty_version_ts > schema_view_.version_ts_)
-            {
-                dirty_schema_ = std::move(dirty_schema);
-                schema_view_.dirty_schema_ =
-                    dirty_schema_ != nullptr ? dirty_schema_.get() : nullptr;
-                schema_view_.dirty_version_ts_ = dirty_version_ts;
-            }
-        }
-
-        void CommitDirtySchema()
-        {
-            if (schema_view_.dirty_version_ts_ > schema_view_.version_ts_)
-            {
-                schema_ = std::move(dirty_schema_);
-                schema_view_.schema_ =
-                    schema_ != nullptr ? schema_.get() : nullptr;
-                schema_view_.version_ts_ = schema_view_.dirty_version_ts_;
-                schema_view_.dirty_schema_ = nullptr;
-                schema_view_.dirty_version_ts_ = 0;
-            }
-            else
-            {
-                dirty_schema_ = nullptr;
-                schema_view_.dirty_schema_ = nullptr;
-                schema_view_.dirty_version_ts_ = 0;
-            }
-        }
-
-        const TableSchemaView *SchemaView() const
-        {
-            return &schema_view_;
-        }
-
-        std::unique_ptr<TableSchema> schema_{nullptr};
-        std::unique_ptr<TableSchema> dirty_schema_{nullptr};
-        TableSchemaView schema_view_;
-    };
 
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
