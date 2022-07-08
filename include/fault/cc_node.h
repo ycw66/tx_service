@@ -70,6 +70,15 @@ public:
         return candidate_leader_term_.load(std::memory_order_acquire);
     }
 
+    /**
+     * try to start checkpoint and set checkpoint flag if this node is group
+     * leader
+     * @return leader term of this ccnode
+     */
+    int64_t TryStartCheckpoint();
+
+    void FinishCheckpoint();
+
 private:
     static braft::NodeOptions BaseNodeOptions()
     {
@@ -129,6 +138,12 @@ private:
     braft::Node *volatile node_;
     std::atomic<int64_t> leader_term_;
     std::atomic<int64_t> candidate_leader_term_;
+    // whether this cc node is doing checkpoint as group leader
+    bool in_checkpoint_;
+    // to coordinate checkpoint procedure and on_leader_stop, this
+    // ccnode's ccmaps and catalogs is cleared when this node steps down as
+    // leader and finishes checkpoint
+    std::mutex checkpoint_mux_;
 
     LocalCcShards &local_cc_shards_;
 

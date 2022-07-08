@@ -239,6 +239,23 @@ public:
 
     void NotifyCheckPointer();
 
+    std::vector<uint32_t> LocalNodeGroups();
+
+    /**
+     * try to start checkpoint and set checkpoint flag if cc_ng_id is node group
+     * leader
+     * @param cc_ng_id
+     * @return leader term of cc_ng_id
+     */
+    int64_t TryStartCheckpoint(uint32_t cc_ng_id);
+
+    /**
+     * cc_ng_id's checkpoint finishes, reset checkpoint flag and clear ccmaps
+     * and catalogs if this node is no longer group leader
+     * @param cc_ng_id
+     */
+    void FinishCheckpoint(uint32_t cc_ng_id);
+
 private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,

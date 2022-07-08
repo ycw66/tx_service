@@ -6,6 +6,7 @@
 #include <iostream>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "catalog.h"
 #include "catalog_factory.h"
@@ -236,7 +237,7 @@ public:
     const CatalogEntry *GetCatalog(const std::string &table_name,
                                    NodeGroupId cc_ng_id);
 
-    std::unordered_set<TableName> CatalogTableNames();
+    std::unordered_set<TableName> CatalogTableNames(NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
                                 uint64_t txn,

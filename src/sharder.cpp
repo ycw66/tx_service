@@ -503,4 +503,32 @@ void Sharder::NotifyCheckPointer()
     return local_shards_.NotifyCheckPointer();
 }
 
+vector<uint32_t> Sharder::LocalNodeGroups()
+{
+    std::vector<uint32_t> ngs;
+    for (auto &pair : cc_nodes_)
+    {
+        ngs.push_back(pair.first);
+    }
+    return ngs;
+}
+
+int64_t Sharder::TryStartCheckpoint(uint32_t cc_ng_id)
+{
+    auto it = cc_nodes_.find(cc_ng_id);
+    if (it != cc_nodes_.end())
+    {
+        return it->second->TryStartCheckpoint();
+    }
+    return -1;
+}
+
+void Sharder::FinishCheckpoint(uint32_t cc_ng_id)
+{
+    auto it = cc_nodes_.find(cc_ng_id);
+    if (it != cc_nodes_.end())
+    {
+        it->second->FinishCheckpoint();
+    }
+}
 }  // namespace txservice

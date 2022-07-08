@@ -6,7 +6,8 @@ namespace txservice
 {
 Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
-                           const uint32_t &checkpoint_interval)
+                           const uint32_t &checkpoint_interval,
+                           TxLog *log_agent)
     : local_shards_(shards),
       last_ckpt_ts_(0),
       mux_(),
@@ -14,7 +15,8 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       request_ckpt_(false),
       store_hd_(write_hd),
       status_(Status::Active),
-      checkpoint_interval_(checkpoint_interval)
+      checkpoint_interval_(checkpoint_interval),
+      log_agent_(log_agent)
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -69,176 +71,192 @@ void Checkpointer::Ckpt()
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
 
-    assert(ckpt_ts >= last_ckpt_ts_);
-
-    if (ckpt_ts == last_ckpt_ts_)
-    {
-        return;
-    }
-
     const CcShard &shard = *local_shards_.cc_shards_[0];
-    bool flushed = true;
 
-    // Copy a set of table names
-    std::unordered_set<TableName> tables = local_shards_.CatalogTableNames();
-
-    // Iteratate all the tables and execute CkptScanCc requests on each
-    // ccshard on all the ccmaps. The result of CkptScanCc is stored in
-    // ckpt_vec.
-    for (const auto &table_name : tables)
+    vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
+    for (uint32_t node_group : node_groups)
     {
-        if (table_name == catalog_ccm_name)
+        // check whether this node is group leader, set checkpoint flag if it is
+        int64_t leader_term =
+            Sharder::Instance().TryStartCheckpoint(node_group);
+        assert(ckpt_ts >= last_ckpt_ts_[node_group]);
+        uint64_t last_ckpt_ts = 0;
+        auto ite = last_ckpt_ts_.find(node_group);
+        if (ite != last_ckpt_ts_.end())
+        {
+            last_ckpt_ts = ite->second;
+        }
+        if (leader_term < 0 || ckpt_ts == last_ckpt_ts)
         {
             continue;
         }
+        bool flushed = true;
 
-        // Only issue tx_request using base table name
-        const TableName *base_table_name_;
-        TableName sk_base_table_name_;
-        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-        if (pos != std::string::npos)
+        // get table names this node group contains
+        std::unordered_set<TableName> tables =
+            local_shards_.CatalogTableNames(node_group);
+
+        // Iterate all the tables and execute CkptScanCc requests on this node
+        // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
+        // ckpt_vec.
+        for (const auto &table_name : tables)
         {
-            sk_base_table_name_ = table_name;
-            sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
-            base_table_name_ = &sk_base_table_name_;
-        }
-        else
-        {
-            base_table_name_ = &table_name;
-        }
-
-        // Init a tx_request to acquire read lock on catalog cc_entry in one
-        // shard, which is good enough to block schema change.
-        TransactionExecution *ckpt_txm = tx_service_->NewTx();
-
-        InitTxRequest init_req;
-        // Set isolation level to RepeatableRead to ensure the readlock will be
-        // set during the execution of the following ReadTxRequest.
-        init_req.iso_level_ = IsolationLevel::RepeatableRead;
-        init_req.Reset();
-        ckpt_txm->Execute(&init_req);
-        init_req.Wait();
-
-        if (init_req.IsError())
-        {
-            flushed = false;
-            break;
-        }
-
-        // If table_name has been dropped at this point, read lock would not be
-        // acquired.
-        CatalogKey table_key(*base_table_name_);
-        CatalogRecord catalog_rec;
-
-        ReadTxRequest read_req;
-        read_req.Reset();
-        read_req.Set(&catalog_ccm_name,
-                     &table_key,
-                     &catalog_rec,
-                     LockType::ReadLock,
-                     true);
-        ckpt_txm->Execute(&read_req);
-        read_req.Wait();
-
-        if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
-        {
-            // Use CommitTxRequest to release read lock.
-            AbortTxRequest abort_req;
-            abort_req.Reset();
-            ckpt_txm->Execute(&abort_req);
-            abort_req.Wait();
-            assert(abort_req.Result() == false);
-            flushed = false;
-            continue;
-        }
-
-        ckpt_vec.clear();
-        CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, ckpt_vec);
-
-        for (auto &ccs : local_shards_.cc_shards_)
-        {
-            ckpt_scan_cc.Reset(ccs->node_id_);
-            ccs->Enqueue(&ckpt_scan_cc);
-            ckpt_scan_cc.Wait();
-
-            auto table_it = ccs->failover_ccms_.find(table_name);
-            if (table_it != ccs->failover_ccms_.end())
+            if (table_name == catalog_ccm_name)
             {
-                for (auto &ng_pair : table_it->second)
-                {
-                    ckpt_scan_cc.Reset(ng_pair.first);
-                    ccs->Enqueue(&ckpt_scan_cc);
-                    ckpt_scan_cc.Wait();
-                }
+                continue;
             }
-        }
 
-        if (!ckpt_vec.empty())
-        {
-            // Flushes to the data store
-            bool ckpt_ret = false;
-
-            CcMap *ccm;
-            auto iter = shard.native_ccms_.find(table_name);
-            if (iter == shard.native_ccms_.end())
+            // Only issue tx_request using base table name
+            const TableName *base_table_name_;
+            TableName sk_base_table_name_;
+            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+            if (pos != std::string::npos)
             {
-                auto it = shard.failover_ccms_.find(table_name);
-                assert(it != shard.failover_ccms_.end());
-                ccm = it->second.begin()->second.get();
+                sk_base_table_name_ = table_name;
+                sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
+                base_table_name_ = &sk_base_table_name_;
             }
             else
             {
-                ccm = iter->second.get();
+                base_table_name_ = &table_name;
             }
 
-            if (ccm->Type() == TableType::Primary)
-            {
-                const Schema *key_schema = ccm->KeySchema();
-                const Schema *rec_schema = ccm->RecordSchema();
-                ckpt_ret = store_hd_->PutAll(table_name,
-                                             ckpt_vec,
-                                             key_schema,
-                                             rec_schema,
-                                             ccm->SchemaTs());
+            // Init a tx_request to acquire read lock on catalog cc_entry in one
+            // shard, which is good enough to block schema change.
+            TransactionExecution *ckpt_txm = tx_service_->NewTx();
 
-                // fault injection to prolong the process of ckpt flush
-                ACTION_FAULT_INJECTOR("after_ckpt_flush");
-            }
-            else
-            {
-                const SecondaryKeySchema *sk_schema =
-                    static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
-                ckpt_ret = store_hd_->PutSkAll(
-                    table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
-            }
+            InitTxRequest init_req;
+            // Set isolation level to RepeatableRead to ensure the readlock will
+            // be set during the execution of the following ReadTxRequest.
+            init_req.iso_level_ = IsolationLevel::RepeatableRead;
+            init_req.Reset();
+            ckpt_txm->Execute(&init_req);
+            init_req.Wait();
 
-            // If flush to data store succeeds, update the ckpt_ts for
-            // each entries in ccmap.
-            if (ckpt_ret)
+            if (init_req.IsError())
             {
-                for (LruEntry *&entry : ckpt_vec)
-                {
-                    entry->ckpt_ts_.store(ckpt_ts, std::memory_order_release);
-                }
-            }
-            else
-            {
+                LOG(INFO) << "init tx failed";
                 flushed = false;
+                break;
             }
+
+            // If table_name has been dropped at this point, read lock would not
+            // be acquired.
+            CatalogKey table_key(*base_table_name_);
+            CatalogRecord catalog_rec;
+
+            ReadTxRequest read_req;
+            read_req.Reset();
+            read_req.Set(&catalog_ccm_name,
+                         &table_key,
+                         &catalog_rec,
+                         LockType::ReadLock,
+                         true);
+            ckpt_txm->Execute(&read_req);
+            read_req.Wait();
+
+            if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
+            {
+                // Use AbortTxRequest to release read lock.
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                ckpt_txm->Execute(&abort_req);
+                abort_req.Wait();
+                assert(abort_req.Result() == false);
+                LOG(INFO) << "checkpointer add table lock failed";
+                flushed = false;
+                continue;
+            }
+
+            ckpt_vec.clear();
+            CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, ckpt_vec);
+
+            for (auto &ccs : local_shards_.cc_shards_)
+            {
+                ckpt_scan_cc.Reset(node_group);
+                ccs->Enqueue(&ckpt_scan_cc);
+                ckpt_scan_cc.Wait();
+            }
+
+            // flush to data store if this node group leader term does not
+            // change
+            if (!ckpt_vec.empty() &&
+                Sharder::Instance().LeaderTerm(node_group) == leader_term)
+            {
+                // Flushes to the data store
+                bool ckpt_ret = false;
+
+                CcMap *ccm;
+                auto iter = shard.native_ccms_.find(table_name);
+                if (iter == shard.native_ccms_.end())
+                {
+                    auto it = shard.failover_ccms_.find(table_name);
+                    assert(it != shard.failover_ccms_.end());
+                    ccm = it->second.begin()->second.get();
+                }
+                else
+                {
+                    ccm = iter->second.get();
+                }
+
+                if (ccm->Type() == TableType::Primary)
+                {
+                    const Schema *key_schema = ccm->KeySchema();
+                    const Schema *rec_schema = ccm->RecordSchema();
+                    // todo: stop flush process if this node is no longer node
+                    //  group leader
+                    ckpt_ret = store_hd_->PutAll(table_name,
+                                                 ckpt_vec,
+                                                 key_schema,
+                                                 rec_schema,
+                                                 ccm->SchemaTs());
+                }
+                else
+                {
+                    const SecondaryKeySchema *sk_schema =
+                        static_cast<const SecondaryKeySchema *>(
+                            ccm->KeySchema());
+                    // todo: stop flush process if this node is no longer node
+                    //  group leader
+                    ckpt_ret = store_hd_->PutSkAll(
+                        table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
+                }
+
+                // If flush to data store succeeds, update the ckpt_ts for each
+                // entry in ccmap.
+                if (ckpt_ret)
+                {
+                    for (LruEntry *&entry : ckpt_vec)
+                    {
+                        entry->ckpt_ts_.store(ckpt_ts,
+                                              std::memory_order_release);
+                    }
+                }
+                else
+                {
+                    LOG(INFO) << "checkpointer flush to cassandra failed";
+                    flushed = false;
+                }
+            }
+
+            // Use CommitTxRequest to release read lock.
+            CommitTxRequest commit_req;
+
+            commit_req.Reset();
+            ckpt_txm->Execute(&commit_req);
+            commit_req.Wait();
+            assert(commit_req.Result() == true);
         }
 
-        // Use CommitTxRequest to release read lock.
-        CommitTxRequest commit_req;
+        // finish checkpoint on this node group, clear its ccmaps and catalogs
+        // if it is no longer leader
+        Sharder::Instance().FinishCheckpoint(node_group);
 
-        commit_req.Reset();
-        ckpt_txm->Execute(&commit_req);
-        commit_req.Wait();
-        assert(commit_req.Result() == true);
-    }
-
-    if (flushed)
-    {
-        last_ckpt_ts_ = ckpt_ts;
+        if (flushed)
+        {
+            last_ckpt_ts_.insert_or_assign(node_group, ckpt_ts);
+            TruncateLog(node_group, leader_term, ckpt_ts);
+        }
     }
 }
 
@@ -315,4 +333,10 @@ void Checkpointer::Terminate()
     cv_.wait(lk, [this] { return status_ == Status::Terminated; });
 }
 
+void Checkpointer::TruncateLog(uint32_t node_group_id,
+                               int64_t term,
+                               uint64_t ckpt_ts)
+{
+    log_agent_->TruncateLog(node_group_id, term, ckpt_ts);
+}
 }  // namespace txservice

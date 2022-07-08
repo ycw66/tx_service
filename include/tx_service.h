@@ -267,7 +267,8 @@ public:
                            this),
           ckpt_(local_cc_shards_,
                 store_hd,
-                conf.find("checkpointer_interval")->second)
+                conf.find("checkpointer_interval")->second,
+                log_hd.get())
     {
         uint32_t core_cnt = conf.find("core_num")->second;
         pool_.reserve(core_cnt);

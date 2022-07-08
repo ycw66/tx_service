@@ -24,6 +24,7 @@ CcNode::CcNode(const uint32_t ng_id,
       storage_path_(storage_path),
       leader_term_(-1),
       candidate_leader_term_(-1),
+      in_checkpoint_(false),
       local_cc_shards_(local_shards),
       replay_service_(replay_service),
       log_group_cnt_(log_group_cnt)
@@ -211,6 +212,38 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     }
 }
 
+int64_t CcNode::TryStartCheckpoint()
+{
+    std::unique_lock lk(checkpoint_mux_);
+    int64_t leader_term = leader_term_.load(std::memory_order_acquire);
+    if (leader_term > 0)
+    {
+        in_checkpoint_ = true;
+    }
+    return leader_term;
+}
+
+void CcNode::FinishCheckpoint()
+{
+    std::unique_lock lk(checkpoint_mux_);
+    if (in_checkpoint_)
+    {
+        in_checkpoint_ = false;
+        if (leader_term_.load(std::memory_order_acquire) < 0)
+        {
+            // this cc node steps down as leader while doing checkpoint, clear
+            // the ccmaps and catalogs when checkpoint finishes
+            uint16_t core_cnt = local_cc_shards_.Count();
+            ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+            for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+            {
+                local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+            }
+            clear_ccm_req.Wait();
+        }
+    }
+}
+
 /**
  * @brief Notify all the nodes that the node_id of the new leader in node
  * group leader_ng_id, and request these nodes to update their leader cache.
@@ -303,16 +336,28 @@ void CcNode::on_leader_stop(const butil::Status &status)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " steps down as the leader of ng#" << ng_id_ << ".";
 
+    std::unique_lock lk(checkpoint_mux_);
     leader_term_.store(-1, std::memory_order_release);
     candidate_leader_term_.store(-1, std::memory_order_release);
 
-    uint16_t core_cnt = local_cc_shards_.Count();
-    ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
-    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+    // if this node group is doing checkpoint, do not clear ccmap and drop
+    // catalogs, once the checkpointer notices the node group is not leader
+    // anymore, it stops immediately and clear ccmaps and catalogs.
+    if (!in_checkpoint_)
     {
-        local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+        uint16_t core_cnt = local_cc_shards_.Count();
+        ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
+        for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
+        }
+        clear_ccm_req.Wait();
     }
-    clear_ccm_req.Wait();
+    else
+    {
+        LOG(INFO) << "node group: " << ng_id_
+                  << " is doing checkpoint, not clear ccmaps and catalogs";
+    }
 }
 
 void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)

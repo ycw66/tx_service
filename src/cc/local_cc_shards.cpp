@@ -179,25 +179,20 @@ const CatalogEntry *LocalCcShards::GetCatalog(const std::string &table_name,
                                                      : &catalog_it->second;
 }
 
-std::unordered_set<TableName> LocalCcShards::CatalogTableNames()
+std::unordered_set<TableName> LocalCcShards::CatalogTableNames(
+    NodeGroupId cc_ng_id)
 {
     std::unordered_set<TableName> table_set;
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
-    for (auto &[base_table_name, ng_catalog_map] : table_catalogs_)
+    for (const auto &[base_table_name, ng_catalog_map] : table_catalogs_)
     {
-        table_set.emplace(base_table_name);
-
-        // The current implementation only considers native cc maps associated
-        // with the cc node group whose preferred leader is this node. This is a
-        // temporary fix. The ultimate fix is that the checkpointer at this node
-        // flushes cc entries by cc node groups, so this function takes input a
-        // the ID of a cc node group and returns cc maps associated with it.
-        auto catalog_it = ng_catalog_map.find(node_id_);
+        auto catalog_it = ng_catalog_map.find(cc_ng_id);
         if (catalog_it != ng_catalog_map.end())
         {
             const CatalogEntry &catalog_entry = catalog_it->second;
-            if (catalog_entry.schema_.get() != nullptr)
+            if (catalog_entry.schema_ != nullptr)
             {
+                table_set.emplace(base_table_name);
                 for (txservice::TableName &index_table_name :
                      catalog_entry.schema_->IndexNames())
                 {
@@ -206,7 +201,6 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames()
             }
         }
     }
-
     return table_set;
 }
 

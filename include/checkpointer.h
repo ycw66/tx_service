@@ -4,11 +4,13 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
+#include "txlog.h"
 #include "util.h"
 
 using namespace std::chrono;
@@ -21,7 +23,9 @@ class Checkpointer
 public:
     Checkpointer(LocalCcShards &shards,
                  store::DataStoreHandler *write_hd,
-                 const uint32_t &checkpoint_interval);
+                 const uint32_t &checkpoint_interval,
+                 TxLog *log_agent);
+
     ~Checkpointer();
 
     void Ckpt();
@@ -53,7 +57,8 @@ private:
     };
 
     LocalCcShards &local_shards_;
-    uint64_t last_ckpt_ts_;
+    // last checkpoint timestamp of each cc node
+    std::unordered_map<uint32_t, uint64_t> last_ckpt_ts_;
     std::mutex mux_;
     std::condition_variable cv_;
     bool request_ckpt_;
@@ -63,5 +68,8 @@ private:
     const uint32_t checkpoint_interval_;
 
     TxService *tx_service_;
+    TxLog *log_agent_;
+
+    void TruncateLog(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
 };
 }  // namespace txservice
