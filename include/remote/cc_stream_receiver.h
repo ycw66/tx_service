@@ -45,12 +45,6 @@ public:
 
     void on_closed(brpc::StreamId stream) override;
 
-    static IsolationLevel ConvertIsolation(IsolationType iso_level);
-    static CcProtocol ConvertProtocol(CcProtocolType proto);
-    static LockType ConvertLockType(CcLockType lock_type);
-    static PostWriteType ConvertCommitType(CommitType commit_type);
-    static RecordStatus ConvertRecordStatusType(RecordStatusType status_type);
-
 private:
     std::unique_ptr<CcMessage> GetCcMsg();
     void OnReceiveCcMsg(std::unique_ptr<CcMessage> msg);

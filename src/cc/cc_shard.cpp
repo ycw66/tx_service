@@ -462,9 +462,16 @@ size_t CcShard::Clean()
  */
 bool CcShard::FlushEntry(LruEntry *entry, bool only_archives)
 {
-    // Now, only flush archives synchronously for test.
-    // TODO(lzx): Add Flush latest version asynchronously.
-    return ArchivesFlusher::Instance().Flush(entry);
+    // TODO(lzx): Now, only flush archives synchronously for test.
+    if (only_archives)
+    {
+        return ArchivesFlusher::Instance().Flush(entry);
+    }
+    else
+    {
+        return (ckpter_->CkptEntry(entry)) &&
+               (ArchivesFlusher::Instance().Flush(entry));
+    }
 }
 
 void CcShard::NotifyCkpt()

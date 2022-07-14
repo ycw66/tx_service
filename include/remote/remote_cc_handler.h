@@ -159,7 +159,8 @@ public:
                             uint32_t key_shard_code,
                             bool is_delete,
                             uint64_t ts,
-                            CcHandlerResult<Void> &hd_res);
+                            CcHandlerResult<Void> &hd_res,
+                            CcProtocol protocol);
 
     void UpdateCommitLowerBound(const TxId &txid,
                                 uint64_t commit_ts_lower_bound,
@@ -175,21 +176,16 @@ public:
                      int node_id,
                      CcHandlerResult<bool> &hres);
 
-    void CleanArchives(uint32_t src_node_id,
-                       const TableName &table_name,
-                       const TxKey &key,
-                       uint32_t key_shard_code,
-                       uint64_t tx_number,
-                       int64_t tx_term,
-                       CcHandlerResult<bool> &hres);
+    void CleanCcEntryForTest(uint32_t src_node_id,
+                             const TableName &table_name,
+                             const TxKey &key,
+                             bool only_archives,
+                             uint32_t key_shard_code,
+                             uint64_t tx_number,
+                             int64_t tx_term,
+                             CcHandlerResult<bool> &hres);
 
 private:
-    static IsolationType ConvertIsolation(IsolationLevel iso_level);
-    static CcProtocolType ConvertProtocol(CcProtocol proto);
-    static CcLockType ConvertLockType(LockType lock_type);
-    static CommitType ConvertPostWriteType(PostWriteType write_type);
-    static RecordStatusType ConvertRecordStatus(RecordStatus rec_status);
-
     CcStreamSender &stream_sender_;
 };
 }  // namespace remote

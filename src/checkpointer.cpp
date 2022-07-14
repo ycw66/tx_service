@@ -260,6 +260,30 @@ void Checkpointer::Ckpt()
     }
 }
 
+bool Checkpointer::CkptEntry(LruEntry *entry)
+{
+    bool ckpt_ret = false;
+    std::vector<LruEntry *> ckpt_vec;
+    ckpt_vec.push_back(entry);
+    CcMap *ccm = entry->parent_map_;
+    TableName table_name = ccm->table_name_;
+    if (ccm->Type() == TableType::Primary)
+    {
+        const Schema *key_schema = ccm->KeySchema();
+        const Schema *rec_schema = ccm->RecordSchema();
+        ckpt_ret = store_hd_->PutAll(
+            table_name, ckpt_vec, key_schema, rec_schema, ccm->SchemaTs());
+    }
+    else
+    {
+        const SecondaryKeySchema *sk_schema =
+            static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
+        ckpt_ret = store_hd_->PutSkAll(
+            table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
+    }
+    return ckpt_ret;
+}
+
 void Checkpointer::Run()
 {
     using namespace std::chrono_literals;

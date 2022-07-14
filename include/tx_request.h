@@ -1,5 +1,7 @@
 #pragma once
 
+#include <tuple>
+
 #include "catalog_key_record.h"
 #include "scan.h"
 #include "tx_container.h"
@@ -212,7 +214,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 struct ScanNextTxRequest
     : public TemplateTxRequest<
           ScanNextTxRequest,
-          std::tuple<const TxKey *, const TxRecord *, bool>>
+          std::tuple<const TxKey *, const TxRecord *, RecordStatus>>
 {
     ScanNextTxRequest(size_t alias, LockType lock_type)
         : alias_(alias), lock_type_(lock_type)
@@ -281,17 +283,19 @@ struct FaultInjectTxRequest
 };
 
 // for test
-struct CleanArchivesTxRequest
-    : public TemplateTxRequest<CleanArchivesTxRequest, bool>
+struct CleanCcEntryForTestTxRequest
+    : public TemplateTxRequest<CleanCcEntryForTestTxRequest, bool>
 {
-    CleanArchivesTxRequest(const TableName *tab_name = nullptr,
-                           const TxKey *key = nullptr)
-        : tab_name_(tab_name), key_(key)
+    CleanCcEntryForTestTxRequest(const TableName *tab_name = nullptr,
+                                 const TxKey *key = nullptr,
+                                 bool only_archives = false)
+        : tab_name_(tab_name), key_(key), only_archives_{only_archives}
     {
     }
 
     const TableName *tab_name_;
     const TxKey *key_;
+    bool only_archives_;
 };
 
 }  // namespace txservice

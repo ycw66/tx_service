@@ -54,7 +54,7 @@ public:
             if (partition_id == 0)
             {
                 RangeRecord &neg_inf_rec =
-                    TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_;
+                    *(TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_);
                 neg_inf_rec.binary_value_ = &table_range;
                 TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_status_ =
                     RecordStatus::Normal;
@@ -69,7 +69,7 @@ public:
                     *start_key, table_range.version_ts_, true);
 
             cce->commit_ts_ = table_range.version_ts_;
-            cce->payload_.binary_value_ = &table_range;
+            cce->payload_->binary_value_ = &table_range;
             cce->payload_status_ = RecordStatus::Normal;
         }
     }
@@ -164,7 +164,7 @@ public:
 
                 RangeRecord *range_rec =
                     static_cast<RangeRecord *>(req.Record());
-                *range_rec = floor_cce->payload_;
+                *range_rec = *(floor_cce->payload_);
                 hd_result->Value().ts_ = floor_cce->commit_ts_;
                 hd_result->Value().rec_status_ = RecordStatus::Normal;
                 hd_result->SetFinished();

@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>  // std::make_shared
 #include <unordered_set>
+#include <utility>  // std::move
 #include <vector>
 
 #include "cc_req_base.h"
@@ -145,7 +146,7 @@ public:
     VersionRecord()
         : payload_ptr_(nullptr),
           payload_status_(RecordStatus::Unknown),
-          commit_ts_(0)
+          commit_ts_(1)
     {
     }
 };
@@ -161,7 +162,7 @@ public:
 
     ArchiveRecord()
         : payload_(nullptr),
-          commit_ts_(0),
+          commit_ts_(1),
           payload_status_(RecordStatus::Unknown)
     {
     }
@@ -231,7 +232,7 @@ public:
     CcEntry(CcMap *parent)
         : LruEntry(parent),
           key_(nullptr),
-          payload_(),
+          payload_(nullptr),
           payload_status_(RecordStatus::Unknown),
           payload_ckpt_(),
           map_prev_(nullptr),
@@ -264,7 +265,7 @@ public:
             mem_usage_ += key_->MemUsage();
         }
         // size of ValueT
-        mem_usage_ += payload_.MemUsage();
+        mem_usage_ += PayloadMemUsage();
         mem_usage_ += sizeof(RecordStatus);
 
         // TODO size of insert_intention_set_, not used yet
@@ -282,8 +283,20 @@ public:
         return mem_usage_;
     }
 
+    size_t PayloadMemUsage() const
+    {
+        if (payload_ == nullptr)
+        {
+            return 0;
+        }
+        else
+        {
+            return payload_->MemUsage();
+        }
+    }
+
     const KeyT *key_;
-    ValueT payload_;
+    std::shared_ptr<ValueT> payload_;
     RecordStatus payload_status_;
 
     std::map<const KeyT *,
@@ -322,10 +335,15 @@ public:
             assert(commit_ts_ > archives_[0].commit_ts_);
         }
 
-        std::shared_ptr<ValueT> payload_ptr =
-            std::make_shared<ValueT>(std::move(payload_));
-
-        archives_.emplace_front(payload_ptr, commit_ts_, payload_status_);
+        // std::shared_ptr<ValueT> payload_ptr = payload_;
+        if (parent_map_->Type() != TableType::Secondary)
+        {
+            archives_.emplace_front(payload_, commit_ts_, payload_status_);
+        }
+        else
+        {
+            archives_.emplace_front(nullptr, commit_ts_, payload_status_);
+        }
 
         return sizeof(commit_ts_) + sizeof(payload_status_);
     }
@@ -476,6 +494,7 @@ public:
         if (payload_status_ == RecordStatus::Unknown)
         {
             rec.payload_status_ = RecordStatus::Unknown;
+            rec.commit_ts_ = commit_ts_;
             return true;
         }
         if (commit_ts_ <= ts)
@@ -501,7 +520,7 @@ public:
             last_read_ts_ = std::max(ts, last_read_ts_);
             if (payload_status_ == RecordStatus::Normal)
             {
-                rec.payload_ptr_ = &payload_;
+                rec.payload_ptr_ = payload_.get();
             }
             rec.commit_ts_ = commit_ts_;
             rec.payload_status_ = payload_status_;
@@ -520,7 +539,7 @@ public:
                 return true;
             }
         }
-        rec.commit_ts_ = 0;
+        rec.commit_ts_ = 1;
         rec.payload_status_ = RecordStatus::VersionUnknown;
         return true;
     }

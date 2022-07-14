@@ -13,7 +13,9 @@
 #include "cc_shard.h"
 #include "fault/fault_inject.h"
 #include "proto/cc_request.pb.h"
+#include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -400,17 +402,18 @@ public:
                 assert(ite != prior_cce.insert_intention_set_.end());
                 assert(ite->second->tx_id_.TxNumber() == txn);
 
-                shard_->DecrementMemory(new_cce->payload_.MemUsage());
+                shard_->DecrementMemory(new_cce->PayloadMemUsage());
                 if (payload_str == nullptr)
                 {
-                    new_cce->payload_ = *commit_val;
+                    new_cce->payload_ = std::make_shared<ValueT>(*commit_val);
                 }
                 else
                 {
                     size_t offset = 0;
-                    new_cce->payload_.Deserialize(payload_str->data(), offset);
+                    new_cce->payload_ = std::make_shared<ValueT>();
+                    new_cce->payload_->Deserialize(payload_str->data(), offset);
                 }
-                shard_->mem_usage_ += new_cce->payload_.MemUsage();
+                shard_->mem_usage_ += new_cce->PayloadMemUsage();
                 new_cce->payload_status_ = RecordStatus::Normal;
 
                 ++ite;
@@ -434,7 +437,7 @@ public:
                 TryInsertCkptList(new_cce);
 
                 size_t key_size = new_cce->key_->MemUsage();
-                size_t payload_size = new_cce->payload_.MemUsage();
+                size_t payload_size = new_cce->PayloadMemUsage();
                 new_cce->parent_map_->shard_->UpdateEstimateLogSize(
                     new_cce, key_size, payload_size);
             }
@@ -472,25 +475,25 @@ public:
 
                 cce.commit_ts_ = commit_ts;
 
-                shard_->DecrementMemory(cce.payload_.MemUsage());
-
+                shard_->DecrementMemory(cce.PayloadMemUsage());
                 if (payload_str == nullptr && !is_del)
                 {
-                    cce.payload_ = *commit_val;
+                    cce.payload_ = std::make_shared<ValueT>(*commit_val);
                 }
                 else if (!is_del)
                 {
                     size_t offset = 0;
-                    cce.payload_.Deserialize(payload_str->data(), offset);
+                    cce.payload_ = std::make_shared<ValueT>();
+                    cce.payload_->Deserialize(payload_str->data(), offset);
                 }
-                shard_->mem_usage_ += cce.payload_.MemUsage();
+                shard_->mem_usage_ += cce.PayloadMemUsage();
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
 
                 TryInsertCkptList(&cce);
 
                 size_t key_size = cce.key_->MemUsage();
-                size_t payload_size = cce.payload_.MemUsage();
+                size_t payload_size = cce.PayloadMemUsage();
                 cce.parent_map_->shard_->UpdateEstimateLogSize(
                     &cce, key_size, payload_size);
             }
@@ -966,7 +969,7 @@ public:
                         return false;
                     }
 
-                    new_cce->payload_ = *payload;
+                    new_cce->payload_ = std::make_shared<ValueT>(*payload);
                     new_cce->payload_status_ = RecordStatus::Normal;
 
                     // Splits the gap.
@@ -1033,7 +1036,7 @@ public:
             {
                 if (commit_ts > 0)
                 {
-                    cce_ptr->payload_ = *payload;
+                    cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
 
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
@@ -1225,6 +1228,7 @@ public:
                               cc_entry.key_lock_.WriteLockTx() == txn) ||
                              (cc_entry.gap_lock_.HasWriteLock() &&
                               cc_entry.gap_lock_.WriteLockTx() == txn);
+        assert(is_write_lock == false);
 
         cc_entry.key_lock_.ClearTx(txn, shard_);
         cc_entry.gap_lock_.ClearTx(txn, shard_);
@@ -1419,14 +1423,16 @@ public:
                 if (req.Record() != nullptr)
                 {
                     ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                    cce->payload_ = *typed_rec;
+                    cce->payload_ = std::make_shared<ValueT>(*typed_rec);
                 }
                 else
                 {
                     assert(req.RecordBlob() != nullptr);
 
                     size_t offset = 0;
-                    cce->payload_.Deserialize(req.RecordBlob()->data(), offset);
+                    cce->payload_ = std::make_shared<ValueT>();
+                    cce->payload_->Deserialize(req.RecordBlob()->data(),
+                                               offset);
                 }
                 cce->payload_status_ = RecordStatus::Normal;
                 cce->commit_ts_ = req.ReadTimestamp();
@@ -1496,12 +1502,12 @@ public:
             if (req.Record() != nullptr)
             {
                 ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                *typed_rec = cce->payload_;
+                *typed_rec = *(cce->payload_);
             }
             else
             {
                 assert(req.RecordBlob() != nullptr);
-                cce->payload_.Serialize(*req.RecordBlob());
+                cce->payload_->Serialize(*req.RecordBlob());
             }
         }
 
@@ -1544,8 +1550,8 @@ public:
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
-                cce->payload_.Deserialize(req.rec_str_->data(), offset);
-                cce->payload_status_ = RecordStatus::Normal;
+                cce->payload_ = std::make_shared<ValueT>();
+                cce->payload_->Deserialize(req.rec_str_->data(), offset);
             }
             cce->commit_ts_ = req.CommitTs();
             cce->payload_status_ = req.RecordStatus();
@@ -1632,10 +1638,22 @@ public:
                 ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
                 break;
             case ScanType::ScanBoth:
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             case ScanType::ScanKey:
-                ScanKey(cce, scan_tuple, false, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        false,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             default:
                 break;
@@ -1681,6 +1699,8 @@ public:
                         true,
                         req.node_group_id_,
                         req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
                         req.is_ckpt_delta_);
                 req.SetCcePtr(cce);
 
@@ -1723,6 +1743,8 @@ public:
                         true,
                         req.node_group_id_,
                         req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
                         req.is_ckpt_delta_);
                 req.SetCcePtr(cce);
 
@@ -1820,6 +1842,8 @@ public:
                         true,
                         req.node_group_id_,
                         term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
                         req.is_ckpt_delta_);
                 req.SetCcePtr(cce);
 
@@ -1886,7 +1910,13 @@ public:
                 }
                 else
                 {
-                    ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                    ScanKey(cce,
+                            scan_tuple,
+                            true,
+                            req.node_group_id_,
+                            term,
+                            req.ReadTimestamp(),
+                            req.Isolation());
                     req.SetCcePtr(cce);
 
                     if (!ConditionalReadLockCce(cce,
@@ -2003,10 +2033,22 @@ public:
                 }
                 break;
             case ScanType::ScanBoth:
-                ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
+                        req.is_ckpt_delta_);
                 break;
             case ScanType::ScanKey:
-                ScanKey(cce, tuple, false, term, req.is_ckpt_delta_);
+                ScanKey(cce,
+                        tuple,
+                        false,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
+                        req.is_ckpt_delta_);
                 break;
             default:
                 break;
@@ -2053,7 +2095,13 @@ public:
                     continue;
                 }
                 tuple = cache.at(tuple_idx);
-                ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
+                        req.is_ckpt_delta_);
 
                 ++tuple_idx;
                 req.SetCcePtr(cce);
@@ -2098,7 +2146,13 @@ public:
                     continue;
                 }
                 tuple = cache.at(tuple_idx);
-                ScanKey(cce, tuple, true, term, req.is_ckpt_delta_);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
+                        req.is_ckpt_delta_);
 
                 ++tuple_idx;
                 req.SetCcePtr(cce);
@@ -2182,7 +2236,13 @@ public:
                 }
 
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
-                ScanKey(cce, scan_tuple, true, term, req.is_ckpt_delta_);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation(),
+                        req.is_ckpt_delta_);
                 ++idx;
                 req.SetCcePtr(cce);
 
@@ -2248,7 +2308,12 @@ public:
                 }
                 else
                 {
-                    ScanKey(cce, scan_tuple, true, term);
+                    ScanKey(cce,
+                            scan_tuple,
+                            true,
+                            term,
+                            req.ReadTimestamp(),
+                            req.Isolation());
                     req.SetCcePtr(cce);
 
                     if (!ConditionalReadLockCce(cce,
@@ -2343,7 +2408,10 @@ public:
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
                 shard_->DecrementMemory(cce->payload_ckpt_.first.MemUsage());
-                cce->payload_ckpt_.first = cce->payload_;
+                if (cce->payload_ != nullptr)
+                {
+                    cce->payload_ckpt_.first = *(cce->payload_);
+                }
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
 
@@ -2477,7 +2545,8 @@ public:
             {
                 if (delete_flag == 0)
                 {
-                    cce->payload_.Deserialize(log_blob.data(), offset);
+                    cce->payload_ = std::make_shared<ValueT>();
+                    cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
                 }
                 else
@@ -2517,9 +2586,10 @@ public:
         return false;
     }
 
-    bool Execute(CleanArchivesForTestCc &req) override
+    bool Execute(CleanCcEntryForTestCc &req) override
     {
         const TxKey *key_ptr = req.Key();
+        bool only_archives = req.OnlyCleanArchives();
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         if (key_ptr != nullptr)
         {
@@ -2533,8 +2603,23 @@ public:
             }
             if (cce_ptr != nullptr)
             {
-                shard_->FlushEntry(cce_ptr, true);
-                cce_ptr->archives_.clear();
+                if (cce_ptr->payload_ != nullptr)
+                {
+                    cce_ptr->payload_ckpt_.first = *(cce_ptr->payload_);
+                }
+                cce_ptr->payload_ckpt_.second =
+                    (cce_ptr->payload_status_ == RecordStatus::Deleted);
+                bool res = shard_->FlushEntry(cce_ptr, only_archives);
+                assert(res == true);
+                if (only_archives)
+                {
+                    cce_ptr->archives_.clear();
+                }
+                else
+                {
+                    ccm_has_full_entries_ = false;
+                    Clean(cce_ptr);
+                }
             }
         }
         req.Result()->SetValue(true);
@@ -3251,16 +3336,42 @@ protected:
                  bool include_gap,
                  uint32_t ng_id,
                  int64_t term,
+                 uint64_t read_ts,
+                 IsolationLevel iso_level,
                  bool is_ckpt_delta = false) const
     {
         tuple->Key() = *cce->key_;
-        if (cce->payload_status_ == RecordStatus::Normal ||
-            (is_ckpt_delta && cce->payload_status_ != RecordStatus::Unknown))
+
+        if (iso_level == IsolationLevel::Snapshot)
         {
-            tuple->Record() = cce->payload_;
+            VersionRecord<ValueT> v_rec;
+            bool res = cce->MvccGet(read_ts, v_rec);
+            if (!res)
+            {
+                // TODO(lzx): to handle this error.
+                // return error.
+            }
+            if (v_rec.payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 v_rec.payload_status_ == RecordStatus::Deleted))
+            {
+                tuple->Record() = *(v_rec.payload_ptr_);
+            }
+            tuple->key_ts_ = v_rec.commit_ts_;
+            tuple->rec_status_ = v_rec.payload_status_;
         }
-        tuple->rec_status_ = cce->payload_status_;
-        tuple->key_ts_ = cce->commit_ts_;
+        else
+        {
+            if (cce->payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 cce->payload_status_ == RecordStatus::Deleted))
+            {
+                tuple->Record() = *(cce->payload_);
+            }
+            tuple->rec_status_ = cce->payload_status_;
+            tuple->key_ts_ = cce->commit_ts_;
+        }
+
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
     }
@@ -3269,34 +3380,45 @@ protected:
                  remote::ScanTuple_msg *tuple,
                  bool include_gap,
                  int64_t term,
+                 uint64_t read_ts,
+                 IsolationLevel iso_level,
                  bool is_ckpt_delta = false) const
     {
         tuple->clear_key();
         cce->key_->Serialize(*tuple->mutable_key());
 
-        switch (cce->payload_status_)
+        if (iso_level == IsolationLevel::Snapshot)
         {
-        case RecordStatus::Normal:
-            tuple->clear_record();
-            cce->payload_.Serialize(*tuple->mutable_record());
-            tuple->set_rec_status(remote::RecordStatusType::NORMAL);
-            break;
-        case RecordStatus::Deleted:
-            if (is_ckpt_delta)
+            VersionRecord<ValueT> v_rec;
+            bool res = cce->MvccGet(read_ts, v_rec);
+            if (!res)
+            {
+                // return error.
+            }
+            if (v_rec.payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 v_rec.payload_status_ == RecordStatus::Deleted))
             {
                 tuple->clear_record();
-                cce->payload_.Serialize(*tuple->mutable_record());
+                v_rec.payload_ptr_->Serialize(*tuple->mutable_record());
             }
-            tuple->set_rec_status(remote::RecordStatusType::DELETED);
-            break;
-        case RecordStatus::Unknown:
-            tuple->set_rec_status(remote::RecordStatusType::UNDEFINED);
-            break;
-        default:
-            break;
+            tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
+                v_rec.payload_status_));
+            tuple->set_key_ts(v_rec.commit_ts_);
         }
-
-        tuple->set_key_ts(cce->commit_ts_);
+        else
+        {
+            if (cce->payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 cce->payload_status_ == RecordStatus::Deleted))
+            {
+                tuple->clear_record();
+                cce->payload_->Serialize(*tuple->mutable_record());
+            }
+            tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
+                cce->payload_status_));
+            tuple->set_key_ts(cce->commit_ts_);
+        }
 
         if (include_gap)
         {

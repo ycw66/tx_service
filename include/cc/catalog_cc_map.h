@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>  // make_shared
 #include <string>
 #include <unordered_map>
 
@@ -509,9 +510,13 @@ public:
             // node group's cc maps.
             assert(success);
         }
-        cce->payload_.Set(catalog_entry->schema_.get(),
-                          catalog_entry->dirty_schema_.get(),
-                          catalog_entry->Version());
+        if (cce->payload_ == nullptr)
+        {
+            cce->payload_ = std::make_shared<CatalogRecord>();
+        }
+        cce->payload_->Set(catalog_entry->schema_.get(),
+                           catalog_entry->dirty_schema_.get(),
+                           catalog_entry->Version());
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {

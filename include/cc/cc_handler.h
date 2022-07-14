@@ -300,7 +300,8 @@ public:
                                     const TxKey &secondary_key,
                                     bool is_delete,
                                     uint64_t ts,
-                                    CcHandlerResult<Void> &) = 0;
+                                    CcHandlerResult<Void> &,
+                                    CcProtocol protocol) = 0;
 
     /// <summary>
     /// Starts a new tx and returns the tx ID.
@@ -362,11 +363,12 @@ public:
 
     virtual uint32_t GetNodeId() const = 0;
 
-    virtual void CleanArchives(const TableName &table_name,
-                               const TxKey &key,
-                               uint64_t tx_number,
-                               int64_t tx_term,
-                               CcHandlerResult<bool> &hres) = 0;
+    virtual void CleanCcEntryForTest(const TableName &table_name,
+                                     const TxKey &key,
+                                     bool only_archives,
+                                     uint64_t tx_number,
+                                     int64_t tx_term,
+                                     CcHandlerResult<bool> &hres) = 0;
 };
 
 }  // namespace txservice

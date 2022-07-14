@@ -27,13 +27,13 @@ TxStartTsCollector::~TxStartTsCollector()
 
 void TxStartTsCollector::Start()
 {
-    active_.store(true, std::memory_order_acquire);
+    active_.store(true);
     thd_ = std::thread([this] { Run(); });
 }
 
 void TxStartTsCollector::Shutdown()
 {
-    active_.store(false, std::memory_order_acquire);
+    active_.store(false);
 }
 
 void TxStartTsCollector::Run()
@@ -135,7 +135,7 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
     {
         min_start_ts = min(min_start_ts, it.second);
     }
-    LOG(INFO) << "collect min start ts of all active tx :" << min_start_ts;
+    // LOG(INFO) << "collect min start ts of all active tx :" << min_start_ts;
     return min_start_ts;
 }
 

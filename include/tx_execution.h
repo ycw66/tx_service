@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stack>
+#include <tuple>
 #include <unordered_set>
 
 #include "catalog_key_record.h"
@@ -27,7 +28,7 @@ struct CommitTxRequest;
 struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct FaultInjectTxRequest;
-struct CleanArchivesTxRequest;
+struct CleanCcEntryForTestTxRequest;
 
 class TransactionExecution
 {
@@ -89,7 +90,7 @@ public:
     void ProcessTxRequest(AbortTxRequest &abort_req);
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
-    void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
+    void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
 
     /**
      * Interface for storage engine runtime.
@@ -127,6 +128,11 @@ public:
     IsolationLevel GetIsolationLevel() const
     {
         return iso_level_;
+    }
+
+    void SetIsolationLevel(IsolationLevel iso_level)
+    {
+        iso_level_ = iso_level;
     }
 
     uint64_t GetStartTs() const
@@ -190,8 +196,8 @@ private:
     void PostProcess(WriteToLogOp &write_log);
     void Process(FaultInjectOp &fault_inject_op);
     void PostProcess(FaultInjectOp &fault_inject_op);
-    void Process(CleanArchivesOp &clean_akv_op);
-    void PostProcess(CleanArchivesOp &clean_akv_op);
+    void Process(CleanCcEntryForTestOp &clean_entry_op);
+    void PostProcess(CleanCcEntryForTestOp &clean_entry_op);
 
     void Process(AcquireAllOp &acq_all_op);
     void PostProcess(AcquireAllOp &acq_all_op);
@@ -296,7 +302,8 @@ private:
     // Response whose returned result is bool
     TxResult<bool> *bool_resp_;
     // Scan result
-    TxResult<std::tuple<const TxKey *, const TxRecord *, bool>> *kvp_resp_;
+    TxResult<std::tuple<const TxKey *, const TxRecord *, RecordStatus>>
+        *kvp_resp_;
     // Scan open result
     TxResult<size_t> *uint64_resp_;
 
@@ -331,7 +338,7 @@ private:
     FaultInjectOp fault_inject_op_;
 
     // clean archives
-    CleanArchivesOp clean_akv_op_;
+    CleanCcEntryForTestOp clean_entry_op_;
 
     friend struct TransactionOperation;
     friend struct ReadOperation;
@@ -351,7 +358,7 @@ private:
     friend struct UpsertTableOp;
     friend struct DsUpsertTableOp;
     friend struct SleepOperation;
-    friend struct CleanArchivesOp;
+    friend struct CleanCcEntryForTestOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

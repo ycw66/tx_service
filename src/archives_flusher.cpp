@@ -1,6 +1,7 @@
 #include "archives_flusher.h"
 
 #include "cc/cc_request.h"
+#include "cc/sk_cc_map.h"  //SkRecord
 #include "sharder.h"
 #include "store/data_store_handler.h"
 
@@ -73,7 +74,15 @@ void ArchivesFlusher::AddTask(LruEntry *entry)
 
     ArchiveFlushTask &task = flush_map_[entry];
     task.tbl_ = entry->parent_map_->table_name_;
-    task.key_ = entry->ExportKey();
+    if (entry->parent_map_->Type() == TableType::Secondary)
+    {
+        task.key_ = entry->parent_map_->ExportSecondaryKey(entry);
+    }
+    else
+    {
+        task.key_ = entry->ExportKey();
+    }
+
     uint32_t shard_code = Sharder::Instance().ShardCode(task.key_->Hash());
     task.node_group_id_ = shard_code >> 10;
     task.term_ = Sharder::Instance().LeaderTerm(shard_code);
@@ -140,8 +149,21 @@ bool ArchivesFlusher::Flush(LruEntry *entry)
         return false;
     }
 
+    if (entry->ArchiveRecordsCount() == 0)
+    {
+        return true;
+    }
+
     TableName tbl = entry->parent_map_->table_name_;
-    TxKey::Uptr key = entry->ExportKey();
+    TxKey::Uptr key = nullptr;
+    if (entry->parent_map_->Type() == TableType::Secondary)
+    {
+        key = entry->parent_map_->ExportSecondaryKey(entry);
+    }
+    else
+    {
+        key = entry->ExportKey();
+    }
     std::vector<VersionedRecord> archives;
     entry->ExportArchives(archives);
 

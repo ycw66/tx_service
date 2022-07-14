@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "cc/local_cc_shards.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "tx_execution.h"
 #include "tx_trace.h"
@@ -53,7 +54,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_ts(ts);
     acq->set_insert(is_insert);
     acq->set_key_shard_code(key_shard_code);
-    acq->set_protocol(ConvertProtocol(proto));
+    acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
 }
@@ -86,8 +87,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
 
     acq_all->set_node_group_id(node_group_id);
     acq_all->set_insert(is_insert);
-    acq_all->set_protocol(ConvertProtocol(proto));
-    acq_all->set_lock_type(ConvertLockType(lock_type));
+    acq_all->set_protocol(ToRemoteType::ConvertProtocol(proto));
+    acq_all->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hres);
 }
@@ -136,7 +137,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
 
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_is_deleted(is_deleted);
-    post_commit->set_protocol(ConvertProtocol(protocol));
+    post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -190,7 +191,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
         post_write_all->set_is_deleted(false);
     }
 
-    CommitType commit_type = ConvertPostWriteType(post_write_type);
+    CommitType commit_type =
+        ToRemoteType::ConvertPostWriteType(post_write_type);
     post_write_all->set_commit_type(commit_type);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hres);
@@ -225,8 +227,8 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_commit_ts(commit_ts);
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
-    vali->set_protocol(ConvertProtocol(protocol));
-    vali->set_lock_type(ConvertLockType(lock_type));
+    vali->set_protocol(ToRemoteType::ConvertProtocol(protocol));
+    vali->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -260,9 +262,9 @@ void txservice::remote::RemoteCcHandler::Read(
     read->clear_key();
     key.Serialize(*read->mutable_key());
     read->set_key_shard_code(key_shard_code);
-    read->set_iso_level(ConvertIsolation(iso_level));
-    read->set_protocol(ConvertProtocol(proto));
-    read->set_lock_type(ConvertLockType(lock_type));
+    read->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
+    read->set_protocol(ToRemoteType::ConvertProtocol(proto));
+    read->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     read->clear_record();
     switch (read_type)
@@ -334,7 +336,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
             VersionedRecord_msg *vrec_msg = read_outside->add_archives();
             vrec_msg->set_version_ts(vrecord.commit_ts_);
             vrec_msg->set_rec_status(
-                ConvertRecordStatus(vrecord.record_status_));
+                ToRemoteType::ConvertRecordStatus(vrecord.record_status_));
             vrecord.record_->Serialize(*vrec_msg->mutable_record());
         }
     }
@@ -391,9 +393,9 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_inclusive(inclusive);
     scan_open->set_direction(direction == ScanDirection::Forward);
     scan_open->set_ts(ts);
-    scan_open->set_iso_level(ConvertIsolation(iso_level));
-    scan_open->set_protocol(ConvertProtocol(proto));
-    scan_open->set_lock_type(ConvertLockType(lock_type));
+    scan_open->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
+    scan_open->set_protocol(ToRemoteType::ConvertProtocol(proto));
+    scan_open->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
     scan_open->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hd_res);
@@ -430,9 +432,9 @@ void txservice::remote::RemoteCcHandler::ScanNext(
                              ScanDirection::Forward);
     scan_next->set_ts(start_ts);
     scan_next->set_scan_cache_ptr(reinterpret_cast<uint64_t>(scan_cache));
-    scan_next->set_iso_level(ConvertIsolation(iso_level));
-    scan_next->set_protocol(ConvertProtocol(proto));
-    scan_next->set_lock_type(ConvertLockType(lock_type));
+    scan_next->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
+    scan_next->set_protocol(ToRemoteType::ConvertProtocol(proto));
+    scan_next->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
     scan_next->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hd_res);
@@ -447,17 +449,18 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     uint32_t key_shard_code,
     bool is_delete,
     uint64_t ts,
-    CcHandlerResult<Void> &hd_res)
+    CcHandlerResult<Void> &hd_res,
+    CcProtocol protocol)
 {
     /*message CommitSkRequest
     {
         uint32 src_node_id = 1;
         string tablename = 2;
-        bytes sk = 3;
-        bytes pk = 4;
-        uint32 key_shard_code = 5;
-        uint64 ts = 6;
-        bool is_deleted = 7;
+        bytes secondary_key = 3;
+        uint32 key_shard_code = 4;
+        uint64 ts = 5;
+        bool is_deleted = 6;
+        CcProtocolType protocol = 7;
     }*/
 
     CcMessage send_msg;
@@ -471,6 +474,7 @@ void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
     CommitSkRequest *commit_sk = send_msg.mutable_commit_sk_req();
     commit_sk->set_src_node_id(src_node_id);
     commit_sk->set_tablename(table_name);
+    commit_sk->set_protocol(ToRemoteType::ConvertProtocol(protocol));
     secondary_key.Serialize(*commit_sk->mutable_secondary_key());
 
     commit_sk->set_key_shard_code(key_shard_code);
@@ -505,10 +509,11 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     stream_sender_.SendMessage(node_id, send_msg, &hres);
 }
 
-void txservice::remote::RemoteCcHandler::CleanArchives(
+void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     uint32_t src_node_id,
     const TableName &table_name,
     const TxKey &key,
+    bool only_archives,
     uint32_t key_shard_code,
     uint64_t tx_number,
     int64_t tx_term,
@@ -516,13 +521,14 @@ void txservice::remote::RemoteCcHandler::CleanArchives(
 {
     CcMessage send_msg;
 
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CleanArchivesRequest);
+    send_msg.set_type(CcMessage::MessageType::
+                          CcMessage_MessageType_CleanCcEntryForTestRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
     send_msg.set_tx_term(tx_term);
     send_msg.set_tx_number(tx_number);
 
-    CleanArchivesRequest *clean_req = send_msg.mutable_clean_archives_req();
+    CleanCcEntryForTestRequest *clean_req =
+        send_msg.mutable_clean_cc_entry_req();
     clean_req->set_src_node_id(src_node_id);
     clean_req->set_tablename(table_name);
     clean_req->clear_key();
@@ -530,96 +536,4 @@ void txservice::remote::RemoteCcHandler::CleanArchives(
     clean_req->set_key_shard_code(key_shard_code);
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
-}
-
-txservice::remote::IsolationType
-txservice::remote::RemoteCcHandler::ConvertIsolation(IsolationLevel iso_level)
-{
-    switch (iso_level)
-    {
-    case IsolationLevel::ReadCommitted:
-        return IsolationType::ReadCommitted;
-    case IsolationLevel::Snapshot:
-        return IsolationType::SnapshotIsolation;
-    case IsolationLevel::RepeatableRead:
-        return IsolationType::RepeatableRead;
-    case IsolationLevel::Serializable:
-        return IsolationType::Serializable;
-    default:
-        return IsolationType::ReadCommitted;
-    }
-}
-
-txservice::remote::CcProtocolType
-txservice::remote::RemoteCcHandler::ConvertProtocol(CcProtocol proto)
-{
-    if (proto == CcProtocol::Locking)
-    {
-        return CcProtocolType::Locking;
-    }
-    else if (proto == CcProtocol::MVCC)
-    {
-        return CcProtocolType::Mvcc;
-    }
-    else
-    {
-        return CcProtocolType::Occ;
-    }
-}
-
-txservice::remote::CcLockType
-txservice::remote::RemoteCcHandler::ConvertLockType(LockType lock_type)
-{
-    if (lock_type == LockType::NoLock)
-    {
-        return CcLockType::NoLock;
-    }
-    else if (lock_type == LockType::ReadIntent)
-    {
-        return CcLockType::ReadIntent;
-    }
-    else if (lock_type == LockType::ReadLock)
-    {
-        return CcLockType::ReadLock;
-    }
-    else if (lock_type == LockType::WriteIntent)
-    {
-        return CcLockType::WriteIntent;
-    }
-    else
-    {
-        return CcLockType::WriteLock;
-    }
-}
-
-txservice::remote::CommitType
-txservice::remote::RemoteCcHandler::ConvertPostWriteType(
-    PostWriteType write_type)
-{
-    if (write_type == PostWriteType::PrepareCommit)
-    {
-        return CommitType::PrepareCommit;
-    }
-    else
-    {
-        return CommitType::PostCommit;
-    }
-}
-
-txservice::remote::RecordStatusType
-txservice::remote::RemoteCcHandler::ConvertRecordStatus(RecordStatus rec_status)
-{
-    switch (rec_status)
-    {
-    case RecordStatus::Normal:
-        return RecordStatusType::NORMAL;
-    case RecordStatus::Deleted:
-        return RecordStatusType::DELETED;
-    case RecordStatus::Unknown:
-        return RecordStatusType::UNDEFINED;
-    case RecordStatus::RemoteUnknown:
-        return RecordStatusType::UNDEFINED;
-    default:
-        return RecordStatusType::UNDEFINED;
-    }
 }

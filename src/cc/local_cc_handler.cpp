@@ -788,7 +788,8 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
                                                    const TxKey &secondary_key,
                                                    bool is_delete,
                                                    uint64_t ts,
-                                                   CcHandlerResult<Void> &hres)
+                                                   CcHandlerResult<Void> &hres,
+                                                   CcProtocol protocol)
 {
     uint32_t shard_code = Sharder::Instance().ShardCode(secondary_key.Hash());
 
@@ -796,8 +797,14 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
     if (node_id == cc_shards_.node_id_)
     {
         CommitSkCc *req = commitsk_pool.NextRequest();
-        req->Reset(
-            &table_name, &secondary_key, txn, shard_code, ts, is_delete, &hres);
+        req->Reset(&table_name,
+                   &secondary_key,
+                   txn,
+                   shard_code,
+                   ts,
+                   is_delete,
+                   &hres,
+                   protocol);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -812,7 +819,8 @@ void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
                                       shard_code,
                                       is_delete,
                                       ts,
-                                      hres);
+                                      hres,
+                                      protocol);
     }
 }
 
@@ -953,36 +961,36 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
         table_name, schema, indexes, is_deleted, commit_ts, &hres);
 }
 
-void txservice::LocalCcHandler::CleanArchives(const TableName &table_name,
-                                              const TxKey &key,
-                                              uint64_t tx_number,
-                                              int64_t tx_term,
-                                              CcHandlerResult<bool> &hres)
+void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
+                                                    const TxKey &key,
+                                                    bool only_archives,
+                                                    uint64_t tx_number,
+                                                    int64_t tx_term,
+                                                    CcHandlerResult<bool> &hres)
 {
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
     uint32_t shard_id = shard_code >> 10;
-    // CcEntryAddr &cce_addr = hres.Value().cce_addr_;
-    // cce_addr.SetNodeGroupId(shard_id);
-    // cce_addr.SetCce(0, -1);
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(shard_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
-        CleanArchivesForTestCc *req = clean_akv_pool.NextRequest();
-        req->Reset(&table_name, &key, shard_code, tx_number, &hres);
+        CleanCcEntryForTestCc *req = clean_cc_entry_pool.NextRequest();
+        req->Reset(
+            &table_name, &key, only_archives, shard_code, tx_number, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
     }
     else
     {
-        remote_hd_.CleanArchives(cc_shards_.node_id_,
-                                 table_name,
-                                 key,
-                                 shard_code,
-                                 tx_number,
-                                 tx_term,
-                                 hres);
+        remote_hd_.CleanCcEntryForTest(cc_shards_.node_id_,
+                                       table_name,
+                                       key,
+                                       only_archives,
+                                       shard_code,
+                                       tx_number,
+                                       tx_term,
+                                       hres);
     }
 }
 

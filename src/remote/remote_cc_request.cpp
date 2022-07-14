@@ -2,6 +2,7 @@
 
 #include "cc/ccm_scanner.h"
 #include "remote/remote_cc_handler.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 
 txservice::remote::RemoteAcquire::RemoteAcquire()
@@ -73,7 +74,7 @@ void txservice::remote::RemoteAcquire::Reset(
                      req.ts(),
                      req.insert(),
                      &cc_res_,
-                     CcStreamReceiver::ConvertProtocol(req.protocol()));
+                     ToLocalType::ConvertProtocol(req.protocol()));
 
     input_msg_ = std::move(input_msg);
 
@@ -162,8 +163,8 @@ void txservice::remote::RemoteAcquireAll::Reset(
                         input_msg->tx_term(),
                         req.insert(),
                         &cc_res_,
-                        CcStreamReceiver::ConvertProtocol(req.protocol()),
-                        CcStreamReceiver::ConvertLockType(req.lock_type()));
+                        ToLocalType::ConvertProtocol(req.protocol()),
+                        ToLocalType::ConvertLockType(req.lock_type()));
 
     input_msg_ = std::move(input_msg);
 
@@ -244,8 +245,8 @@ void txservice::remote::RemotePostRead::Reset(
                       req.key_ts(),
                       req.gap_ts(),
                       &cc_res_,
-                      CcStreamReceiver::ConvertProtocol(req.protocol()),
-                      CcStreamReceiver::ConvertLockType(req.lock_type()));
+                      ToLocalType::ConvertProtocol(req.protocol()),
+                      ToLocalType::ConvertLockType(req.lock_type()));
 
     input_msg_ = std::move(input_msg);
 
@@ -345,9 +346,9 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       input_msg->tx_term(),
                       req.ts(),
                       &cc_res_,
-                      CcStreamReceiver::ConvertIsolation(req.iso_level()),
-                      CcStreamReceiver::ConvertProtocol(req.protocol()),
-                      CcStreamReceiver::ConvertLockType(req.lock_type()));
+                      ToLocalType::ConvertIsolation(req.iso_level()),
+                      ToLocalType::ConvertProtocol(req.protocol()),
+                      ToLocalType::ConvertLockType(req.lock_type()));
     }
     else
     {
@@ -366,9 +367,9 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       input_msg->tx_term(),
                       req.ts(),
                       &cc_res_,
-                      CcStreamReceiver::ConvertIsolation(req.iso_level()),
-                      CcStreamReceiver::ConvertProtocol(req.protocol()),
-                      CcStreamReceiver::ConvertLockType(req.lock_type()));
+                      ToLocalType::ConvertIsolation(req.iso_level()),
+                      ToLocalType::ConvertProtocol(req.protocol()),
+                      ToLocalType::ConvertLockType(req.lock_type()));
     }
 
     input_msg_ = std::move(input_msg);
@@ -458,7 +459,7 @@ void txservice::remote::RemotePostWrite::Reset(
     uint64_t commit_ts = post_commit.commit_ts();
     const std::string *rec_str =
         commit_ts > 0 ? &post_commit.record() : nullptr;
-    proto_ = CcStreamReceiver::ConvertProtocol(post_commit.protocol());
+    proto_ = ToLocalType::ConvertProtocol(post_commit.protocol());
     PostWriteCc::Reset(&cce_addr_,
                        input_msg->tx_number(),
                        commit_ts,
@@ -516,7 +517,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
     DmlOperation dml_op = post_write_all.is_deleted() ? DmlOperation::Delete
                                                       : DmlOperation::Upsert;
     PostWriteType write_type =
-        CcStreamReceiver::ConvertCommitType(post_write_all.commit_type());
+        ToLocalType::ConvertCommitType(post_write_all.commit_type());
 
     PostWriteAllCc::Reset(&post_write_all.tablename(),
                           &post_write_all.key(),
@@ -601,10 +602,10 @@ void txservice::remote::RemoteScanOpen::Reset(
     table_name_ = &scan_open.tablename();
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_open.lock_type());
-    isolation_level_ =
-        CcStreamReceiver::ConvertIsolation(scan_open.iso_level());
-    proto_ = CcStreamReceiver::ConvertProtocol(scan_open.protocol());
+    isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
+    proto_ = ToLocalType::ConvertProtocol(scan_open.protocol());
     tx_number_ = input_msg->tx_number();
+    snapshot_ts_ = scan_open.ts();
 
     ccm_ = nullptr;
     cce_ptr_ = nullptr;
@@ -733,11 +734,11 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_next.lock_type());
-    isolation_level_ =
-        CcStreamReceiver::ConvertIsolation(scan_next.iso_level());
-    proto_ = CcStreamReceiver::ConvertProtocol(scan_next.protocol());
+    isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
+    proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
     tx_number_ = input_msg->tx_number();
     cce_ptr_ = nullptr;
+    snapshot_ts_ = scan_next.ts();
 
     const LruEntry *prior_lru_entry =
         reinterpret_cast<const LruEntry *>(prior_cce_addr_);
@@ -808,7 +809,8 @@ void txservice::remote::RemoteCommitSk::Reset(
                       req.key_shard_code(),
                       req.ts(),
                       req.is_deleted(),
-                      &cc_res_);
+                      &cc_res_,
+                      ToLocalType::ConvertProtocol(req.protocol()));
 
     input_msg_ = std::move(input_msg);
 
@@ -828,7 +830,7 @@ void txservice::remote::RemoteReadOutside::Reset(
     assert(req.cce_addr().cce_ptr() != 0);
     cce_addr_.SetCce(
         req.cce_addr().cce_ptr(), req.cce_addr().term(), req.node_group_id());
-    rec_status_ = CcStreamReceiver::ConvertRecordStatusType(req.rec_status());
+    rec_status_ = ToLocalType::ConvertRecordStatusType(req.rec_status());
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
 
@@ -839,7 +841,7 @@ void txservice::remote::RemoteReadOutside::Reset(
         auto &v_rec = archives_.emplace_back();
         v_rec.commit_ts_ = vrec_msg.version_ts();
         v_rec.record_status_ =
-            CcStreamReceiver::ConvertRecordStatusType(vrec_msg.rec_status());
+            ToLocalType::ConvertRecordStatusType(vrec_msg.rec_status());
         v_rec.record_blob_ = &vrec_msg.record();
     }
 
@@ -902,13 +904,13 @@ void txservice::remote::RemoteFaultInjectCC::Reset(
     }
 }
 
-txservice::remote::RemoteCleanArchivesForTestCc::RemoteCleanArchivesForTestCc()
+txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
     : cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
-    output_msg_.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CleanArchivesResponse);
+    output_msg_.set_type(CcMessage::MessageType::
+                             CcMessage_MessageType_CleanCcEntryForTestResponse);
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<bool> *res)
     {
@@ -916,19 +918,21 @@ txservice::remote::RemoteCleanArchivesForTestCc::RemoteCleanArchivesForTestCc()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
-        CleanArchivesResponse *resp = output_msg_.mutable_clean_archives_resp();
+        CleanCcEntryForTestResponse *resp =
+            output_msg_.mutable_clean_cc_entry_resp();
         resp->set_error_code(res->ErrorCode());
 
-        const CleanArchivesRequest &req = input_msg_->clean_archives_req();
+        const CleanCcEntryForTestRequest &req =
+            input_msg_->clean_cc_entry_req();
         hd_->SendMessage(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
-void txservice::remote::RemoteCleanArchivesForTestCc::Reset(
+void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
     std::unique_ptr<CcMessage> input_msg)
 {
-    assert(input_msg->has_clean_archives_req());
+    assert(input_msg->has_clean_cc_entry_req());
 
     cc_res_.Reset();
 
@@ -936,13 +940,14 @@ void txservice::remote::RemoteCleanArchivesForTestCc::Reset(
     output_msg_.clear_handler_addr();
     output_msg_.clear_acquire_resp();
 
-    const CleanArchivesRequest &req = input_msg->clean_archives_req();
+    const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
 
-    CleanArchivesForTestCc::Reset(&req.tablename(),
-                                  &req.key(),
-                                  req.key_shard_code(),
-                                  input_msg->tx_number(),
-                                  &cc_res_);
+    CleanCcEntryForTestCc::Reset(&req.tablename(),
+                                 &req.key(),
+                                 req.only_archives(),
+                                 req.key_shard_code(),
+                                 input_msg->tx_number(),
+                                 &cc_res_);
 
     input_msg_ = std::move(input_msg);
 

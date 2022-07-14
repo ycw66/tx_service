@@ -33,7 +33,7 @@ struct CkptUpdateCc;
 struct CkptTs;
 struct ReplayLogCc;
 struct FaultInjectCC;
-struct CleanArchivesForTestCc;
+struct CleanCcEntryForTestCc;
 
 class CcShard;
 
@@ -71,7 +71,7 @@ public:
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
-    virtual bool Execute(CleanArchivesForTestCc &req) = 0;
+    virtual bool Execute(CleanCcEntryForTestCc &req) = 0;
 
     virtual std::unique_ptr<CcScanner> CreateScanner(
         ScanDirection direction) const = 0;
@@ -80,6 +80,12 @@ public:
 
     virtual void Clean(LruEntry *remove_entry) = 0;
     virtual void Clean() = 0;
+
+    virtual TxKey::Uptr ExportSecondaryKey(LruEntry *entry) const
+    {
+        assert(false);
+        return nullptr;
+    }
 
     /**
      * @brief If the new cc_entry is not in the checkpoint list, enlists the new

@@ -1722,12 +1722,13 @@ void SleepOperation::Forward(TransactionExecution *txm)
     }
 }
 
-CleanArchivesOp::CleanArchivesOp(TransactionExecution *txm) : hd_result_(txm)
+CleanCcEntryForTestOp::CleanCcEntryForTestOp(TransactionExecution *txm)
+    : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
-void CleanArchivesOp::Forward(TransactionExecution *txm)
+void CleanCcEntryForTestOp::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
     if (!is_running_)

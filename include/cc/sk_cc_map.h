@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>  // make_shared
 #include <set>
 
 #include "secondary_key.h"
@@ -80,11 +81,13 @@ public:
           compound_schema_(sk_schema, pk_schema)
     {
         neg_inf_.key_ = nullptr;
-        neg_inf_.payload_.sk_ = NegativeInfinity<SkT>::Instance();
-        neg_inf_.payload_.pk_ = NegativeInfinity<PkT>::Instance();
+        neg_inf_.payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        neg_inf_.payload_->sk_ = NegativeInfinity<SkT>::Instance();
+        neg_inf_.payload_->pk_ = NegativeInfinity<PkT>::Instance();
         pos_inf_.key_ = nullptr;
-        pos_inf_.payload_.sk_ = PositiveInfinity<SkT>::Instance();
-        pos_inf_.payload_.pk_ = PositiveInfinity<PkT>::Instance();
+        pos_inf_.payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        pos_inf_.payload_->sk_ = PositiveInfinity<SkT>::Instance();
+        pos_inf_.payload_->pk_ = PositiveInfinity<PkT>::Instance();
 
         neg_inf_.map_next_ = &pos_inf_;
         pos_inf_.map_prev_ = &neg_inf_;
@@ -141,7 +144,14 @@ public:
         // issues a key-oriented read toward the cc map of a secondary index,
         // except for using the read request to bring an index entry (sk, pk)
         // into the cc map for concurrency control, i.e., read outside.
-        assert(req.Type() == ReadType::OutsideNormal);
+        if (req.Isolation() == IsolationLevel::Snapshot)
+        {
+            // Notice(lzx): this case only for debug testing.
+        }
+        else
+        {
+            assert(req.Type() == ReadType::OutsideNormal);
+        }
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
@@ -179,11 +189,35 @@ public:
             }
         }
 
+        if (req.Isolation() == IsolationLevel::Snapshot)
+        {
+            // Notice(lzx): this case only for debug testing.
+            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            bool res = cce_ptr->MvccGet(req.ReadTimestamp(), v_rec);
+            if (!res)
+            {
+                // TODO(lzx): to handle this error.
+                assert(res);
+            }
+            hd_res->Value().rec_status_ = v_rec.payload_status_;
+            hd_res->Value().ts_ = v_rec.commit_ts_;
+            hd_res->SetFinished();
+            return true;
+        }
+
         cce_ptr->payload_status_ = RecordStatus::Normal;
         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr), term);
 
         hd_res->Value().ts_ = cce_ptr->commit_ts_;
         hd_res->Value().rec_status_ = cce_ptr->payload_status_;
+
+        // Refill mvcc archives
+        if ((req.Type() == ReadType::OutsideNormal ||
+             req.Type() == ReadType::OutsideDeleted) &&
+            req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
+        {
+            cce_ptr->AddArchiveRecords(*req.ArchivesPtr());
+        }
 
         hd_res->SetFinished();
         return true;
@@ -257,10 +291,22 @@ public:
                 ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
                 break;
             case ScanType::ScanBoth:
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             case ScanType::ScanKey:
-                ScanKey(cce, scan_tuple, false, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        false,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             default:
                 break;
@@ -303,7 +349,13 @@ public:
                 cce = std::get<2>(*scan_ccm_it);
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
                     *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 req.SetCcePtr(cce);
 
                 if (!ConditionalReadLockCce(cce,
@@ -340,7 +392,13 @@ public:
                 cce = std::get<2>(*scan_ccm_it);
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
                     *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, req.term_);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        req.node_group_id_,
+                        req.term_,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 req.SetCcePtr(cce);
 
                 if (!ConditionalReadLockCce(cce,
@@ -432,7 +490,13 @@ public:
 
                 TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
                     *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        req.node_group_id_,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 req.SetCcePtr(cce);
 
                 if (!ConditionalReadLockCce(cce,
@@ -498,7 +562,13 @@ public:
                 }
                 else
                 {
-                    ScanKey(cce, scan_tuple, true, req.node_group_id_, term);
+                    ScanKey(cce,
+                            scan_tuple,
+                            true,
+                            req.node_group_id_,
+                            term,
+                            req.ReadTimestamp(),
+                            req.Isolation());
                     req.SetCcePtr(cce);
 
                     if (!ConditionalReadLockCce(cce,
@@ -611,10 +681,20 @@ public:
                 }
                 break;
             case ScanType::ScanBoth:
-                ScanKey(cce, tuple, true, term);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             case ScanType::ScanKey:
-                ScanKey(cce, tuple, false, term);
+                ScanKey(cce,
+                        tuple,
+                        false,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 break;
             default:
                 break;
@@ -661,7 +741,12 @@ public:
                     continue;
                 }
                 tuple = cache.at(tuple_idx);
-                ScanKey(cce, tuple, true, term);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
 
                 ++tuple_idx;
                 req.SetCcePtr(cce);
@@ -706,7 +791,12 @@ public:
                     continue;
                 }
                 tuple = cache.at(tuple_idx);
-                ScanKey(cce, tuple, true, term);
+                ScanKey(cce,
+                        tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
 
                 ++tuple_idx;
                 req.SetCcePtr(cce);
@@ -792,7 +882,12 @@ public:
                 }
 
                 remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
-                ScanKey(cce, scan_tuple, true, term);
+                ScanKey(cce,
+                        scan_tuple,
+                        true,
+                        term,
+                        req.ReadTimestamp(),
+                        req.Isolation());
                 ++idx;
                 req.SetCcePtr(cce);
 
@@ -858,7 +953,12 @@ public:
                 }
                 else
                 {
-                    ScanKey(cce, scan_tuple, true, term);
+                    ScanKey(cce,
+                            scan_tuple,
+                            true,
+                            term,
+                            req.ReadTimestamp(),
+                            req.Isolation());
                     req.SetCcePtr(cce);
 
                     if (!ConditionalReadLockCce(cce,
@@ -948,6 +1048,15 @@ public:
             return false;
         }
 
+        // for mvcc
+        if (req.Protocol() == CcProtocol::MVCC)
+        {
+            uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
+            cce->KickOutArchiveRecords(recycle_ts);
+            size_t added_mem_usage = cce->ArchiveBeforeUpdate();
+            shard_->mem_usage_ += added_mem_usage;
+        }
+
         cce->payload_status_ =
             req.is_delete_ ? RecordStatus::Deleted : RecordStatus::Normal;
         cce->commit_ts_ = req.ts_;
@@ -993,7 +1102,7 @@ public:
             {
                 // no need to update memory usage since this payload_ckpt_ has a
                 // fixed size
-                cce->payload_ckpt_.first = cce->payload_;
+                cce->payload_ckpt_.first = *(cce->payload_);
                 cce->payload_ckpt_.second =
                     cce->payload_status_ == RecordStatus::Deleted;
 
@@ -1134,8 +1243,68 @@ public:
         return true;
     }
 
-    bool Execute(CleanArchivesForTestCc &req) override
+    bool Execute(CleanCcEntryForTestCc &req) override
     {
+        const TxKey *key_ptr = req.Key();
+        bool only_archives = req.OnlyCleanArchives();
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
+
+        if (key_ptr != nullptr)
+        {
+            // find cc entry
+            const SecondaryKey<SkT, PkT> *look_key =
+                static_cast<const SecondaryKey<SkT, PkT> *>(req.Key());
+            const SkT &sk = look_key->SKey();
+            const PkT &pk = look_key->PKey();
+
+            auto sk_it = sk_index_.lower_bound(sk);
+
+            std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> *pk_group =
+                nullptr;
+            typename std::map<PkT,
+                              CcEntry<VoidKey, SkRecord<SkT, PkT>>>::iterator
+                pk_it;
+
+            if (sk_it != sk_index_.end() && sk_it->first == sk)
+            {
+                pk_group = &sk_it->second;
+                pk_it = pk_group->lower_bound(pk);
+
+                if (pk_it != pk_group->end() && pk_it->first == pk)
+                {
+                    cce_ptr = &pk_it->second;
+                }
+            }
+
+            if (cce_ptr != nullptr)
+            {
+                if (cce_ptr->payload_ != nullptr)
+                {
+                    cce_ptr->payload_ckpt_.first = *(cce_ptr->payload_);
+                }
+                cce_ptr->payload_ckpt_.second =
+                    (cce_ptr->payload_status_ == RecordStatus::Deleted);
+                bool res = shard_->FlushEntry(cce_ptr, only_archives);
+                if (!res)
+                {
+                    req.Result()->SetValue(false);
+                }
+                else
+                {
+                    req.Result()->SetValue(true);
+                    if (only_archives)
+                    {
+                        cce_ptr->archives_.clear();
+                    }
+                    else
+                    {
+                        ccm_has_full_entries_ = false;
+                        Clean(cce_ptr);
+                    }
+                }
+            }
+        }
+        req.Result()->SetFinished();
         return true;
     }
 
@@ -1176,33 +1345,33 @@ public:
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *next_cce = cce->map_next_;
 
         if ((prev_cce != &neg_inf_ &&
-             *prev_cce->payload_.sk_ == *cce->payload_.sk_) ||
+             *prev_cce->payload_->sk_ == *cce->payload_->sk_) ||
             (next_cce != &pos_inf_ &&
-             *cce->payload_.sk_ == *next_cce->payload_.sk_))
+             *cce->payload_->sk_ == *next_cce->payload_->sk_))
         {
             // delete secondary map of sk_index_
             shard_->DecrementMemory(cce->GetCcEntryMemUsage() +
-                                    cce->payload_.pk_->MemUsage());
+                                    cce->payload_->pk_->MemUsage());
 
-            auto sk_it = sk_index_.find(*cce->payload_.sk_);
+            auto sk_it = sk_index_.find(*cce->payload_->sk_);
             assert(sk_it != sk_index_.end());
-            sk_it->second.erase(*cce->payload_.pk_);
+            sk_it->second.erase(*cce->payload_->pk_);
 
             if (sk_it->second.empty())
             {
-                sk_index_.erase(*cce->payload_.sk_);
+                sk_index_.erase(*cce->payload_->sk_);
             }
         }
         else
         {
             // delete sk_index_
             shard_->DecrementMemory(cce->GetCcEntryMemUsage() +
-                                    cce->payload_.pk_->MemUsage() +
-                                    cce->payload_.sk_->MemUsage());
+                                    cce->payload_->pk_->MemUsage() +
+                                    cce->payload_->sk_->MemUsage());
 
             // The (sk,pk) pair is the last entry of this sk group. Removes the
             // sk from the index.
-            sk_index_.erase(*cce->payload_.sk_);
+            sk_index_.erase(*cce->payload_->sk_);
         }
 
         prev_cce->map_next_ = next_cce;
@@ -1271,9 +1440,9 @@ public:
         while (cce != &pos_inf_)
         {
             assert(cce_prev == nullptr ||
-                   *cce_prev->payload_.sk_ < *cce->payload_.sk_ ||
-                   *cce_prev->payload_.sk_ == *cce->payload_.sk_ &&
-                       *cce_prev->payload_.pk_ < *cce->payload_.pk_);
+                   *cce_prev->payload_->sk_ < *cce->payload_->sk_ ||
+                   *cce_prev->payload_->sk_ == *cce->payload_->sk_ &&
+                       *cce_prev->payload_->pk_ < *cce->payload_->pk_);
             cce_prev = cce;
             cce = cce->map_next_;
             ++cnt;
@@ -1282,18 +1451,44 @@ public:
         return cnt;
     }
 
+    TxKey::Uptr ExportSecondaryKey(LruEntry *entry) const override
+    {
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
+            static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(entry);
+
+        return std::make_unique<SecondaryKey<SkT, PkT>>(*cce->payload_->sk_,
+                                                        *cce->payload_->pk_);
+    }
+
 private:
     void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
                  bool include_gap,
                  uint32_t ng_id,
-                 int64_t term) const
+                 int64_t term,
+                 uint64_t read_ts,
+                 IsolationLevel iso_level) const
     {
         SecondaryKey<SkT, PkT> &sk = tuple->Key();
-        sk.SKey() = *cce->payload_.sk_;
-        sk.PKey() = *cce->payload_.pk_;
-        tuple->rec_status_ = cce->payload_status_;
-        tuple->key_ts_ = cce->commit_ts_;
+        sk.SKey() = *cce->payload_->sk_;
+        sk.PKey() = *cce->payload_->pk_;
+        if (iso_level == IsolationLevel::Snapshot)
+        {
+            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            bool res = cce->MvccGet(read_ts, v_rec);
+            if (!res)
+            {
+                // TODO(lzx): to handle this error.
+                assert(res);
+            }
+            tuple->rec_status_ = v_rec.payload_status_;
+            tuple->key_ts_ = v_rec.commit_ts_;
+        }
+        else
+        {
+            tuple->rec_status_ = cce->payload_status_;
+            tuple->key_ts_ = cce->commit_ts_;
+        }
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
         tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
     }
@@ -1301,31 +1496,37 @@ private:
     void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  remote::ScanTuple_msg *tuple,
                  bool include_gap,
-                 int64_t term) const
+                 int64_t term,
+                 uint64_t read_ts,
+                 IsolationLevel iso_level) const
     {
         tuple->clear_key();
         std::string &key_blob = *tuple->mutable_key();
 
         // Serializes the secondary key
-        cce->payload_.sk_->Serialize(key_blob);
+        cce->payload_->sk_->Serialize(key_blob);
         // Serializes the primary key
-        cce->payload_.pk_->Serialize(key_blob);
+        cce->payload_->pk_->Serialize(key_blob);
 
-        switch (cce->payload_status_)
+        if (iso_level == IsolationLevel::Snapshot)
         {
-        case RecordStatus::Normal:
-            tuple->set_rec_status(remote::RecordStatusType::NORMAL);
-            break;
-        case RecordStatus::Deleted:
-            tuple->set_rec_status(remote::RecordStatusType::DELETED);
-            break;
-        case RecordStatus::Unknown:
-            tuple->set_rec_status(remote::RecordStatusType::UNDEFINED);
-            break;
-        default:
-            break;
+            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            bool res = cce->MvccGet(read_ts, v_rec);
+            if (!res)
+            {
+                // TODO(lzx): to handle this error.
+                assert(res);
+            }
+            tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
+                v_rec.payload_status_));
+            tuple->set_key_ts(v_rec.commit_ts_);
         }
-        tuple->set_key_ts(cce->commit_ts_);
+        else
+        {
+            tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
+                cce->payload_status_));
+            tuple->set_key_ts(cce->commit_ts_);
+        }
 
         if (include_gap)
         {
@@ -1441,8 +1642,9 @@ private:
 
         new_cce = &pk_it->second;
         new_cce->key_ = nullptr;
-        new_cce->payload_.sk_ = &sk_it->first;
-        new_cce->payload_.pk_ = &pk_it->first;
+        new_cce->payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        new_cce->payload_->sk_ = &sk_it->first;
+        new_cce->payload_->pk_ = &pk_it->first;
 
         if (pk_it == pk_group->begin())
         {
@@ -1639,9 +1841,9 @@ private:
             }
             else
             {
-                internal_sk_it_ = internal_map.find(*cce->payload_.sk_);
+                internal_sk_it_ = internal_map.find(*cce->payload_->sk_);
                 internal_pk_it_ =
-                    internal_sk_it_->second.find(*cce->payload_.pk_);
+                    internal_sk_it_->second.find(*cce->payload_->pk_);
                 assert(internal_sk_it_ != internal_map.end());
                 assert(internal_pk_it_ != internal_sk_it_->second.end());
 

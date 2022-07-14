@@ -244,7 +244,7 @@ public:
         : record_(nullptr),
           record_blob_(nullptr),
           record_status_(RecordStatus::Unknown),
-          commit_ts_(0UL)
+          commit_ts_(1UL)
     {
     }
 

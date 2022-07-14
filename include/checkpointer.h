@@ -30,6 +30,12 @@ public:
 
     void Ckpt();
 
+    /**
+     * @brief Checkpoint one Entry to KvStore synchronously.
+     * Now, only used for test.
+     */
+    bool CkptEntry(LruEntry *entry);
+
     void Run();
 
     /**

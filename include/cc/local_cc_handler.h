@@ -209,7 +209,8 @@ public:
                             const TxKey &secondary_key,
                             bool is_delete,
                             uint64_t ts,
-                            CcHandlerResult<Void> &) override;
+                            CcHandlerResult<Void> &hd_res,
+                            CcProtocol protocol) override;
 
     /// <summary>
     /// Starts a new tx and returns the tx ID.
@@ -268,11 +269,12 @@ public:
                               uint64_t commit_ts,
                               CcHandlerResult<Void> &hres) override;
 
-    void CleanArchives(const TableName &table_name,
-                       const TxKey &key,
-                       uint64_t tx_number,
-                       int64_t tx_term,
-                       CcHandlerResult<bool> &hres) override;
+    void CleanCcEntryForTest(const TableName &table_name,
+                             const TxKey &key,
+                             bool only_archives,
+                             uint64_t tx_number,
+                             int64_t tx_term,
+                             CcHandlerResult<bool> &hres) override;
 
     /*
      * Get the node id which runs the current transaction.
@@ -306,7 +308,7 @@ private:
     CcRequestPool<ScanOpenBatchCc> scan_open_pool;
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
-    CcRequestPool<CleanArchivesForTestCc> clean_akv_pool;
+    CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
 
     friend class remote::RemoteCcHandler;
 };

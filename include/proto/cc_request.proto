@@ -104,6 +104,7 @@ enum RecordStatusType {
 	NORMAL = 0;
 	UNDEFINED = 1;
 	DELETED = 2;
+	VERSIONUNDEFIND=3;
 }
 
 enum CommitType {
@@ -298,6 +299,7 @@ message CommitSkRequest {
 	uint32 key_shard_code = 4;
 	uint64 ts = 5;
 	bool is_deleted = 6;
+	CcProtocolType protocol = 7;
 }
 
 message FaultInjectRequest {
@@ -310,14 +312,15 @@ message FaultInjectResponse {
   int32 error_code = 1;
 }
 
-message CleanArchivesRequest {
+message CleanCcEntryForTestRequest {
   uint32 src_node_id = 1;
   string tablename = 2;
   bytes key = 3;
   uint32 key_shard_code = 4;
+  bool only_archives=5;
 }
 
-message CleanArchivesResponse {
+message CleanCcEntryForTestResponse {
   int32 error_code = 1;
 }
 
@@ -353,8 +356,8 @@ message CcMessage {
 		AcquireAllRequest = 28;
 		AcquireAllResponse = 29;
 		PostWriteAllRequest = 30;
-		CleanArchivesRequest = 32;
-		CleanArchivesResponse = 33;
+		CleanCcEntryForTestRequest = 32;
+		CleanCcEntryForTestResponse = 33;
 		RecoverStateCheckRequest = 34;
 		RecoverStateCheckResponse = 35;
 	}
@@ -384,8 +387,8 @@ message CcMessage {
 		AcquireAllRequest acquire_all_req = 36;
 		AcquireAllResponse acquire_all_resp = 37;
 		PostWriteAllRequest post_write_all_req = 38;
-		CleanArchivesRequest clean_archives_req = 40;
-		CleanArchivesResponse clean_archives_resp= 41;
+		CleanCcEntryForTestRequest clean_cc_entry_req = 40;
+		CleanCcEntryForTestResponse clean_cc_entry_resp= 41;
 		RecoverStateCheckRequest recover_state_check_req = 42;
 		RecoverStateCheckResponse recover_state_check_resp = 43;
 	}

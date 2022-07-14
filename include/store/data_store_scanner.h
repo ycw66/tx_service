@@ -11,7 +11,9 @@ class DataStoreScanner
 public:
     virtual ~DataStoreScanner() = default;
     virtual void Current(const txservice::TxKey *&key,
-                         const txservice::TxRecord *&rec) = 0;
+                         const txservice::TxRecord *&rec,
+                         uint64_t &version_ts_,
+                         bool &deleted_) = 0;
     virtual bool MoveNext() = 0;
 };
 }  // namespace store

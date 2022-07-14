@@ -280,6 +280,11 @@ public:
         return lock_type_;
     }
 
+    uint64_t ReadTimestamp() const
+    {
+        return snapshot_ts_;
+    }
+
     void SetCcePtr(LruEntry *ptr)
     {
         cce_ptr_ = ptr;
@@ -308,6 +313,7 @@ private:
     {
         LockType::NoLock
     };
+    uint64_t snapshot_ts_{0};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -352,6 +358,11 @@ public:
         return lock_type_;
     }
 
+    uint64_t ReadTimestamp() const
+    {
+        return snapshot_ts_;
+    }
+
     void SetCcePtr(LruEntry *ptr)
     {
         cce_ptr_ = ptr;
@@ -378,6 +389,7 @@ private:
     {
         LockType::NoLock
     };
+    uint64_t snapshot_ts_{0};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -453,14 +465,14 @@ private:
     friend class RemoteCcHandler;
 };
 
-struct RemoteCleanArchivesForTestCc : public CleanArchivesForTestCc
+struct RemoteCleanCcEntryForTestCc : public CleanCcEntryForTestCc
 {
 public:
-    RemoteCleanArchivesForTestCc();
+    RemoteCleanCcEntryForTestCc();
 
-    RemoteCleanArchivesForTestCc(const RemoteCleanArchivesForTestCc &rhs) =
+    RemoteCleanCcEntryForTestCc(const RemoteCleanCcEntryForTestCc &rhs) =
         delete;
-    RemoteCleanArchivesForTestCc(RemoteCleanArchivesForTestCc &&rhs) = delete;
+    RemoteCleanCcEntryForTestCc(RemoteCleanCcEntryForTestCc &&rhs) = delete;
 
     void Reset(std::unique_ptr<CcMessage> input_msg);
 

@@ -3,6 +3,7 @@
 #include <brpc/controller.h>
 
 #include "cc/local_cc_shards.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "tx_execution.h"
 #include "tx_trace.h"
@@ -24,7 +25,7 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteCommitSk> commit_sk_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
-thread_local CcRequestPool<RemoteCleanArchivesForTestCc> clean_akv_pool_;
+thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -664,7 +665,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     term = tuple_msg.cce_addr().term();
 
                     RecordStatus rec_status =
-                        ConvertRecordStatusType(tuple_msg.rec_status());
+                        ToLocalType::ConvertRecordStatusType(
+                            tuple_msg.rec_status());
 
                     shard_cache->AddScanTuple(tuple_msg.key(),
                                               tuple_msg.key_ts(),
@@ -749,8 +751,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 const ScanTuple_msg &tuple_msg = scan_next_res.scan_tuple(idx);
                 hd_res->Value().term_ = tuple_msg.cce_addr().term();
 
-                RecordStatus rec_status =
-                    ConvertRecordStatusType(tuple_msg.rec_status());
+                RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
+                    tuple_msg.rec_status());
 
                 shard_cache->AddScanTuple(tuple_msg.key(),
                                           tuple_msg.key_ts(),
@@ -817,18 +819,21 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         msg_pool_.enqueue(std::move(msg));
         break;
     }
-    case CcMessage::MessageType::CcMessage_MessageType_CleanArchivesRequest:
+    case CcMessage::MessageType::
+        CcMessage_MessageType_CleanCcEntryForTestRequest:
     {
-        RemoteCleanArchivesForTestCc *clean_req = clean_akv_pool_.NextRequest();
+        RemoteCleanCcEntryForTestCc *clean_req =
+            clean_cc_entry_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), clean_req);
         clean_req->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(0, clean_req);
 
         break;
     }
-    case CcMessage::MessageType::CcMessage_MessageType_CleanArchivesResponse:
+    case CcMessage::MessageType::
+        CcMessage_MessageType_CleanCcEntryForTestResponse:
     {
-        assert(msg->has_clean_archives_resp());
+        assert(msg->has_clean_cc_entry_resp());
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
 
@@ -842,7 +847,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         CcHandlerResult<bool> *hd_res =
             reinterpret_cast<CcHandlerResult<bool> *>(msg->handler_addr());
 
-        const CleanArchivesResponse &clean_res = msg->clean_archives_resp();
+        const CleanCcEntryForTestResponse &clean_res =
+            msg->clean_cc_entry_resp();
 
         if (clean_res.error_code() != 0)
         {
@@ -900,91 +906,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     default:
         break;
-    }
-}
-
-IsolationLevel CcStreamReceiver::ConvertIsolation(IsolationType iso_type)
-{
-    switch (iso_type)
-    {
-    case IsolationType::ReadCommitted:
-        return IsolationLevel::ReadCommitted;
-    case IsolationType::SnapshotIsolation:
-        return IsolationLevel::Snapshot;
-    case IsolationType::RepeatableRead:
-        return IsolationLevel::RepeatableRead;
-    case IsolationType::Serializable:
-        return IsolationLevel::Serializable;
-    default:
-        return IsolationLevel::ReadCommitted;
-    }
-}
-
-CcProtocol CcStreamReceiver::ConvertProtocol(CcProtocolType proto)
-{
-    if (proto == CcProtocolType::Locking)
-    {
-        return CcProtocol::Locking;
-    }
-    else if (proto == CcProtocolType::Mvcc)
-    {
-        return CcProtocol::MVCC;
-    }
-    else
-    {
-        return CcProtocol::OCC;
-    }
-}
-
-LockType CcStreamReceiver::ConvertLockType(CcLockType lock_type)
-{
-    if (lock_type == CcLockType::NoLock)
-    {
-        return LockType::NoLock;
-    }
-    else if (lock_type == CcLockType::ReadIntent)
-    {
-        return LockType::ReadIntent;
-    }
-    else if (lock_type == CcLockType::ReadLock)
-    {
-        return LockType::ReadLock;
-    }
-    else if (lock_type == CcLockType::WriteIntent)
-    {
-        return LockType::WriteIntent;
-    }
-    else
-    {
-        return LockType::WriteLock;
-    }
-}
-
-PostWriteType CcStreamReceiver::ConvertCommitType(CommitType commit_type)
-{
-    if (commit_type == CommitType::PrepareCommit)
-    {
-        return PostWriteType::PrepareCommit;
-    }
-    else
-    {
-        return PostWriteType::PostCommit;
-    }
-}
-
-RecordStatus CcStreamReceiver::ConvertRecordStatusType(
-    RecordStatusType status_type)
-{
-    switch (status_type)
-    {
-    case RecordStatusType::NORMAL:
-        return RecordStatus::Normal;
-    case RecordStatusType::DELETED:
-        return RecordStatus::Deleted;
-    case RecordStatusType::UNDEFINED:
-        return RecordStatus::Unknown;
-    default:
-        return RecordStatus::Unknown;
     }
 }
 

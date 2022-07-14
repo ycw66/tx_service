@@ -54,7 +54,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       write_log_(this),
       sleep_op_(this),
       fault_inject_op_(this),
-      clean_akv_op_(this)
+      clean_entry_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, handler);
 }
@@ -667,25 +667,35 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
-        if (read_.read_type_ == ReadType::Inside &&
-            (read_.read_tx_req_->lock_type_ == LockType::WriteIntent ||
-             read_.iso_level_ >= IsolationLevel::RepeatableRead))
+        if (read_.read_type_ == ReadType::Inside)
         {
-            const ReadSetEntry *prev_read =
-                rw_set_.FindRead(read_res.cce_addr_);
-            if (prev_read != nullptr && prev_read->version_ts_ != read_res.ts_)
-            {
-                // this branch is only reachable for OCC protocol
-                assert(read_.protocol_ == CcProtocol::OCC);
-                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                return;
-            }
-            else
+            if (read_.read_tx_req_->lock_type_ == LockType::WriteIntent)
             {
                 rw_set_.AddRead(read_res.cce_addr_,
                                 read_res.ts_,
                                 read_.protocol_,
                                 read_.read_tx_req_->lock_type_);
+            }
+            else if (read_.iso_level_ >= IsolationLevel::RepeatableRead)
+            {
+                const ReadSetEntry *prev_read =
+                    rw_set_.FindRead(read_res.cce_addr_);
+                if (prev_read != nullptr &&
+                    prev_read->version_ts_ != read_res.ts_)
+                {
+                    // this branch is only reachable for OCC protocol
+                    assert(read_.protocol_ == CcProtocol::OCC);
+                    rec_resp_->FinishError(
+                        TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                    return;
+                }
+                else
+                {
+                    rw_set_.AddRead(read_res.cce_addr_,
+                                    read_res.ts_,
+                                    read_.protocol_,
+                                    read_.read_tx_req_->lock_type_);
+                }
             }
         }
 
@@ -760,7 +770,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                           inclusive,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
-                          commit_ts_bound_,
+                          start_ts_,
                           scan_open.hd_result_,
                           direction,
                           iso_level_,
@@ -901,10 +911,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 
     const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
-    //  cc_scan_tuple->key_ts_ == 0 means it is backfill entry and thus data
-    //  store already contains this entry. Since the final scan result is the
-    //  merge of memory entries with data store entries, as a result it's safe
-    //  to skip these backfill entries.
+    // (cc_scan_tuple->key_ts_ == 0) means it is a boundary key but outside the
+    // query scope.
+    // (cc_scan_tuple->rec_status_ == RecordStatus::Unknown) means
+    // it is a backfilling entry and thus data store already contains this
+    // entry. Since the final scan result is the merge of memory entries with
+    // data store entries, as a result it's safe to skip these backfill entries.
     while (cc_scan_tuple != nullptr &&
            (cc_scan_tuple->key_ts_ == 0 ||
             cc_scan_tuple->rec_status_ == RecordStatus::Unknown))
@@ -937,11 +949,13 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     // Lock need to be released when transaction be committed, so add scan
     // result into transaction read set
     if (cc_scan_tuple != nullptr &&
-        iso_level_ >= IsolationLevel::RepeatableRead)
+        (iso_level_ >= IsolationLevel::RepeatableRead ||
+         scan_next.tx_req_->lock_type_ == LockType::WriteIntent))
     {
-        LockType lk_type = protocol_ == CcProtocol::Locking
-                               ? LockType::ReadLock
-                               : LockType::ReadIntent;
+        // LockType lk_type = protocol_ == CcProtocol::Locking
+        //                        ? LockType::ReadLock
+        //                        : LockType::ReadIntent;
+        LockType lk_type = scan_next.tx_req_->lock_type_;
 
         // Not necessary to add read (and lock) on index table cc entry, unless
         // iso level is serializable
@@ -980,23 +994,29 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                 {
-                    kvp_resp_->Finish(std::make_tuple(
-                        cc_scan_tuple->Key(), cc_scan_tuple->Record(), false));
+                    kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                      cc_scan_tuple->Record(),
+                                                      RecordStatus::Normal));
                 }
                 else
                 {
-                    assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
+                    assert(cc_scan_tuple->rec_status_ ==
+                               RecordStatus::Deleted ||
+                           cc_scan_tuple->rec_status_ ==
+                               RecordStatus::VersionUnknown);
                     if (scan_next.scanner_->is_ckpt_delta_)
                     {
                         kvp_resp_->Finish(
                             std::make_tuple(cc_scan_tuple->Key(),
                                             cc_scan_tuple->Record(),
-                                            true));
+                                            cc_scan_tuple->rec_status_));
                     }
                     else
                     {
-                        kvp_resp_->Finish(std::make_tuple(
-                            cc_scan_tuple->Key(), nullptr, true));
+                        kvp_resp_->Finish(
+                            std::make_tuple(cc_scan_tuple->Key(),
+                                            nullptr,
+                                            cc_scan_tuple->rec_status_));
                     }
                 }
 
@@ -1004,7 +1024,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(nullptr, nullptr, true));
+                kvp_resp_->Finish(
+                    std::make_tuple(nullptr, nullptr, RecordStatus::Deleted));
             }
             return;
         }
@@ -1018,13 +1039,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             // Returns the key-value pair in the local write set.
             if (local_write.op_ == DmlOperation::Delete)
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(local_write.key_.get(), nullptr, true));
+                kvp_resp_->Finish(std::make_tuple(
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), local_write.rec_.get(), false));
+                kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
+                                                  local_write.rec_.get(),
+                                                  RecordStatus::Normal));
             }
 
             ++it->second.first;
@@ -1040,14 +1062,17 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
             if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    cc_scan_tuple->Key(), cc_scan_tuple->Record(), false));
+                kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                  cc_scan_tuple->Record(),
+                                                  RecordStatus::Normal));
             }
             else
             {
-                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
-                kvp_resp_->Finish(
-                    std::make_tuple(cc_scan_tuple->Key(), nullptr, true));
+                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted ||
+                       cc_scan_tuple->rec_status_ ==
+                           RecordStatus::VersionUnknown);
+                kvp_resp_->Finish(std::make_tuple(
+                    cc_scan_tuple->Key(), nullptr, cc_scan_tuple->rec_status_));
             }
             scan_next.scanner_->MoveNext();
         }
@@ -1056,13 +1081,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             // Returns the key-value pair in the local write set.
             if (local_write.op_ == DmlOperation::Delete)
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(local_write.key_.get(), nullptr, true));
+                kvp_resp_->Finish(std::make_tuple(
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), local_write.rec_.get(), false));
+                kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
+                                                  local_write.rec_.get(),
+                                                  RecordStatus::Normal));
             }
 
             ++it->second.first;
@@ -1081,21 +1107,28 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                 {
-                    kvp_resp_->Finish(std::make_tuple(
-                        cc_scan_tuple->Key(), cc_scan_tuple->Record(), false));
+                    kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                      cc_scan_tuple->Record(),
+                                                      RecordStatus::Normal));
                 }
                 else
                 {
-                    assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
+                    assert(cc_scan_tuple->rec_status_ ==
+                               RecordStatus::Deleted ||
+                           cc_scan_tuple->rec_status_ ==
+                               RecordStatus::VersionUnknown);
                     kvp_resp_->Finish(
-                        std::make_tuple(cc_scan_tuple->Key(), nullptr, true));
+                        std::make_tuple(cc_scan_tuple->Key(),
+                                        nullptr,
+                                        cc_scan_tuple->rec_status_));
                 }
 
                 scan_next.scanner_->MoveNext();
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(nullptr, nullptr, true));
+                kvp_resp_->Finish(
+                    std::make_tuple(nullptr, nullptr, RecordStatus::Deleted));
             }
             return;
         }
@@ -1108,13 +1141,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             // Returns the key-value pair in the local write set.
             if (local_write.op_ == DmlOperation::Delete)
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(local_write.key_.get(), nullptr, true));
+                kvp_resp_->Finish(std::make_tuple(
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), local_write.rec_.get(), false));
+                kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
+                                                  local_write.rec_.get(),
+                                                  RecordStatus::Normal));
             }
 
             ++rit->second.first;
@@ -1130,14 +1164,17 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
             if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    cc_scan_tuple->Key(), cc_scan_tuple->Record(), false));
+                kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                  cc_scan_tuple->Record(),
+                                                  RecordStatus::Normal));
             }
             else
             {
-                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
-                kvp_resp_->Finish(
-                    std::make_tuple(cc_scan_tuple->Key(), nullptr, true));
+                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted ||
+                       cc_scan_tuple->rec_status_ ==
+                           RecordStatus::VersionUnknown);
+                kvp_resp_->Finish(std::make_tuple(
+                    cc_scan_tuple->Key(), nullptr, cc_scan_tuple->rec_status_));
             }
 
             scan_next.scanner_->MoveNext();
@@ -1147,13 +1184,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             // Returns the key-value pair in the local write set.
             if (local_write.op_ == DmlOperation::Delete)
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(local_write.key_.get(), nullptr, true));
+                kvp_resp_->Finish(std::make_tuple(
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
             }
             else
             {
-                kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), local_write.rec_.get(), false));
+                kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
+                                                  local_write.rec_.get(),
+                                                  RecordStatus::Normal));
             }
 
             ++rit->second.first;
@@ -1833,7 +1871,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                         *key,
                         write_entry.op_ == DmlOperation::Delete,
                         commit_ts_,
-                        hres);
+                        hres,
+                        protocol_);
                 }
                 else
                 {
@@ -2151,7 +2190,8 @@ void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)
     bool_resp_->Finish(fault_inject_op_.succeed_);
 }
 
-void TransactionExecution::ProcessTxRequest(CleanArchivesTxRequest &clean_req)
+void TransactionExecution::ProcessTxRequest(
+    CleanCcEntryForTestTxRequest &clean_req)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -2166,16 +2206,17 @@ void TransactionExecution::ProcessTxRequest(CleanArchivesTxRequest &clean_req)
     bool_resp_ = &clean_req.tx_result_;
     bool_resp_->Reset();
 
-    clean_akv_op_.Set(clean_req.tab_name_, clean_req.key_);
-    PushOperation(&clean_akv_op_);
-    Process(clean_akv_op_);
+    clean_entry_op_.Set(
+        clean_req.tab_name_, clean_req.key_, clean_req.only_archives_);
+    PushOperation(&clean_entry_op_);
+    Process(clean_entry_op_);
 }
 
-void TransactionExecution::Process(CleanArchivesOp &clean_akv_op)
+void TransactionExecution::Process(CleanCcEntryForTestOp &clean_entry_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &clean_akv_op,
+        &clean_entry_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -2183,22 +2224,23 @@ void TransactionExecution::Process(CleanArchivesOp &clean_akv_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    clean_akv_op_.Reset();
-    clean_akv_op_.is_running_ = true;
+    clean_entry_op_.Reset();
+    clean_entry_op_.is_running_ = true;
 
-    handler->CleanArchives(*clean_akv_op_.tab_name_,
-                           *clean_akv_op_.key_,
-                           tx_number_.load(std::memory_order_relaxed),
-                           tx_term_,
-                           clean_akv_op_.hd_result_);
+    handler->CleanCcEntryForTest(*clean_entry_op_.tab_name_,
+                                 *clean_entry_op_.key_,
+                                 clean_entry_op_.only_archives_,
+                                 tx_number_.load(std::memory_order_relaxed),
+                                 tx_term_,
+                                 clean_entry_op_.hd_result_);
     return;
 }
 
-void TransactionExecution::PostProcess(CleanArchivesOp &clean_akv_op)
+void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &clean_akv_op,
+        &clean_entry_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -2209,7 +2251,7 @@ void TransactionExecution::PostProcess(CleanArchivesOp &clean_akv_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    bool_resp_->Finish(clean_akv_op.succeed_);
+    bool_resp_->Finish(clean_entry_op.succeed_);
 }
 
 }  // namespace txservice

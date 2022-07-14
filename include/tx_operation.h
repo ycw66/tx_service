@@ -391,15 +391,16 @@ public:
     int sleep_secs_{0};
 };
 
-struct CleanArchivesOp : TransactionOperation
+struct CleanCcEntryForTestOp : TransactionOperation
 {
 public:
-    explicit CleanArchivesOp(TransactionExecution *txm);
+    explicit CleanCcEntryForTestOp(TransactionExecution *txm);
 
-    void Set(const TableName *tn, const TxKey *key)
+    void Set(const TableName *tn, const TxKey *key, bool only_archives)
     {
         tab_name_ = tn;
         key_ = key;
+        only_archives_ = only_archives;
         succeed_ = false;
     }
 
@@ -412,6 +413,7 @@ public:
 
     const TableName *tab_name_{nullptr};
     const TxKey *key_{nullptr};
+    bool only_archives_{false};
 
     bool succeed_{false};
     CcHandlerResult<bool> hd_result_;

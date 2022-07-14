@@ -1114,6 +1114,11 @@ public:
         return lock_type_;
     }
 
+    uint64_t ReadTimestamp() const
+    {
+        return ts_;
+    }
+
     void SetCcePtr(LruEntry *ptr)
     {
         cce_ptr_ = ptr;
@@ -1198,6 +1203,11 @@ public:
     LockType GetLockType()
     {
         return lock_type_;
+    }
+
+    uint64_t ReadTimestamp() const
+    {
+        return ts_;
     }
 
     void SetCcePtr(LruEntry *ptr)
@@ -1441,10 +1451,11 @@ public:
                uint32_t key_shard_code,
                uint64_t ts,
                bool is_delete,
-               CcHandlerResult<Void> *res)
+               CcHandlerResult<Void> *res,
+               CcProtocol proto)
     {
         TemplatedCcRequest<CommitSkCc, Void>::Reset(
-            tn, res, key_shard_code >> 10, tx_number);
+            tn, res, key_shard_code >> 10, tx_number, proto);
 
         secondary_key_ = secondary_key;
         secondary_key_str_ = nullptr;
@@ -1459,10 +1470,11 @@ public:
                uint32_t key_shard_code,
                uint64_t ts,
                bool is_delete,
-               CcHandlerResult<Void> *res)
+               CcHandlerResult<Void> *res,
+               CcProtocol proto)
     {
         TemplatedCcRequest<CommitSkCc, Void>::Reset(
-            tn, res, key_shard_code >> 10, tx_number);
+            tn, res, key_shard_code >> 10, tx_number, proto);
 
         secondary_key_ = nullptr;
         secondary_key_str_ = secondary_key_str;
@@ -1933,74 +1945,68 @@ public:
     uint64_t upper_bound_ts_;
 };
 
-struct CleanArchivesForTestCc
-    : public TemplatedCcRequest<CleanArchivesForTestCc, bool>
+struct CleanCcEntryForTestCc
+    : public TemplatedCcRequest<CleanCcEntryForTestCc, bool>
 {
 public:
-    CleanArchivesForTestCc()
-        : key_(nullptr), key_str_(nullptr), key_shard_code_(0U)
+    CleanCcEntryForTestCc()
+        : key_(nullptr),
+          key_str_(nullptr),
+          key_shard_code_(0U),
+          only_archives_(false)
     {
     }
 
-    CleanArchivesForTestCc(const CleanArchivesForTestCc &rhs) = delete;
-    CleanArchivesForTestCc(CleanArchivesForTestCc &&rhs) = delete;
+    CleanCcEntryForTestCc(const CleanCcEntryForTestCc &rhs) = delete;
+    CleanCcEntryForTestCc(CleanCcEntryForTestCc &&rhs) = delete;
 
     void Reset(const TableName *tn,
                const TxKey *key,
+               bool only_archives,
                uint32_t key_shard_code,
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
     {
-        TemplatedCcRequest<CleanArchivesForTestCc, bool>::Reset(
+        TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
             tn, res, key_shard_code >> 10, tx_number);
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
+        only_archives_ = only_archives;
         res_ = res;
-        // cce_ptr_ = nullptr;
     }
 
     void Reset(const TableName *tn,
                const std::string *key_str,
+               bool only_archives,
                uint32_t key_shard_code,
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
     {
-        TemplatedCcRequest<CleanArchivesForTestCc, bool>::Reset(
+        TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
             tn, res, key_shard_code >> 10, tx_number);
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
+        only_archives_ = only_archives;
         res_ = res;
-        // cce_ptr_ = nullptr;
     }
-
-    // const TableName *Table() const
-    // {
-    //     return table_name_;
-    // }
 
     const TxKey *Key() const
     {
         return key_;
     }
 
-    // void SetCcePtr(LruEntry *ptr)
-    // {
-    //     cce_ptr_ = ptr;
-    // }
-
-    // LruEntry *CcePtr() const
-    // {
-    //     return cce_ptr_;
-    // }
+    bool OnlyCleanArchives() const
+    {
+        return only_archives_;
+    }
 
 private:
     const TxKey *key_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
-
-    // LruEntry *cce_ptr_{nullptr};
+    bool only_archives_;
 };
 
 }  // namespace txservice
