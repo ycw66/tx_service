@@ -952,9 +952,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         (iso_level_ >= IsolationLevel::RepeatableRead ||
          scan_next.tx_req_->lock_type_ == LockType::WriteIntent))
     {
-        // LockType lk_type = protocol_ == CcProtocol::Locking
-        //                        ? LockType::ReadLock
-        //                        : LockType::ReadIntent;
         LockType lk_type = scan_next.tx_req_->lock_type_;
 
         // Not necessary to add read (and lock) on index table cc entry, unless

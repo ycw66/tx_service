@@ -1053,7 +1053,7 @@ public:
         {
             uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
             cce->KickOutArchiveRecords(recycle_ts);
-            size_t added_mem_usage = cce->ArchiveBeforeUpdate();
+            size_t added_mem_usage = cce->ArchiveBeforeUpdate(false);
             shard_->mem_usage_ += added_mem_usage;
         }
 

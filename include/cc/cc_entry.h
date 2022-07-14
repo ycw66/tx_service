@@ -323,7 +323,7 @@ public:
      *
      * @return New memory usage caused by archive
      */
-    size_t ArchiveBeforeUpdate()
+    size_t ArchiveBeforeUpdate(bool copy_payload = true)
     {
         if (commit_ts_ <= 1)  // no history record
         {
@@ -335,8 +335,7 @@ public:
             assert(commit_ts_ > archives_[0].commit_ts_);
         }
 
-        // std::shared_ptr<ValueT> payload_ptr = payload_;
-        if (parent_map_->Type() != TableType::Secondary)
+        if (copy_payload)
         {
             archives_.emplace_front(payload_, commit_ts_, payload_status_);
         }
