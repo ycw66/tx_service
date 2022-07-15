@@ -1387,12 +1387,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else if (is_deleted_)
         {
             // For DROP TABLE statements, the data store operation happens
-            // after the commit log is flushed and is the second to the last
-            // step.
-            op_ = &clean_log_op_;
-            FillCleanLogRequest(txm);
-            txm->PushOperation(&clean_log_op_);
-            txm->Process(clean_log_op_);
+            // after the commit log is flushed.
+            op_ = &post_all_lock_op_;
+
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
         }
         else
         {
@@ -1468,10 +1467,19 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            op_ = &post_all_lock_op_;
+            if (is_deleted_)
+            {
+                op_ = &upsert_kv_table_op_;
+                upsert_kv_table_op_.table_schema_ = nullptr;
+                txm->PushOperation(&upsert_kv_table_op_);
+                txm->Process(upsert_kv_table_op_);
+            }
+            {
+                op_ = &post_all_lock_op_;
 
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
         }
     }
     else if (op_ == &post_all_lock_op_)
@@ -1539,20 +1547,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     .local_cce_addr_;
             txm->rw_set_.DedupRead(schema_entry_addr);
 
-            if (is_deleted_)
-            {
-                op_ = &upsert_kv_table_op_;
-                upsert_kv_table_op_.table_schema_ = nullptr;
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
-            }
-            else
-            {
-                op_ = &clean_log_op_;
-                FillCleanLogRequest(txm);
-                txm->PushOperation(&clean_log_op_);
-                txm->Process(clean_log_op_);
-            }
+            op_ = &clean_log_op_;
+            FillCleanLogRequest(txm);
+            txm->PushOperation(&clean_log_op_);
+            txm->Process(clean_log_op_);
         }
     }
     else if (op_ == &clean_log_op_)
