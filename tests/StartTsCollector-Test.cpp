@@ -33,6 +33,12 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
     uint32_t node_id = 0;
     uint32_t core_num = 5;
 
+    std::map<std::string, uint32_t> tx_service_conf;
+    tx_service_conf.insert(
+        std::pair<std::string, uint32_t>("core_num", core_num));
+    tx_service_conf.insert(
+        std::pair<std::string, uint32_t>("checkpointer_interval", 10));
+
     uint16_t log_server_port = 8602;
     std::vector<uint16_t> log_instance_ports = ports;
     for (auto it = log_instance_ports.begin(); it != log_instance_ports.end();
@@ -60,8 +66,8 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
     std::unique_ptr<TxService> tx_service_ = std::make_unique<TxService>(
         local_path,
         &mock_catalog_factory,
+        tx_service_conf,
         node_id,
-        core_num,
         &ips,
         &ports,
         store_hd.get(),

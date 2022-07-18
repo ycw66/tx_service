@@ -32,11 +32,15 @@ set( TARGETS_ALL
     ${TARGETS_SINGLE_FILE}
 )
 
+enable_testing()
+include(CTest)
+include(Catch)
+
 foreach( name ${TARGETS_SINGLE_FILE} )
     add_executable( ${name} ${TESTS_DIR}/${name}.cpp)
     target_link_libraries(${name} PUBLIC txservice Catch2::Catch2)
+    catch_discover_tests(${name})
 endforeach()
-
 
 foreach( name ${TARGETS_ALL} )
     target_include_directories( ${name} PRIVATE ${HEADER_DIR} ${CMAKE_SOURCE_DIR} ${INCLUDE_DIR} )
@@ -57,3 +61,4 @@ foreach( name ${TARGETS_ALL} )
         target_compile_options( ${name}  PRIVATE /W4 /w44265 /WX )
     endif()
 endforeach()
+

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>  //unique_ptr
+
 #include "catalog_factory.h"     // TableSchema,CatalogFactory
 #include "cc/template_cc_map.h"  // CcMap,TemplateCcMap
 #include "schema.h"              // Schema
@@ -70,7 +72,7 @@ public:
     }
     std::string_view VersionStringView() const override
     {
-        std::string_view(std::to_string(version_));
+        return std::string_view(std::to_string(version_));
     }
     std::vector<TableName> IndexNames() const override
     {
@@ -82,6 +84,11 @@ public:
         }
 
         return index_names;
+    }
+    const Schema *IndexKeySchema(const TableName &index_name) const override
+    {
+        assert(false);
+        return nullptr;
     }
 
 private:
@@ -102,7 +109,8 @@ public:
 
     TableSchema::uptr CreateTableSchema(const std::string &table_name,
                                         const std::string &catalog_image,
-                                        uint64_t version) override
+                                        uint64_t version,
+                                        NodeGroupId cc_ng_id) override
     {
         return std::make_unique<MockTableSchema>(
             table_name, catalog_image, version);
@@ -129,12 +137,28 @@ public:
                               uint64_t schema_ts,
                               txservice::CcShard *shard) override
     {
+        assert(false);
         return nullptr;
     }
 
     CcMap::uptr CreatePkRangeMap(const TableName &base_table,
                                  CcShard *shard) override
     {
+        assert(false);
+        return nullptr;
+    }
+
+    std::unique_ptr<CcScanner> CreatePkCcmScanner(
+        ScanDirection direction, const Schema *key_schema) override
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    std::unique_ptr<CcScanner> CreateSkCcmScanner(
+        ScanDirection direction, const Schema *compound_key_schema) override
+    {
+        assert(false);
         return nullptr;
     }
 };

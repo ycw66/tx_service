@@ -32,12 +32,11 @@ public:
             log_group_id, cntl, &log_record, &log_response, &done);
     }
 
-    void TruncateLog(brpc::Controller *controller,
-                     const ::txlog::LogRequest *request,
-                     ::txlog::LogResponse *response,
-                     ::google::protobuf::Closure *done) override
+    void TruncateLog(uint32_t cc_node_group_id,
+                     int64_t term,
+                     uint64_t checkpoint_timestamp) override
     {
-        log_agent_.TruncateLog(controller, request, response, done);
+        log_agent_.TruncateLog(cc_node_group_id, term, checkpoint_timestamp);
     }
 
     void ReplayLog(uint32_t cc_node_group_id,

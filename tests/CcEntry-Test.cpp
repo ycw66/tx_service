@@ -25,19 +25,19 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
 
     entry.commit_ts_ = 1U;
-    entry.payload_ = CompositeRecord<int>(1);
+    entry.payload_ = std::make_shared<CompositeRecord<int>>(1);
     entry.payload_status_ = RecordStatus::Normal;
 
     entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 
     entry.commit_ts_ = 2U;
-    entry.payload_ = CompositeRecord<int>(2);
+    entry.payload_ = std::make_shared<CompositeRecord<int>>(2);
     entry.payload_status_ = RecordStatus::Normal;
     entry.ArchiveBeforeUpdate();
 
     entry.commit_ts_ = 3U;
-    entry.payload_ = CompositeRecord<int>(3);
+    entry.payload_ = std::make_shared<CompositeRecord<int>>(3);
     entry.payload_status_ = RecordStatus::Normal;
     entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 2);
@@ -403,31 +403,25 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     // (read_ts: 5)->... => Unknown
     {
         uint64_t ts = 5;
-        // uint64_t target = 0;
         VersionRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
-        // REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        // REQUIRE(std::get<0>(rec.payload_->Tuple()) == target);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
-    entry.payload_ = CompositeRecord<int>(12);
+    entry.payload_ = std::make_shared<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
     // (read_ts: 5)->... => VersionUnknown
     {
         uint64_t ts = 5;
-        // uint64_t target = 0;
         VersionRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
-        // REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        // REQUIRE(std::get<0>(rec.payload_->Tuple()) == target);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
 
@@ -460,13 +454,12 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     // (read_ts: 1)->... => VersionUnknown
     {
         uint64_t ts = 1;
-        uint64_t target = 0;
+        uint64_t target = 1;
         VersionRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        // REQUIRE(std::get<0>(rec.payload_->Tuple()) == target);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
 
@@ -517,7 +510,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
-    entry.payload_ = CompositeRecord<int>(12);
+    entry.payload_ = std::make_shared<CompositeRecord<int>>(12);
 
     // [10,9,8,6,3,2]
     std::vector<VersionedRecord> records;  // desc order

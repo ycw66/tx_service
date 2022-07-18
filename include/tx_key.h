@@ -215,6 +215,11 @@ public:
     {
     }
 
+    CompositeKey(const CompositeKey &rhs, const txservice::Schema *schema)
+        : fields_(rhs.fields_), field_cnt_(rhs.field_cnt_)
+    {
+    }
+
     CompositeKey(CompositeKey &&other)
         : fields_(other.fields_), field_cnt_(other.field_cnt_)
     {

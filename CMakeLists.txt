@@ -17,10 +17,16 @@ if ( MSVC )
 endif()
 
 option(BRPC_WITH_GLOG "With glog" ON)
+option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
 
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 #find_package(OpenSSL REQUIRED)
+
+message(STATUS "protobuf dir: ${PROTOBUF_LIBRARY}")
+message(STATUS "protobuf include dir: ${Protobuf_INCLUDE_DIR}")
+message(STATUS "gflags libs dir: ${GFLAGS_LIBRARY}")
+message(STATUS "gflags include dir: ${GFLAGS_INCLUDE_DIR}")
 
 if ( CMAKE_COMPILER_IS_GNUCC )
     find_path(BRPC_INCLUDE_PATH NAMES brpc/stream.h)
@@ -59,22 +65,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     # endif()
 endif()
 
-#if ( MSVC )
-#    find_package(protobuf CONFIG REQUIRED)
-#    set (PROTOBUF_LIBRARIES "protobuf::libprotobuf")
-#endif()
 
-#find_library(PROTOBUF_LIBRARY NAMES libprotobuf)
-#if ((NOT PROTOBUF_LIBRARY))
-#    message(FATAL_ERROR "Fail to find protobuf")
-#endif()
-
-message(STATUS "protobuf dir: ${PROTOBUF_LIBRARY}")
-message(STATUS "protobuf dir: ${Protobuf_INCLUDE_DIR}")
-message(STATUS "protobuf dir: ${OPENSSL_LIB}")
-message(STATUS "protobuf dir: ${OPENSSL_INCLUDE_PATH}")
-message(STATUS "gflags libs dir: ${GFLAGS_LIBRARY}")
-message(STATUS "gflags libs dir: ${GFLAGS_LIBRARIES}")
 
 set(PROTO_SRC ${CMAKE_SOURCE_DIR}/include/proto)
 set(PROTO_NAME cc_request)
@@ -158,4 +149,9 @@ target_link_libraries(txservice PRIVATE ${LINK_LIB} logservice)
 #add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
 #target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
 
-add_subdirectory(tests)
+
+message(NOTICE "with tests: ${RUN_TX_SERVICE_TESTS}")
+if (RUN_TX_SERVICE_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif ()
