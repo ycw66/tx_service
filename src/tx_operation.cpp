@@ -510,7 +510,7 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
     {
         if (hd_result_.ErrorCode() ==
                 (int8_t) HandlerResultErrorType::Unknown &&
-            retry_num_ > 0)
+            log_type_ == TxLogType::DATA && retry_num_ > 0)
         {
             LOG(INFO) << "Retry Write Log Request, tx_number: "
                       << txm->tx_number_;
