@@ -234,9 +234,6 @@ private:
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
 
-    void AddReadSet(const ScanTuple *cc_scan_tuple,
-                    ScanNextOperation &scan_next);
-
     enum struct TxType
     {
         Data = 0,
