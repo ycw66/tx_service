@@ -1819,11 +1819,6 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 
         // transaction can be recycled and put into free list.
         tx_status_.store(TxnStatus::Finished, std::memory_order_release);
-
-        CcHandlerResult<Void> fake_result(this);
-        handler->UpdateTxnStatus(
-            txid_, tx_status_.load(std::memory_order_relaxed), fake_result);
-
         Reset();
     }
 }

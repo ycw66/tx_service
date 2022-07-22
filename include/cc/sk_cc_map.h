@@ -1128,7 +1128,7 @@ public:
         if (cce == &pos_inf_)
         {
             req.Notify();
-            return true;
+            return false;
         }
         else
         {
@@ -1219,7 +1219,7 @@ public:
                     // the lock holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
-                    shard_->DeleteLockHolidngTx(txn, cce, true);
+                    shard_->DeleteLockHoldingTx(txn, cce, true);
                     // cce->key_lock_.ClearTx(txn);
                 }
             }

@@ -1345,6 +1345,9 @@ public:
     {
     }
 
+    // CkptScanCc is always stack object and won't be reused, worse, it might be
+    // destructed before Execute returns, so always return false as caller
+    // should never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
         if (ccm_ == nullptr)
@@ -1713,6 +1716,9 @@ public:
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
     ReplayLogCc(ReplayLogCc &&rhs) = delete;
 
+    // ReplayLogCc is always stack object and won't be reused, worse, it might
+    // be destructed before Execute returns, so always return false as caller
+    // should never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
         int64_t cc_ng_candid_term =
@@ -1773,7 +1779,8 @@ public:
             }
         }
 
-        return ccm_->Execute(*this);
+        ccm_->Execute(*this);
+        return false;
     }
 
     void SetFinish()

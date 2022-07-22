@@ -139,7 +139,9 @@ TEntry &CcShard::NewTx()
     while (cnt < tx_vec_.size())
     {
         TEntry &te = tx_vec_[next_tx_idx_];
-        if (te.status_ == TxnStatus::Finished)
+        if (te.status_ == TxnStatus::Finished ||
+            te.status_ == TxnStatus::Committed ||
+            te.status_ == TxnStatus::Aborted)
         {
             break;
         }
@@ -282,7 +284,7 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     return &em_it.first->second;
 }
 
-void CcShard::DeleteLockHolidngTx(TxNumber txn,
+void CcShard::DeleteLockHoldingTx(TxNumber txn,
                                   LruEntry *cce_ptr,
                                   bool is_key_write_lock)
 {
@@ -331,6 +333,18 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
     if (now_ts - lk_info.ts_ >= ts_gap &&
         now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
+        uint32_t txn_node_group = lock_holding_txn >> 42L;
+        if (txn_node_group == Sharder::Instance().NodeId())
+        {
+            LOG(WARNING)
+                << "orphan lock detected, lock holding txn: "
+                << lock_holding_txn
+                << ", txn is initiated by this machine, no need to recover";
+            // no need to check and recover local txn, it must be ongoing
+            return;
+        }
+        LOG(WARNING) << "orphan lock detected, lock holding txn: "
+                     << lock_holding_txn << ", try to recover";
         Sharder::Instance().RecoverTx(lock_holding_txn,
                                       lk_info.tx_coord_term_,
                                       cc_ng_id,

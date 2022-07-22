@@ -236,7 +236,7 @@ public:
                                     LruEntry *cce_ptr,
                                     bool is_key_write_lock);
 
-    void DeleteLockHolidngTx(TxNumber txn,
+    void DeleteLockHoldingTx(TxNumber txn,
                              LruEntry *cce_ptr,
                              bool is_key_write_lock);
 

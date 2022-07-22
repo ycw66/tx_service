@@ -445,7 +445,7 @@ public:
             req.Result()->SetFinished();
             prior_cce.gap_lock_.ReleaseWriteLock(txn, shard_);
             // The insert places a write lock on the prior cc entry's gap.
-            shard_->DeleteLockHolidngTx(txn, &prior_cce, true);
+            shard_->DeleteLockHoldingTx(txn, &prior_cce, true);
             return true;
         }
         else
@@ -501,7 +501,7 @@ public:
             req.Result()->SetFinished();
             cce.key_lock_.ReleaseWriteLock(txn, shard_);
             cce.wlock_ts_ = 0;
-            shard_->DeleteLockHolidngTx(txn, &cce, true);
+            shard_->DeleteLockHoldingTx(txn, &cce, true);
             return true;
         }
     }
@@ -1001,7 +1001,7 @@ public:
             {
                 cce_ptr->gap_lock_.ReleaseWriteLock(txn, shard_);
                 // The insert places a write lock on the prior cc entry's gap.
-                shard_->DeleteLockHolidngTx(txn, cce_ptr, false);
+                shard_->DeleteLockHoldingTx(txn, cce_ptr, false);
             }
 
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
@@ -1062,12 +1062,12 @@ public:
                     if (lk_type == LockType::WriteLock)
                     {
                         cce_ptr->key_lock_.ReleaseWriteLock(txn, shard_);
-                        shard_->DeleteLockHolidngTx(txn, cce_ptr, true);
+                        shard_->DeleteLockHoldingTx(txn, cce_ptr, true);
                     }
                     else if (lk_type == LockType::WriteIntent)
                     {
                         cce_ptr->key_lock_.ReleaseWriteIntent(txn, shard_);
-                        shard_->DeleteLockHolidngTx(txn, cce_ptr, false);
+                        shard_->DeleteLockHoldingTx(txn, cce_ptr, false);
                     }
                 }
             }
@@ -1233,7 +1233,7 @@ public:
         cc_entry.key_lock_.ClearTx(txn, shard_);
         cc_entry.gap_lock_.ClearTx(txn, shard_);
 
-        shard_->DeleteLockHolidngTx(txn, &cc_entry, is_write_lock);
+        shard_->DeleteLockHoldingTx(txn, &cc_entry, is_write_lock);
         return true;
     }
 
@@ -2399,7 +2399,7 @@ public:
         if (ng_term < 0)
         {
             req.Notify();
-            return true;
+            return false;
         }
 
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
@@ -2441,7 +2441,7 @@ public:
         if (cce == &pos_inf_)
         {
             req.Notify();
-            return true;
+            return false;
         }
         else
         {
@@ -2567,7 +2567,7 @@ public:
                     // the lock holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
-                    shard_->DeleteLockHolidngTx(txn, cce, true);
+                    shard_->DeleteLockHoldingTx(txn, cce, true);
                     // cce->key_lock_.ClearTx(txn);
                 }
             }
