@@ -320,7 +320,8 @@ public:
                                         req.TxTerm(),
                                         req.NodeGroupId(),
                                         cce->payload_status_,
-                                        term))
+                                        term,
+                                        start_pair.second))
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
@@ -364,7 +365,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -407,7 +409,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -505,7 +508,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -544,7 +548,7 @@ public:
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                true))
+                                                ScanType::ScanGap))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -578,7 +582,7 @@ public:
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                true))
+                                                ScanType::ScanBoth))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -707,7 +711,8 @@ public:
                                         req.TxTerm(),
                                         req.NodeGroupId(),
                                         cce->payload_status_,
-                                        term))
+                                        term,
+                                        start_pair.second))
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
@@ -757,7 +762,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -807,7 +813,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -897,7 +904,8 @@ public:
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
-                                            term))
+                                            term,
+                                            ScanType::ScanBoth))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
@@ -935,7 +943,7 @@ public:
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                true))
+                                                ScanType::ScanGap))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
@@ -968,7 +976,7 @@ public:
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                true))
+                                                ScanType::ScanGap))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,

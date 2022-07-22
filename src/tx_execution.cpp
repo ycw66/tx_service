@@ -303,12 +303,14 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &scan_open_req,
-        [this]() -> std::string
+        [&]() -> std::string
         {
             return std::string("\"tx_number\":")
                 .append(std::to_string(this->TxNumber()))
                 .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
+                .append(std::to_string(this->tx_term_))
+                .append("\"table_name:\":")
+                .append(*scan_open_req.tab_name_);
         });
     uint64_resp_ = &scan_open_req.tx_result_;
     uint64_resp_->Reset();
@@ -360,12 +362,14 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &upsert_req,
-        [this]() -> std::string
+        [&]() -> std::string
         {
             return std::string("\"tx_number\":")
                 .append(std::to_string(this->TxNumber()))
                 .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
+                .append(std::to_string(this->tx_term_))
+                .append("\"table_name:\":")
+                .append(*upsert_req.tab_name_);
         });
     void_resp_ = &upsert_req.tx_result_;
     void_resp_->Reset();
@@ -417,12 +421,14 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &req,
-        [this]() -> std::string
+        [&]() -> std::string
         {
             return std::string("\"tx_number\":")
                 .append(std::to_string(this->TxNumber()))
                 .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
+                .append(std::to_string(this->tx_term_))
+                .append("\"table_name\":")
+                .append(*req.table_name_);
         });
     bool_resp_ = &req.tx_result_;
 

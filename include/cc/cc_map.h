@@ -35,6 +35,13 @@ struct ReplayLogCc;
 struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
 
+enum struct ScanType
+{
+    ScanKey = 0,
+    ScanGap,
+    ScanBoth
+};
+
 class CcShard;
 
 class CcMap
@@ -131,7 +138,7 @@ public:
                                 uint32_t cce_node_group_id,
                                 RecordStatus payload_status,
                                 int64_t ng_term,
-                                bool gap_lock = false);
+                                ScanType scan_type);
 
     bool ReadLockCce(LruEntry *cce,
                      CcRequestBase &req,
@@ -157,13 +164,6 @@ public:
     bool ccm_has_full_entries_{false};
 
 protected:
-    enum struct ScanType
-    {
-        ScanKey = 0,
-        ScanGap,
-        ScanBoth
-    };
-
     /**
      * @brief After the input request is executed at the current shard, moves
      * the request to another shard for execution.

@@ -46,7 +46,7 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
                                    uint32_t cce_node_group_id,
                                    RecordStatus payload_status,
                                    int64_t ng_term,
-                                   bool gap_lock)
+                                   ScanType scan_type)
 {
     // cce payload_status is unknown means it is a cache miss read. Hence should
     // not acquire any lock.
@@ -54,7 +54,7 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
         payload_status != RecordStatus::Unknown)
     {
         /*gap lock has not been implemented, just a place holder*/
-        if (gap_lock)
+        if (scan_type == ScanType::ScanGap)
         {
             return true;
         }
