@@ -44,26 +44,26 @@ void CcHandlerResult<T>::SetFinished()
         auto r = ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);
         if (r == 1)
         {
-            bool expect = false;
-            is_finished_.compare_exchange_strong(
-                expect, true, std::memory_order_acq_rel);
-
             if (post_lambda_)
             {
                 post_lambda_(this);
             }
+
+            bool expect = false;
+            is_finished_.compare_exchange_strong(
+                expect, true, std::memory_order_acq_rel);
         }
     }
     else
     {
-        bool expect = false;
-        is_finished_.compare_exchange_strong(
-            expect, true, std::memory_order_acq_rel);
-
         if (post_lambda_)
         {
             post_lambda_(this);
         }
+
+        bool expect = false;
+        is_finished_.compare_exchange_strong(
+            expect, true, std::memory_order_acq_rel);
     }
 };
 
