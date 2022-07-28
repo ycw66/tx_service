@@ -7,7 +7,7 @@ find_package(Catch2 REQUIRED)
 
 # define folders used:
 set( TESTS_DIR ${CMAKE_SOURCE_DIR}/tests )
-set( HEADER_DIR   ${CMAKE_SOURCE_DIR}/tests/include )
+set( HEADER_DIR   ${CMAKE_SOURCE_DIR}/tests/include) 
 
 # single-file sources:
 
@@ -38,7 +38,7 @@ include(Catch)
 
 foreach( name ${TARGETS_SINGLE_FILE} )
     add_executable( ${name} ${TESTS_DIR}/${name}.cpp)
-    target_link_libraries(${name} PUBLIC txservice Catch2::Catch2)
+    target_link_libraries(${name} PUBLIC txservice logservice Catch2::Catch2)
     catch_discover_tests(${name})
 endforeach()
 

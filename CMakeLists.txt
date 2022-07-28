@@ -103,11 +103,8 @@ if ( CMAKE_COMPILER_IS_GNUCC )
        ${LEVELDB_LIB}
        ${BRAFT_LIB}
        ${BRPC_LIB}
+       ${OPENSSL_LIB}
     )
-endif()
-
-if ( CMAKE_COMPILER_IS_GNUCC )
-   set(LINK_LIB ${LINK_LIB} ${OPENSSL_LIB} ${GFLAGS_LIBRARY} ${BRAFT_LIB} ${BRPC_LIB})
 endif()
 
 SET (TxService_SOURCES
