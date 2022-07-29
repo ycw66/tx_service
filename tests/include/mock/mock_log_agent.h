@@ -32,11 +32,12 @@ public:
             log_group_id, cntl, &log_record, &log_response, &done);
     }
 
-    void TruncateLog(uint32_t cc_node_group_id,
-                     int64_t term,
-                     uint64_t checkpoint_timestamp) override
+    void UpdateCheckpointTs(uint32_t cc_node_group_id,
+                            int64_t term,
+                            uint64_t checkpoint_timestamp) override
     {
-        log_agent_.TruncateLog(cc_node_group_id, term, checkpoint_timestamp);
+        log_agent_.UpdateCheckpointTs(
+            cc_node_group_id, term, checkpoint_timestamp);
     }
 
     void ReplayLog(uint32_t cc_node_group_id,

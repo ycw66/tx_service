@@ -28,7 +28,8 @@ public:
                 std::vector<LruEntry *> &batch,
                 const Schema *key_schema,
                 const Schema *rec_schema,
-                uint64_t schema_ts) override
+                uint64_t schema_ts,
+                uint32_t node_group) override
     {
         for (const auto &entry : batch)
         {
@@ -63,7 +64,8 @@ public:
     bool PutSkAll(const TableName &table_name,
                   std::vector<LruEntry *> &batch,
                   const SecondaryKeySchema *sk_schema,
-                  uint64_t schema_ts) override
+                  uint64_t schema_ts,
+                  uint32_t node_group) override
     {
         for (const auto &entry : batch)
         {

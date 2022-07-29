@@ -20,16 +20,39 @@ public:
 
     virtual bool Connect() = 0;
 
+    /**
+     * flush entries in @param batch to data store, stop and return false if
+     * node_group is no longer leader
+     * @param table_name
+     * @param batch
+     * @param key_schema
+     * @param rec_schema
+     * @param schema_ts
+     * @param node_group
+     * @return whether all entries are written to data store successfully
+     */
     virtual bool PutAll(const txservice::TableName &table_name,
                         std::vector<txservice::LruEntry *> &batch,
                         const txservice::Schema *key_schema,
                         const txservice::Schema *rec_schema,
-                        uint64_t schema_ts) = 0;
+                        uint64_t schema_ts,
+                        uint32_t node_group) = 0;
 
+    /**
+     * flush entries in @param batch to data store, stop and return false if
+     * node_group is no longer leader
+     * @param table_name
+     * @param batch
+     * @param sk_schema
+     * @param schema_ts
+     * @param node_group
+     * @return whether all entries are written to data store successfully
+     */
     virtual bool PutSkAll(const txservice::TableName &table_name,
                           std::vector<txservice::LruEntry *> &batch,
                           const txservice::SecondaryKeySchema *sk_schema,
-                          uint64_t schema_ts) = 0;
+                          uint64_t schema_ts,
+                          uint32_t node_group) = 0;
 
     virtual void UpsertTable(
         const txservice::TableName &ccm_table_name,

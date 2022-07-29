@@ -242,19 +242,21 @@ public:
     std::vector<uint32_t> LocalNodeGroups();
 
     /**
-     * try to start checkpoint and set checkpoint flag if cc_ng_id is node group
-     * leader
+     * Try to pin data of cc_ng_id if it is group leader
      * @param cc_ng_id
-     * @return leader term of cc_ng_id
+     * @return leader term of cc_ng_id, -1 if not found
      */
-    int64_t TryStartCheckpoint(uint32_t cc_ng_id);
+    int64_t TryPinNodeGroupData(uint32_t cc_ng_id);
 
     /**
-     * cc_ng_id's checkpoint finishes, reset checkpoint flag and clear ccmaps
-     * and catalogs if this node is no longer group leader
+     * Unpin data of cc_ng_id, clear ccmaps and catalogs if this node is no
+     * longer group leader and pinning threads number decreases to 0.
+     * Must be called in pair with TryPinNodeGroupData if TryPinNodeGroupData
+     * returns success, otherwise braft thread of cc_ng_id will be blocked
+     * forever.
      * @param cc_ng_id
      */
-    void FinishCheckpoint(uint32_t cc_ng_id);
+    void UnpinNodeGroupData(uint32_t cc_ng_id);
 
 private:
     Sharder(uint32_t node_id,

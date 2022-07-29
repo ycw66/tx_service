@@ -76,9 +76,6 @@ void Checkpointer::Ckpt()
     vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)
     {
-        // check whether this node is group leader, set checkpoint flag if it is
-        int64_t leader_term =
-            Sharder::Instance().TryStartCheckpoint(node_group);
         assert(ckpt_ts >= last_ckpt_ts_[node_group]);
         uint64_t last_ckpt_ts = 0;
         auto ite = last_ckpt_ts_.find(node_group);
@@ -86,7 +83,14 @@ void Checkpointer::Ckpt()
         {
             last_ckpt_ts = ite->second;
         }
-        if (leader_term < 0 || ckpt_ts == last_ckpt_ts)
+        if (ckpt_ts == last_ckpt_ts)
+        {
+            continue;
+        }
+        // check whether this node is group leader, pin its data if it is
+        int64_t leader_term =
+            Sharder::Instance().TryPinNodeGroupData(node_group);
+        if (leader_term < 0)
         {
             continue;
         }
@@ -101,6 +105,11 @@ void Checkpointer::Ckpt()
         // ckpt_vec.
         for (const auto &table_name : tables)
         {
+            if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
+            {
+                flushed = false;
+                break;
+            }
             if (table_name == catalog_ccm_name)
             {
                 continue;
@@ -203,23 +212,23 @@ void Checkpointer::Ckpt()
                 {
                     const Schema *key_schema = ccm->KeySchema();
                     const Schema *rec_schema = ccm->RecordSchema();
-                    // todo: stop flush process if this node is no longer node
-                    //  group leader
                     ckpt_ret = store_hd_->PutAll(table_name,
                                                  ckpt_vec,
                                                  key_schema,
                                                  rec_schema,
-                                                 ccm->SchemaTs());
+                                                 ccm->SchemaTs(),
+                                                 node_group);
                 }
                 else
                 {
                     const SecondaryKeySchema *sk_schema =
                         static_cast<const SecondaryKeySchema *>(
                             ccm->KeySchema());
-                    // todo: stop flush process if this node is no longer node
-                    //  group leader
-                    ckpt_ret = store_hd_->PutSkAll(
-                        table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
+                    ckpt_ret = store_hd_->PutSkAll(table_name,
+                                                   ckpt_vec,
+                                                   sk_schema,
+                                                   ccm->SchemaTs(),
+                                                   node_group);
                 }
 
                 // If flush to data store succeeds, update the ckpt_ts for each
@@ -248,11 +257,12 @@ void Checkpointer::Ckpt()
             assert(commit_req.Result() == true);
         }
 
-        // finish checkpoint on this node group, clear its ccmaps and catalogs
-        // if it is no longer leader
-        Sharder::Instance().FinishCheckpoint(node_group);
+        // finish checkpoint on this node group, unpin its data and clear its
+        // ccmaps and catalogs if it is no longer leader
+        Sharder::Instance().UnpinNodeGroupData(node_group);
 
-        if (flushed)
+        if (flushed &&
+            Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
             last_ckpt_ts_.insert_or_assign(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
@@ -271,15 +281,21 @@ bool Checkpointer::CkptEntry(LruEntry *entry)
     {
         const Schema *key_schema = ccm->KeySchema();
         const Schema *rec_schema = ccm->RecordSchema();
-        ckpt_ret = store_hd_->PutAll(
-            table_name, ckpt_vec, key_schema, rec_schema, ccm->SchemaTs());
+        std::atomic<bool> interrupt{false};
+        ckpt_ret = store_hd_->PutAll(table_name,
+                                     ckpt_vec,
+                                     key_schema,
+                                     rec_schema,
+                                     ccm->SchemaTs(),
+                                     interrupt);
     }
     else
     {
         const SecondaryKeySchema *sk_schema =
             static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
+        std::atomic<bool> interrupt{false};
         ckpt_ret = store_hd_->PutSkAll(
-            table_name, ckpt_vec, sk_schema, ccm->SchemaTs());
+            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), interrupt);
     }
     return ckpt_ret;
 }

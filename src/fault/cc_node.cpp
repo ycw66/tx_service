@@ -24,7 +24,7 @@ CcNode::CcNode(const uint32_t ng_id,
       storage_path_(storage_path),
       leader_term_(-1),
       candidate_leader_term_(-1),
-      in_checkpoint_(false),
+      pinning_threads_(0),
       local_cc_shards_(local_shards),
       replay_service_(replay_service),
       log_group_cnt_(log_group_cnt)
@@ -212,27 +212,28 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     }
 }
 
-int64_t CcNode::TryStartCheckpoint()
+int64_t CcNode::PinData()
 {
-    std::unique_lock lk(checkpoint_mux_);
+    std::unique_lock lk(pinning_threads_mux_);
     int64_t leader_term = leader_term_.load(std::memory_order_acquire);
     if (leader_term > 0)
     {
-        in_checkpoint_ = true;
+        pinning_threads_++;
     }
     return leader_term;
 }
 
-void CcNode::FinishCheckpoint()
+void CcNode::UnpinData()
 {
-    std::unique_lock lk(checkpoint_mux_);
-    if (in_checkpoint_)
+    std::unique_lock lk(pinning_threads_mux_);
+    if (pinning_threads_ > 0)
     {
-        in_checkpoint_ = false;
-        if (leader_term_.load(std::memory_order_acquire) < 0)
+        pinning_threads_--;
+        if (leader_term_.load(std::memory_order_acquire) < 0 &&
+            pinning_threads_ == 0)
         {
-            // this cc node steps down as leader while doing checkpoint, clear
-            // the ccmaps and catalogs when checkpoint finishes
+            // this cc node steps down as leader while its data is pinned, clear
+            // the ccmaps and catalogs if pinning thread number is 0
             uint16_t core_cnt = local_cc_shards_.Count();
             ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
             for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
@@ -240,6 +241,8 @@ void CcNode::FinishCheckpoint()
                 local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
             }
             clear_ccm_req.Wait();
+            // wake up braft thread in case it is waiting in on_leader_start()
+            pinning_threads_cv_.notify_one();
         }
     }
 }
@@ -326,6 +329,13 @@ void CcNode::on_leader_start(int64_t term)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
 
+    // before replaying log, wait for all threads pinning data of this node
+    // group to finish and ccmaps and catalogs to be cleared
+    {
+        std::unique_lock lk(pinning_threads_mux_);
+        pinning_threads_cv_.wait(lk, [this] { return pinning_threads_ == 0; });
+    }
+
     replay_service_->ReplayLog(ng_id_, term);
 
     NotifyNewLeaderStart(ng_id_, node_id_);
@@ -336,14 +346,15 @@ void CcNode::on_leader_stop(const butil::Status &status)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " steps down as the leader of ng#" << ng_id_ << ".";
 
-    std::unique_lock lk(checkpoint_mux_);
+    std::unique_lock lk(pinning_threads_mux_);
     leader_term_.store(-1, std::memory_order_release);
     candidate_leader_term_.store(-1, std::memory_order_release);
 
-    // if this node group is doing checkpoint, do not clear ccmap and drop
-    // catalogs, once the checkpointer notices the node group is not leader
-    // anymore, it stops immediately and clear ccmaps and catalogs.
-    if (!in_checkpoint_)
+    // If this node group's data is pinned, do not clear ccmap and drop
+    // catalogs. The pinning threads will notice the node group is not leader
+    // anymore and stop immediately and unpin the data. The ccmaps and catalogs
+    // are cleared when all pinning threads stop.
+    if (pinning_threads_ == 0)
     {
         uint16_t core_cnt = local_cc_shards_.Count();
         ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
@@ -356,7 +367,7 @@ void CcNode::on_leader_stop(const butil::Status &status)
     else
     {
         LOG(INFO) << "node group: " << ng_id_
-                  << " is doing checkpoint, not clear ccmaps and catalogs";
+                  << " data is pinned, not clear ccmaps and catalogs";
     }
 }
 

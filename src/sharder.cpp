@@ -513,22 +513,22 @@ vector<uint32_t> Sharder::LocalNodeGroups()
     return ngs;
 }
 
-int64_t Sharder::TryStartCheckpoint(uint32_t cc_ng_id)
+int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
 {
     auto it = cc_nodes_.find(cc_ng_id);
     if (it != cc_nodes_.end())
     {
-        return it->second->TryStartCheckpoint();
+        return it->second->PinData();
     }
     return -1;
 }
 
-void Sharder::FinishCheckpoint(uint32_t cc_ng_id)
+void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
 {
     auto it = cc_nodes_.find(cc_ng_id);
     if (it != cc_nodes_.end())
     {
-        it->second->FinishCheckpoint();
+        it->second->UnpinData();
     }
 }
 }  // namespace txservice

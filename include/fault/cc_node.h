@@ -71,13 +71,18 @@ public:
     }
 
     /**
-     * try to start checkpoint and set checkpoint flag if this node is group
-     * leader
+     * Pin data of this node group if this ccnode is group leader.
+     * Must be called in pair with UnpinData().
      * @return leader term of this ccnode
      */
-    int64_t TryStartCheckpoint();
+    int64_t PinData();
 
-    void FinishCheckpoint();
+    /**
+     * Unpin data of this node group so that ccmaps and catalogs can be cleared
+     * if ccnode is no longer leader.
+     * Must be called in pair with PinData().
+     */
+    void UnpinData();
 
 private:
     static braft::NodeOptions BaseNodeOptions()
@@ -138,12 +143,12 @@ private:
     braft::Node *volatile node_;
     std::atomic<int64_t> leader_term_;
     std::atomic<int64_t> candidate_leader_term_;
-    // whether this cc node is doing checkpoint as group leader
-    bool in_checkpoint_;
-    // to coordinate checkpoint procedure and on_leader_stop, this
-    // ccnode's ccmaps and catalogs is cleared when this node steps down as
-    // leader and finishes checkpoint
-    std::mutex checkpoint_mux_;
+
+    // number of threads currently accessing data of this node group, this node
+    // group's data cannot be cleared unless pinning_threads_ is 0
+    int pinning_threads_;
+    std::mutex pinning_threads_mux_;
+    std::condition_variable pinning_threads_cv_;
 
     LocalCcShards &local_cc_shards_;
 
