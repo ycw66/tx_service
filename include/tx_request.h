@@ -216,13 +216,14 @@ struct ScanNextTxRequest
           ScanNextTxRequest,
           std::tuple<const TxKey *, const TxRecord *, RecordStatus>>
 {
-    ScanNextTxRequest(size_t alias, LockType lock_type)
-        : alias_(alias), lock_type_(lock_type)
+    ScanNextTxRequest(size_t alias, LockType lock_type, TableName table_name)
+        : alias_(alias), lock_type_(lock_type), table_name_(table_name)
     {
     }
 
     size_t alias_;
     LockType lock_type_;
+    TableName table_name_;
 };
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>

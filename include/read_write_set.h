@@ -33,7 +33,12 @@ public:
 
     size_t ReadSetSize() const
     {
-        return rset_.size();
+        size_t rset_size = 0;
+        for (auto &table_key_it : rset_)
+        {
+            rset_size += table_key_it.second.size();
+        }
+        return rset_size;
     }
 
     size_t WriteSetSize() const
@@ -41,7 +46,9 @@ public:
         return wset_cnt_;
     }
 
-    const std::unordered_map<CcEntryAddr, ReadSetEntry> &ReadSet() const
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
+        &ReadSet() const
     {
         return rset_;
     }
@@ -49,10 +56,12 @@ public:
     void AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
                  CcProtocol proto,
-                 LockType lock_type)
+                 LockType lock_type,
+                 TableName table_name)
     {
-        auto [it, inserted] =
-            rset_.try_emplace(cce_addr, read_ts, proto, lock_type);
+        auto table_it = rset_.try_emplace(table_name);
+        auto [it, inserted] = table_it.first->second.try_emplace(
+            cce_addr, read_ts, proto, lock_type);
         if (!inserted)
         {
             it->second.version_ts_ = read_ts;
@@ -75,11 +84,15 @@ public:
      */
     void UpdateRead(const CcEntryAddr &cce_addr, uint64_t version_ts)
     {
-        auto read_it = rset_.find(cce_addr);
-        if (read_it != rset_.end())
+        for (auto &table_key_it : rset_)
         {
-            ReadSetEntry &rs_entry = read_it->second;
-            rs_entry.version_ts_ = version_ts;
+            auto read_it = table_key_it.second.find(cce_addr);
+            if (read_it != table_key_it.second.end())
+            {
+                ReadSetEntry &rs_entry = read_it->second;
+                rs_entry.version_ts_ = version_ts;
+                break;
+            }
         }
     }
 
@@ -94,12 +107,15 @@ public:
     uint64_t DedupRead(const CcEntryAddr &cce_addr)
     {
         uint64_t read_ts = 0;
-
-        auto cce_it = rset_.find(cce_addr);
-        if (cce_it != rset_.end())
+        for (auto &table_key_it : rset_)
         {
-            read_ts = cce_it->second.version_ts_;
-            rset_.erase(cce_it);
+            auto cce_it = table_key_it.second.find(cce_addr);
+            if (cce_it != table_key_it.second.end())
+            {
+                read_ts = cce_it->second.version_ts_;
+                table_key_it.second.erase(cce_it);
+                break;
+            }
         }
 
         return read_ts;
@@ -153,12 +169,17 @@ public:
         return nullptr;
     }
 
-    const ReadSetEntry *FindRead(const CcEntryAddr &cce_addr) const
+    const ReadSetEntry *FindRead(const TableName &tablename,
+                                 const CcEntryAddr &cce_addr) const
     {
-        auto key_it = rset_.find(cce_addr);
-        if (key_it != rset_.end())
+        auto table_key_it = rset_.find(tablename);
+        if (table_key_it != rset_.end())
         {
-            return &key_it->second;
+            auto key_it = table_key_it->second.find(cce_addr);
+            if (key_it != table_key_it->second.end())
+            {
+                return &key_it->second;
+            }
         }
 
         return nullptr;
@@ -288,8 +309,14 @@ public:
         }
     }
 
+    void ClearReadSet(const TableName &table_name)
+    {
+        rset_.erase(table_name);
+    }
+
 private:
-    std::unordered_map<CcEntryAddr, ReadSetEntry> rset_;
+    std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
+        rset_;
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
     std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>

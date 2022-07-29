@@ -663,29 +663,31 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     else
     {
         const ReadKeyResult &read_res = read_.hd_result_.Value();
+        const ReadTxRequest *read_req = read.read_tx_req_;
 
         // optimization for case that we read the same key continuously
         // especially speed up remote read. e.g. Read A, Write B, Read A.
         if (read_res.rec_status_ == RecordStatus::Normal)
         {
-            const ReadTxRequest *read_req = read.read_tx_req_;
             rw_set_.AddCacheRead(
                 *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
         if (read_.read_type_ == ReadType::Inside)
         {
+            const TableName *table_name = read_req->tab_name_;
             if (read_.read_tx_req_->lock_type_ == LockType::WriteIntent)
             {
                 rw_set_.AddRead(read_res.cce_addr_,
                                 read_res.ts_,
                                 read_.protocol_,
-                                read_.read_tx_req_->lock_type_);
+                                read_.read_tx_req_->lock_type_,
+                                *table_name);
             }
             else if (read_.iso_level_ >= IsolationLevel::RepeatableRead)
             {
                 const ReadSetEntry *prev_read =
-                    rw_set_.FindRead(read_res.cce_addr_);
+                    rw_set_.FindRead(*table_name, read_res.cce_addr_);
                 if (prev_read != nullptr &&
                     prev_read->version_ts_ != read_res.ts_)
                 {
@@ -700,7 +702,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                     rw_set_.AddRead(read_res.cce_addr_,
                                     read_res.ts_,
                                     read_.protocol_,
-                                    read_.read_tx_req_->lock_type_);
+                                    read_.read_tx_req_->lock_type_,
+                                    *table_name);
                 }
             }
         }
@@ -979,10 +982,13 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             .append(std::to_string(
                                 cc_scan_tuple->cce_addr_.CcePtr()));
                     }));
+
+            TableName table_name = scan_next.tx_req_->table_name_;
             rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                             cc_scan_tuple->key_ts_,
                             protocol_,
-                            lk_type);
+                            lk_type,
+                            table_name);
         }
     }
 
@@ -1397,11 +1403,17 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
             candidate, acquire_write_.results_[idx].Value().commit_ts_ + 1);
     }
 
-    const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
-        rw_set_.ReadSet();
-    for (auto read_it = rset.begin(); read_it != rset.end(); ++read_it)
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
+        &rset = rw_set_.ReadSet();
+    for (const auto &table_entry_it : rset)
     {
-        candidate = std::max(candidate, read_it->second.version_ts_ + 1);
+        for (auto read_it = table_entry_it.second.begin();
+             read_it != table_entry_it.second.end();
+             ++read_it)
+        {
+            candidate = std::max(candidate, read_it->second.version_ts_ + 1);
+        }
     }
 
     handler->SetCommitTimestamp(txid_, candidate, set_ts.hd_result_);
@@ -1468,31 +1480,35 @@ void TransactionExecution::Process(ValidateOperation &validate)
                 .append(std::to_string(this->tx_term_));
         });
     size_t offset = 0;
-    const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
-        rw_set_.ReadSet();
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
+        &rset = rw_set_.ReadSet();
 
     validate.Reset(rw_set_.ReadSetSize());
     validate.vali_cce_addr_.clear();
     validate.is_running_ = true;
 
-    for (const auto &[cce_addr, read_entry] : rset)
+    for (const auto &table_entry_it : rset)
     {
-        validate_.vali_cce_addr_.emplace_back(&cce_addr);
+        for (const auto &[cce_addr, read_entry] : table_entry_it.second)
+        {
+            validate_.vali_cce_addr_.emplace_back(&cce_addr);
 
-        CcHandlerResult<std::vector<TxId>> &hres = validate.results_[offset];
-        hres.Reset();
+            CcHandlerResult<std::vector<TxId>> &hres =
+                validate.results_[offset];
+            hres.Reset();
+            handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                              tx_term_,
+                              read_entry.version_ts_,
+                              0,
+                              commit_ts_,
+                              cce_addr,
+                              hres,
+                              read_entry.protocol_,
+                              read_entry.lock_type_);
 
-        handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                          tx_term_,
-                          read_entry.version_ts_,
-                          0,
-                          commit_ts_,
-                          cce_addr,
-                          hres,
-                          read_entry.protocol_,
-                          read_entry.lock_type_);
-
-        ++offset;
+            ++offset;
+        }
     }
 
     StartTiming();
@@ -1945,25 +1961,29 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         assert(offset == write_intention_size);
 
         idx = 0;
-        const std::unordered_map<CcEntryAddr, ReadSetEntry> &rset =
-            rw_set_.ReadSet();
-        for (const auto &[cce_addr, read_entry] : rset)
+        const std::unordered_map<TableName,
+                                 std::unordered_map<CcEntryAddr, ReadSetEntry>>
+            &rset = rw_set_.ReadSet();
+
+        for (const auto &table_entry_it : rset)
         {
-            CcHandlerResult<std::vector<TxId>> &hres =
-                post_process.read_results_[idx];
-            hres.Reset();
+            for (const auto &[cce_addr, read_entry] : table_entry_it.second)
+            {
+                CcHandlerResult<std::vector<TxId>> &hres =
+                    post_process.read_results_[idx];
+                hres.Reset();
+                handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                                  tx_term_,
+                                  0,
+                                  0,
+                                  0,
+                                  cce_addr,
+                                  hres,
+                                  read_entry.protocol_,
+                                  read_entry.lock_type_);
 
-            handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                              tx_term_,
-                              0,
-                              0,
-                              0,
-                              cce_addr,
-                              hres,
-                              read_entry.protocol_,
-                              read_entry.lock_type_);
-
-            ++idx;
+                ++idx;
+            }
         }
     }
 
@@ -2102,6 +2122,17 @@ void TransactionExecution::PostProcess(PostWriteAllOp &post_write_all_op)
                 .append(std::to_string(this->tx_term_));
         });
     state_stack_.pop_back();
+
+    // remove read set entry for tables that have been dropped.
+    // such as CREATE TABLE ... SELECT ... statement.
+    if (post_write_all_op.write_type_ == PostWriteType::PostCommit &&
+        post_write_all_op.dml_op_ == DmlOperation::Delete)
+    {
+        assert(post_write_all_op.key_ != nullptr);
+        const CatalogKey *table_key =
+            static_cast<const CatalogKey *>(post_write_all_op.key_);
+        rw_set_.ClearReadSet(table_key->Name());
+    }
     // So far, post-write-all is only used for schema evolution operations.
     assert(!state_stack_.empty());
     Forward();
