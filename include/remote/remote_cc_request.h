@@ -285,14 +285,14 @@ public:
         return snapshot_ts_;
     }
 
-    void SetCcePtr(LruEntry *ptr)
+    void SetCcePtr(LruEntry *ptr, int core_id)
     {
-        cce_ptr_ = ptr;
+        cce_ptr_.at(core_id) = ptr;
     }
 
-    LruEntry *CcePtr() const
+    LruEntry *CcePtr(int core_id) const
     {
-        return cce_ptr_;
+        return cce_ptr_[core_id];
     }
 
 private:
@@ -320,7 +320,7 @@ private:
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
-    LruEntry *cce_ptr_{nullptr};
+    std::vector<LruEntry *> cce_ptr_;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

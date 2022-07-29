@@ -1607,7 +1607,7 @@ std::ostream &operator<<(std::ostream &outs,
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
          << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr(0)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;

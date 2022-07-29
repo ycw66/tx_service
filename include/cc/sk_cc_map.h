@@ -657,11 +657,11 @@ public:
         remote::ScanTuple_msg *tuple = nullptr;
         size_t tuple_idx = 0;
 
-        if (req.CcePtr() != nullptr)
+        if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
             cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
-                req.CcePtr());
-            req.SetCcePtr(nullptr);
+                req.CcePtr(shard_->LocalCoreId()));
+            req.SetCcePtr(nullptr, shard_->LocalCoreId());
             // Lock has been acquired
             scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
         }
@@ -704,7 +704,7 @@ public:
                 break;
             }
 
-            req.SetCcePtr(cce);
+            req.SetCcePtr(cce, shard_->LocalCoreId());
             if (!ConditionalReadLockCce(cce,
                                         req,
                                         LockType::ReadIntent,
@@ -754,7 +754,7 @@ public:
                         req.Isolation());
 
                 ++tuple_idx;
-                req.SetCcePtr(cce);
+                req.SetCcePtr(cce, shard_->LocalCoreId());
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
@@ -805,7 +805,7 @@ public:
                         req.Isolation());
 
                 ++tuple_idx;
-                req.SetCcePtr(cce);
+                req.SetCcePtr(cce, shard_->LocalCoreId());
 
                 if (!ConditionalReadLockCce(cce,
                                             req,

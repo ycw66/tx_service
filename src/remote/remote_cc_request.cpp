@@ -539,6 +539,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
 
 txservice::remote::RemoteScanOpen::RemoteScanOpen()
 {
+    parallel_req_ = true;
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse);
     res_ = &cc_res_;
@@ -594,7 +595,8 @@ void txservice::remote::RemoteScanOpen::Reset(
 
     cc_res_.Reset();
     cc_res_.SetRefCnt(core_cnt);
-    cce_ptr_ = nullptr;
+    cce_ptr_.clear();
+    cce_ptr_.resize(core_cnt);
 
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 
@@ -608,7 +610,6 @@ void txservice::remote::RemoteScanOpen::Reset(
     snapshot_ts_ = scan_open.ts();
 
     ccm_ = nullptr;
-    cce_ptr_ = nullptr;
 
     if (scan_open.start_key_case() == ScanOpenRequest::StartKeyCase::kNegInf)
     {

@@ -54,12 +54,15 @@ public:
             return true;
         }
 
-        if (ccm_ == nullptr)
+        CcMap *ccm = nullptr;
+        RequestT *typed_req = static_cast<RequestT *>(this);
+
+        if (parallel_req_ || ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
-            if (ccm_ == nullptr)
+            if (ccm == nullptr)
             {
                 if (txservice::IsRangeTablename(*table_name_))
                 {
@@ -69,7 +72,7 @@ public:
                     if (ranges != nullptr)
                     {
                         ccs.CreateRangeCcMap(*table_name_, node_group_id_);
-                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                        ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                     else
                     {
@@ -133,7 +136,7 @@ public:
                                                   catalog_entry->Version());
                             }
 
-                            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                            ccm = ccs.GetCcm(*table_name_, node_group_id_);
                         }
                         else
                         {
@@ -156,11 +159,20 @@ public:
                     }
                 }
             }
+            if (!parallel_req_)
+            {
+                ccm_ = ccm;
+            }
+            assert(ccm != nullptr);
+            return ccm->Execute(*typed_req);
         }
-
-        assert(ccm_ != nullptr);
-        RequestT *typed_req = static_cast<RequestT *>(this);
-        return ccm_->Execute(*typed_req);
+        else
+        {
+            // non parallel request which is executed again, e.g. initial
+            // execution blocked by lock.
+            assert(ccm_ != nullptr);
+            return ccm_->Execute(*typed_req);
+        }
     }
 
     CcHandlerResult<ResultType> *Result()
@@ -275,8 +287,14 @@ protected:
 
     CcHandlerResult<ResultType> *res_{nullptr};
     const TableName *table_name_{nullptr};
+    // track the ccmap for ccrequest, it has two usages: a. ccreq is blocked by
+    // lock and need to be re-execute. b. ccreq records the ccentry address, and
+    // need to use ccentry to find the corresponding ccmap and ccshard.
     CcMap *ccm_{nullptr};
     uint32_t node_group_id_{0};
+    // whether request is running on multi threads in parallel. e.g.
+    // RemoteScanOpen.
+    bool parallel_req_{false};
 };
 
 struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>
