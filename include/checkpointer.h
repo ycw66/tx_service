@@ -76,6 +76,6 @@ private:
     TxService *tx_service_;
     TxLog *log_agent_;
 
-    void TruncateLog(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
+    void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
 };
 }  // namespace txservice

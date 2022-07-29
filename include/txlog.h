@@ -39,11 +39,12 @@ public:
                           ::txlog::LogResponse &log_response,
                           google::protobuf::Closure &done) = 0;
 
-    // Invoked by a cc node group's leader to notify all log groups its
-    // checkpoint timestamp (so that the transaction log can be truncated).
-    virtual void TruncateLog(uint32_t cc_node_group_id,
-                             int64_t term,
-                             uint64_t checkpoint_timestamp) = 0;
+    // Invoked by a cc node group's leader to update its checkpoint timestamp in
+    // all log groups (so that the transaction logs before checkpoint timestamp
+    // can be ignored and truncated).
+    virtual void UpdateCheckpointTs(uint32_t cc_node_group_id,
+                                    int64_t term,
+                                    uint64_t checkpoint_timestamp) = 0;
 
     // Invoked by a failing over cc node group to replay log and notify all log
     // groups the raft term of the group's new leader.

@@ -255,7 +255,7 @@ void Checkpointer::Ckpt()
         if (flushed)
         {
             last_ckpt_ts_.insert_or_assign(node_group, ckpt_ts);
-            TruncateLog(node_group, leader_term, ckpt_ts);
+            NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
     }
 }
@@ -357,10 +357,10 @@ void Checkpointer::Terminate()
     cv_.wait(lk, [this] { return status_ == Status::Terminated; });
 }
 
-void Checkpointer::TruncateLog(uint32_t node_group_id,
-                               int64_t term,
-                               uint64_t ckpt_ts)
+void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
+                                     int64_t term,
+                                     uint64_t ckpt_ts)
 {
-    log_agent_->TruncateLog(node_group_id, term, ckpt_ts);
+    log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
 }
 }  // namespace txservice
