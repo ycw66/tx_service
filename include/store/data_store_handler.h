@@ -98,27 +98,11 @@ public:
                                bool &found) const = 0;
     virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
 
-    //-- view
-    virtual bool UpsertView(std::string_view view,
-                            std::string_view definition) const = 0;
-    virtual bool DropView(std::string_view view) const = 0;
-    virtual bool FetchView(std::string_view view,
-                           std::string &definition,
-                           bool &found) const = 0;
-    virtual bool DiscoverAllViewNames(
-        std::vector<std::string> &view_names) const = 0;
-
     virtual std::unique_ptr<DataStoreScanner> ScanForward(
         const txservice::TableName &table_name,
         const txservice::TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
-        const txservice::Schema *key_schema,
-        const txservice::Schema *rec_schema,
-        bool scan_foward) = 0;
-
-    virtual std::unique_ptr<DataStoreScanner> ScanForward(
-        const txservice::TableName &table_name,
         const std::string &search_cond,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
