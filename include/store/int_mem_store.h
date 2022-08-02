@@ -182,47 +182,11 @@ public:
         return false;
     }
 
-    //-- view
-    bool UpsertView(std::string_view view,
-                    std::string_view definition) const override
-    {
-        assert(false);
-        return false;
-    }
-    bool DropView(std::string_view view) const override
-    {
-        assert(false);
-        return false;
-    }
-    bool FetchView(std::string_view view,
-                   std::string &definition,
-                   bool &found) const override
-    {
-        assert(false);
-        return false;
-    }
-    bool DiscoverAllViewNames(
-        std::vector<std::string> &view_names) const override
-    {
-        assert(false);
-        return false;
-    }
-
     std::unique_ptr<DataStoreScanner> ScanForward(
         const txservice::TableName &table_name,
         const txservice::TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
-        const txservice::Schema *key_schema,
-        const txservice::Schema *rec_schema,
-        bool scan_foward) override
-    {
-        assert(false);
-        return nullptr;
-    }
-
-    std::unique_ptr<DataStoreScanner> ScanForward(
-        const txservice::TableName &table_name,
         const std::string &search_cond,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
