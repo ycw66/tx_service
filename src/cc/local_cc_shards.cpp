@@ -298,6 +298,25 @@ void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
     }
 }
 
+void LocalCcShards::UpdateTsBase(uint64_t timestamp)
+{
+    for (std::unique_ptr<CcShard> &ccs : cc_shards_)
+    {
+        uint64_t tsb = ccs->ts_base_.load(std::memory_order_acquire);
+        while (timestamp > tsb &&
+               !ccs->ts_base_.compare_exchange_strong(tsb, timestamp))
+        {
+            tsb = ccs->ts_base_.load(std::memory_order_acquire);
+        }
+        if (timestamp > tsb)
+        {
+            LOG(INFO) << "cc shard on core: " << ccs->core_id_
+                      << " update ts_base_ from: " << tsb
+                      << " to: " << timestamp;
+        }
+    }
+}
+
 void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
 {
     for (auto node_catalog_it = table_catalogs_.begin();

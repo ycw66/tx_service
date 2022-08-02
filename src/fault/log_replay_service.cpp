@@ -496,8 +496,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
             uint32_t lg_id = finish_msg.log_group_id();
             uint32_t latest_txn_no = finish_msg.latest_txn_no();
+            uint64_t last_ckpt_ts = finish_msg.last_ckpt_ts();
             Sharder::Instance().FinishLogReplay(
-                cc_ng_id, cc_ng_term, lg_id, latest_txn_no);
+                cc_ng_id, cc_ng_term, lg_id, latest_txn_no, last_ckpt_ts);
 
             // update recovering status and then close this stream,
             // log_shipping_agent has to create a new stream to send recoverTx

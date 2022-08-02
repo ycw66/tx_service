@@ -257,6 +257,8 @@ public:
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
+    void UpdateTsBase(uint64_t timestamp);
+
     /**
      * @brief Drops all tables' catalogs associated with the specified cc node
      * group. The function is called when this node steps down from the leader
