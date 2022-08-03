@@ -21,7 +21,9 @@ option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
 
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
-#find_package(OpenSSL REQUIRED)
+find_package(OpenSSL REQUIRED)
+
+message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
 message(STATUS "protobuf dir: ${PROTOBUF_LIBRARY}")
 message(STATUS "protobuf include dir: ${Protobuf_INCLUDE_DIR}")
@@ -134,7 +136,7 @@ SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     )
 
-set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC})
+set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})
 set(TxService_SOURCES ${TxService_SOURCES} ${PROTO_SRC}/${PROTO_NAME}.pb.cc)
 
 add_library(txservice STATIC ${TxService_SOURCES} )

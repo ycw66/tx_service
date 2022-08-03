@@ -33,14 +33,23 @@ struct ReplayLogInfo
 {
     ReplayLogInfo() = default;
 
-    ReplayLogInfo(uint32_t cc_ng_id, int64_t cc_ng_term, int log_group)
-        : cc_ng_id_(cc_ng_id), cc_ng_term_(cc_ng_term), log_group_(log_group)
+    ReplayLogInfo(uint32_t cc_ng_id,
+                  int64_t cc_ng_term,
+                  int log_group,
+                  uint64_t queued_clock)
+        : cc_ng_id_(cc_ng_id),
+          cc_ng_term_(cc_ng_term),
+          log_group_(log_group),
+          queued_clock_(queued_clock)
     {
     }
 
     uint32_t cc_ng_id_;
     int64_t cc_ng_term_;
     int log_group_;
+    // the clock when the request is put into the replay queue.
+    // set queued_clock_ to 0, if it's not a delayed request.
+    uint64_t queued_clock_;
 };
 
 struct RecoverTxInfo
@@ -97,13 +106,21 @@ public:
                               ::google::protobuf::Closure *done) override;
 
     /**
-     * Send ReplayLogRequest to log groups. If log_group is negative, send to
-     * all log groups, else just the specified log group.
-     * @param cc_ng_id
-     * @param cc_ng_term
-     * @param log_group
+     * @brief Send ReplayLogRequest to log groups. If log_group is negative,
+     * send to all log groups, else just the specified log group.
      */
-    void ReplayLog(uint32_t cc_ng_id, int64_t cc_ng_term, int log_group = -1);
+    void ReplayLog(uint32_t cc_ng_id,
+                   int64_t cc_ng_term,
+                   int log_group = -1,
+                   bool delayed_request = false);
+
+    /**
+     * @brief ReplayNow() check whether the replay request can be processed
+     * immediately. When replay error happens, we will put the replay request
+     * into replay queue again, but with a delay (defalut 10 seconds).
+     *
+     */
+    bool ReplayNow(ReplayLogInfo &info);
 
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
@@ -138,6 +155,7 @@ private:
         uint32_t cc_ng_id_;
         int64_t cc_ng_term_;
         bool recovering_;
+        bool recovery_error_{false};
     };
 
     LocalCcShards &local_shards_;
@@ -150,10 +168,12 @@ private:
     std::condition_variable inbound_cv_;
 
     void WaitAndClearRequests(
+        brpc::StreamId stream_id,
         std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
         std::mutex &mux,
         std::condition_variable &cv,
-        uint32_t &finish_log_cnt);
+        uint32_t &finish_log_cnt,
+        bool &recovery_error);
     static const int timeout_ms_ = 2000;
     // to resend ReplayLogRequest on stream timeout
     TxLog *log_agent_;

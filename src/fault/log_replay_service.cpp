@@ -54,8 +54,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
             while (!finish_.load(std::memory_order_acquire))
             {
                 std::unique_lock<std::mutex> lk(queue_mux_);
-                queue_cv_.wait(
+                queue_cv_.wait_for(
                     lk,
+                    chrono::seconds(5),
                     [this]
                     {
                         return !replay_log_queue_.empty() ||
@@ -73,7 +74,21 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                 if (!replay_log_queue_.empty())
                 {
                     ReplayLogInfo info = replay_log_queue_.front();
-                    replay_log_queue_.pop_front();
+                    if (ReplayNow(info))
+                    {
+                        replay_log_queue_.pop_front();
+
+                        if (Sharder::Instance().LeaderTerm(info.cc_ng_id_) > 0)
+                        {
+                            // node group has become the tx leader, skip replay.
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        // delayed replay request will be scheduled later.
+                        continue;
+                    }
                     lk.unlock();
                     // call log agent replay log api
                     log_agent_->ReplayLog(info.cc_ng_id_,
@@ -83,7 +98,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                                           info.log_group_,
                                           finish_);
                 }
-                else
+                else if (!recover_tx_queue_.empty())
                 {
                     RecoverTxInfo recover_tx_info = recover_tx_queue_.front();
                     recover_tx_queue_.pop_front();
@@ -245,6 +260,30 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
         });
 }
 
+bool ReplayService::ReplayNow(ReplayLogInfo &info)
+{
+    // queued_clock_ == 0 means it's not a delayed request.
+    if (info.queued_clock_ == 0)
+    {
+        return true;
+    }
+
+    // check whether the delayed request can be executed now.
+    uint64_t now_ts = LocalCcShards::ClockTs();
+    using namespace std::chrono_literals;
+    uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::seconds(30))
+                            .count();
+    if (now_ts - info.queued_clock_ > duration)
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
 void ReplayService::Shutdown()
 {
     // reap background thread
@@ -364,10 +403,17 @@ void ReplayService::UpdateLogGroupLeader(
 
 void ReplayService::ReplayLog(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
-                              int log_group)
+                              int log_group,
+                              bool delayed_request)
 {
     std::unique_lock lk(queue_mux_);
-    replay_log_queue_.emplace_back(cc_ng_id, cc_ng_term, log_group);
+    uint64_t queued_clock = 0;
+    if (delayed_request)
+    {
+        queued_clock = LocalCcShards::ClockTs();
+    }
+    replay_log_queue_.emplace_back(
+        cc_ng_id, cc_ng_term, log_group, queued_clock);
     queue_cv_.notify_one();
 }
 
@@ -393,6 +439,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     std::mutex mux;
     std::condition_variable cv;
     uint32_t finish_log_cnt = 0;
+    bool recovery_error = false;
 
     for (size_t idx = 0; idx < size; ++idx)
     {
@@ -420,13 +467,15 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     schema_op_msg.txn(),
                     mux,
                     cv,
-                    finish_log_cnt));
+                    finish_log_cnt,
+                    recovery_error));
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());
 
             // wait for this schema operation to be recovered at all shards
             // before processing next
-            WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
+            WaitAndClearRequests(
+                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
         }
 
         // parse and process log records
@@ -475,7 +524,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                         0,
                         mux,
                         cv,
-                        finish_log_cnt));
+                        finish_log_cnt,
+                        recovery_error));
 
                 // Enqueues the replay request to the first local shard. The
                 // shard will deserialize the log record and only insert the
@@ -490,15 +540,10 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
         if (msg.has_finish())
         {
-            // wait for all preceding ReplayLogCc requests finish
-            WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
             // finish log replay of this log group
-            const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
-            uint32_t lg_id = finish_msg.log_group_id();
-            uint32_t latest_txn_no = finish_msg.latest_txn_no();
-            uint64_t last_ckpt_ts = finish_msg.last_ckpt_ts();
-            Sharder::Instance().FinishLogReplay(
-                cc_ng_id, cc_ng_term, lg_id, latest_txn_no, last_ckpt_ts);
+            // wait for all preceding ReplayLogCc requests finish
+            WaitAndClearRequests(
+                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
 
             // update recovering status and then close this stream,
             // log_shipping_agent has to create a new stream to send recoverTx
@@ -508,6 +553,29 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             auto it = inbound_connections_.find(stream_id);
             if (it != inbound_connections_.end())
             {
+                // ignore the old stream which is not in inbound_connections_.
+                // if error happens during replay, the current ng's leader term
+                // should not be updated.
+                if (it->second.recovery_error_)
+                {
+                    LOG(ERROR)
+                        << "monographdb failed to recovery on ccnode group:"
+                        << cc_ng_id << " with term:" << cc_ng_term;
+                }
+                else
+                {
+                    // finish log replay of this log group
+                    const ::txlog::ReplayFinishMsg &finish_msg = msg.finish();
+                    uint32_t lg_id = finish_msg.log_group_id();
+                    uint32_t latest_txn_no = finish_msg.latest_txn_no();
+                    uint64_t last_ckpt_ts = finish_msg.last_ckpt_ts();
+                    Sharder::Instance().FinishLogReplay(cc_ng_id,
+                                                        cc_ng_term,
+                                                        lg_id,
+                                                        latest_txn_no,
+                                                        last_ckpt_ts);
+                }
+
                 LOG(INFO) << "replay connection: cc node group: "
                           << it->second.cc_ng_id_
                           << ", term: " << it->second.cc_ng_term_
@@ -521,7 +589,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         }
     }
 
-    WaitAndClearRequests(cc_req_vec, mux, cv, finish_log_cnt);
+    WaitAndClearRequests(
+        stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
     return 0;
 }
 
@@ -577,17 +646,52 @@ void ReplayService::on_closed(brpc::StreamId id)
 }
 
 void ReplayService::WaitAndClearRequests(
+    brpc::StreamId stream_id,
     std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
     std::mutex &mux,
     std::condition_variable &cv,
-    uint32_t &finish_log_cnt)
+    uint32_t &finish_log_cnt,
+    bool &recovery_error)
 {
     std::unique_lock<std::mutex> lk(mux);
     cv.wait(lk,
             [&finish_log_cnt, &cc_req_vec]
-            { return finish_log_cnt == cc_req_vec.size(); });
-    cc_req_vec.clear();
-    finish_log_cnt = 0;
+            { return (finish_log_cnt == cc_req_vec.size()); });
+    if (finish_log_cnt == cc_req_vec.size())
+    {
+        cc_req_vec.clear();
+        finish_log_cnt = 0;
+    }
+    if (recovery_error)
+    {
+        std::unique_lock lk(inbound_mux_);
+        uint32_t error_node_group_id = 0;
+        int64_t error_term = -1;
+
+        // find the replay error node group and its term.
+        auto it = inbound_connections_.find(stream_id);
+        assert(it != inbound_connections_.end());
+        if (it != inbound_connections_.end())
+        {
+            error_node_group_id = it->second.cc_ng_id_;
+            error_term = it->second.cc_ng_term_;
+            it->second.recovery_error_ = true;
+        }
+
+        // close all the streams belonging to the current node group and term.
+        for (const auto &[stream_id, info] : inbound_connections_)
+        {
+            if (info.cc_ng_id_ == error_node_group_id &&
+                info.cc_ng_term_ == error_term)
+            {
+                brpc::StreamClose(stream_id);
+            }
+        }
+        // put the replay log request back to the replay queue, but the replay
+        // request will be scheduled with 10 senconds delay. log_id = -1 means
+        // replay from all the log groups.
+        ReplayLog(error_node_group_id, error_term, -1, true);
+    }
 }
 
 void ReplayService::ClearTx(uint64_t tx_number)

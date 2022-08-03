@@ -1707,28 +1707,21 @@ public:
                 uint64_t txn,
                 std::mutex &mux,
                 std::condition_variable &cv,
-                uint32_t &finish_cnt)
+                uint32_t &finish_cnt,
+                bool &recovery_error)
         : table_name_str_(table_name_view),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
           result_(nullptr),
           external_mux_(mux),
           external_cv_(cv),
-          finish_cnt_(finish_cnt)
+          finish_cnt_(finish_cnt),
+          recovery_error_(recovery_error)
     {
         table_name_ = &table_name_str_;
         node_group_id_ = ng_id;
         tx_number_ = txn;
         res_ = &result_;
-
-        result_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-        {
-            // Notifies the external caller--the log replay handler--that the
-            // specified log record has been replayed in all cores of this node.
-            std::lock_guard<std::mutex> lk(external_mux_);
-            ++finish_cnt_;
-            external_cv_.notify_all();
-        };
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -1744,7 +1737,7 @@ public:
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (cc_ng_candid_term < 0 && cc_ng_term < 0)
         {
-            res_->SetFinished();
+            SetFinish();
             return false;
         }
 
@@ -1765,7 +1758,7 @@ public:
                         // is unset (version_ts is 0). This means that there is
                         // an error when reading the catalog from the data
                         // store. Returns the request with an error.
-                        res_->SetError(100);
+                        SetRecoveryError();
                         return false;
                     }
                     else if (catalog_entry->schema_ != nullptr)
@@ -1775,7 +1768,7 @@ public:
                         // Replaying records from a dropped table.
                         if (ccm_ == nullptr)
                         {
-                            res_->SetFinished();
+                            SetFinish();
                             return false;
                         }
                     }
@@ -1783,7 +1776,7 @@ public:
                     {
                         // The table is dropped. Skips replaying the log for
                         // this cc map.
-                        res_->SetFinished();
+                        SetFinish();
                         return false;
                     }
                 }
@@ -1803,7 +1796,21 @@ public:
 
     void SetFinish()
     {
-        result_.SetFinished();
+        // Notifies the external caller--the log replay handler--that the
+        // specified log record has been replayed in all cores of this node.
+        // HandlerResult is not used by external caller, hence we don't need to
+        // call HandlerResult.SetFinished().
+        std::lock_guard<std::mutex> lk(external_mux_);
+        ++finish_cnt_;
+        external_cv_.notify_all();
+    }
+
+    void SetRecoveryError()
+    {
+        std::lock_guard<std::mutex> lk(external_mux_);
+        ++finish_cnt_;
+        recovery_error_ = true;
+        external_cv_.notify_all();
     }
 
     const std::string_view &LogContentView() const
@@ -1834,6 +1841,7 @@ private:
     std::mutex &external_mux_;
     std::condition_variable &external_cv_;
     uint32_t &finish_cnt_;
+    bool &recovery_error_;
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
