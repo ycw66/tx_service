@@ -1,5 +1,6 @@
 #include "checkpointer.h"
 
+#include "sharder.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -277,25 +278,24 @@ bool Checkpointer::CkptEntry(LruEntry *entry)
     ckpt_vec.push_back(entry);
     CcMap *ccm = entry->parent_map_;
     TableName table_name = ccm->table_name_;
+    uint32_t node_group = Sharder::Instance().NodeId();
     if (ccm->Type() == TableType::Primary)
     {
         const Schema *key_schema = ccm->KeySchema();
         const Schema *rec_schema = ccm->RecordSchema();
-        std::atomic<bool> interrupt{false};
         ckpt_ret = store_hd_->PutAll(table_name,
                                      ckpt_vec,
                                      key_schema,
                                      rec_schema,
                                      ccm->SchemaTs(),
-                                     interrupt);
+                                     node_group);
     }
     else
     {
         const SecondaryKeySchema *sk_schema =
             static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
-        std::atomic<bool> interrupt{false};
         ckpt_ret = store_hd_->PutSkAll(
-            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), interrupt);
+            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), node_group);
     }
     return ckpt_ret;
 }
