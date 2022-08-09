@@ -56,17 +56,20 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                 std::unique_lock<std::mutex> lk(queue_mux_);
                 queue_cv_.wait_for(
                     lk,
-                    chrono::seconds(5),
+                    chrono::seconds(10),
                     [this]
                     {
                         return !replay_log_queue_.empty() ||
                                !recover_tx_queue_.empty() ||
                                finish_.load(std::memory_order_acquire);
                     });
-                LOG(INFO) << "replay service notify thread wakes up "
-                          << !replay_log_queue_.empty() << " "
-                          << !recover_tx_queue_.empty() << " "
-                          << finish_.load(std::memory_order_acquire);
+                if (!replay_log_queue_.empty() || !recover_tx_queue_.empty())
+                {
+                    LOG(INFO) << "replay service notify thread wakes up "
+                              << !replay_log_queue_.empty() << " "
+                              << !recover_tx_queue_.empty() << " "
+                              << finish_.load(std::memory_order_acquire);
+                }
                 if (finish_.load(std::memory_order_acquire))
                 {
                     break;
