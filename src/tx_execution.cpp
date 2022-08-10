@@ -1269,7 +1269,11 @@ void TransactionExecution::Upsert(const TableName &table_name,
                                   TxRecord::Uptr rec,
                                   DmlOperation op)
 {
-    rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op);
+    if (!rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op))
+    {
+        void_resp_->FinishError(TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR);
+        return;
+    }
     void_resp_->Finish(void_);
 }
 

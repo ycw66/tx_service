@@ -44,7 +44,8 @@ enum struct TxErrorCode
     // read. Hence the writer's commit_ts may be smaller than the reader's
     // snapshot_ts which will break the snapshot isolation level.
     CC_ERR_MVCC_READ_MUST_WAIT_WRITE,
-    CC_ERR_MVCC_VERSION_PREMATURELY_KICKED
+    CC_ERR_MVCC_VERSION_PREMATURELY_KICKED,
+    WRITE_SET_BYTES_COUNT_EXCEED_ERR
 };
 
 static const std::map<TxErrorCode, std::string> error_messages{
@@ -59,6 +60,8 @@ static const std::map<TxErrorCode, std::string> error_messages{
      "Transaction failed due to the transaction node is no longer the raft "
      "leader."},
     {TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
-     "Failed at acquire write intent."}};
+     "Failed at acquire write intent."},
+    {TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR,
+     "Transaction failed due to write set bytes count too large."}};
 
 }  // namespace txservice

@@ -15,8 +15,11 @@ using TableWriteSet =
 
 class ReadWriteSet
 {
+    static const uint32_t MaxWriteSetBytesCnt = 32 * 1024 * 1024;
+
 public:
-    ReadWriteSet() : rset_(), wset_(), wset_cnt_(0)  //, sset_(), sset_cnt_(0)
+    ReadWriteSet() : rset_(), wset_(), wset_cnt_(0), wset_bytes_cnt_(0)
+    //, sset_(), sset_cnt_(0)
     {
     }
 
@@ -26,6 +29,7 @@ public:
         wset_.clear();
         rset_.clear();
         read_cache_.clear();
+        wset_bytes_cnt_ = 0;
 
         // sset_cnt_ = 0;
         // sset_.clear();
@@ -121,11 +125,19 @@ public:
         return read_ts;
     }
 
-    void AddWrite(const TableName &tabname,
+    bool AddWrite(const TableName &tabname,
                   TxKey::Uptr key,
                   TxRecord::Uptr rec,
                   DmlOperation op_type)
     {
+        // Check write set bytes count.
+        wset_bytes_cnt_ += ((key.get() ? key.get()->MemUsage() : 0) +
+                            (rec.get() ? rec.get()->MemUsage() : 0));
+        if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
+        {
+            return false;
+        }
+
         auto table_iter = wset_.find(tabname);
         if (table_iter == wset_.end())
         {
@@ -151,6 +163,7 @@ public:
             it->second.rec_ = std::move(wset_entry.rec_);
             it->second.op_ = wset_entry.op_;
         }
+        return true;
     }
 
     const WriteSetEntry *FindWrite(const TableName &table_name,
@@ -261,6 +274,7 @@ public:
     {
         wset_.clear();
         wset_cnt_ = 0;
+        wset_bytes_cnt_ = 0;
     }
 
     void ClearTable(const TableName &table_name)
@@ -271,6 +285,11 @@ public:
             const TableWriteSet &tab_wset = tab_it->second;
             assert(wset_cnt_ >= tab_wset.size());
             wset_cnt_ -= tab_wset.size();
+            for (auto &key_it : tab_wset)
+            {
+                wset_bytes_cnt_ -= (key_it.second.key_.get()->MemUsage() +
+                                    key_it.second.rec_.get()->MemUsage());
+            }
             wset_.erase(tab_it);
         }
     }
@@ -321,6 +340,7 @@ private:
     size_t wset_cnt_;
     std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>
         read_cache_;
+    size_t wset_bytes_cnt_;
     /*std::unordered_map<TableName,
         std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>>
         sset_;
