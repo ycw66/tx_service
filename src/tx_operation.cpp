@@ -1474,6 +1474,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
+            else
             {
                 op_ = &post_all_lock_op_;
 
