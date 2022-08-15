@@ -1293,6 +1293,11 @@ public:
           finish_cnt_(0),
           shard_cnt_(shard_cnt)
     {
+        for (int i = 0; i < shard_cnt_; i++)
+        {
+            memory_usage_kb_vec_.emplace_back(0);
+            log_usage_kb_vec_.emplace_back(0);
+        }
     }
 
     CkptTsCc() = delete;
@@ -1303,6 +1308,9 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs());
+        memory_usage_kb_vec_[ccs.LocalCoreId()] = ccs.mem_usage_ / 1000;
+        log_usage_kb_vec_[ccs.LocalCoreId()] =
+            ccs.estimate_ccshard_log_size_ / 1000;
 
         assert(finish_cnt_ < shard_cnt_);
         ++finish_cnt_;
@@ -1327,12 +1335,34 @@ public:
         return ckpt_ts_;
     }
 
+    uint64_t GetMemUsage() const
+    {
+        uint64_t total_usage = 0;
+        for (uint64_t shard_usage : memory_usage_kb_vec_)
+        {
+            total_usage += shard_usage;
+        }
+        return total_usage;
+    }
+
+    uint64_t GetLogUsage() const
+    {
+        uint64_t total_usage = 0;
+        for (uint64_t shard_usage : log_usage_kb_vec_)
+        {
+            total_usage += shard_usage;
+        }
+        return total_usage;
+    }
+
 private:
     uint64_t ckpt_ts_;
     std::mutex mux_;
     std::condition_variable cv_;
     std::atomic<size_t> finish_cnt_;
     size_t shard_cnt_;
+    std::vector<uint64_t> memory_usage_kb_vec_;
+    std::vector<uint64_t> log_usage_kb_vec_;
 };
 
 struct CkptScanCc : public CcRequestBase

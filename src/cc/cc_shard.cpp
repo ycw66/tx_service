@@ -12,6 +12,8 @@ namespace txservice
 {
 CcShard::CcShard(uint16_t core_id,
                  uint32_t core_cnt,
+                 uint32_t node_memory_limit_mb,
+                 uint32_t node_log_limit_mb,
                  uint64_t base_ts,
                  uint32_t node_id,
                  LocalCcShards &local_shards,
@@ -35,6 +37,12 @@ CcShard::CcShard(uint16_t core_id,
       processor_sleep_(false),
       catalog_factory_(catalog_factory)
 {
+    // memory_limit_ and log_limit_ are calculated at shard level.
+    memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
+    memory_limit_ /= core_cnt_;
+    log_limit_ = (uint64_t) MB(node_log_limit_mb);
+    log_limit_ /= core_cnt_;
+
     tx_vec_.reserve(128);
     for (int idx = 0; idx < 128; ++idx)
     {
@@ -258,7 +266,7 @@ void CcShard::UpdateEstimateLogSize(LruEntry *entry,
     entry->estimate_ccentry_log_size_ += key_size + payload_size;
     estimate_ccshard_log_size_ += key_size + payload_size;
 
-    if (estimate_ccshard_log_size_ >= log_size_limit)
+    if (estimate_ccshard_log_size_ >= log_limit_)
     {
         NotifyCkpt();
     }

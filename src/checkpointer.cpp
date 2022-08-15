@@ -72,6 +72,12 @@ void Checkpointer::Ckpt()
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
 
+    LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
+              << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
+              << " KB"
+              << ". The log usage of node is: " << ckpt_req.GetLogUsage()
+              << "KB.";
+
     const CcShard &shard = *local_shards_.cc_shards_[0];
 
     vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();

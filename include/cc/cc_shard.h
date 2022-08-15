@@ -77,16 +77,13 @@ struct TxLockInfo
 class CcShard
 {
 public:
-    // TODO put these variables into a configuration file
-    static constexpr double cap_memusage_percentage = 1;
-    static constexpr size_t total_memory = MB(2000);
-    static constexpr size_t log_size_limit = MB(1000);
-
     CcShard() = delete;
     CcShard(const CcShard &other) = delete;
 
     CcShard(uint16_t core_id,
             uint32_t core_cnt,
+            uint32_t node_memory_limit_mb,
+            uint32_t node_log_limit_mb,
             uint64_t base_ts,
             uint32_t node_id,
             LocalCcShards &local_shards,
@@ -104,8 +101,7 @@ public:
 
     bool Full() const
     {
-        return mem_usage_ >=
-               CcShard::cap_memusage_percentage * CcShard::total_memory;
+        return mem_usage_ >= memory_limit_;
     }
 
     /**
@@ -410,6 +406,13 @@ public:
     // cache min{start_ts of all tx in this shard, ts_base} last calculated
     std::atomic<uint64_t> min_tx_start_ts_{0U};
     std::atomic<int64_t> min_tx_start_ts_term_{-1};
+
+    // shard level memory limit.
+    uint64_t memory_limit_{0};
+    // shard level log limit. Note that RocksDB engine based log service
+    // supports persist log state machine to disk. Hence log_limit is a soft
+    // limit.
+    uint64_t log_limit_{0};
 
 private:
     /**

@@ -10,6 +10,8 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 
 LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
+                             uint32_t memory_limit_mb,
+                             uint32_t log_limit_mb,
                              CatalogFactory *catalog_factory,
                              store::DataStoreHandler *store_hd,
                              TxService *tx_service)
@@ -27,8 +29,14 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
-        cc_shards_.emplace_back(std::make_unique<CcShard>(
-            thd_idx, core_cnt, ts_base, node_id, *this, catalog_factory_));
+        cc_shards_.emplace_back(std::make_unique<CcShard>(thd_idx,
+                                                          core_cnt,
+                                                          memory_limit_mb,
+                                                          log_limit_mb,
+                                                          ts_base,
+                                                          node_id,
+                                                          *this,
+                                                          catalog_factory_));
     }
 }
 

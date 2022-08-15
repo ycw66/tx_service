@@ -377,18 +377,17 @@ void Sharder::WaitClusterReady()
     while (true)
     {
         bool recovery_all_finished = true;
-        for (const auto &ng_pair : ng_leader_cache_)
+        for (uint32_t ng_id = 0; ng_id < ips_.size(); ng_id++)
         {
-            if (recovered_leader_set.find(ng_pair.first) ==
-                recovered_leader_set.end())
+            if (recovered_leader_set.find(ng_id) == recovered_leader_set.end())
             {
                 recovery_all_finished = false;
 
-                if (ng_pair.second.load(std::memory_order_acquire) == node_id_)
+                if (ng_id == node_id_)
                 {
-                    if (Sharder::Instance().LeaderTerm(ng_pair.first) > 0)
+                    if (Sharder::Instance().LeaderTerm(ng_id) > 0)
                     {
-                        recovered_leader_set.emplace(ng_pair.first);
+                        recovered_leader_set.emplace(ng_id);
                     }
                 }
                 else
@@ -406,9 +405,9 @@ void Sharder::WaitClusterReady()
                     remote::RecoverStateCheckRequest *recover_req =
                         send_msg.mutable_recover_state_check_req();
                     recover_req->set_src_node_id(node_id_);
-                    recover_req->set_node_group_id(ng_pair.first);
+                    recover_req->set_node_group_id(ng_id);
 
-                    cc_stream_sender_->SendMessage(ng_pair.first, send_msg);
+                    cc_stream_sender_->SendMessage(ng_id, send_msg);
                 }
             }
         }

@@ -33,6 +33,8 @@ class LocalCcShards
 public:
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
+                  uint32_t memory_limit_mb = 1000,
+                  uint32_t log_limit_mb = 1000,
                   CatalogFactory *catalog_factory = nullptr,
                   store::DataStoreHandler *store_hd = nullptr,
                   TxService *tx_service = nullptr);

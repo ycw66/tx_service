@@ -262,6 +262,8 @@ public:
               std::unique_ptr<TxLog> log_hd = nullptr)
         : local_cc_shards_(node_id,
                            conf.find("core_num")->second,
+                           conf.find("node_memory_limit_mb")->second,
+                           conf.find("node_log_limit_mb")->second,
                            catalog_factory,
                            store_hd,
                            this),
