@@ -32,7 +32,7 @@ class CcScanner;
 struct ScanCache
 {
 public:
-    static constexpr size_t ScanBatchSize = 3;
+    static constexpr size_t ScanBatchSize = 128;
 
     ScanCache(CcScanner *scanner) : idx_(0), size_(0), scanner_(scanner)
     {
