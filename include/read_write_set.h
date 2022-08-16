@@ -15,7 +15,7 @@ using TableWriteSet =
 
 class ReadWriteSet
 {
-    static const uint32_t MaxWriteSetBytesCnt = 32 * 1024 * 1024;
+    static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
 
 public:
     ReadWriteSet() : rset_(), wset_(), wset_cnt_(0), wset_bytes_cnt_(0)
