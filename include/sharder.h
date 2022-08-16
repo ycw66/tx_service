@@ -6,6 +6,8 @@
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
+#include "ds_range_evaluate_service.h"
+#include "ds_range_split_service.h"
 #include "fault/cc_node.h"
 #include "fault/log_replay_service.h"
 #include "remote/cc_node_service.h"
@@ -261,6 +263,16 @@ public:
      */
     void UnpinNodeGroupData(uint32_t cc_ng_id);
 
+    DsRangeSplitOperationService *GetDsRangeSplitOperationService()
+    {
+        return ds_range_split_operation_service_.get();
+    }
+
+    DsRangeEvaluateOperationService *GetDsRangeEvaluateOperationService()
+    {
+        return ds_range_evaluate_operation_service_.get();
+    }
+
 private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,
@@ -327,6 +339,12 @@ private:
     // The replay service that accepts a stream of log replay messages from all
     // log groups.
     std::unique_ptr<fault::ReplayService> log_replay_service_;
+
+    // Two services for range split
+    std::unique_ptr<DsRangeEvaluateOperationService>
+        ds_range_evaluate_operation_service_;
+    std::unique_ptr<DsRangeSplitOperationService>
+        ds_range_split_operation_service_;
 
     LocalCcShards &local_shards_;
     std::unique_ptr<TxLog> log_agent_;

@@ -66,32 +66,36 @@ public:
             {
                 if (txservice::IsRangeTablename(*table_name_))
                 {
+                    // Get original table name for the range table name
+                    const txservice::TableName base_table_name =
+                        GetBaseTableNameFromRangeTableName(*table_name_);
+                    const CatalogEntry *catalog_entry =
+                        ccs.GetCatalog(base_table_name, node_group_id_);
+                    // When a tx sends a request toward a table's range
+                    // cc map, either to look up the range containing the
+                    // input key or to lock a range for splitting/merging,
+                    // this or prior tx's must have accessed the table's
+                    // cc map at this node to read or write the table's
+                    // data. Initialization of the table's cc map needs to
+                    // instantiate the schema instance. So, the table's
+                    // schema should never be null.
+                    assert(catalog_entry != nullptr &&
+                           catalog_entry->schema_ != nullptr);
+                    TableSchema *table_schema = catalog_entry->schema_.get();
+
                     // The request is toward a special cc map that contains a
-                    // table's ranges.
-                    auto ranges = ccs.GetTableRanges(*table_name_);
+                    // tabmode's ranges.
+                    auto ranges = ccs.GetAllTableRangesForATable(*table_name_);
                     if (ranges != nullptr)
                     {
-                        ccs.CreateRangeCcMap(*table_name_, node_group_id_);
+                        ccs.CreateRangeCcMap(*table_name_,
+                                             table_schema,
+                                             node_group_id_,
+                                             table_schema->Version());
                         ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                     else
                     {
-                        // Get original table name for the range table name
-                        const txservice::TableName base_table_name =
-                            GetTablenameFromRangeTablename(*table_name_);
-                        const CatalogEntry *catalog_entry =
-                            ccs.GetCatalog(base_table_name, node_group_id_);
-                        // When a tx sends a request toward a table's range
-                        // cc map, either to look up the range containing the
-                        // input key or to lock a range for splitting/merging,
-                        // this or prior tx's must have accessed the table's
-                        // cc map at this node to read or write the table's
-                        // data. Initialization of the table's cc map needs to
-                        // instantiate the schema instance. So, the table's
-                        // schema should never be null.
-                        assert(catalog_entry != nullptr &&
-                               catalog_entry->schema_ != nullptr);
-
                         // The local node does not contain the table's ranges.
                         // The FetchTableRanges() method will send an async
                         // request toward the data store to fetch the table's
@@ -99,9 +103,7 @@ public:
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
                         ccs.FetchTableRanges(
-                            *table_name_,
-                            catalog_entry->schema_->KeySchema(),
-                            this);
+                            *table_name_, table_schema->KeySchema(), this);
                         return false;
                     }
                 }
@@ -667,7 +669,8 @@ public:
                TxRecord *rec,
                DmlOperation dml_op,
                CcHandlerResult<Void> *res,
-               PostWriteType commit_type)
+               PostWriteType commit_type,
+               int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
@@ -681,6 +684,7 @@ public:
         decoded_payload_ = nullptr;
         dml_op_ = dml_op;
         commit_type_ = commit_type;
+        tx_term_ = tx_term;
     }
 
     void Reset(const TableName *tname,
@@ -691,7 +695,8 @@ public:
                std::unique_ptr<TxRecord> rec,
                DmlOperation dml_op,
                CcHandlerResult<Void> *res,
-               PostWriteType commit_type)
+               PostWriteType commit_type,
+               int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
@@ -705,6 +710,7 @@ public:
         decoded_payload_ = std::move(rec);
         dml_op_ = dml_op;
         commit_type_ = commit_type;
+        tx_term_ = tx_term;
     }
 
     void Reset(const TableName *tname,
@@ -715,7 +721,8 @@ public:
                const std::string *rec,
                DmlOperation dml_op,
                CcHandlerResult<Void> *res,
-               PostWriteType commit_type)
+               PostWriteType commit_type,
+               int64_t tx_term)
     {
         TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
@@ -729,6 +736,7 @@ public:
         decoded_payload_ = nullptr;
         dml_op_ = dml_op;
         commit_type_ = commit_type;
+        tx_term_ = tx_term;
     }
 
     uint64_t CommitTs() const
@@ -793,6 +801,11 @@ public:
         ccm_ = nullptr;
     }
 
+    int64_t TxTerm()
+    {
+        return tx_term_;
+    }
+
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
@@ -809,6 +822,7 @@ private:
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     DmlOperation dml_op_{DmlOperation::Update};
     PostWriteType commit_type_;
+    int64_t tx_term_{0};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, std::vector<TxId>>

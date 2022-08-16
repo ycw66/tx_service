@@ -79,6 +79,20 @@ bool CcMap::ConditionalReadLockCce(LruEntry *cce,
         }
 
         shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            cce,
+            (
+                [&req, &ng_term, cce]() -> std::string
+                {
+                    return std::string("\"tx_number\":")
+                        .append(std::to_string(req.Txn()))
+                        .append(",\"tx_term\":")
+                        .append(std::to_string(ng_term))
+                        .append(",\"cce_ptr\":")
+                        .append(
+                            std::to_string(reinterpret_cast<uint64_t>(cce)));
+                }));
         return true;
     }
     else

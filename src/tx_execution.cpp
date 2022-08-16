@@ -64,7 +64,6 @@ void TransactionExecution::Reset(CcProtocol proto)
     cache_miss_read_cce_addr_.SetCce(0, -1, 0);
     state_stack_.clear();
     txid_.Reset();
-    tx_number_.store(UINT32_MAX, std::memory_order_release);
     tx_term_ = -1;
     commit_ts_ = UINT64_MAX;
     commit_ts_bound_ = 0;
@@ -72,6 +71,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();
+    tx_number_.store(UINT32_MAX, std::memory_order_release);
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
     bool_resp_ = nullptr;
@@ -81,6 +81,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     next_req_.store(nullptr);
     protocol_ = proto;
     schema_op_ = nullptr;
+    ds_split_range_op_ = nullptr;
 }
 
 void TransactionExecution::Restart()
@@ -174,6 +175,20 @@ void TransactionExecution::Forward()
 
     prev_op_ = state_stack_.back();
     prev_op_->Forward(this);
+}
+
+void TransactionExecution::ForwardTs(uint64_t candidate_ts)
+{
+    commit_ts_ = commit_ts_bound_ + 1;
+    if (candidate_ts != 0)
+    {
+        commit_ts_ = std::max(commit_ts_, candidate_ts + 1);
+    }
+}
+
+void TransactionExecution::MarkFailed()
+{
+    commit_ts_ = 0;
 }
 
 int TransactionExecution::Execute(TxRequest *tx_req)
@@ -354,7 +369,10 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
-    ScanClose(scan_close_req.alias_, *scan_close_req.end_key_.get());
+    TableName table_name = scan_close_req.table_name_;
+    ScanClose(scan_close_req.alias_,
+              *scan_close_req.end_key_.get(),
+              scan_close_req.lock_type_, table_name);
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
@@ -461,6 +479,32 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
         fi_req.fault_name_, fi_req.fault_paras_, fi_req.vct_node_id_);
     PushOperation(&fault_inject_op_);
     Process(fault_inject_op_);
+}
+
+void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    bool_resp_ = &req.tx_result_;
+    bool_resp_->Reset();
+
+    ds_split_range_op_ = std::make_unique<DsSplitRangeOp>(req.range_table_name_,
+                                                          req.key_schema_,
+                                                          req.record_schema_,
+                                                          req.range_key_,
+                                                          req.range_record_,
+                                                          this);
+    PushOperation(ds_split_range_op_.get());
+    Forward();
 }
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
@@ -1209,7 +1253,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 }
 
-void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
+void TransactionExecution::ScanClose(size_t alias,
+                                     const TxKey &end_key,
+                                     LockType lock_type, TableName &table_name)
 {
     auto scan_it = scans_.find(alias);
     assert(scan_it != scans_.end());
@@ -1217,25 +1263,44 @@ void TransactionExecution::ScanClose(size_t alias, const TxKey &end_key)
 
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
-    if (iso_level_ >= IsolationLevel::RepeatableRead &&
+    if ((iso_level_ >= IsolationLevel::RepeatableRead ||
+         lock_type == LockType::WriteIntent) &&
         scanner.IndexType() != ScanIndexType::Secondary)
     {
-        //
-        // The following code is temporarily commented out, as we lack the
-        // appropriate API of the scanner to drain cached tuples in the scanner.
-        //
-        // LockType lk_type = protocol_ == CcProtocol::Locking
-        //                        ? LockType::ReadLock
-        //                        : LockType::ReadIntent;
-
-        // const ScanTuple *cc_scan_tuple = scanner.Current();
-        // while (cc_scan_tuple != nullptr)
-        // {
-        //     rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-        //                     cc_scan_tuple->key_ts_,
-        //                     protocol_,
-        //                     lk_type);
-        // }
+        // drain out the scan tuple in the scan cache
+        scanner.SetDrainCacheMode(true);
+        const ScanTuple *cc_scan_tuple = scanner.Current();
+        // In case the scan status is blocked before
+        if (cc_scan_tuple == nullptr &&
+            scanner.Status() == ScannerStatus::Blocked)
+        {
+            scanner.MoveNext();
+            cc_scan_tuple = scanner.Current();
+        }
+        while (cc_scan_tuple != nullptr)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                &rw_set_,
+                (
+                    [this, cc_scan_tuple]() -> std::string
+                    {
+                        return std::string("\"tx_number\":")
+                            .append(std::to_string(this->TxNumber()))
+                            .append(",\"tx_term\":")
+                            .append(std::to_string(this->tx_term_))
+                            .append(",\"cce_ptr\":")
+                            .append(std::to_string(
+                                cc_scan_tuple->cce_addr_.CcePtr()));
+                    }));
+            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                            cc_scan_tuple->key_ts_,
+                            protocol_,
+                            lock_type, table_name);
+            scanner.MoveNext();
+            cc_scan_tuple = scanner.Current();
+        }
     }
 
     handler->ScanClose(alias, end_key, false);
@@ -2285,6 +2350,199 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
     assert(state_stack_.empty());
 
     bool_resp_->Finish(clean_entry_op.succeed_);
+    Forward();
+}
+
+void TransactionExecution::Process(
+    DsFindRangeMedianKeyOp &ds_find_range_median_key_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_find_range_median_key_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    ds_find_range_median_key_op.hd_result_.Reset();
+    ds_find_range_median_key_op.is_running_ = true;
+
+    handler->DataStoreFindRangeMedianKey(
+        *ds_find_range_median_key_op.table_name_,
+        ds_find_range_median_key_op.partition_id_,
+        ds_find_range_median_key_op.key_schema,
+        ds_find_range_median_key_op.hd_result_);
+}
+
+void TransactionExecution::PostProcess(
+    DsFindRangeMedianKeyOp &ds_find_range_median_key_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_find_range_median_key_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(DsCopyRangeDataOp &ds_copy_range_data_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_copy_range_data_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    TX_TRACE_DUMP(&ds_copy_range_data_op);
+    ds_copy_range_data_op.hd_result_.Reset();
+    ds_copy_range_data_op.is_running_ = true;
+
+    handler->DataStoreCopyRangeData(ds_copy_range_data_op.table_name_,
+                                    ds_copy_range_data_op.old_partition_id_,
+                                    ds_copy_range_data_op.new_partition_id_,
+                                    ds_copy_range_data_op.middle_key_,
+                                    ds_copy_range_data_op.filter_ts_,
+                                    ds_copy_range_data_op.key_schema_,
+                                    ds_copy_range_data_op.record_schema_,
+                                    ds_copy_range_data_op.hd_result_);
+}
+
+void TransactionExecution::PostProcess(DsCopyRangeDataOp &ds_copy_range_data_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_copy_range_data_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(
+    DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_delete_out_of_range_data_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    ds_delete_out_of_range_data_op.hd_result_.Reset();
+    ds_delete_out_of_range_data_op.is_running_ = true;
+    handler->DataStoreDeleteOutOfRangeData(
+        ds_delete_out_of_range_data_op.table_name_,
+        ds_delete_out_of_range_data_op.partition_id_,
+        ds_delete_out_of_range_data_op.middle_key_,
+        ds_delete_out_of_range_data_op.key_schema_,
+        ds_delete_out_of_range_data_op.hd_result_);
+}
+
+void TransactionExecution::PostProcess(
+    DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_delete_out_of_range_data_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(DsUpsertRangeOp &ds_upsert_range_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_upsert_range_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    ds_upsert_range_op.Reset();
+    ds_upsert_range_op.is_running_ = true;
+    handler->DataStoreUpsertRange(ds_upsert_range_op.range_table_name_,
+                                  ds_upsert_range_op.key_schema_,
+                                  ds_upsert_range_op.key_,
+                                  ds_upsert_range_op.partition_id_,
+                                  ds_upsert_range_op.ts_,
+                                  ds_upsert_range_op.hd_result_);
+}
+
+void TransactionExecution::PostProcess(DsUpsertRangeOp &ds_upsert_range_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ds_upsert_range_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(NoOp &no_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &no_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    no_op.is_running_ = true;
+    no_op.hd_result_.SetFinished();
+}
+
+void TransactionExecution::PostProcess(NoOp &no_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &no_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    Forward();
 }
 
 }  // namespace txservice

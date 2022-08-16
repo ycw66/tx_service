@@ -541,10 +541,10 @@ void CcShard::InitTableRanges(const TableName &range_table_name,
     local_shards_.InitTableRanges(range_table_name, init_ranges);
 }
 
-const std::map<uint32_t, TableRangeEntry> *CcShard::GetTableRanges(
-    const TableName &range_table_name)
+std::map<int32_t, TableRangeEntryWithShade>
+    *CcShard::GetAllTableRangesForATable(const TableName &range_table_name)
 {
-    return local_shards_.GetTableRanges(range_table_name);
+    return local_shards_.GetAllTableRangesForATable(range_table_name);
 }
 
 void CcShard::FetchCatalog(const TableName &table_name,
@@ -580,6 +580,52 @@ void CcShard::FetchTableRanges(const TableName &range_table_name,
     {
         local_shards_.store_hd_->FetchTableRanges(range_table_name, fetch_req);
     }
+}
+
+const TableRangeEntryWithShade *CcShard::CreateDirtyTableRange(
+    const TableName &table_name,
+    int32_t partition_id,
+    std::unique_ptr<TxKey> new_key,
+    int32_t new_partition_id,
+    uint64_t commit_ts)
+{
+    return local_shards_.CreateDirtyTableRange(table_name,
+                                               partition_id,
+                                               std::move(new_key),
+                                               new_partition_id,
+                                               commit_ts);
+}
+
+const std::pair<TableRangeEntry *, TableRangeEntry *>
+CcShard::CommitDirtyTableRange(const TableName &table_name,
+                               int32_t partition_id,
+                               uint64_t commit_ts)
+{
+    return local_shards_.CommitDirtyTableRange(
+        table_name, partition_id, commit_ts);
+}
+
+void CcShard::PostCommitDirtyTableRange(const TableName &table_name,
+                                        int32_t partition_id)
+{
+    local_shards_.PostCommitDirtyTableRange(table_name, partition_id);
+}
+
+void CcShard::CleanTableRange(const TableName &table_name, uint32_t ng_id)
+{
+    local_shards_.CleanTableRange(table_name, ng_id);
+}
+
+const TableRangeEntry *CcShard::GetTableEffectiveRange(
+    const TableName &table_name, int32_t partition_id)
+{
+    return local_shards_.GetTableEffectiveRange(table_name, partition_id);
+}
+
+const TableRangeEntryWithShade *CcShard::GetTableRangeWithShade(
+    const TableName &table_name, int32_t partition_id)
+{
+    return local_shards_.GetTableRangeWithShade(table_name, partition_id);
 }
 
 void CcShard::RemoveFetchRequest(const TableName &table_name)
@@ -733,13 +779,16 @@ void CcShard::DropCcms(NodeGroupId ng_id)
 }
 
 void CcShard::CreateRangeCcMap(const TableName &range_table_name,
-                               NodeGroupId ng_id)
+                               const TableSchema *table_schema,
+                               NodeGroupId ng_id,
+                               uint64_t schema_ts)
 {
     if (ng_id == node_id_)
     {
         native_ccms_.try_emplace(
             range_table_name,
-            catalog_factory_->CreatePkRangeMap(range_table_name, this));
+            catalog_factory_->CreatePkRangeMap(
+                range_table_name, table_schema, schema_ts, this));
     }
     else
     {
@@ -747,7 +796,9 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
         std::unordered_map<NodeGroupId, CcMap::uptr> &range_maps =
             fail_range_it->second;
         range_maps.try_emplace(
-            ng_id, catalog_factory_->CreatePkRangeMap(range_table_name, this));
+            ng_id,
+            catalog_factory_->CreatePkRangeMap(
+                range_table_name, table_schema, schema_ts, this));
     }
 }
 

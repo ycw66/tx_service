@@ -1,10 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "catalog_key_record.h"
 #include "cc_handler.h"
 #include "log_closure.h"
+#include "range_record.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
@@ -46,6 +49,24 @@ struct TransactionOperation
 
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
+};
+
+struct CompositeTransactionOperation : TransactionOperation
+{
+    CompositeTransactionOperation();
+
+    virtual ~CompositeTransactionOperation() = default;
+
+    template <typename Op>
+    void ForwardToSubOperation(TransactionExecution *txm, Op *next_op);
+
+    template <typename Op>
+    void RetrySubOperation(TransactionExecution *txm, Op *next_op);
+
+    /**
+     * @brief The current stage of this multi-stage schema operation
+     */
+    TransactionOperation *op_{nullptr};
 };
 
 struct ReadOperation : TransactionOperation
@@ -245,6 +266,10 @@ struct AcquireAllOp : public TransactionOperation
     void Resize(size_t new_size);
     void Reset(size_t node_cnt);
     void Forward(TransactionExecution *txm) override;
+    /**
+     * @brief Get the max commit/validate ts of the all result
+     */
+    uint64_t MaxTs();
 
     std::vector<CcHandlerResult<AcquireAllResult>> hd_results_;
     uint32_t upload_cnt_{0};
@@ -266,6 +291,7 @@ struct PostWriteAllOp : public TransactionOperation
     void Reset(uint32_t ng_cnt);
     void Resize(uint32_t ng_cnt);
     void Forward(TransactionExecution *txm) override;
+    bool IsFailed();
 
     std::vector<CcHandlerResult<Void>> hd_results_;
     size_t upload_cnt_{0};
@@ -419,4 +445,190 @@ public:
     CcHandlerResult<bool> hd_result_;
 };
 
+struct DsFindRangeMedianKeyOp : public TransactionOperation
+{
+    DsFindRangeMedianKeyOp() = delete;
+
+    DsFindRangeMedianKeyOp(const TableName *table_name,
+                           TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName *table_name_;
+    int32_t partition_id_;
+    const Schema *key_schema;
+    CcHandlerResult<RangeMedianKeyResult> hd_result_;
+};
+
+struct DsCopyRangeDataOp : public TransactionOperation
+{
+    DsCopyRangeDataOp() = delete;
+
+    DsCopyRangeDataOp(const TableName &table_name, TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName &table_name_;
+    TxKey *middle_key_;
+    int32_t old_partition_id_;
+    int32_t new_partition_id_;
+    const Schema *key_schema_;
+    const Schema *record_schema_;
+    // additional filtering condition beside middle key
+    // which guarantte a definite data set for copying
+    uint64_t filter_ts_;
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct DsUpsertRangeOp : TransactionOperation
+{
+    DsUpsertRangeOp() = delete;
+    DsUpsertRangeOp(const TableName &range_table_name,
+                    TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName &range_table_name_;
+    const Schema *key_schema_;
+    TxKey *key_;
+    int32_t partition_id_;
+    int64_t ts_;
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct DsDeleteOutOfRangeDataOp : public TransactionOperation
+{
+    DsDeleteOutOfRangeDataOp() = delete;
+
+    DsDeleteOutOfRangeDataOp(const TableName &table_name,
+                             TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName &table_name_;
+    int32_t partition_id_;
+    TxKey *middle_key_{nullptr};
+    const Schema *key_schema_;
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct NoOp : public TransactionOperation
+{
+    NoOp(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct DsSplitRangeOp : public CompositeTransactionOperation
+{
+    DsSplitRangeOp() = delete;
+
+    DsSplitRangeOp(const TableName &table_name,
+                   const Schema *key_schema,
+                   const Schema *record_schema,
+                   const TxKey *range_key,
+                   RangeRecord *splitting_range_record,
+                   TransactionExecution *txm);
+
+    void FillTxLogForUpdateOldRange(TransactionExecution *txm);
+    void FillTxLogForCopyOldRangeData(TransactionExecution *txm);
+    void FillTxLogForDirtyOldRangeData(TransactionExecution *txm);
+    void FillTxLogForDeleteOutOfOldRangeData(TransactionExecution *txm);
+    void FillTxLogForCleanLog(TransactionExecution *txm);
+    void ForceToFinish(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName &table_name_{""};
+    TableName range_table_name_{""};
+    const Schema *key_schema_{nullptr};
+    const Schema *record_schema_{nullptr};
+    int32_t partition_id_{-1};
+    const TxKey *range_key_{nullptr};
+    RangeRecord *old_range_record_{nullptr};
+    std::unique_ptr<TxKey> new_range_key_{nullptr};
+    std::unique_ptr<TableRangeEntry> upload_range_entry_{nullptr};
+    std::unique_ptr<RangeRecord> upload_range_record_{nullptr};
+    int32_t new_partition_id_{-1};
+
+    /**
+     * @brief Acquire write intents on the range to split at all shards. This is
+     * to prevent concurrent modifications on the same range.
+     */
+    AcquireAllOp acquire_all_intent_for_update_old_range_op_;
+    /**
+     * @brief Find the median key value of the old range
+     */
+    DsFindRangeMedianKeyOp ds_find_median_key_for_old_range_op_;
+    /**
+     * @brief Upgrades the write intents to write locks. This is to wait for
+     * existing queries reading or writing the range to finish and to block new
+     * reads and writes on the range to start.
+     */
+    AcquireAllOp acquire_all_lock_for_update_old_range_op_;
+    /**
+     * @brief Write log to mark the split range is started, with the information
+     * of the old range and new range information, after this it is guaranted to
+     * succeed after this
+     */
+    // WriteToLogOp prepare_log_for_update_old_range_op_;
+    NoOp prepare_log_for_update_old_range_op_;
+    /**
+     * @brief
+     * 1. Upload the new key, ne_partition_id to the
+     * old range entry, it is visible to all nodes
+     * 2. Downgrade lock to write intent
+     */
+    PostWriteAllOp post_all_lock_for_update_old_range_op_;
+    /**
+     * @brief
+     * 1.Start a new thread to do work of copy data from the old range to the
+     * new ranges 2.The working thread updates the running status to the
+     * ds_copy_old_range_data_op_
+     */
+    DsCopyRangeDataOp ds_copy_old_range_data_op_;
+    /**
+     * @brief Write log to mark the range split is finished
+     */
+    // WriteToLogOp ds_copy_old_range_data_finished_log_op_;
+    NoOp ds_copy_old_range_data_finished_log_op_;
+    /**
+     * @brief
+     * 1. Upgrade the write intent on old range entry to write lock on all nodes
+     * 2. Add write lock on new range entries to write locks on all nodes
+     */
+    AcquireAllOp acquire_all_lock_for_dirty_old_range_op_;
+    /**
+     * @brief Write commit log to mark the split range transaction is succeed
+     */
+    // WriteToLogOp commit_log_for_dirty_old_range_op_;
+    NoOp commit_log_for_dirty_old_range_op_;
+    /**
+     * @brief
+     * 1. Update the dirty old range, clean new key and new partition id
+     * 2. Upload the new range
+     * 3. Remove all write locks on all nodes
+     */
+    PostWriteAllOp post_write_all_for_dirty_old_range_op_;
+    /**
+     * @brief Flush all updated range entries into Cassandra
+     */
+    DsUpsertRangeOp ds_upsert_new_range_op_;
+    /*
+     * @brief Write log to mark removing out of data from old range
+     */
+    // WriteToLogOp delete_out_of_old_range_data_log_op_;
+    NoOp delete_out_of_old_range_data_log_op_;
+    /**
+     * @brief Delete out of range data from the Cassandra partition
+     */
+    DsDeleteOutOfRangeDataOp delete_out_of_old_range_data_op_;
+    /**
+     * @brief Remove split range log from the log state machine
+     */
+    // WriteToLogOp clean_log_op_;
+    NoOp clean_log_op_;
+};
 }  // namespace txservice

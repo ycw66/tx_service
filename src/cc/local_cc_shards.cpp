@@ -228,18 +228,19 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
 
     auto table_it = table_ranges_.try_emplace(range_table_name);
-    // assert(!table_it.second);
-    std::map<uint32_t, TableRangeEntry> &ranges = table_it.first->second;
+    assert(table_it.second);
+    std::map<int32_t, TableRangeEntryWithShade> &ranges =
+        table_it.first->second;
 
     if (init_ranges.empty())
     {
-        ranges.try_emplace(0, nullptr, 1, 0, UINT32_MAX);
+        ranges.try_emplace(0, nullptr, 1, 0, INT32_MAX);
     }
     else
     {
         ranges.try_emplace(0, nullptr, 1, 0, init_ranges[0].partition_id_);
 
-        for (size_t pidx = 0; pidx < ranges.size() - 1; ++pidx)
+        for (size_t pidx = 0; pidx < init_ranges.size() - 1; ++pidx)
         {
             InitRangeEntry &range_entry = init_ranges[pidx];
             InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
@@ -256,12 +257,12 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                            std::move(last_range_entry.key_),
                            last_range_entry.version_ts_,
                            last_range_entry.partition_id_,
-                           UINT32_MAX);
+                           INT32_MAX);
     }
 }
 
-const std::map<uint32_t, TableRangeEntry> *LocalCcShards::GetTableRanges(
-    const TableName &range_table_name)
+std::map<int32_t, TableRangeEntryWithShade> *
+LocalCcShards::GetAllTableRangesForATable(const TableName &range_table_name)
 {
     std::shared_lock<std::shared_mutex> s_lk(catalog_mux_);
 
@@ -269,11 +270,11 @@ const std::map<uint32_t, TableRangeEntry> *LocalCcShards::GetTableRanges(
     return table_it == table_ranges_.end() ? nullptr : &table_it->second;
 }
 
-const TableRangeEntry *LocalCcShards::CreateDirtyRange(
+const TableRangeEntryWithShade *LocalCcShards::CreateDirtyTableRange(
     const TableName &table_name,
-    uint32_t partition_id,
+    int32_t partition_id,
     std::unique_ptr<TxKey> new_key,
-    uint32_t new_partition_id,
+    int32_t new_partition_id,
     uint64_t commit_ts)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
@@ -281,19 +282,109 @@ const TableRangeEntry *LocalCcShards::CreateDirtyRange(
     auto table_it = table_ranges_.find(table_name);
     assert(table_it != table_ranges_.end());
 
-    std::map<uint32_t, TableRangeEntry> &ranges = table_it->second;
+    std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
     auto range_it = ranges.find(partition_id);
     assert(range_it != ranges.end());
-    TableRangeEntry &range_entry = range_it->second;
+    TableRangeEntry *shader = range_it->second.shader_.get();
 
-    if (range_entry.dirty_ts_ < commit_ts)
-    {
-        range_entry.new_key_ = std::move(new_key);
-        range_entry.new_partition_id_ = new_partition_id;
-        range_entry.dirty_ts_ = commit_ts;
-    }
+    assert(shader->dirty_ts_ < commit_ts);
+    shader->SetDirty(std::move(new_key), new_partition_id, commit_ts);
 
-    return &range_entry;
+    range_it->second.shade_ = shader->Clone();
+
+    return &range_it->second;
+}
+
+const std::pair<TableRangeEntry *, TableRangeEntry *>
+LocalCcShards::CommitDirtyTableRange(const TableName &table_name,
+                                     int32_t partition_id,
+                                     uint64_t commit_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(table_name);
+    assert(table_it != table_ranges_.end());
+
+    std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
+    auto range_it = ranges.find(partition_id);
+    assert(range_it != ranges.end());
+    // get the old dirty range for splitting
+    TableRangeEntry *dirty_range_entry = range_it->second.shader_.get();
+    assert(dirty_range_entry->IsDirty());
+
+    // create new range
+    auto new_range_entry_pair =
+        ranges.try_emplace(dirty_range_entry->new_partition_id_,
+                           std::move(dirty_range_entry->new_key_),
+                           commit_ts,
+                           dirty_range_entry->new_partition_id_,
+                           dirty_range_entry->next_partition_id_);
+
+    // point old range next partition id to the new partition id
+    dirty_range_entry->next_partition_id_ =
+        dirty_range_entry->new_partition_id_;
+    // clear dirty range
+    dirty_range_entry->ClearDirty();
+
+    // return the new range entry, insert new partition must be succeed
+    assert(new_range_entry_pair.second);
+    std::map<int32_t, TableRangeEntryWithShade>::iterator
+        new_range_entry_with_shade = new_range_entry_pair.first;
+    TableRangeEntry *new_range_entry =
+        new_range_entry_with_shade->second.shader_.get();
+    return std::pair<TableRangeEntry *, TableRangeEntry *>(dirty_range_entry,
+                                                           new_range_entry);
+}
+
+void LocalCcShards::PostCommitDirtyTableRange(const TableName &table_name,
+                                              int32_t partition_id)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(table_name);
+    assert(table_it != table_ranges_.end());
+
+    std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
+    auto range_it = ranges.find(partition_id);
+    assert(range_it != ranges.end());
+    range_it->second.shade_ = std::unique_ptr<TableRangeEntry>(nullptr);
+}
+
+void LocalCcShards::CleanTableRange(const TableName &table_name, uint32_t ng_id)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+    table_ranges_.erase(table_name);
+}
+
+const TableRangeEntry *LocalCcShards::GetTableEffectiveRange(
+    const TableName &table_name, int32_t partition_id)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(table_name);
+    assert(table_it != table_ranges_.end());
+
+    std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
+    auto range_it = ranges.find(partition_id);
+    assert(range_it != ranges.end());
+    TableRangeEntry *shader = range_it->second.shader_.get();
+    TableRangeEntry *shade = range_it->second.shade_.get();
+
+    return shade != nullptr ? shade : shader;
+}
+
+const TableRangeEntryWithShade *LocalCcShards::GetTableRangeWithShade(
+    const TableName &table_name, int32_t partition_id)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto table_it = table_ranges_.find(table_name);
+    assert(table_it != table_ranges_.end());
+
+    std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
+    auto range_it = ranges.find(partition_id);
+    assert(range_it != ranges.end());
+    return &range_it->second;
 }
 
 void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)

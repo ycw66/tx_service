@@ -1,6 +1,6 @@
 #pragma once
 
-#include <memory>  //unique_ptr
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -205,7 +205,10 @@ public:
     using Uptr = std::unique_ptr<CcScanner>;
 
     CcScanner(ScanDirection direction, ScanIndexType index_type)
-        : direct_(direction), index_type_(index_type), is_ckpt_delta_(false)
+        : direct_(direction),
+          index_type_(index_type),
+          drain_cache_mode_(false),
+          is_ckpt_delta_(false)
     {
     }
 
@@ -224,6 +227,9 @@ public:
     virtual ScannerStatus Status() const = 0;
     virtual void MoveNext() = 0;
 
+    virtual void SetDrainCacheMode(bool drain_cache_mode) = 0;
+    virtual bool GetDrainCacheMode() = 0;
+
     ScanDirection Direction() const
     {
         return direct_;
@@ -237,6 +243,9 @@ public:
 protected:
     ScanDirection direct_;
     ScanIndexType index_type_;
+    // In drain cache mode, Movenext/Current will drain out the cached the
+    // tuples in each buckets
+    bool drain_cache_mode_{false};
 
 public:
     bool is_ckpt_delta_;
@@ -340,11 +349,17 @@ public:
             {
                 if (cache.Status() == ScannerStatus::Blocked)
                 {
-                    status_ = ScannerStatus::Blocked;
-                    curr_shard_code_ = shard_code;
-                    curr_tuple_ = nullptr;
+                    if (!drain_cache_mode_)
+                    {
+                        status_ = ScannerStatus::Blocked;
+                        curr_shard_code_ = shard_code;
+                        curr_tuple_ = nullptr;
 
-                    return nullptr;
+                        return nullptr;
+                    }
+                    {
+                        // In drain_cache_mode_, we just it iterate all cache
+                    }
                 }
             }
         }
@@ -387,6 +402,18 @@ public:
                 curr_tuple_ = nullptr;
             }
         }
+    }
+
+    void SetDrainCacheMode(bool drain_cache_mode)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        drain_cache_mode_ = drain_cache_mode;
+    }
+
+    bool GetDrainCacheMode()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return drain_cache_mode_;
     }
 
 private:

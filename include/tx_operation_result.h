@@ -1,7 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <memory>  //unique_ptr
+#include <memory>
 
 #include "cc/cc_entry.h"
 
@@ -113,5 +113,33 @@ struct InitTxResult
     uint64_t start_ts_;
     // The term of the cc node group to which the tx is bound.
     int64_t term_;
+};
+
+struct RangeMedianKeyResult
+{
+    RangeMedianKeyResult()
+    {
+    }
+
+    RangeMedianKeyResult(const RangeMedianKeyResult &other)
+    {
+        median_key_ = other.median_key_->Clone();
+        new_partition_id_ = other.new_partition_id_;
+    }
+
+    RangeMedianKeyResult &operator=(const RangeMedianKeyResult &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+        median_key_ = rhs.median_key_->Clone();
+        new_partition_id_ = rhs.new_partition_id_;
+
+        return *this;
+    }
+
+    std::unique_ptr<TxKey> median_key_{nullptr};
+    int32_t new_partition_id_{-1};
 };
 }  // namespace txservice

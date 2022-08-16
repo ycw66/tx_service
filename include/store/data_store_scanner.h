@@ -15,6 +15,7 @@ public:
                          uint64_t &version_ts_,
                          bool &deleted_) = 0;
     virtual bool MoveNext() = 0;
+    virtual void End() = 0;
 };
 }  // namespace store
 }  // namespace txservice

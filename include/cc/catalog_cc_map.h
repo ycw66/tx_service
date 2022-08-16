@@ -194,12 +194,11 @@ public:
 
         // When the request commits the schema operation, modifies the cc
         // map(s) at this shard.
+        const TableSchema *old_schema = catalog_entry->schema_.get();
+        const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
         if (req.CommitType() == PostWriteType::PostCommit &&
             catalog_entry->DirtyVersion() > 0)
         {
-            const TableSchema *old_schema = catalog_entry->schema_.get();
-            const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
-
             if (new_schema == nullptr)
             {
                 // A remote tx is allowed to acquire write intents/locks and
@@ -214,7 +213,13 @@ public:
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
                 shard_->DropCcm(table_key->Name(), req.NodeGroupId());
+                TableName range_table_name =
+                    GetRangeTablenameFromTablename(table_key->Name());
 
+#ifdef RANGE_PARTITION_ENABLED
+                // Drop range table if exist
+                shard_->DropCcm(range_table_name, req.NodeGroupId());
+#endif
                 if (old_schema != nullptr)
                 {
                     std::vector<TableName> index_names =
@@ -222,6 +227,11 @@ public:
                     for (const TableName &index_name : index_names)
                     {
                         shard_->DropCcm(index_name, req.NodeGroupId());
+                        // Drop range table if exist
+                        TableName index_range_table_name =
+                            GetRangeTablenameFromTablename(index_name);
+                        shard_->DropCcm(index_range_table_name,
+                                        req.NodeGroupId());
                     }
                 }
             }
@@ -259,6 +269,29 @@ public:
             shard_->core_id_ == shard_->core_cnt_ - 1 &&
             catalog_entry->DirtyVersion() > 0)
         {
+            // If this is a drop table req, drop the range table also
+            // Drop table range before drop catalog
+            if (new_schema == nullptr)
+            {
+                TableName range_table_name =
+                    GetRangeTablenameFromTablename(table_key->Name());
+                shard_->CleanTableRange(range_table_name, req.NodeGroupId());
+
+                if (old_schema != nullptr)
+                {
+                    std::vector<TableName> index_names =
+                        old_schema->IndexNames();
+                    for (const TableName &index_name : index_names)
+                    {
+                        // Drop range table if exist
+                        TableName index_range_table_name =
+                            GetRangeTablenameFromTablename(index_name);
+                        shard_->CleanTableRange(index_range_table_name,
+                                                req.NodeGroupId());
+                    }
+                }
+            }
+
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
 

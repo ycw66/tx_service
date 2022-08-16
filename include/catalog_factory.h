@@ -45,6 +45,8 @@ public:
                                       CcShard *shard) = 0;
 
     virtual CcMap::uptr CreatePkRangeMap(const TableName &range_pk_table_name,
+                                         const TableSchema *table_schema,
+                                         uint64_t schema_ts,
                                          CcShard *shard) = 0;
 
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
@@ -52,5 +54,8 @@ public:
 
     virtual std::unique_ptr<CcScanner> CreateSkCcmScanner(
         ScanDirection direction, const Schema *compound_key_schema) = 0;
+
+    virtual std::unique_ptr<CcScanner> CreatePkRangeCcmScanner(
+        ScanDirection direction, const Schema *key_schema) = 0;
 };
 }  // namespace txservice

@@ -4,9 +4,14 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "catalog.h"
 #include "catalog_factory.h"
@@ -248,14 +253,41 @@ public:
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges);
 
-    const std::map<uint32_t, TableRangeEntry> *GetTableRanges(
+    std::map<int32_t, TableRangeEntryWithShade> *GetAllTableRangesForATable(
         const TableName &range_table_name);
 
-    const TableRangeEntry *CreateDirtyRange(const TableName &table_name,
-                                            uint32_t partition_id,
-                                            std::unique_ptr<TxKey> new_key,
-                                            uint32_t new_partition_id,
-                                            uint64_t commit_ts);
+    /**
+     * @brief Create the dirty range, and return the shade of the dirty range
+     */
+    const TableRangeEntryWithShade *CreateDirtyTableRange(
+        const TableName &table_name,
+        int32_t partition_id,
+        std::unique_ptr<TxKey> new_key,
+        int32_t new_partition_id,
+        uint64_t commit_ts);
+
+    /**
+     * @brief Commit dirty range and return both the old and new range entries
+     */
+    const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
+        const TableName &table_name, int32_t partition_id, uint64_t commit_ts);
+
+    /**
+     * @brief Clear the shade of the dirty range after dirty range committed
+     */
+    void PostCommitDirtyTableRange(const TableName &table_name,
+                                   int32_t partition_id);
+
+    /**
+     * @brief Clean range table
+     */
+    void CleanTableRange(const TableName &table_name, uint32_t ng_id);
+
+    const TableRangeEntry *GetTableEffectiveRange(const TableName &table_name,
+                                                  int32_t partition_id);
+
+    const TableRangeEntryWithShade *GetTableRangeWithShade(
+        const TableName &table_name, int32_t partition_id);
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
@@ -310,7 +342,7 @@ private:
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
         table_catalogs_;
-    std::unordered_map<TableName, std::map<uint32_t, TableRangeEntry>>
+    std::unordered_map<TableName, std::map<int32_t, TableRangeEntryWithShade>>
         table_ranges_;
     std::shared_mutex catalog_mux_;
 
@@ -319,5 +351,7 @@ private:
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
+    friend class DsRangeSplitOperationService;
+    friend class DsRangeEvaluateOperationService;
 };
 }  // namespace txservice

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>  // std::max
+#include <map>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -59,6 +60,36 @@ public:
         neg_inf_.ckpt_next_ = &pos_inf_;
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
+
+        TX_TRACE_ASSOCIATE_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            (txservice::LruEntry *) &neg_inf_,
+            [this]() -> std::string
+            {
+                return std::string("\"associate\":\"neg_inf_\", \"cce_ptr_\":")
+                    .append(std::to_string(
+                        reinterpret_cast<uint64_t>(&this->neg_inf_)))
+                    .append("\"key_\":")
+                    .append(std::to_string(
+                        reinterpret_cast<uint64_t>(&this->neg_inf_.key_)))
+                    .append("\"table_name_\":")
+                    .append(this->table_name_);
+            });
+
+        TX_TRACE_ASSOCIATE_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            (txservice::LruEntry *) &pos_inf_,
+            [this]() -> string
+            {
+                return std::string("\"associate\":\"neg_inf_\", \"cce_ptr_\":")
+                    .append(std::to_string(
+                        reinterpret_cast<uint64_t>(&this->pos_inf_)))
+                    .append("\"key_\":")
+                    .append(std::to_string(
+                        reinterpret_cast<uint64_t>(&this->pos_inf_.key_)))
+                    .append("\"table_name_\":")
+                    .append(this->table_name_);
+            });
     }
 
     virtual ~TemplateCcMap()
@@ -1070,6 +1101,14 @@ public:
                         shard_->DeleteLockHoldingTx(txn, cce_ptr, false);
                     }
                 }
+                else if (req.CommitType() == PostWriteType::PrepareCommit)
+                {
+                    // downgrade write lock to write intent
+                    if (lk_type == LockType::WriteLock)
+                    {
+                        cce_ptr->key_lock_.DowngradeWriteLock(txn, shard_);
+                    }
+                }
             }
 
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
@@ -1624,7 +1663,8 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_key, req.inclusive_)
+                    ? FowardScanStart(
+                          *look_key, req.inclusive_, req.is_include_floor_cce_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
@@ -2672,7 +2712,12 @@ public:
 
     void Clean(LruEntry *remove_entry) override
     {
-        CcShard::DetachLru(remove_entry);
+        // Don't call DetachLru if entry is not in lru list(Emplaced by force)
+        if (remove_entry->lru_prev_ != nullptr &&
+            remove_entry->lru_next_ != nullptr)
+        {
+            CcShard::DetachLru(remove_entry);
+        }
 
         if (remove_entry->ckpt_next_ != nullptr)
         {
@@ -2746,6 +2791,15 @@ public:
 protected:
     CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, uint64_t ts)
     {
+        if (&key == neg_inf_.key_)
+        {
+            return &neg_inf_;
+        }
+        else if (&key == pos_inf_.key_)
+        {
+            return &pos_inf_;
+        }
+
         auto lb_it = ccm_.lower_bound(key);
         if (lb_it != ccm_.end() && lb_it->first == key)
         {
@@ -3142,6 +3196,19 @@ protected:
         return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
     }
 
+    std::pair<Iterator, ScanType> MakeForwardScanPair(Iterator it,
+                                                      bool is_include_floor_cce)
+    {
+        if (is_include_floor_cce)
+        {
+            return std::make_pair(it, ScanType::ScanBoth);
+        }
+        else
+        {
+            return std::make_pair(it, ScanType::ScanGap);
+        }
+    }
+
     /**
      * @brief Searches the start cc entry of a forward scan.
      *
@@ -3152,12 +3219,12 @@ protected:
      * starting from the start cc entry and whether the scan includes the start
      * cc entry's key or gap or both.
      */
-    std::pair<Iterator, ScanType> FowardScanStart(const KeyT &key,
-                                                  bool inclusive)
+    std::pair<Iterator, ScanType> FowardScanStart(
+        const KeyT &key, bool inclusive, bool is_include_floor_cce = false)
     {
         if (key.Type() == KeyType::NegativeInf)
         {
-            return std::make_pair(Begin(), ScanType::ScanGap);
+            return MakeForwardScanPair(Begin(), is_include_floor_cce);
         }
 
         // The key equal to or greater than the search key.
@@ -3167,15 +3234,15 @@ protected:
         {
             if (ccm_.empty())
             {
-                return std::make_pair(Begin(), ScanType::ScanGap);
+                return MakeForwardScanPair(Begin(), is_include_floor_cce);
             }
             else
             {
                 // lower_it must be pointing to the end of the map. The start
                 // entry is the last in the map, only including the gap.
                 --lower_it;
-                return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                      ScanType::ScanGap);
+                return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
+                                           is_include_floor_cce);
             }
         }
 
@@ -3196,13 +3263,13 @@ protected:
 
                 if (lower_it == ccm_.begin())
                 {
-                    return std::make_pair(Begin(), ScanType::ScanGap);
+                    return MakeForwardScanPair(Begin(), is_include_floor_cce);
                 }
                 else
                 {
                     --lower_it;
-                    return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                          ScanType::ScanGap);
+                    return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
+                                               is_include_floor_cce);
                 }
             }
             else
@@ -3220,13 +3287,13 @@ protected:
                     // The start entry is the one prior to (30, 'd'), including
                     // the gap but not the key.
                     --upper_it;
-                    return std::make_pair(Iterator(upper_it, &neg_inf_),
-                                          ScanType::ScanGap);
+                    return MakeForwardScanPair(Iterator(upper_it, &neg_inf_),
+                                               is_include_floor_cce);
                 }
                 else
                 {
-                    return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                          ScanType::ScanGap);
+                    return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
+                                               is_include_floor_cce);
                 }
             }
         }
@@ -3236,13 +3303,13 @@ protected:
             // start entry precedes the lower bound, excluding the key.
             if (lower_it == ccm_.begin())
             {
-                return std::make_pair(Begin(), ScanType::ScanGap);
+                return MakeForwardScanPair(Begin(), is_include_floor_cce);
             }
             else
             {
                 --lower_it;
-                return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                      ScanType::ScanGap);
+                return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
+                                           is_include_floor_cce);
             }
         }
     }

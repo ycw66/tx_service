@@ -88,12 +88,25 @@ static inline bool IsRangeTablename(
 }
 
 /** @brief
+  If the table_name is a index name
+*/
+static inline bool IsIndexTableName(const txservice::TableName &index_name)
+{
+    std::string::size_type pos = index_name.find(INDEX_NAME_PREFIX);
+    if (pos == std::string::npos)
+    {
+        return false;
+    }
+    return true;
+}
+
+/** @brief
   Derive the Mysql table name from the range table name
 
   Input range table name format: ./dbname/tablename*~~ranges
   Origin table name: ./dbname/tablename
  */
-static inline txservice::TableName GetTablenameFromRangeTablename(
+static inline txservice::TableName GetBaseTableNameFromRangeTableName(
     const txservice::TableName &range_table_name)
 {
     if (!IsRangeTablename(range_table_name))
@@ -107,6 +120,19 @@ static inline txservice::TableName GetTablenameFromRangeTablename(
     return table_name.substr(0, table_name.rfind(search_str));
 }
 
+static inline txservice::TableName GetBaseTablenameFromIndexTableName(
+    const txservice::TableName &index_table_name)
+{
+    if (!IsIndexTableName(index_table_name))
+    {
+        return std::string();
+    }
+
+    txservice::TableName table_name(index_table_name);
+    std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
+    TableName sk_base_table_name = table_name.substr(0, pos);
+    return sk_base_table_name;
+}
 /** @brief
   Replace the 1st occurrence of to_replace with replace in str
 

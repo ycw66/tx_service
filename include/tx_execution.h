@@ -1,8 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <stack>
+#include <string>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "catalog_key_record.h"
 #include "cc/cc_handler.h"
@@ -29,6 +34,8 @@ struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
+struct CleanArchivesTxRequest;
+struct SplitRangeTxRequest;
 
 class TransactionExecution
 {
@@ -91,6 +98,8 @@ public:
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
+    void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
+    void ProcessTxRequest(SplitRangeTxRequest &range_split_req);
 
     /**
      * Interface for storage engine runtime.
@@ -168,6 +177,17 @@ private:
     void PushOperation(TransactionOperation *op, int retry_num = RETRY_NUM);
 
     /**
+     * @brief Move forward the tx's ts, either as the commit_ts_bound_ +1 or
+     * candidate_ts +1, depends on which one is max
+     */
+    void ForwardTs(uint64_t candidate_ts = 0);
+
+    /**
+     * @brief Mark transaction as failed, and forward to clean up step
+     */
+    void MarkFailed();
+
+    /**
      * Process Operations.
      * The TxRequest is responsible for putting the corresponding operations
      * into state_stack. The first Forward call will start to process these
@@ -207,9 +227,30 @@ private:
     void Process(DsUpsertTableOp &ds_upsert_table_op);
     void PostProcess(DsUpsertTableOp &ds_upsert_table_op);
 
+    void Process(DsSplitRangeOp &ds_split_range_op);
+    void PostProcess(DsSplitRangeOp &ds_split_range_op);
+
+    void Process(DsCopyRangeDataOp &ds_copy_range_data_op);
+    void PostProcess(DsCopyRangeDataOp &ds_copy_range_data_op);
+
+    void Process(DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op);
+    void PostProcess(DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op);
+
+    void Process(DsFindRangeMedianKeyOp &ds_find_range_median_key_op);
+    void PostProcess(DsFindRangeMedianKeyOp &ds_find_range_median_key_op);
+
+    void Process(DsUpsertRangeOp &ds_upsert_range_op);
+    void PostProcess(DsUpsertRangeOp &ds_upsert_range_op);
+
+    void Process(NoOp &no_op);
+    void PostProcess(NoOp &no_op);
+
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(size_t alias, const TxKey &end_key);
+    void ScanClose(size_t alias,
+                   const TxKey &end_key,
+                   LockType lock_type,
+                   TableName &table_name);
 
     void Update(const TableName &table_name,
                 TxKey::Uptr key,
@@ -278,6 +319,8 @@ private:
 
     std::unique_ptr<SchemaOp> schema_op_;
 
+    std::unique_ptr<DsSplitRangeOp> ds_split_range_op_;
+
     std::unordered_map<
         size_t,
         std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>>
@@ -341,6 +384,7 @@ private:
     CleanCcEntryForTestOp clean_entry_op_;
 
     friend struct TransactionOperation;
+    friend struct CompositeTransactionOperation;
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;
     friend struct AcquireWriteOperation;
@@ -359,6 +403,13 @@ private:
     friend struct DsUpsertTableOp;
     friend struct SleepOperation;
     friend struct CleanCcEntryForTestOp;
+    friend struct CleanArchivesOp;
+    friend struct DsSplitRangeOp;
+    friend struct DsCopyRangeDataOp;
+    friend struct DsFindRangeMedianKeyOp;
+    friend struct DsDeleteOutOfRangeDataOp;
+    friend struct DsUpsertRangeOp;
+    friend struct NoOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

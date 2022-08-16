@@ -228,13 +228,21 @@ struct ScanNextTxRequest
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
-    ScanCloseTxRequest(size_t alias, TxKey *end_key)
-        : alias_(alias), end_key_(end_key)
+    ScanCloseTxRequest(size_t alias,
+                       TxKey *end_key,
+                       LockType lock_type,
+                       TableName table_name)
+        : alias_(alias),
+          end_key_(end_key),
+          lock_type_(lock_type),
+          table_name_(table_name)
     {
     }
 
     size_t alias_;
     TxKeyContainer end_key_;
+    LockType lock_type_;
+    TableName table_name_;
 };
 
 struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>
@@ -265,6 +273,28 @@ struct UpsertTableTxRequest
     const char *catalog_image_;
     size_t catalog_length_;
     bool is_deleted_;
+};
+
+struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
+{
+    SplitRangeTxRequest(const TableName &range_table_name,
+                        const Schema *key_schema,
+                        const Schema *record_schema,
+                        const TxKey *range_key,
+                        RangeRecord *range_record)
+        : range_table_name_(range_table_name),
+          key_schema_(key_schema),
+          record_schema_(record_schema),
+          range_key_(range_key),
+          range_record_(range_record)
+    {
+    }
+
+    const TableName &range_table_name_{nullptr};
+    const Schema *key_schema_{nullptr};
+    const Schema *record_schema_{nullptr};
+    const TxKey *range_key_;
+    RangeRecord *range_record_{nullptr};
 };
 
 struct FaultInjectTxRequest

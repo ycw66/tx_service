@@ -2,8 +2,10 @@
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
+#include "ds_range_evaluate_service.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
+#include "tx_operation_result.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -31,12 +33,14 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(const txservice::TableName &table_name,
-                        std::vector<txservice::LruEntry *> &batch,
-                        const txservice::Schema *key_schema,
-                        const txservice::Schema *rec_schema,
+    virtual bool PutAll(const TableName &table_name,
+                        std::vector<LruEntry *> &batch,
+                        const Schema *key_schema,
+                        const Schema *rec_schema,
                         uint64_t schema_ts,
-                        uint32_t node_group) = 0;
+                        uint32_t node_group,
+                        DsRangeEvaluateOperationService
+                            *ds_range_evaluate_operation_service) = 0;
 
     /**
      * flush entries in @param batch to data store, stop and return false if
@@ -141,6 +145,40 @@ public:
     {
         tx_service_ = tx_service;
     }
+
+    virtual bool GetRangeSize(const TableName &table_name,
+                              int32_t partition_id,
+                              int64_t *size) = 0;
+
+    virtual bool FindRangeMedianKey(
+        const TableName &table_name,
+        int32_t partition_id,
+        const txservice::Schema *key_schema,
+        txservice::CcHandlerResult<RangeMedianKeyResult>
+            *out_median_key_result) = 0;
+
+    virtual bool CopyRangeData(const TableName &table_name,
+                               int32_t old_partition_id,
+                               int32_t new_partition_id,
+                               const txservice::TxKey *start_key,
+                               uint64_t tx_ts,
+                               const txservice::Schema *key_schema,
+                               const txservice::Schema *rec_schema) = 0;
+
+    virtual bool DeleteOutOfRangeData(const TableName &table_name,
+                                      int32_t partition_id,
+                                      const TxKey *start_key,
+                                      const txservice::Schema *key_schema) = 0;
+
+    virtual bool GetNextRangePartitionId(const txservice::TableName &tablename,
+                                         int32_t *out_next_partition_id,
+                                         int retry_count = 5) = 0;
+
+    virtual bool UpsertRange(const TableName &range_table_name,
+                             const Schema *key_schema,
+                             TxKey *key,
+                             int32_t partition_id,
+                             int64_t ts) = 0;
 
 protected:
     txservice::TxService *tx_service_;

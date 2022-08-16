@@ -29,7 +29,9 @@ public:
                 const Schema *key_schema,
                 const Schema *rec_schema,
                 uint64_t schema_ts,
-                uint32_t node_group) override
+                uint32_t node_group,
+                DsRangeEvaluateOperationService
+                    *ds_range_evaluate_operation_service) override
     {
         for (const auto &entry : batch)
         {
@@ -188,12 +190,64 @@ public:
         bool inclusive,
         uint8_t key_parts,
         const std::string &search_cond,
+        const txservice::TxKey &start_key,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
         bool scan_foward) override
     {
         assert(false);
         return nullptr;
+    }
+
+    bool GetRangeSize(const TableName &table_name,
+                      int32_t partition_id,
+                      int64_t *size)
+    {
+        return true;
+    }
+
+    bool FindRangeMedianKey(
+        const TableName &table_name,
+        int32_t partition_id,
+        const txservice::Schema *key_schema,
+        txservice::CcHandlerResult<RangeMedianKeyResult> *out_median_key_result)
+    {
+        return true;
+    }
+
+    bool CopyRangeData(const TableName &table_name,
+                       int32_t old_partition_id,
+                       int32_t new_partition_id,
+                       const txservice::TxKey *start_key,
+                       uint64_t tx_ts,
+                       const txservice::Schema *key_schema,
+                       const txservice::Schema *rec_schema)
+    {
+        return true;
+    }
+
+    bool DeleteOutOfRangeData(const TableName &table_name,
+                              int32_t partition_id,
+                              const TxKey *start_key,
+                              const txservice::Schema *key_schema)
+    {
+        return true;
+    }
+
+    bool GetNextRangePartitionId(const txservice::TableName &tablename,
+                                 int32_t *out_next_partition_id,
+                                 int retry_count = 5)
+    {
+        return true;
+    }
+
+    bool UpsertRange(const TableName &range_table_name,
+                     const Schema *key_schema,
+                     TxKey *key,
+                     int32_t partition_id,
+                     int64_t ts)
+    {
+        return true;
     }
 
     /**

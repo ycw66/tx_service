@@ -6,9 +6,11 @@
 
 #include "cc/cc_handler_result.h"
 #include "fault/fault_inject.h"
+#include "range_record.h"
 #include "sharder.h"
 #include "tx_execution.h"
 #include "tx_trace.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -983,6 +985,23 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                                        acquire_res.last_vali_ts_ + 1);
                 txm->commit_ts_bound_ = std::max(txm->commit_ts_bound_, ts);
 
+                // Dedup read set for successful acquire
+                if (!hd_result.IsError())
+                {
+                    const CcEntryAddr &cce_addr = acquire_res.local_cce_addr_;
+                    uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
+                    if (read_version > 0 &&
+                        read_version != acquire_res.commit_ts_)
+                    {
+                        // Each write-set key acquires a write lock and gets the
+                        // key's last validation ts and commit ts. If the write
+                        // key has been read before and the key's commit ts
+                        // mismatches the prior version, this is not a
+                        // repeatable read.
+                        fail_cnt_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+
                 if (acquire_res.node_term_ < 0)
                 {
                     bool success = hd_result.ForceError();
@@ -1020,13 +1039,27 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                 txm->commit_ts_bound_ = std::max(txm->commit_ts_bound_, ts);
 
                 assert(acquire_res.node_term_ >= 0);
+
+                // Dedup read set
+                const CcEntryAddr &cce_addr = acquire_res.local_cce_addr_;
+                uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
+                if (read_version > 0 && read_version != acquire_res.commit_ts_)
+                {
+                    // Each write-set key acquires a write lock and gets the
+                    // key's last validation ts and commit ts. If the write
+                    // key has been read before and the key's commit ts
+                    // mismatches the prior version, this is not a
+                    // repeatable read.
+                    fail_cnt_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
         else
         {
             for (size_t nid = 0; nid < upload_cnt_; ++nid)
             {
-                if (hd_results_[nid].ErrorCode() == -1)
+                CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[nid];
+                if (hd_result.ErrorCode() == -1)
                 {
                     if (retry_num_ == 0)
                     {
@@ -1038,11 +1071,43 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         return;
                     }
                 }
+                else
+                {
+                    // Dedup read set for successful acquire
+                    const AcquireAllResult &acquire_all_result =
+                        hd_result.Value();
+                    const CcEntryAddr &cce_addr =
+                        acquire_all_result.local_cce_addr_;
+                    uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
+                    if (read_version > 0 &&
+                        read_version != acquire_all_result.commit_ts_)
+                    {
+                        // Each write-set key acquires a write lock and gets
+                        // the key's last validation ts and commit ts. If
+                        // the write key has been read before and the key's
+                        // commit ts mismatches the prior version, this is
+                        // not a repeatable read.
+                        fail_cnt_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
             }
         }
 
         txm->PostProcess(*this);
     }
+}
+
+uint64_t AcquireAllOp::MaxTs()
+{
+    uint64_t max_ts = 0;
+    for (size_t idx = 0; idx < upload_cnt_; ++idx)
+    {
+        const AcquireAllResult &acq_all_res = hd_results_[idx].Value();
+        uint64_t ts =
+            std::max(acq_all_res.commit_ts_, acq_all_res.last_vali_ts_);
+        max_ts = std::max(max_ts, ts);
+    }
+    return max_ts;
 }
 
 PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm)
@@ -1113,6 +1178,20 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
+}
+
+bool PostWriteAllOp::IsFailed()
+{
+    bool failed = false;
+    for (size_t idx = 0; idx < upload_cnt_; ++idx)
+    {
+        if (hd_results_[idx].IsError())
+        {
+            failed = true;
+            break;
+        }
+    }
+    return failed;
 }
 
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
@@ -1750,4 +1829,717 @@ void CleanCcEntryForTestOp::Forward(TransactionExecution *txm)
     }
 }
 
+NoOp::NoOp(TransactionExecution *txm) : hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void NoOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+}
+
+DsCopyRangeDataOp::DsCopyRangeDataOp(const TableName &table_name,
+                                     TransactionExecution *txm)
+    : table_name_(table_name), hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void DsCopyRangeDataOp::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+}
+
+void DsCopyRangeDataOp::Reset()
+{
+    hd_result_.Reset();
+}
+
+DsDeleteOutOfRangeDataOp::DsDeleteOutOfRangeDataOp(const TableName &table_name,
+                                                   TransactionExecution *txm)
+    : table_name_(table_name), hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void DsDeleteOutOfRangeDataOp::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+}
+
+void DsDeleteOutOfRangeDataOp::Reset()
+{
+    hd_result_.Reset();
+}
+
+DsFindRangeMedianKeyOp::DsFindRangeMedianKeyOp(const TableName *table_name,
+                                               TransactionExecution *txm)
+    : table_name_(table_name), hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void DsFindRangeMedianKeyOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+}
+
+void DsFindRangeMedianKeyOp::Reset()
+{
+    hd_result_.Reset();
+}
+
+DsUpsertRangeOp::DsUpsertRangeOp(const TableName &range_table_name,
+                                 TransactionExecution *txm)
+    : range_table_name_(range_table_name), hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void DsUpsertRangeOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+}
+
+void DsUpsertRangeOp::Reset()
+{
+    hd_result_.Reset();
+}
+
+CompositeTransactionOperation::CompositeTransactionOperation() : op_(nullptr)
+{
+}
+
+template <typename Op>
+void CompositeTransactionOperation::ForwardToSubOperation(
+    TransactionExecution *txm, Op *next_op)
+{
+    op_ = next_op;
+    txm->PushOperation(next_op);
+    txm->Process(*next_op);
+}
+
+template <typename Op>
+void CompositeTransactionOperation::RetrySubOperation(TransactionExecution *txm,
+                                                      Op *last_sub_op)
+{
+    ForwardToSubOperation(txm, last_sub_op);
+}
+
+DsSplitRangeOp::DsSplitRangeOp(const TableName &table_name,
+                               const Schema *key_schema,
+                               const Schema *record_schema,
+                               const TxKey *range_key,
+                               RangeRecord *splitting_range_record,
+                               TransactionExecution *txm)
+    : CompositeTransactionOperation(),
+      table_name_(table_name),
+      range_table_name_(GetRangeTablenameFromTablename(table_name)),
+      key_schema_(key_schema),
+      record_schema_(record_schema),
+      range_key_(range_key),
+      old_range_record_(splitting_range_record),
+      upload_range_entry_(nullptr),
+      upload_range_record_(nullptr),
+      acquire_all_intent_for_update_old_range_op_(txm),
+      ds_find_median_key_for_old_range_op_(&table_name_, txm),
+      acquire_all_lock_for_update_old_range_op_(txm),
+      prepare_log_for_update_old_range_op_(txm),
+      post_all_lock_for_update_old_range_op_(txm),
+      ds_copy_old_range_data_op_(table_name_, txm),
+      ds_copy_old_range_data_finished_log_op_(txm),
+      acquire_all_lock_for_dirty_old_range_op_(txm),
+      commit_log_for_dirty_old_range_op_(txm),
+      post_write_all_for_dirty_old_range_op_(txm),
+      ds_upsert_new_range_op_(range_table_name_, txm),
+      delete_out_of_old_range_data_log_op_(txm),
+      delete_out_of_old_range_data_op_(table_name_, txm),
+      clean_log_op_(txm)
+{
+    partition_id_ = old_range_record_->RangeEntry()->partition_id_;
+    upload_range_entry_ = old_range_record_->RangeEntry()->Clone();
+    upload_range_record_ = std::make_unique<RangeRecord>();
+    upload_range_record_->range_entry_ = upload_range_entry_.get();
+
+    TX_TRACE_ASSOCIATE(this,
+                       &acquire_all_intent_for_update_old_range_op_,
+                       "acquire_all_intent_for_update_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &ds_find_median_key_for_old_range_op_,
+                       "ds_find_median_key_for_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &acquire_all_lock_for_update_old_range_op_,
+                       "acquire_all_lock_for_update_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &prepare_log_for_update_old_range_op_,
+                       "prepare_log_for_update_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &post_all_lock_for_update_old_range_op_,
+                       "post_all_lock_for_update_old_range_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &ds_copy_old_range_data_op_, "ds_copy_old_range_data_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &ds_copy_old_range_data_finished_log_op_,
+                       "ds_copy_old_range_data_finished_log_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &acquire_all_lock_for_dirty_old_range_op_,
+                       "acquire_all_lock_for_dirty_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &commit_log_for_dirty_old_range_op_,
+                       "commit_log_for_dirty_old_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &post_write_all_for_dirty_old_range_op_,
+                       "post_write_all_for_dirty_old_range_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &ds_upsert_new_range_op_, "ds_upsert_new_range_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &delete_out_of_old_range_data_log_op_,
+                       "delete_out_of_old_range_data_log_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &delete_out_of_old_range_data_op_,
+                       "delete_out_of_old_range_data_op_");
+    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
+}
+
+void DsSplitRangeOp::FillTxLogForUpdateOldRange(TransactionExecution *txm)
+{
+}
+
+void DsSplitRangeOp::FillTxLogForCopyOldRangeData(TransactionExecution *txm)
+{
+}
+
+void DsSplitRangeOp::FillTxLogForDirtyOldRangeData(TransactionExecution *txm)
+{
+}
+
+void DsSplitRangeOp::FillTxLogForDeleteOutOfOldRangeData(
+    TransactionExecution *txm)
+{
+}
+
+void DsSplitRangeOp::FillTxLogForCleanLog(TransactionExecution *txm)
+{
+}
+
+void DsSplitRangeOp::ForceToFinish(TransactionExecution *txm)
+{
+    clean_log_op_.hd_result_.SetFinished();
+    op_ = &clean_log_op_;
+    Forward(txm);
+}
+
+void DsSplitRangeOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        acquire_all_intent_for_update_old_range_op_.table_name_ =
+            &range_table_name_;
+        acquire_all_intent_for_update_old_range_op_.key_ = range_key_;
+        acquire_all_intent_for_update_old_range_op_.lk_type_ =
+            LockType::WriteIntent;
+        acquire_all_intent_for_update_old_range_op_.protocol_ =
+            CcProtocol::Locking;
+        ForwardToSubOperation(txm,
+                              &acquire_all_intent_for_update_old_range_op_);
+    }
+    else if (op_ == &acquire_all_intent_for_update_old_range_op_)
+    {
+        if (acquire_all_intent_for_update_old_range_op_.fail_cnt_.load(
+                std::memory_order_acquire) > 0)
+        {
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
+            txm->MarkFailed();
+            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+        }
+        else
+        {
+            // TODO(Xiao Ji): Check old_range_record_.version_ts_ against the
+            // acquire_all_result.commit_ts_ to make sure the split range is not
+            // changed since been read.
+            uint64_t candidate_max_ts =
+                acquire_all_intent_for_update_old_range_op_.MaxTs();
+            txm->ForwardTs(candidate_max_ts);
+            // Set the partition id going to find for the median key
+            ds_find_median_key_for_old_range_op_.table_name_ = &table_name_;
+            ds_find_median_key_for_old_range_op_.partition_id_ = partition_id_;
+            ds_find_median_key_for_old_range_op_.key_schema = key_schema_;
+            ForwardToSubOperation(txm, &ds_find_median_key_for_old_range_op_);
+        }
+    }
+    else if (op_ == &ds_find_median_key_for_old_range_op_)
+    {
+        if (ds_find_median_key_for_old_range_op_.hd_result_.IsError())
+        {
+            txm->bool_resp_->SetErrorCode(TxErrorCode::DATA_STORE_READ_ERR);
+            txm->MarkFailed();
+            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+        }
+        else
+        {
+            RangeMedianKeyResult &median_key_result =
+                ds_find_median_key_for_old_range_op_.hd_result_.Value();
+            new_range_key_ = std::move(median_key_result.median_key_);
+            new_partition_id_ = median_key_result.new_partition_id_;
+            txm->ForwardTs();
+            // Going to lock the range table with the old range start key
+            acquire_all_lock_for_update_old_range_op_.table_name_ =
+                &range_table_name_;
+            acquire_all_lock_for_update_old_range_op_.key_ = range_key_;
+            acquire_all_lock_for_update_old_range_op_.lk_type_ =
+                LockType::WriteLock;
+            acquire_all_lock_for_update_old_range_op_.protocol_ =
+                CcProtocol::Locking;
+            ForwardToSubOperation(txm,
+                                  &acquire_all_lock_for_update_old_range_op_);
+        }
+    }
+    else if (op_ == &acquire_all_lock_for_update_old_range_op_)
+    {
+        if (acquire_all_lock_for_update_old_range_op_.fail_cnt_.load(
+                std::memory_order_acquire) > 0)
+        {
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
+            txm->MarkFailed();
+            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+        }
+        else
+        {
+            uint64_t candidate_max_ts =
+                acquire_all_lock_for_update_old_range_op_.MaxTs();
+            txm->ForwardTs(candidate_max_ts);
+            FillTxLogForUpdateOldRange(txm);
+            ForwardToSubOperation(txm, &prepare_log_for_update_old_range_op_);
+        }
+    }
+    else if (op_ == &prepare_log_for_update_old_range_op_)
+    {
+        if (prepare_log_for_update_old_range_op_.hd_result_.IsError())
+        {
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
+            txm->MarkFailed();
+            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+        }
+        else
+        {
+            post_all_lock_for_update_old_range_op_.table_name_ =
+                &range_table_name_;
+            post_all_lock_for_update_old_range_op_.key_ = range_key_;
+            post_all_lock_for_update_old_range_op_.dml_op_ =
+                DmlOperation::Update;
+            post_all_lock_for_update_old_range_op_.write_type_ =
+                PostWriteType::PrepareCommit;
+
+            // Going to update the old range with new key and new partition
+            // id as the splitting key and the old range became dirty
+            upload_range_entry_->new_key_ = new_range_key_->Clone();
+            upload_range_entry_->new_partition_id_ = new_partition_id_;
+
+            upload_range_record_->range_entry_ = upload_range_entry_.get();
+            post_all_lock_for_update_old_range_op_.rec_ =
+                upload_range_record_.get();
+            txm->ForwardTs();
+            ForwardToSubOperation(txm, &post_all_lock_for_update_old_range_op_);
+        }
+    }
+    else if (op_ == &post_all_lock_for_update_old_range_op_)
+    {
+        bool failed = post_all_lock_for_update_old_range_op_.IsFailed();
+
+        if (failed)
+        {
+            // After prepare log is succeed, this range split operation is
+            // guaranteed to succeed, and can only roll forward, retry if failed
+            // unless the leader is changed.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &post_all_lock_for_update_old_range_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            // Going to copy data after middle key in the old range to the new
+            // range
+            ds_copy_old_range_data_op_.middle_key_ = new_range_key_.get();
+            ds_copy_old_range_data_op_.old_partition_id_ = partition_id_;
+            ds_copy_old_range_data_op_.new_partition_id_ = new_partition_id_;
+            ds_copy_old_range_data_op_.key_schema_ = key_schema_;
+            ds_copy_old_range_data_op_.record_schema_ = record_schema_;
+            ds_copy_old_range_data_op_.filter_ts_ = txm->commit_ts_;
+            ForwardToSubOperation(txm, &ds_copy_old_range_data_op_);
+        }
+    }
+    else if (op_ == &ds_copy_old_range_data_op_)
+    {
+        if (ds_copy_old_range_data_op_.hd_result_.IsError())
+        {
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &ds_copy_old_range_data_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            FillTxLogForCopyOldRangeData(txm);
+            ForwardToSubOperation(txm,
+                                  &ds_copy_old_range_data_finished_log_op_);
+        }
+    }
+    else if (op_ == &ds_copy_old_range_data_finished_log_op_)
+    {
+        if (ds_copy_old_range_data_finished_log_op_.hd_result_.IsError())
+        {
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                // Retry if failed
+                RetrySubOperation(txm,
+                                  &ds_copy_old_range_data_finished_log_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            acquire_all_lock_for_dirty_old_range_op_.table_name_ =
+                &range_table_name_;
+            acquire_all_lock_for_dirty_old_range_op_.key_ = range_key_;
+            acquire_all_lock_for_dirty_old_range_op_.lk_type_ =
+                LockType::WriteLock;
+            acquire_all_lock_for_dirty_old_range_op_.protocol_ =
+                CcProtocol::Locking;
+            ForwardToSubOperation(txm,
+                                  &acquire_all_lock_for_dirty_old_range_op_);
+        }
+    }
+    else if (op_ == &acquire_all_lock_for_dirty_old_range_op_)
+    {
+        if (acquire_all_lock_for_dirty_old_range_op_.fail_cnt_.load(
+                std::memory_order_acquire) > 0)
+        {
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm,
+                                  &acquire_all_lock_for_dirty_old_range_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            uint64_t candidate_max_ts =
+                acquire_all_lock_for_dirty_old_range_op_.MaxTs();
+            txm->ForwardTs(candidate_max_ts);
+            FillTxLogForDirtyOldRangeData(txm);
+            ForwardToSubOperation(txm, &commit_log_for_dirty_old_range_op_);
+        }
+    }
+    else if (op_ == &commit_log_for_dirty_old_range_op_)
+    {
+        if (commit_log_for_dirty_old_range_op_.hd_result_.IsError())
+        {
+            // Fails to flush the commit log. Retries the operation if the
+            // tx node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &commit_log_for_dirty_old_range_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            post_write_all_for_dirty_old_range_op_.table_name_ =
+                &range_table_name_;
+            post_write_all_for_dirty_old_range_op_.key_ = range_key_;
+            post_write_all_for_dirty_old_range_op_.dml_op_ =
+                DmlOperation::Update;
+            post_write_all_for_dirty_old_range_op_.write_type_ =
+                PostWriteType::PostCommit;
+
+            // Restore the dirty range record to the old one,
+            // and fork the new range
+            post_write_all_for_dirty_old_range_op_.rec_ =
+                upload_range_record_.get();
+            txm->ForwardTs();
+            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+        }
+    }
+    else if (op_ == &post_write_all_for_dirty_old_range_op_)
+    {
+        bool failed = post_write_all_for_dirty_old_range_op_.IsFailed();
+
+        if (failed)
+        {
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            ds_upsert_new_range_op_.key_schema_ = key_schema_;
+            ds_upsert_new_range_op_.key_ = new_range_key_.get();
+            ds_upsert_new_range_op_.partition_id_ = new_partition_id_;
+            ds_upsert_new_range_op_.ts_ = txm->commit_ts_;
+            ForwardToSubOperation(txm, &ds_upsert_new_range_op_);
+        }
+    }
+    else if (op_ == &ds_upsert_new_range_op_)
+    {
+        if (ds_upsert_new_range_op_.hd_result_.IsError())
+        {
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                // Retry if failed
+                RetrySubOperation(txm, &ds_upsert_new_range_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            FillTxLogForDeleteOutOfOldRangeData(txm);
+            ForwardToSubOperation(txm, &delete_out_of_old_range_data_log_op_);
+        }
+    }
+    else if (op_ == &delete_out_of_old_range_data_log_op_)
+    {
+        if (delete_out_of_old_range_data_log_op_.hd_result_.IsError())
+        {
+            // Fails to flush the commit log. Retries the operation if the
+            // tx node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &delete_out_of_old_range_data_log_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            delete_out_of_old_range_data_op_.partition_id_ = partition_id_;
+            delete_out_of_old_range_data_op_.middle_key_ = new_range_key_.get();
+            delete_out_of_old_range_data_op_.key_schema_ = key_schema_;
+            ForwardToSubOperation(txm, &delete_out_of_old_range_data_op_);
+        }
+    }
+    else if (op_ == &delete_out_of_old_range_data_op_)
+    {
+        if (delete_out_of_old_range_data_op_.hd_result_.IsError())
+        {
+            // The data store operation failed. Retry the operation if the
+            // tx node is still the leader.
+            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                    txm->tx_term_))
+            {
+                RetrySubOperation(txm, &delete_out_of_old_range_data_op_);
+            }
+            else
+            {
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            FillTxLogForCleanLog(txm);
+            ForwardToSubOperation(txm, &clean_log_op_);
+        }
+    }
+    else if (op_ == &clean_log_op_)
+    {
+        if (clean_log_op_.hd_result_.IsError() &&
+            Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                txm->tx_term_))
+        {
+            RetrySubOperation(txm, &clean_log_op_);
+        }
+        else if (txm->tx_status_ == TxnStatus::Recovering)
+        {
+            txm->Reset();
+            txm->tx_status_.store(TxnStatus::Finished,
+                                  std::memory_order_release);
+        }
+        else
+        {
+            txm->bool_resp_->Finish(true);
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+            txm->ds_split_range_op_ = nullptr;
+        }
+    }
+}
 }  // namespace txservice

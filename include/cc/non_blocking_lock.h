@@ -43,6 +43,12 @@ public:
 
     void ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
 
+    /**
+     *  @brief Release the write lock and add the write intent, take effect only
+     * when write lock is owned by the tx_number
+     */
+    void DowngradeWriteLock(TxNumber tx_number, CcShard *ccs);
+
     bool AcquireWriteIntent(CcRequestBase *cc_req,
                             int64_t tx_term,
                             CcProtocol protocol);

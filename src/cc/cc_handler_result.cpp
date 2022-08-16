@@ -138,11 +138,11 @@ template class CcHandlerResult<ScanNextResult>;
 template class CcHandlerResult<ScanOpenResult>;
 template class CcHandlerResult<AcquireAllResult>;
 template class CcHandlerResult<AcquireKeyResult>;
+template class CcHandlerResult<RangeMedianKeyResult>;
 template class CcHandlerResult<Void>;
 template class CcHandlerResult<TxId>;
 template class CcHandlerResult<std::vector<txservice::TxId>>;
 template class CcHandlerResult<bool>;
 template class CcHandlerResult<uint64_t>;
 template class CcHandlerResult<int8_t>;
-
 }  // namespace txservice

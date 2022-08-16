@@ -232,13 +232,13 @@ public:
     CcEntry(CcMap *parent)
         : LruEntry(parent),
           key_(nullptr),
-          payload_(nullptr),
           payload_status_(RecordStatus::Unknown),
           payload_ckpt_(),
           map_prev_(nullptr),
           map_next_(nullptr),
           archives_()
     {
+        payload_ = std::make_shared<ValueT>();
     }
 
     ~CcEntry() = default;

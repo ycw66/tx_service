@@ -1,6 +1,8 @@
 #pragma once
 
-#include <variant>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include "tx_key.h"
 #include "tx_record.h"
@@ -12,24 +14,89 @@ struct TableRangeEntry
     TableRangeEntry() = delete;
     TableRangeEntry(std::unique_ptr<TxKey> start_key,
                     uint64_t version_ts,
-                    uint32_t partition_id,
-                    uint32_t next_partition_id)
+                    int32_t partition_id,
+                    int32_t next_partition_id)
         : start_key_(std::move(start_key)),
           version_ts_(version_ts),
           partition_id_(partition_id),
-          next_partition_id_(next_partition_id)
+          next_partition_id_(next_partition_id),
+          new_key_(nullptr),
+          new_partition_id_(-1),
+          dirty_ts_(0)
     {
+    }
+
+    std::unique_ptr<TableRangeEntry> Clone() const
+    {
+        std::unique_ptr<TxKey> start_key_clone =
+            start_key_ == nullptr ? nullptr : start_key_->Clone();
+        TableRangeEntry *that = new TableRangeEntry(std::move(start_key_clone),
+                                                    version_ts_,
+                                                    partition_id_,
+                                                    next_partition_id_);
+        if (new_key_ == nullptr)
+        {
+            that->new_key_ = nullptr;
+        }
+        else
+        {
+            std::unique_ptr<TxKey> new_key_clone = new_key_->Clone();
+            that->new_key_ = std::move(new_key_clone);
+        }
+        that->new_partition_id_ = new_partition_id_;
+        return std::unique_ptr<TableRangeEntry>(that);
+    }
+
+    void SetDirty(std::unique_ptr<TxKey> new_key,
+                  uint32_t new_partition_id,
+                  uint64_t dirty_ts)
+    {
+        new_key_ = std::move(new_key);
+        new_partition_id_ = new_partition_id;
+        dirty_ts_ = dirty_ts;
+    }
+
+    void ClearDirty(uint64_t commit_ts = 0)
+    {
+        new_key_ = nullptr;
+        new_partition_id_ = -1;
+        dirty_ts_ = 0;
+        if (commit_ts != 0)
+        {
+            version_ts_ = commit_ts;
+        }
+    }
+
+    bool IsDirty()
+    {
+        return (new_key_ != nullptr) && (new_partition_id_ != 0);
     }
 
     std::unique_ptr<TxKey> start_key_;
     uint64_t version_ts_{1};
-    uint32_t partition_id_;
-    uint32_t next_partition_id_;
+    int32_t partition_id_{0};
+    int32_t next_partition_id_{0};
 
     std::unique_ptr<TxKey> new_key_{nullptr};
-    uint32_t new_partition_id_{0};
+    int32_t new_partition_id_{-1};
 
     uint64_t dirty_ts_{0};
+};
+
+struct TableRangeEntryWithShade
+{
+    TableRangeEntryWithShade(std::unique_ptr<TxKey> start_key,
+                             uint64_t version_ts,
+                             int32_t partition_id,
+                             int32_t next_partition_id)
+        : shader_(std::make_unique<TableRangeEntry>(std::move(start_key),
+                                                    version_ts,
+                                                    partition_id,
+                                                    next_partition_id)),
+          shade_(std::unique_ptr<TableRangeEntry>(nullptr)){};
+
+    std::unique_ptr<TableRangeEntry> shader_;
+    std::unique_ptr<TableRangeEntry> shade_;
 };
 
 struct InitRangeEntry
@@ -37,7 +104,7 @@ struct InitRangeEntry
     InitRangeEntry(const InitRangeEntry &rhs) = delete;
 
     InitRangeEntry(std::unique_ptr<TxKey> start_key,
-                   uint32_t partition_id,
+                   int32_t partition_id,
                    uint64_t version_ts)
         : key_(std::move(start_key)),
           partition_id_(partition_id),
@@ -53,21 +120,15 @@ struct InitRangeEntry
     }
 
     std::unique_ptr<TxKey> key_{nullptr};
-    uint32_t partition_id_{0};
+    int32_t partition_id_{0};
     uint64_t version_ts_{0};
-};
-
-struct RangePair
-{
-    uint32_t partition_id_{0};
-    uint32_t next_partition_id_{UINT32_MAX};
 };
 
 struct RangeRecord : public TxRecord
 {
 public:
     RangeRecord() = default;
-    RangeRecord(const RangeRecord &rhs) : binary_value_(rhs.binary_value_)
+    RangeRecord(const RangeRecord &rhs) : range_entry_(rhs.range_entry_)
     {
     }
 
@@ -93,7 +154,7 @@ public:
     void Copy(const TxRecord &rhs) override
     {
         const RangeRecord &that = static_cast<const RangeRecord &>(rhs);
-        binary_value_ = that.binary_value_;
+        range_entry_ = that.range_entry_;
     }
 
     std::string ToString() const override
@@ -107,33 +168,15 @@ public:
         {
             return *this;
         }
-        binary_value_ = rhs.binary_value_;
+        range_entry_ = rhs.range_entry_;
         return *this;
     }
 
     const TableRangeEntry *RangeEntry() const
     {
-        const auto range_entry = std::get_if<0>(&binary_value_);
-        return *range_entry;
+        return range_entry_;
     }
 
-    const TxKey *Key()
-    {
-        const auto key = std::get_if<1>(&binary_value_);
-        return *key;
-    }
-
-    /**
-     * @brief The binary value of a range record serves two purposes: (1) a
-     * tx searches the partition ID of a range containing the input key. The
-     * returned range record's value points to a table range entry, which gives
-     * the range's partition ID and the new partition ID if the range is being
-     * split or merged. (2) A tx splits/merges an existing range and uses the
-     * range record to install a "dirty version" of the range in the tx service.
-     * The record's value points to the start key of a range that is either (a)
-     * split from the existing range or (b) merged with the existing range.
-     *
-     */
-    std::variant<const TableRangeEntry *, const TxKey *> binary_value_;
+    const TableRangeEntry *range_entry_;
 };
 }  // namespace txservice

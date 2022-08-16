@@ -519,6 +519,8 @@ void txservice::remote::RemotePostWriteAll::Reset(
     PostWriteType write_type =
         ToLocalType::ConvertCommitType(post_write_all.commit_type());
 
+    int64_t tx_term = input_msg->tx_term();
+
     PostWriteAllCc::Reset(&post_write_all.tablename(),
                           &post_write_all.key(),
                           post_write_all.node_group_id(),
@@ -527,7 +529,8 @@ void txservice::remote::RemotePostWriteAll::Reset(
                           rec_str,
                           dml_op,
                           &cc_res_,
-                          write_type);
+                          write_type,
+                          tx_term);
 
     input_msg_ = std::move(input_msg);
 

@@ -6,8 +6,10 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "catalog.h"
 #include "catalog_factory.h"
@@ -341,8 +343,29 @@ public:
     void InitTableRanges(const TableName &table_name,
                          std::vector<InitRangeEntry> &init_ranges);
 
-    const std::map<uint32_t, TableRangeEntry> *GetTableRanges(
+    std::map<int32_t, TableRangeEntryWithShade> *GetAllTableRangesForATable(
         const TableName &range_table_name);
+
+    const TableRangeEntryWithShade *CreateDirtyTableRange(
+        const TableName &table_name,
+        int32_t partition_id,
+        std::unique_ptr<TxKey> new_key,
+        int32_t new_partition_id,
+        uint64_t commit_ts);
+
+    const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
+        const TableName &table_name, int32_t partition_id, uint64_t commit_ts);
+
+    const TableRangeEntry *GetTableEffectiveRange(const TableName &table_name,
+                                                  int32_t partition_id);
+
+    const TableRangeEntryWithShade *GetTableRangeWithShade(
+        const TableName &table_name, int32_t partition_id);
+
+    void PostCommitDirtyTableRange(const TableName &table_name,
+                                   int32_t partition_id);
+
+    void CleanTableRange(const TableName &table_name, uint32_t ng_id);
 
     /**
      * @brief Fetches the table's catalog from the data store and temporarily
@@ -389,7 +412,10 @@ public:
      */
     void DropCcms(NodeGroupId ng_id);
 
-    void CreateRangeCcMap(const TableName &range_table_name, NodeGroupId ng_id);
+    void CreateRangeCcMap(const TableName &range_table_name,
+                          const TableSchema *table_schema,
+                          NodeGroupId ng_id,
+                          uint64_t schema_ts);
 
     void DecrementMemory(size_t mem_size);
 

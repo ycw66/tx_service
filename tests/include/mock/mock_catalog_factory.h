@@ -141,8 +141,18 @@ public:
         return nullptr;
     }
 
-    CcMap::uptr CreatePkRangeMap(const TableName &base_table,
-                                 CcShard *shard) override
+    CcMap::uptr CreatePkRangeMap(const txservice::TableName &base_table,
+                                 const txservice::TableSchema *table_schema,
+                                 uint64_t schema_ts,
+                                 txservice::CcShard *shard) override
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    std::unique_ptr<txservice::CcScanner> CreatePkRangeCcmScanner(
+        txservice::ScanDirection direction,
+        const txservice::Schema *key_schema) override
     {
         assert(false);
         return nullptr;

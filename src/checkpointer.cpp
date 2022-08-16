@@ -117,7 +117,8 @@ void Checkpointer::Ckpt()
                 flushed = false;
                 break;
             }
-            if (table_name == catalog_ccm_name)
+
+            if (table_name == catalog_ccm_name || IsRangeTablename(table_name))
             {
                 continue;
             }
@@ -219,12 +220,22 @@ void Checkpointer::Ckpt()
                 {
                     const Schema *key_schema = ccm->KeySchema();
                     const Schema *rec_schema = ccm->RecordSchema();
-                    ckpt_ret = store_hd_->PutAll(table_name,
-                                                 ckpt_vec,
-                                                 key_schema,
-                                                 rec_schema,
-                                                 ccm->SchemaTs(),
-                                                 node_group);
+                    // todo: stop flush process if this node is no longer node
+                    //  group leader
+                    ckpt_ret = store_hd_->PutAll(
+                        table_name,
+                        ckpt_vec,
+                        key_schema,
+                        rec_schema,
+                        ccm->SchemaTs(),
+                        node_group,
+                        Sharder::Instance()
+                            .GetDsRangeEvaluateOperationService());
+                    if (!ckpt_ret)
+                    {
+                        LOG(INFO)
+                            << "checkpointer PutAll flush to cassandra failed";
+                    }
                 }
                 else
                 {
@@ -236,6 +247,11 @@ void Checkpointer::Ckpt()
                                                    sk_schema,
                                                    ccm->SchemaTs(),
                                                    node_group);
+                    if (!ckpt_ret)
+                    {
+                        LOG(INFO) << "checkpointer PutSkAll flush to cassandra "
+                                     "failed";
+                    }
                 }
 
                 // If flush to data store succeeds, update the ckpt_ts for each
@@ -250,7 +266,6 @@ void Checkpointer::Ckpt()
                 }
                 else
                 {
-                    LOG(INFO) << "checkpointer flush to cassandra failed";
                     flushed = false;
                 }
             }
@@ -289,12 +304,14 @@ bool Checkpointer::CkptEntry(LruEntry *entry)
     {
         const Schema *key_schema = ccm->KeySchema();
         const Schema *rec_schema = ccm->RecordSchema();
-        ckpt_ret = store_hd_->PutAll(table_name,
-                                     ckpt_vec,
-                                     key_schema,
-                                     rec_schema,
-                                     ccm->SchemaTs(),
-                                     node_group);
+        ckpt_ret = store_hd_->PutAll(
+            table_name,
+            ckpt_vec,
+            key_schema,
+            rec_schema,
+            ccm->SchemaTs(),
+            node_group,
+            Sharder::Instance().GetDsRangeEvaluateOperationService());
     }
     else
     {

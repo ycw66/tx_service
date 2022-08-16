@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "ds_range_split_service.h"
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
@@ -145,7 +146,8 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
                        &rec,
                        dml_op,
                        &hres,
-                       post_write_type);
+                       post_write_type,
+                       tx_term);
         }
         else
         {
@@ -158,7 +160,8 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
                        std::move(dup_rec),
                        dml_op,
                        &hres,
-                       post_write_type);
+                       post_write_type,
+                       tx_term);
         }
 
         TX_TRACE_ACTION(this, req);
@@ -658,20 +661,61 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         return;
     }
 
-    // Check if the table exists
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
-    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_);
 
-    if (ccm == nullptr)
+    const Schema *schema = nullptr;
+    std::unique_ptr<CcScanner> ccm_scanner = nullptr;
+    if (txservice::IsRangeTablename(table_name))
     {
-        hd_res.SetError(-1);
+        const txservice::TableName base_table_name =
+            GetBaseTableNameFromRangeTableName(table_name);
+        const CatalogEntry *catalog_entry =
+            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
+        if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
+        {
+            schema = catalog_entry->schema_.get()->KeySchema();
+        }
+
+        ccm_scanner = local_shard.catalog_factory_->CreatePkRangeCcmScanner(
+            direction, schema);
+    }
+    else if (txservice::IsIndexTableName(table_name))
+    {
+        const txservice::TableName sk_base_table_name =
+            GetBaseTablenameFromIndexTableName(table_name);
+        const CatalogEntry *catalog_entry =
+            local_shard.GetCatalog(sk_base_table_name, local_shard.node_id_);
+        if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
+        {
+            schema = catalog_entry->schema_.get()->IndexKeySchema(table_name);
+        }
+        ccm_scanner =
+            local_shard.catalog_factory_->CreateSkCcmScanner(direction, schema);
+    }
+    else
+    {
+        const CatalogEntry *catalog_entry =
+            local_shard.GetCatalog(table_name, local_shard.node_id_);
+
+        if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
+        {
+            schema = catalog_entry->schema_.get()->KeySchema();
+        }
+
+        ccm_scanner =
+            local_shard.catalog_factory_->CreatePkCcmScanner(direction, schema);
+    }
+
+    if (ccm_scanner == nullptr)
+    {
+        hd_res.SetError(1);
         return;
     }
 
     ScanOpenResult &open_result = hd_res.Value();
     open_result.Reset(1);
 
-    open_result.scanner_ = ccm->CreateScanner(direction);
+    open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
     open_result.scan_alias_ = scan_alias_cnt_++;
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
@@ -698,7 +742,17 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
-    ccm->Execute(*scan_open_cc_req);
+    // Check if the table exists
+    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_);
+
+    if (ccm != nullptr)
+    {
+        ccm->Execute(*scan_open_cc_req);
+    }
+    else
+    {
+        local_shard.Enqueue(scan_open_cc_req);
+    }
 }
 
 void txservice::LocalCcHandler::ScanNextBatch(
@@ -1009,4 +1063,65 @@ uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
     return ccs.Now();
+}
+
+void txservice::LocalCcHandler::DataStoreFindRangeMedianKey(
+    const txservice::TableName &table_name,
+    int32_t partition,
+    const txservice::Schema *key_schema,
+    CcHandlerResult<RangeMedianKeyResult> &hd_res)
+{
+    DsRangeSplitOperationService *ds_range_split_operation_service =
+        Sharder::Instance().GetDsRangeSplitOperationService();
+    ds_range_split_operation_service->SubmitFindRangeMedianKeyWork(
+        table_name, partition, key_schema, &hd_res);
+}
+
+void txservice::LocalCcHandler::DataStoreCopyRangeData(
+    const txservice::TableName &table_name,
+    int32_t old_partition_id,
+    int32_t new_partition_id,
+    const TxKey *start_key,
+    uint64_t tx_ts,
+    const txservice::Schema *key_schema,
+    const txservice::Schema *rec_schema,
+    CcHandlerResult<Void> &hd_res)
+{
+    DsRangeSplitOperationService *ds_range_split_operation_service =
+        Sharder::Instance().GetDsRangeSplitOperationService();
+    ds_range_split_operation_service->SubmitCopyRangeDataWork(table_name,
+                                                              old_partition_id,
+                                                              new_partition_id,
+                                                              start_key,
+                                                              tx_ts,
+                                                              key_schema,
+                                                              rec_schema,
+                                                              &hd_res);
+}
+
+void txservice::LocalCcHandler::DataStoreUpsertRange(
+    const txservice::TableName &range_table_name,
+    const txservice::Schema *key_schema,
+    txservice::TxKey *key,
+    int32_t partition_id,
+    int64_t ts,
+    CcHandlerResult<Void> &hd_res)
+{
+    DsRangeSplitOperationService *ds_range_split_operation_service =
+        Sharder::Instance().GetDsRangeSplitOperationService();
+    ds_range_split_operation_service->SubmitUpsertRangeWork(
+        range_table_name, key_schema, key, partition_id, ts, &hd_res);
+}
+
+void txservice::LocalCcHandler::DataStoreDeleteOutOfRangeData(
+    const txservice::TableName &table_name,
+    int32_t partition_id,
+    const TxKey *start_key,
+    const txservice::Schema *key_schema,
+    CcHandlerResult<Void> &hd_res)
+{
+    DsRangeSplitOperationService *ds_range_split_operation_service =
+        Sharder::Instance().GetDsRangeSplitOperationService();
+    ds_range_split_operation_service->SubmitDeleteOutOfRangeDataWork(
+        table_name, partition_id, start_key, key_schema, &hd_res);
 }

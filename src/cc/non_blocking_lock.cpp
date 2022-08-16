@@ -408,6 +408,24 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
     }
 }
 
+void NonBlockingLock::DowngradeWriteLock(TxNumber tx_number, CcShard *ccs)
+{
+    if (is_write_lock_empty_ || write_lock_tx_ != tx_number)
+    {
+        return;
+    }
+
+    // release the write lock.
+    write_lock_tx_ = 0;
+    is_write_lock_empty_ = true;
+
+    // add the write intent
+    write_intent_tx_ = tx_number;
+    is_write_intent_empty_ = false;
+
+    TryPopBlockingQueue(ccs);
+}
+
 /**
  * @brief Release the write intent on this object (i.e. ccentry).
  *

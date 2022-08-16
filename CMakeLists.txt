@@ -9,6 +9,9 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error -W -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DFAULT_INJECTOR")
 
+option(RANGE_PARTITION_ENABLED "Whether enable range partition" OFF)
+message(NOTICE "RANGE_PARTITION_ENABLED : ${RANGE_PARTITION_ENABLED}")
+
 if ( CMAKE_COMPILER_IS_GNUCC )
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-reorder -Wno-unused-parameter -Wno-parentheses")
 endif()
@@ -109,6 +112,11 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     )
 endif()
 
+if(RANGE_PARTITION_ENABLED)
+  # add preprocessor defition RANGE_PARTITION_ENABLED
+  add_compile_definitions(RANGE_PARTITION_ENABLED);
+endif()
+
 SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/tx_execution.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_operation.cpp
@@ -134,6 +142,8 @@ SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/log_replay_service.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/cc_node.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/ds_range_evaluate_service.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/ds_range_split_service.cpp
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})
