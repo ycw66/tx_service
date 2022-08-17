@@ -369,10 +369,10 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
-    TableName table_name = scan_close_req.table_name_;
     ScanClose(scan_close_req.alias_,
-              *scan_close_req.end_key_.get(),
-              scan_close_req.lock_type_, table_name);
+              *scan_close_req.end_key_,
+              scan_close_req.lock_type_,
+              scan_close_req.table_name_);
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
@@ -587,6 +587,8 @@ void TransactionExecution::Process(ReadOperation &read)
         const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
         read.lock_type_ = read.read_tx_req_->lock_type_;
+        const uint64_t corresponding_sk_commit_ts =
+            read.read_tx_req_->corresponding_sk_commit_ts_;
 
         // Reads the specified key from the local cc map to which this tx is
         // bound. This API is used for reading cc maps replicated in all shards.
@@ -649,13 +651,23 @@ void TransactionExecution::Process(ReadOperation &read)
             read.protocol_ = protocol_;
             read.iso_level_ = iso_level_;
 
+            uint64_t read_ts = 0;
+            if (iso_level_ == IsolationLevel::Snapshot)
+            {
+                read_ts = start_ts_;
+            }
+            else if (corresponding_sk_commit_ts != 0)
+            {
+                read_ts = corresponding_sk_commit_ts;
+            }
+
             handler->Read(table_name,
                           key,
                           rec,
                           read.read_type_,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
-                          start_ts_,
+                          read_ts,
                           read.hd_result_,
                           iso_level_,
                           protocol_,
@@ -726,7 +738,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                                 read_res.ts_,
                                 read_.protocol_,
                                 read_.read_tx_req_->lock_type_,
-                                *table_name);
+                                table_name);
             }
             else if (read_.iso_level_ >= IsolationLevel::RepeatableRead)
             {
@@ -747,7 +759,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                                     read_res.ts_,
                                     read_.protocol_,
                                     read_.read_tx_req_->lock_type_,
-                                    *table_name);
+                                    table_name);
                 }
             }
         }
@@ -1001,39 +1013,35 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     // Lock need to be released when transaction be committed, so add scan
     // result into transaction read set
-    if (cc_scan_tuple != nullptr &&
+    if (cc_scan_tuple != nullptr && protocol_ != CcProtocol::MVCC &&
         (iso_level_ >= IsolationLevel::RepeatableRead ||
-         scan_next.tx_req_->lock_type_ == LockType::WriteIntent))
+         scan_next.tx_req_->lock_type_ == LockType::WriteIntent ||
+         scan_next.scanner_->IndexType() == ScanIndexType::Secondary))
     {
         LockType lk_type = scan_next.tx_req_->lock_type_;
 
-        // Not necessary to add read (and lock) on index table cc entry, unless
-        // iso level is serializable
-        if (scan_next.scanner_->IndexType() != ScanIndexType::Secondary)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                &scan_next,
-                (
-                    [this, cc_scan_tuple]() -> std::string
-                    {
-                        return std::string("\"tx_number\":")
-                            .append(std::to_string(this->TxNumber()))
-                            .append(",\"tx_term\":")
-                            .append(std::to_string(this->tx_term_))
-                            .append(",\"cce_ptr\":")
-                            .append(std::to_string(
-                                cc_scan_tuple->cce_addr_.CcePtr()));
-                    }));
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+            &scan_next,
+            (
+                [this, cc_scan_tuple]() -> std::string
+                {
+                    return std::string("\"tx_number\":")
+                        .append(std::to_string(this->TxNumber()))
+                        .append(",\"tx_term\":")
+                        .append(std::to_string(this->tx_term_))
+                        .append(",\"cce_ptr\":")
+                        .append(
+                            std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
+                }));
 
-            TableName table_name = scan_next.tx_req_->table_name_;
-            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                            cc_scan_tuple->key_ts_,
-                            protocol_,
-                            lk_type,
-                            table_name);
-        }
+        const TableName &table_name = scan_next.tx_req_->table_name_;
+        rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                        cc_scan_tuple->key_ts_,
+                        protocol_,
+                        lk_type,
+                        &table_name);
     }
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
@@ -1049,7 +1057,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
                                                       cc_scan_tuple->Record(),
-                                                      RecordStatus::Normal));
+                                                      RecordStatus::Normal,
+                                                      cc_scan_tuple->key_ts_));
                 }
                 else
                 {
@@ -1062,14 +1071,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         kvp_resp_->Finish(
                             std::make_tuple(cc_scan_tuple->Key(),
                                             cc_scan_tuple->Record(),
-                                            cc_scan_tuple->rec_status_));
+                                            cc_scan_tuple->rec_status_,
+                                            cc_scan_tuple->key_ts_));
                     }
                     else
                     {
                         kvp_resp_->Finish(
                             std::make_tuple(cc_scan_tuple->Key(),
                                             nullptr,
-                                            cc_scan_tuple->rec_status_));
+                                            cc_scan_tuple->rec_status_,
+                                            cc_scan_tuple->key_ts_));
                     }
                 }
 
@@ -1077,8 +1088,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             }
             else
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(nullptr, nullptr, RecordStatus::Deleted));
+                kvp_resp_->Finish(std::make_tuple(
+                    nullptr, nullptr, RecordStatus::Deleted, 0));
             }
             return;
         }
@@ -1087,19 +1098,20 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
         // Case that needs to merge ccm entries with local write set entries.
         if (cc_scan_tuple == nullptr ||
-            *local_write.key_.get() < *cc_scan_tuple->Key())
+            *local_write.key_ < *cc_scan_tuple->Key())
         {
             // Returns the key-value pair in the local write set.
             if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
             }
             else
             {
                 kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
                                                   local_write.rec_.get(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  0));
             }
 
             ++it->second.first;
@@ -1117,15 +1129,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
                                                   cc_scan_tuple->Record(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  cc_scan_tuple->key_ts_));
             }
             else
             {
-                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted ||
-                       cc_scan_tuple->rec_status_ ==
-                           RecordStatus::VersionUnknown);
-                kvp_resp_->Finish(std::make_tuple(
-                    cc_scan_tuple->Key(), nullptr, cc_scan_tuple->rec_status_));
+                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
+                kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                  nullptr,
+                                                  cc_scan_tuple->rec_status_,
+                                                  cc_scan_tuple->key_ts_));
             }
             scan_next.scanner_->MoveNext();
         }
@@ -1135,13 +1148,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
             }
             else
             {
                 kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
                                                   local_write.rec_.get(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  0));
             }
 
             ++it->second.first;
@@ -1162,26 +1176,25 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
                                                       cc_scan_tuple->Record(),
-                                                      RecordStatus::Normal));
+                                                      RecordStatus::Normal,
+                                                      cc_scan_tuple->key_ts_));
                 }
                 else
                 {
-                    assert(cc_scan_tuple->rec_status_ ==
-                               RecordStatus::Deleted ||
-                           cc_scan_tuple->rec_status_ ==
-                               RecordStatus::VersionUnknown);
+                    assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
                     kvp_resp_->Finish(
                         std::make_tuple(cc_scan_tuple->Key(),
                                         nullptr,
-                                        cc_scan_tuple->rec_status_));
+                                        cc_scan_tuple->rec_status_,
+                                        cc_scan_tuple->key_ts_));
                 }
 
                 scan_next.scanner_->MoveNext();
             }
             else
             {
-                kvp_resp_->Finish(
-                    std::make_tuple(nullptr, nullptr, RecordStatus::Deleted));
+                kvp_resp_->Finish(std::make_tuple(
+                    nullptr, nullptr, RecordStatus::Deleted, 0));
             }
             return;
         }
@@ -1195,13 +1208,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
             }
             else
             {
                 kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
                                                   local_write.rec_.get(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  0));
             }
 
             ++rit->second.first;
@@ -1219,15 +1233,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
                                                   cc_scan_tuple->Record(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  cc_scan_tuple->key_ts_));
             }
             else
             {
-                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted ||
-                       cc_scan_tuple->rec_status_ ==
-                           RecordStatus::VersionUnknown);
-                kvp_resp_->Finish(std::make_tuple(
-                    cc_scan_tuple->Key(), nullptr, cc_scan_tuple->rec_status_));
+                assert(cc_scan_tuple->rec_status_ == RecordStatus::Deleted);
+                kvp_resp_->Finish(std::make_tuple(cc_scan_tuple->Key(),
+                                                  nullptr,
+                                                  cc_scan_tuple->rec_status_,
+                                                  cc_scan_tuple->key_ts_));
             }
 
             scan_next.scanner_->MoveNext();
@@ -1238,13 +1253,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             if (local_write.op_ == DmlOperation::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
-                    local_write.key_.get(), nullptr, RecordStatus::Deleted));
+                    local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
             }
             else
             {
                 kvp_resp_->Finish(std::make_tuple(local_write.key_.get(),
                                                   local_write.rec_.get(),
-                                                  RecordStatus::Normal));
+                                                  RecordStatus::Normal,
+                                                  0));
             }
 
             ++rit->second.first;
@@ -1255,17 +1271,25 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
 void TransactionExecution::ScanClose(size_t alias,
                                      const TxKey &end_key,
-                                     LockType lock_type, TableName &table_name)
+                                     LockType lock_type,
+                                     const TableName &table_name)
 {
     auto scan_it = scans_.find(alias);
+    if (scan_it == scans_.end())
+    {
+        void_resp_->Finish(void_);
+        return;
+    }
+
     assert(scan_it != scans_.end());
     CcScanner &scanner = *scan_it->second;
 
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
     if ((iso_level_ >= IsolationLevel::RepeatableRead ||
-         lock_type == LockType::WriteIntent) &&
-        scanner.IndexType() != ScanIndexType::Secondary)
+         lock_type == LockType::WriteIntent ||
+         scanner.IndexType() == ScanIndexType::Secondary) &&
+        protocol_ != CcProtocol::MVCC)
     {
         // drain out the scan tuple in the scan cache
         scanner.SetDrainCacheMode(true);
@@ -1297,7 +1321,8 @@ void TransactionExecution::ScanClose(size_t alias,
             rw_set_.AddRead(cc_scan_tuple->cce_addr_,
                             cc_scan_tuple->key_ts_,
                             protocol_,
-                            lock_type, table_name);
+                            lock_type,
+                            &table_name);
             scanner.MoveNext();
             cc_scan_tuple = scanner.Current();
         }
@@ -1390,14 +1415,6 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
     for (auto &[table_name, table_write_set] : wset)
     {
-        // Skip acquire write for secondary index table.
-        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-        if (pos != std::string::npos)
-        {
-            acquire_write.acquire_write_cnt_ -= table_write_set.size();
-            continue;
-        }
-
         for (auto &[key_ptr, write_entry] : table_write_set)
         {
             CcHandlerResult<AcquireKeyResult> &hres =
@@ -1406,7 +1423,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
             hres.Value().remote_ack_cnt_ = &acquire_write.remote_ack_cnt_;
             acquire_write.acquire_write_entries_.at(idx) = &write_entry;
             handler->AcquireWrite(table_name,
-                                  *write_entry.key_.get(),
+                                  *write_entry.key_,
                                   txid_,
                                   tx_term_,
                                   current_ts,
@@ -1932,6 +1949,10 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
+        // If the tx has finished validation, the read intentions/locks of the
+        // read-set keys have been cleared after validation. Post-processing
+        // only clears the write locks of the write-set keys.
+
         post_process.Reset(0, rw_set_.WriteSetSize());
 
         size_t idx = 0;
@@ -1944,31 +1965,14 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 CcHandlerResult<Void> &hres = post_process.write_results_[idx];
                 hres.Reset();
 
-                std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-                if (pos != std::string::npos)
-                {
-                    handler->CommitSecondaryKey(
-                        tx_number_.load(std::memory_order_relaxed),
-                        tx_term_,
-                        table_name,
-                        *key,
-                        write_entry.op_ == DmlOperation::Delete,
-                        commit_ts_,
-                        hres,
-                        protocol_);
-                }
-                else
-                {
-                    handler->PostWrite(
-                        tx_number_.load(std::memory_order_relaxed),
-                        tx_term_,
-                        commit_ts_,
-                        write_entry.cce_addr_,
-                        write_entry.rec_.get(),
-                        write_entry.op_ == DmlOperation::Delete,
-                        hres,
-                        protocol_);
-                }
+                handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   commit_ts_,
+                                   write_entry.cce_addr_,
+                                   write_entry.rec_.get(),
+                                   write_entry.op_ == DmlOperation::Delete,
+                                   hres,
+                                   protocol_);
 
                 ++idx;
             }
@@ -1976,12 +1980,9 @@ void TransactionExecution::Process(PostProcessOp &post_process)
     }
     else
     {
-        // If the tx has finished validation, the read intentions/locks of the
-        // read-set keys have been cleared after validation. Post-processing
-        // only clears the write locks of the write-set keys. If the tx failed
-        // during the acquire phase or was aborted before entering the commit
-        // phase, post-processing removes write intentions of write-set keys and
-        // clears read intentions/locks of read-set keys.
+        // If the tx failed during the acquire phase or was aborted before
+        // entering the commit phase, post-processing removes write intentions
+        // of write-set keys and clears read intentions/locks of read-set keys.
 
         post_process.Reset(read_intention_size, write_intention_size);
 
@@ -1991,14 +1992,6 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             rw_set_.WriteSet();
         for (const auto &[table_name, table_write_set] : wset)
         {
-            // skip secondary index table when postprocess of abort op since sk
-            // will not acquire write lock.
-            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-            if (pos != std::string::npos)
-            {
-                continue;
-            }
-
             for (const auto &[key, write_entry] : table_write_set)
             {
                 if (acquire_write_.results_[idx].IsError())

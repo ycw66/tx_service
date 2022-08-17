@@ -190,7 +190,6 @@ public:
         bool inclusive,
         uint8_t key_parts,
         const std::string &search_cond,
-        const txservice::TxKey &start_key,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
         bool scan_foward) override

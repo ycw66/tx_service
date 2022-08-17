@@ -49,7 +49,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
     notify_thread_ = std::thread(
         [this]
         {
-            LOG(INFO) << "replay service notify thread started";
+            // LOG(INFO) << "replay service notify thread started";
             brpc::Channel channel;
             while (!finish_.load(std::memory_order_acquire))
             {
@@ -63,13 +63,10 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                                !recover_tx_queue_.empty() ||
                                finish_.load(std::memory_order_acquire);
                     });
-                if (!replay_log_queue_.empty() || !recover_tx_queue_.empty())
-                {
-                    LOG(INFO) << "replay service notify thread wakes up "
-                              << !replay_log_queue_.empty() << " "
-                              << !recover_tx_queue_.empty() << " "
-                              << finish_.load(std::memory_order_acquire);
-                }
+                // LOG(INFO) << "replay service notify thread wakes up "
+                //           << !replay_log_queue_.empty() << " "
+                //           << !recover_tx_queue_.empty() << " "
+                //           << finish_.load(std::memory_order_acquire);
                 if (finish_.load(std::memory_order_acquire))
                 {
                     break;
@@ -195,8 +192,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     if (tx_status ==
                         remote::CheckTxStatusResponse_TxStatus_ONGOING)
                     {
-                        LOG(INFO) << "The tx " << recover_tx_info.tx_number_
-                                  << " is ongoing. Does nothing for recovery.";
+                        // LOG(INFO) << "The tx " << recover_tx_info.tx_number_
+                        //           << " is ongoing. Does nothing for
+                        //           recovery.";
                         continue;
                     }
                     else if (recover_tx_info.key_write_lock_count_ == 0 ||

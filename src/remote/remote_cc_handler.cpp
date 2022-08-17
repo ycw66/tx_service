@@ -94,7 +94,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
 }
 
 void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
-                                                   uint64_t tx_number,
+                                                   TxNumber tx_number,
                                                    int64_t tx_term,
                                                    uint64_t commit_ts,
                                                    const CcEntryAddr &cce_addr,
@@ -131,8 +131,10 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
     {
         // The commit ts is 0, if the post-write request is used to clear the
         // write lock when the tx aborts.
-        assert(record != nullptr);
-        record->Serialize(*post_commit->mutable_record());
+        if (record != nullptr)
+        {
+            record->Serialize(*post_commit->mutable_record());
+        }
     }
 
     post_commit->set_commit_ts(commit_ts);
@@ -381,7 +383,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     case KeyType::NegativeInf:
         scan_open->set_neg_inf(true);
         break;
-    case KeyType::PostiveInf:
+    case KeyType::PositiveInf:
         scan_open->set_pos_inf(true);
         break;
     default:
@@ -438,50 +440,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hd_res);
-}
-
-void txservice::remote::RemoteCcHandler::CommitSecondaryKey(
-    uint32_t src_node_id,
-    TxNumber txn,
-    int64_t tx_term,
-    const TableName &table_name,
-    const TxKey &secondary_key,
-    uint32_t key_shard_code,
-    bool is_delete,
-    uint64_t ts,
-    CcHandlerResult<Void> &hd_res,
-    CcProtocol protocol)
-{
-    /*message CommitSkRequest
-    {
-        uint32 src_node_id = 1;
-        string tablename = 2;
-        bytes secondary_key = 3;
-        uint32 key_shard_code = 4;
-        uint64 ts = 5;
-        bool is_deleted = 6;
-        CcProtocolType protocol = 7;
-    }*/
-
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_CommitSkRequest);
-    send_msg.set_tx_number(txn);
-    send_msg.set_tx_term(tx_term);
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
-
-    CommitSkRequest *commit_sk = send_msg.mutable_commit_sk_req();
-    commit_sk->set_src_node_id(src_node_id);
-    commit_sk->set_tablename(table_name);
-    commit_sk->set_protocol(ToRemoteType::ConvertProtocol(protocol));
-    secondary_key.Serialize(*commit_sk->mutable_secondary_key());
-
-    commit_sk->set_key_shard_code(key_shard_code);
-    commit_sk->set_ts(ts);
-    commit_sk->set_is_deleted(is_delete);
-
-    stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::FaultInject(

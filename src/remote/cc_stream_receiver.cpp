@@ -23,7 +23,6 @@ thread_local CcRequestPool<RemoteRead> read_pool_;
 thread_local CcRequestPool<RemoteReadOutside> read_outside_pool_;
 thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
-thread_local CcRequestPool<RemoteCommitSk> commit_sk_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 
@@ -768,15 +767,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         msg_pool_.enqueue(std::move(msg));
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_CommitSkRequest:
-    {
-        RemoteCommitSk *commit_sk_req = commit_sk_pool_.NextRequest();
-        TX_TRACE_ASSOCIATE(msg.get(), commit_sk_req);
-        commit_sk_req->Reset(std::move(msg));
-        local_shards_.EnqueueCcRequest(commit_sk_req->KeyShardCode(),
-                                       commit_sk_req);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest:

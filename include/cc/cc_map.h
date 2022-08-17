@@ -6,6 +6,7 @@
 #include "cc/cc_req_base.h"
 #include "ccm_scanner.h"
 #include "tx_key.h"
+#include "tx_operation_result.h"
 #include "type.h"
 
 namespace txservice
@@ -28,7 +29,6 @@ struct ScanOpenBatchCc;
 struct ScanNextBatchCc;
 struct NegotiateCc;
 struct CkptScanCc;
-struct CommitSkCc;
 struct CkptUpdateCc;
 struct CkptTs;
 struct ReplayLogCc;
@@ -73,7 +73,6 @@ public:
     virtual bool Execute(ScanNextBatchCc &req) = 0;
     virtual bool Execute(remote::RemoteScanOpen &req) = 0;
     virtual bool Execute(remote::RemoteScanNextBatch &req) = 0;
-    virtual bool Execute(CommitSkCc &req) = 0;
     virtual bool Execute(CkptScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
@@ -138,7 +137,8 @@ public:
                                 uint32_t cce_node_group_id,
                                 RecordStatus payload_status,
                                 int64_t ng_term,
-                                ScanType scan_type);
+                                ScanType scan_type,
+                                bool is_sk = false);
 
     bool ReadLockCce(LruEntry *cce,
                      CcRequestBase &req,
@@ -173,6 +173,14 @@ protected:
      * is moved.
      */
     void MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id);
+
+    bool AcquireWriteLockOnExistingCcEntry(
+        AcquireCc &req,
+        bool resume,
+        CcHandlerResult<AcquireKeyResult> *hd_res,
+        AcquireKeyResult &acquire_key_result,
+        int64_t ng_term,
+        LruEntry &cc_entry);
 
     uint64_t schema_ts_{1};
 };

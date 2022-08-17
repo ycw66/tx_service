@@ -622,7 +622,7 @@ void txservice::remote::RemoteScanOpen::Reset(
     else if (scan_open.start_key_case() ==
              ScanOpenRequest::StartKeyCase::kPosInf)
     {
-        key_type_ = KeyType::PostiveInf;
+        key_type_ = KeyType::PositiveInf;
         start_key_str_ = nullptr;
     }
     else
@@ -763,58 +763,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     }
 
     is_ckpt_delta_ = scan_next.ckpt();
-
-    input_msg_ = std::move(input_msg);
-
-    if (hd_ == nullptr)
-    {
-        hd_ = Sharder::Instance().GetCcStreamSender();
-    }
-}
-
-txservice::remote::RemoteCommitSk::RemoteCommitSk()
-{
-    res_ = &cc_res_;
-
-    output_msg_.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
-
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
-    {
-        output_msg_.set_tx_number(input_msg_->tx_number());
-        output_msg_.set_tx_term(input_msg_->tx_term());
-        output_msg_.set_handler_addr(input_msg_->handler_addr());
-
-        PostprocessResponse *resp = output_msg_.mutable_post_resp();
-        resp->set_error_code(res->ErrorCode());
-
-        const CommitSkRequest &req = input_msg_->commit_sk_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
-        hd_->RecycleCcMsg(std::move(input_msg_));
-    };
-}
-
-void txservice::remote::RemoteCommitSk::Reset(
-    std::unique_ptr<CcMessage> input_msg)
-{
-    assert(input_msg->has_commit_sk_req());
-
-    cc_res_.Reset();
-
-    output_msg_.clear_tx_number();
-    output_msg_.clear_handler_addr();
-    output_msg_.clear_read_resp();
-
-    const CommitSkRequest &req = input_msg->commit_sk_req();
-
-    CommitSkCc::Reset(&req.tablename(),
-                      &req.secondary_key(),
-                      input_msg->tx_number(),
-                      req.key_shard_code(),
-                      req.ts(),
-                      req.is_deleted(),
-                      &cc_res_,
-                      ToLocalType::ConvertProtocol(req.protocol()));
 
     input_msg_ = std::move(input_msg);
 

@@ -166,7 +166,7 @@ public:
                     // The floor entry's key is equal to the insert key. If the
                     // key is deleted, the insert becomes an update. Or the
                     // insert is aborted due to the duplidate key conflict.
-                    if (cce_ptr->payload_status_ != RecordStatus::Deleted)
+                    if (cce_ptr->payload_status_ == RecordStatus::Deleted)
                     {
                         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                         ng_term,
@@ -206,12 +206,12 @@ public:
         // Cce ptr either points to the cc entry whose gap will accommodate the
         // new insert, or the cc entry whose key will be updated/deleted.
         CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
-        const TxId *txid = req.Txid();
 
         if (cce_addr.CcePtr() == 0)
         {
             // This is an insert. The new insert results in an insert entry in
             // the intention set of the preceding key's gap.
+            const TxId *txid = req.Txid();
 
             auto ins_it = cc_entry.insert_intention_set_.find(target_key);
             if (ins_it != cc_entry.insert_intention_set_.end())
@@ -244,115 +244,8 @@ public:
         }
         else
         {
-            int64_t tx_term = req.TxTerm();
-
-            // On execution resumption, the write lock has been acquired when
-            // being unblocked.
-            bool lock_success = resume ? true
-                                       : cc_entry.key_lock_.AcquireWriteLock(
-                                             &req, tx_term, req.Protocol());
-
-            if (lock_success)
-            {
-                shard_->UpsertLockHoldingTx(
-                    req.Txn(), req.TxTerm(), cce_ptr, true);
-                // for mvcc
-                uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
-                cc_entry.wlock_ts_ = lock_ts;
-
-                // Updates last_vali_ts after successfully acquiring the write
-                // lock such that it is no smaller than the current time of
-                // the shard. The net effect is that the tx acquiring the write
-                // lock is forced not to commit at a time earlier than the
-                // clock of this cc node, even if the clock of the tx's
-                // coordinator node drifts and falls behind. Checkpointing
-                // relies on this property to avoid picking a checkpoint ts in
-                // this shard that may overlap with the ongoing tx.
-                acquire_key_result.last_vali_ts_ =
-                    std::max(cc_entry.last_read_ts_, lock_ts);
-                acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
-
-                hd_res->SetFinished();
-            }
-            else
-            {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    &req,
-                    "AcquireWriteLock.Fail",
-                    reinterpret_cast<LruEntry *>(&cc_entry),
-                    [&req]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(req.Txn()))
-                            .append(",\"term\":")
-                            .append(std::to_string(req.TxTerm()));
-                    });
-                const std::unordered_set<TxNumber> &read_locks =
-                    cc_entry.key_lock_.ReadLocks();
-                if (read_locks.size() > 0)
-                {
-                    TX_TRACE_DUMP_WITH_CONTEXT(
-                        &read_locks,
-                        [&cc_entry]() -> std::string
-                        {
-                            return std::string("\"CcEntry\":")
-                                .append(FMT_POINTER_TO_UINT64T(&cc_entry))
-                                .append(
-                                    ",\"associate\":\"key_lock_.read_locks\"");
-                        });
-                    // If the request fails to acquire the write lock because of
-                    // read locks, checks each read lock and recovers if needed.
-                    for (const auto &read_tx : read_locks)
-                    {
-                        shard_->CheckRecoverTx(
-                            read_tx, req.NodeGroupId(), ng_term);
-                    }
-                }
-                else
-                {
-                    TX_TRACE_DUMP_WITH_CONTEXT(
-                        cc_entry.key_lock_.WriteLockTx(),
-                        [&cc_entry]() -> std::string
-                        {
-                            return std::string("\"CcEntry\":")
-                                .append(FMT_POINTER_TO_UINT64T(&cc_entry))
-                                .append(
-                                    ",\"associate\":\"key_lock_.write_lock\"");
-                        });
-                    // The request fails because of write-write conflicts.
-                    assert(cc_entry.key_lock_.HasWriteLock());
-                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
-                                           req.NodeGroupId(),
-                                           ng_term);
-                }
-
-                if (req.Protocol() == CcProtocol::OCC ||
-                    req.Protocol() == CcProtocol::MVCC)
-                {
-                    // For OCC/MVCC, a conflict causes the tx to abort
-                    // immediately.
-                    hd_res->SetError(1);
-                    return true;
-                }
-                else
-                {
-                    // For 2PL, a conflict blocks the tx by putting it into the
-                    // lock's blocking queue.
-
-                    uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-                    if (tx_node != req.NodeGroupId())
-                    {
-                        // If the acquire request comes from a remote node,
-                        // sends acknowledgement to the sender when the request
-                        // is blocked.
-                        remote::RemoteAcquire &remote_req =
-                            static_cast<remote::RemoteAcquire &>(req);
-                        remote_req.Acknowledge();
-                    }
-
-                    return false;
-                }
-            }
+            return AcquireWriteLockOnExistingCcEntry(
+                req, resume, hd_res, acquire_key_result, ng_term, cc_entry);
         }
 
         return true;
@@ -372,6 +265,12 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
+
+        CODE_FAULT_INJECTOR("delay_release_write_lock_on_pk", {
+            // throw back to cc_queue
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+        });
 
         const CcEntryAddr &cce_addr = *req.CceAddr();
 
@@ -487,7 +386,8 @@ public:
             CcEntry<KeyT, ValueT> &cce =
                 *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-            if (cce.key_lock_.WriteLockTx() != txn)
+            if (cce.key_lock_.HasWriteLock() &&
+                cce.key_lock_.WriteLockTx() != txn)
             {
                 req.Result()->SetFinished();
                 return true;
@@ -518,15 +418,15 @@ public:
                     cce.payload_->Deserialize(payload_str->data(), offset);
                 }
                 shard_->mem_usage_ += cce.PayloadMemUsage();
-                cce.payload_status_ =
-                    is_del ? RecordStatus::Deleted : RecordStatus::Normal;
-
-                TryInsertCkptList(&cce);
 
                 size_t key_size = cce.key_->MemUsage();
                 size_t payload_size = cce.PayloadMemUsage();
                 cce.parent_map_->shard_->UpdateEstimateLogSize(
                     &cce, key_size, payload_size);
+
+                cce.payload_status_ =
+                    is_del ? RecordStatus::Deleted : RecordStatus::Normal;
+                TryInsertCkptList(&cce);
             }
 
             req.Result()->SetFinished();
@@ -1162,16 +1062,13 @@ public:
             return true;
         }
 
-        // validate rset cce
-        CcEntry<KeyT, ValueT> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-
-        // read_entry.version_ts_: cc_entry.commit_ts_ before validation
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
-        // the txm.commit_ts_
         uint64_t commit_ts = req.CommitTs();
         TxNumber txn = req.Txn();
+
+        CcEntry<KeyT, ValueT> &cc_entry =
+            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
         if ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
             (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_))
@@ -1210,7 +1107,8 @@ public:
                 cc_entry.last_read_ts_ =
                     std::max(cc_entry.last_read_ts_, commit_ts);
 
-                if (cc_entry.key_lock_.HasWriteLock())
+                if (cc_entry.key_lock_.HasWriteLock() &&
+                    txn != cc_entry.key_lock_.HasWriteLock())
                 {
                     int64_t ng_term =
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
@@ -1538,15 +1436,28 @@ public:
             // TODO: TxExecution and runtime also use this new value as read
             // result to avoid future PostRead abort.
 
-            if (req.Record() != nullptr)
+            if (req.Isolation() == IsolationLevel::ReadCommitted &&
+                cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp())
             {
-                ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                *typed_rec = *(cce->payload_);
+                cce->key_lock_.InsertBlockingQueue(&req, req.TxTerm());
+
+                // After inserting to blocking queue, the execution of current
+                // ReadCc request should stop.
+                return false;
             }
             else
             {
-                assert(req.RecordBlob() != nullptr);
-                cce->payload_->Serialize(*req.RecordBlob());
+                // safe to read the record
+                if (req.Record() != nullptr)
+                {
+                    ValueT *typed_rec = static_cast<ValueT *>(req.Record());
+                    *typed_rec = *(cce->payload_);
+                }
+                else
+                {
+                    assert(req.RecordBlob() != nullptr);
+                    cce->payload_->Serialize(*req.RecordBlob());
+                }
             }
         }
 
@@ -2032,7 +1943,7 @@ public:
         case KeyType::NegativeInf:
             look_key = NegativeInfinity<KeyT>::Instance();
             break;
-        case KeyType::PostiveInf:
+        case KeyType::PositiveInf:
             look_key = PositiveInfinity<KeyT>::Instance();
             break;
         default:
@@ -2400,28 +2311,6 @@ public:
         return true;
     }
 
-    /// <summary>
-    /// CommitSkCc only applies to the cc map of a secondary index.
-    /// </summary>
-    /// <param name="req"></param>
-    bool Execute(CommitSkCc &req) override
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            (txservice::CcMap *) this,
-            &req,
-            [&req]() -> std::string
-            {
-                return std::string("\"cc_map_type\":\"template_cc_map\"")
-                    .append(",\"tx_number\":")
-                    .append(std::to_string(req.Txn()))
-                    .append(",\"term\":")
-                    .append("0");
-            });
-        TX_TRACE_DUMP(&req);
-
-        return true;
-    }
-
     bool Execute(CkptScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2613,9 +2502,9 @@ public:
                     // If the record in the log has a commit ts greater than
                     // that of the cc entry and the cc entry has a write
                     // lock, the lock's owner must be the tx that commits
-                    // the log record. TODO: it is safer if we ship the tx
-                    // ID with the recovering message and match it against
-                    // the lock holder.
+                    // the log record.
+                    // TODO: it is safer if we ship the tx ID with the
+                    // recovering message and match it against the lock holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
                     shard_->DeleteLockHoldingTx(txn, cce, true);
@@ -3317,7 +3206,7 @@ protected:
     std::pair<Iterator, ScanType> BackwardScanStart(const KeyT &key,
                                                     bool inclusive)
     {
-        if (key.Type() == KeyType::PostiveInf)
+        if (key.Type() == KeyType::PositiveInf)
         {
             auto start_it = End();
             --start_it;

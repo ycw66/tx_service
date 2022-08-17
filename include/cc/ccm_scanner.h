@@ -404,13 +404,13 @@ public:
         }
     }
 
-    void SetDrainCacheMode(bool drain_cache_mode)
+    void SetDrainCacheMode(bool drain_cache_mode) override
     {
         std::unique_lock<std::mutex> lock(mutex_);
         drain_cache_mode_ = drain_cache_mode;
     }
 
-    bool GetDrainCacheMode()
+    bool GetDrainCacheMode() override
     {
         std::unique_lock<std::mutex> lock(mutex_);
         return drain_cache_mode_;

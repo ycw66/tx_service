@@ -61,9 +61,9 @@ public:
                  uint64_t read_ts,
                  CcProtocol proto,
                  LockType lock_type,
-                 TableName table_name)
+                 const TableName *table_name)
     {
-        auto table_it = rset_.try_emplace(table_name);
+        auto table_it = rset_.try_emplace(*table_name);
         auto [it, inserted] = table_it.first->second.try_emplace(
             cce_addr, read_ts, proto, lock_type);
         if (!inserted)

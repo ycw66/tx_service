@@ -405,34 +405,6 @@ private:
     friend class ::txservice::SkCcMap;
 };
 
-struct RemoteCommitSk : public CommitSkCc
-{
-public:
-    RemoteCommitSk();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
-
-    uint64_t handler_addr()
-    {
-        if (input_msg_)
-        {
-            return input_msg_->handler_addr();
-        }
-        else
-        {
-            return 0;
-        }
-    }
-
-private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
-    CcStreamSender *hd_{nullptr};
-    CcHandlerResult<Void> cc_res_{nullptr};
-
-    template <typename SkT, typename PkT>
-    friend class ::txservice::SkCcMap;
-};
-
 struct RemoteFaultInjectCC : public FaultInjectCC
 {
 public:

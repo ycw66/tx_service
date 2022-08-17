@@ -90,6 +90,8 @@ public:
 
     void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
+    void InsertBlockingQueue(CcRequestBase *cc_req, int64_t tx_term);
+
     bool IsEmpty() const;
 
     TxNumber WriteLockTx() const;
@@ -163,17 +165,24 @@ private:
     // the cache replacement algorithm from kicking out the item's concurrency
     // control (cc) entry from the cc map before the tx finishes.
     std::unordered_set<TxNumber> read_intentions_;
-    // Tx's who have acquired read locks and their terms
+    // Tx's who have acquired read locks
     std::unordered_set<TxNumber> read_locks_;
     TxNumber write_lock_tx_{0};
     bool is_write_lock_empty_{true};
     TxNumber write_intent_tx_{0};
     bool is_write_intent_empty_{true};
-    // blocking_queue_ stores the requests which acquire lock/intent failed due
-    // to conflict. There are three types of lock requests can be in blocking
-    // queue: Write Lock(WL), Write Intent(WI) and Read Lock(RL). The conflict
+    // blocking_queue_ stores the requests that 1) want to acquire lock/intent
+    // but failed due to conflict, or 2) want to read a pk record whose commit
+    // ts is less than the commit ts of the corresponding secondary index the
+    // transaction just read, under which circumstance the pk read should wait
+    // until the pk is updated to maintain the consistency of pk-sk mapping.
+    // There are four types of lock requests can be in blocking queue: Write
+    // Lock(WL), Write Intent(WI), Read Lock(RL) and No Lock(NL). The conflict
     // map is that WL conflicts with WL/WI/RL, WI conflicts with WL/WI and RL
-    // conflicts with WL.
+    // conflicts with WL. NL denotes a pk read request under read committed
+    // isolation level. NL requests are always inserted to the beginning of
+    // blocking_queue_ because it will not introduce any conflict with other
+    // tansactions.
     CircularQueue<LockQueueEntry> blocking_queue_;
 
     template <typename KeyT, typename ValueT>

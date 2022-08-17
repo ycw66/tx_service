@@ -250,7 +250,7 @@ private:
     void ScanClose(size_t alias,
                    const TxKey &end_key,
                    LockType lock_type,
-                   TableName &table_name);
+                   const TableName &table_name);
 
     void Update(const TableName &table_name,
                 TxKey::Uptr key,
@@ -345,7 +345,8 @@ private:
     // Response whose returned result is bool
     TxResult<bool> *bool_resp_;
     // Scan result
-    TxResult<std::tuple<const TxKey *, const TxRecord *, RecordStatus>>
+    TxResult<
+        std::tuple<const TxKey *, const TxRecord *, RecordStatus, uint64_t>>
         *kvp_resp_;
     // Scan open result
     TxResult<size_t> *uint64_resp_;

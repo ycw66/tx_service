@@ -1,8 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <memory>  // make_shared
 #include <set>
+#include <string>
+#include <unordered_set>
 
 #include "secondary_key.h"
 #include "template_cc_map.h"
@@ -105,12 +108,211 @@ public:
 
     bool Execute(AcquireCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        CcHandlerResult<AcquireKeyResult> *hd_res = req.Result();
+        AcquireKeyResult &acquire_key_result = hd_res->Value();
+        CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
+        bool resume = false;
+        const SecondaryKey<SkT, PkT> *target_key = nullptr;
+        SecondaryKey<SkT, PkT> decoded_key;
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireCc", {
+            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireCc";
+            ng_term = -1;
+        });
+        if (ng_term < 0)
+        {
+            hd_res->SetError(-1);
+            return true;
+        }
+
+        if (req.CcePtr() != nullptr)
+        {
+            // The request was blocked before and is now unblocked.
+            resume = true;
+            cce_ptr = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                req.CcePtr());
+        }
+        else
+        {
+            // First time the request is processed.
+
+            const TxKey *req_key = req.Key();
+            if (req_key != nullptr)
+            {
+                target_key =
+                    static_cast<const SecondaryKey<SkT, PkT> *>(req_key);
+            }
+            else
+            {
+                const std::string *key_str = req.KeyStr();
+
+                assert(key_str != nullptr);
+
+                size_t offset = 0;
+                decoded_key.Deserialize(
+                    key_str->data(), offset, &compound_schema_);
+                target_key = &decoded_key;
+            }
+
+            if (req.IsInsert())
+            {
+                // Finds the greatest cc entry whose key is less than or equal
+                // to the input key. If the map is empty, the floor key is
+                // negative infinity.
+
+                cce_ptr =
+                    std::get<2>(*FowardScanStart(*target_key, true).first);
+
+                if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
+                {
+                    // The floor entry's key is equal to the insert key. If the
+                    // key is deleted, the insert becomes an update. Or the
+                    // insert is aborted due to the duplidate key conflict.
+                    if (cce_ptr->payload_status_ == RecordStatus::Deleted)
+                    {
+                        cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
+                                        ng_term,
+                                        req.NodeGroupId());
+                    }
+                    else
+                    {
+                        // Inserts a duplicate key.
+                        hd_res->SetError(1);
+                        return true;
+                    }
+                }
+
+                req.SetCcePtr(cce_ptr);
+            }
+            else
+            {
+                cce_ptr = FindEmplace(
+                    target_key->SKey(), target_key->PKey(), req.Ts());
+
+                if (cce_ptr == nullptr)
+                {
+                    // The acquire request needs a new cc entry but the cc map
+                    // has reached the maximal capacity. Blocks the request by
+                    // putting it back to the cc request queue.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+
+                assert(cce_ptr != nullptr);
+                cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
+                                ng_term,
+                                req.NodeGroupId());
+                req.SetCcePtr(cce_ptr);
+            }
+        }
+
+        // Cce ptr either points to the cc entry whose gap will accommodate the
+        // new insert, or the cc entry whose key will be updated/deleted.
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> &cc_entry = *cce_ptr;
+
+        if (cce_addr.CcePtr() == 0)
+        {
+            // TODO: Insert branch needs rethinking, currently useless
+        }
+        else
+        {
+            return AcquireWriteLockOnExistingCcEntry(
+                req, resume, hd_res, acquire_key_result, ng_term, cc_entry);
+        }
+
         return true;
     }
 
     bool Execute(PostWriteCc &req) override
     {
-        return true;
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        const CcEntryAddr &cce_addr = *req.CceAddr();
+        assert(cce_addr.CcePtr() != 0);
+
+        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
+                                                 cce_addr.Term()))
+        {
+            req.Result()->SetError(-1);
+            return true;
+        }
+
+        TxNumber txn = req.Txn();
+        uint64_t commit_ts = req.CommitTs();
+        bool is_del = req.IsDeleted();
+
+        if (cce_addr.InsertPtr() != 0)
+        {
+            // TODO: insert branch
+            return true;
+        }
+        else
+        {
+            // upsert and delete branch.
+            assert(cce_addr.CcePtr() != 0);
+
+            auto cce = reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                cce_addr.CcePtr());
+
+            if (cce->key_lock_.HasWriteLock() &&
+                cce->key_lock_.WriteLockTx() != txn)
+            {
+                req.Result()->SetFinished();
+                return true;
+            }
+
+            if (commit_ts > 0)
+            {
+                // for mvcc
+                if (req.Protocol() == CcProtocol::MVCC)
+                {
+                    uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
+                    cce->KickOutArchiveRecords(recycle_ts);
+                    size_t added_mem_usage = cce->ArchiveBeforeUpdate(false);
+                    shard_->mem_usage_ += added_mem_usage;
+                }
+
+                // sk entry does not need to install the payload since it has
+                // been installed in AcquireCc(just two pointers)
+
+                cce->commit_ts_ = commit_ts;
+                cce->payload_status_ =
+                    is_del ? RecordStatus::Deleted : RecordStatus::Normal;
+                TryInsertCkptList(cce);
+            }
+
+            req.Result()->SetFinished();
+            cce->key_lock_.ReleaseWriteLock(req.Txn(), shard_);
+            cce->wlock_ts_ = 0;
+            shard_->DeleteLockHoldingTx(req.Txn(), cce, true);
+            return true;
+        }
     }
 
     bool Execute(AcquireAllCc &req) override
@@ -125,11 +327,144 @@ public:
 
     bool Execute(PostReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        auto hd_res = req.Result();
+        const CcEntryAddr &cce_addr = *req.CceAddr();
+        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
+                                                 cce_addr.Term()))
+        {
+            hd_res->SetError(-1);
+            return true;
+        }
+
+        uint64_t key_ts = req.KeyTs();
+        uint64_t gap_ts = req.GapTs();
+        uint64_t commit_ts = req.CommitTs();
+        TxNumber txn = req.Txn();
+
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
+            reinterpret_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
+                cce_addr.CcePtr());
+
+        if ((key_ts > 0 && key_ts != cce->commit_ts_) ||
+            (gap_ts > 0 && gap_ts != cce->gap_commit_ts_))
+        {
+            // 2PL is a blocking protocol. Once a read lock is acquired, no one
+            // can possibly change the key. There is no validation step under
+            // MVCC protocol.(MVCC using history versions to ensure repeatable
+            // read.) So, this branch is only reachable for OCC protocol
+            // validating version stability.
+            assert(req.Protocol() == CcProtocol::OCC);
+
+            hd_res->SetError(1);  // broken repeatable read, set error.
+        }
+        else if (req.Protocol() == CcProtocol::OCC)
+        {
+            std::vector<TxId> &conflicting_txs = hd_res->Value();
+
+            if (gap_ts > 0)
+            {
+                cce->gap_last_read_ts_ =
+                    std::max(cce->gap_last_read_ts_, commit_ts);
+
+                conflicting_txs.reserve(cce->insert_intention_set_.size() + 1);
+
+                for (auto it = cce->insert_intention_set_.begin();
+                     it != cce->insert_intention_set_.end();
+                     ++it)
+                {
+                    conflicting_txs.emplace_back(it->second->tx_id_);
+                }
+            }
+
+            if (key_ts > 0)
+            {
+                cce->last_read_ts_ = std::max(cce->last_read_ts_, commit_ts);
+
+                if (cce->key_lock_.HasWriteLock() &&
+                    txn != cce->key_lock_.WriteLockTx())
+                {
+                    int64_t ng_term =
+                        Sharder::Instance().LeaderTerm(req.NodeGroupId());
+                    shard_->CheckRecoverTx(cce->key_lock_.WriteLockTx(),
+                                           req.NodeGroupId(),
+                                           ng_term);
+
+                    conflicting_txs.emplace_back(cce->key_lock_.WriteLockTx());
+                }
+            }
+
+            hd_res->SetFinished();
+        }
+        else if (req.Protocol() == CcProtocol::Locking ||
+                 req.Protocol() == CcProtocol::MVCC)
+        {
+            // For 2PL, read validation is equivalent to releasing the read
+            // lock. In contrast to the conventional 2PL where read locks
+            // are released after logging, our protocol releases the read
+            // lock before the log is persisted. This difference demands
+            // that future write transactions modifying this key cannot commit
+            // prior to this read tx. This is achieved via updating the
+            // last_read_ts field of the cc entry, which pushes future
+            // transactions' commit timestamps larger than the largest commit
+            // timestamp of all read transactions that have released the read
+            // lock on the key.
+
+            if (gap_ts > 0)
+            {
+                cce->gap_last_read_ts_ =
+                    std::max(cce->gap_last_read_ts_, commit_ts);
+            }
+
+            if (key_ts > 0)
+            {
+                cce->last_read_ts_ = std::max(cce->last_read_ts_, commit_ts);
+            }
+
+            // For 2PL, releasing read locks may spend extra cycles to
+            // process unblocked requests. Sets the handler's finish signal
+            // before releasing read locks, so that if blocking requests come
+            // from a different core or a remote node, their tx's can move
+            // forward immediately.
+            hd_res->SetFinished();
+        }
+
+        cce->key_lock_.ClearTx(txn, shard_);
+        cce->gap_lock_.ClearTx(txn, shard_);
+
+        // ReadCc in sk_cc_map only acquire read lock(no write intention)
+        shard_->DeleteLockHoldingTx(txn, cce, false);
+
         return true;
     }
 
     bool Execute(ReadCc &req) override
     {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"sk_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append(std::to_string(req.TxTerm()));
+            });
+        TX_TRACE_DUMP(&req);
+
         auto hd_res = req.Result();
 
         uint32_t ng_id = req.KeyShardCode() >> 10;
@@ -255,7 +590,8 @@ public:
             return true;
         }
 
-        const SkT *look_sk = static_cast<const SkT *>(req.start_key_);
+        const SecondaryKey<SkT, PkT> *look_key =
+            static_cast<const SecondaryKey<SkT, PkT> *>(req.start_key_);
         TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *typed_cache =
             static_cast<
                 TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *>(
@@ -276,8 +612,8 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_sk, req.inclusive_)
-                    : BackwardScanStart(*look_sk, req.inclusive_);
+                    ? FowardScanStart(*look_key, req.inclusive_)
+                    : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
             cce = std::get<2>(*scan_ccm_it);
@@ -313,19 +649,19 @@ public:
             }
             req.SetCcePtr(cce);
 
-            // sk only needs to acquire read intention
             if (!ConditionalReadLockCce(cce,
                                         req,
-                                        LockType::ReadIntent,
+                                        LockType::ReadLock,
                                         req.TxTerm(),
                                         req.NodeGroupId(),
                                         cce->payload_status_,
                                         term,
-                                        start_pair.second))
+                                        start_pair.second,
+                                        true))
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
-                    "AcquireReadIntent.Fail",
+                    "AcquireReadLock.Fail",
                     reinterpret_cast<LruEntry *>(cce),
                     [&req]() -> std::string
                     {
@@ -361,16 +697,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntentOnKey.Fail",
+                        "AcquireReadLockOnKey.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -405,16 +742,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntentOnKey.Fail",
+                        "AcquireReadLockOnKey.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -504,16 +842,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntent.Fail",
+                        "AcquireReadLock.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -543,16 +882,17 @@ public:
 
                     if (!ConditionalReadLockCce(cce,
                                                 req,
-                                                LockType::ReadIntent,
+                                                LockType::ReadLock,
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                ScanType::ScanGap))
+                                                ScanType::ScanGap,
+                                                true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
-                            "AcquireReadIntentOnGap.Fail",
+                            "AcquireReadLock.Fail",
                             reinterpret_cast<LruEntry *>(cce),
                             [&req]() -> std::string
                             {
@@ -577,16 +917,17 @@ public:
 
                     if (!ConditionalReadLockCce(cce,
                                                 req,
-                                                LockType::ReadIntent,
+                                                LockType::ReadLock,
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                ScanType::ScanBoth))
+                                                ScanType::ScanBoth,
+                                                true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
-                            "AcquireReadIntentOnKey.Fail",
+                            "AcquireReadLock.Fail",
                             reinterpret_cast<LruEntry *>(cce),
                             [&req]() -> std::string
                             {
@@ -629,23 +970,22 @@ public:
             return true;
         }
 
-        const SkT *look_sk;
-        SkT sk_obj;
+        const SecondaryKey<SkT, PkT> *look_key;
+        SecondaryKey<SkT, PkT> sk_obj;
 
         switch (req.key_type_)
         {
         case KeyType::NegativeInf:
-            look_sk = NegativeInfinity<SkT>::Instance();
+            look_key = NegativeInfinity<SecondaryKey<SkT, PkT>>::Instance();
             break;
-        case KeyType::PostiveInf:
-            look_sk = PositiveInfinity<SkT>::Instance();
+        case KeyType::PositiveInf:
+            look_key = PositiveInfinity<SecondaryKey<SkT, PkT>>::Instance();
             break;
         default:
             size_t offset = 0;
-            sk_obj.Deserialize(req.start_key_str_->data(),
-                               offset,
-                               compound_schema_.sk_schema_.get());
-            look_sk = &sk_obj;
+            sk_obj.Deserialize(
+                req.start_key_str_->data(), offset, &compound_schema_);
+            look_key = &sk_obj;
             break;
         }
 
@@ -669,8 +1009,8 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_sk, req.inclusive_)
-                    : BackwardScanStart(*look_sk, req.inclusive_);
+                    ? FowardScanStart(*look_key, req.inclusive_)
+                    : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
             cce = std::get<2>(*scan_ccm_it);
@@ -707,16 +1047,17 @@ public:
             req.SetCcePtr(cce, shard_->LocalCoreId());
             if (!ConditionalReadLockCce(cce,
                                         req,
-                                        LockType::ReadIntent,
+                                        LockType::ReadLock,
                                         req.TxTerm(),
                                         req.NodeGroupId(),
                                         cce->payload_status_,
                                         term,
-                                        start_pair.second))
+                                        start_pair.second,
+                                        true))
             {
                 TX_TRACE_ACTION_WITH_CONTEXT(
                     &req,
-                    "AcquireReadIntent.Fail",
+                    "AcquireReadLock.Fail",
                     reinterpret_cast<LruEntry *>(cce),
                     [&req]() -> std::string
                     {
@@ -758,16 +1099,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntentOnKey.Fail",
+                        "AcquireReadLockOnKey.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -809,16 +1151,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntentOnKey.Fail",
+                        "AcquireReadLockOnKey.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -900,16 +1243,17 @@ public:
 
                 if (!ConditionalReadLockCce(cce,
                                             req,
-                                            LockType::ReadIntent,
+                                            LockType::ReadLock,
                                             req.TxTerm(),
                                             req.NodeGroupId(),
                                             cce->payload_status_,
                                             term,
-                                            ScanType::ScanBoth))
+                                            ScanType::ScanBoth,
+                                            true))
                 {
                     TX_TRACE_ACTION_WITH_CONTEXT(
                         &req,
-                        "AcquireReadIntentOnKey.Fail",
+                        "AcquireReadLockOnKey.Fail",
                         reinterpret_cast<LruEntry *>(cce),
                         [&req]() -> std::string
                         {
@@ -938,16 +1282,17 @@ public:
 
                     if (!ConditionalReadLockCce(cce,
                                                 req,
-                                                LockType::ReadIntent,
+                                                LockType::ReadLock,
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                ScanType::ScanGap))
+                                                ScanType::ScanGap,
+                                                true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
-                            "AcquireReadIntentOnGap.Fail",
+                            "AcquireReadLockOnGap.Fail",
                             reinterpret_cast<LruEntry *>(cce),
                             [&req]() -> std::string
                             {
@@ -971,16 +1316,17 @@ public:
 
                     if (!ConditionalReadLockCce(cce,
                                                 req,
-                                                LockType::ReadIntent,
+                                                LockType::ReadLock,
                                                 req.TxTerm(),
                                                 req.NodeGroupId(),
                                                 cce->payload_status_,
                                                 term,
-                                                ScanType::ScanGap))
+                                                ScanType::ScanGap,
+                                                true))
                     {
                         TX_TRACE_ACTION_WITH_CONTEXT(
                             &req,
-                            "AcquireReadIntentOnKey.Fail",
+                            "AcquireReadLockOnKey.Fail",
                             reinterpret_cast<LruEntry *>(cce),
                             [&req]() -> std::string
                             {
@@ -998,79 +1344,6 @@ public:
             }
         }
         req.scan_cache_.resize(idx);
-
-        req.Result()->SetFinished();
-        return true;
-    }
-
-    bool Execute(CommitSkCc &req) override
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            (txservice::CcMap *) this,
-            &req,
-            [&req]() -> std::string
-            {
-                return std::string("\"cc_map_type\":\"sk_cc_map\"")
-                    .append(",\"tx_number\":")
-                    .append(std::to_string(req.Txn()))
-                    .append(",\"term\":")
-                    .append("0");
-            });
-        TX_TRACE_DUMP(&req);
-
-        uint32_t ng_id = req.key_shard_code_ >> 10;
-        int64_t term = Sharder::Instance().LeaderTerm(ng_id);
-        if (term < 0)
-        {
-            req.Result()->SetError(-1);
-            return true;
-        }
-
-        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
-
-        if (req.secondary_key_ != nullptr)
-        {
-            const SecondaryKey<SkT, PkT> *secondary_key =
-                static_cast<const SecondaryKey<SkT, PkT> *>(req.secondary_key_);
-
-            cce = FindEmplace(
-                secondary_key->SKey(), secondary_key->PKey(), req.ts_);
-        }
-        else
-        {
-            SecondaryKey<SkT, PkT> secondary_key_obj;
-            size_t offset = 0;
-            secondary_key_obj.Deserialize(
-                req.secondary_key_str_->data(), offset, &compound_schema_);
-
-            cce = FindEmplace(
-                secondary_key_obj.SKey(), secondary_key_obj.PKey(), req.ts_);
-        }
-
-        if (cce == nullptr)
-        {
-            // The request needs a new cc entry but the cc map has reached the
-            // maximal capacity. Blocks the request by putting it back to the cc
-            // request queue.
-            shard_->Enqueue(shard_->LocalCoreId(), &req);
-            return false;
-        }
-
-        // for mvcc
-        if (req.Protocol() == CcProtocol::MVCC)
-        {
-            uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
-            cce->KickOutArchiveRecords(recycle_ts);
-            size_t added_mem_usage = cce->ArchiveBeforeUpdate(false);
-            shard_->mem_usage_ += added_mem_usage;
-        }
-
-        cce->payload_status_ =
-            req.is_delete_ ? RecordStatus::Deleted : RecordStatus::Normal;
-        cce->commit_ts_ = req.ts_;
-        cce->gap_commit_ts_ = req.ts_;
-
-        TryInsertCkptList(cce);
 
         req.Result()->SetFinished();
         return true;
@@ -1222,9 +1495,9 @@ public:
                     // If the record in the log has a commit ts greater than
                     // that of the cc entry and the cc entry has a write
                     // lock, the lock's owner must be the tx that commits
-                    // the log record. TODO: it is safer if we ship the tx
-                    // ID with the recovering message and match it against
-                    // the lock holder.
+                    // the log record.
+                    // TODO: it is safer if we ship the tx ID with the
+                    // recovering message and match it against the lock holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
                     shard_->DeleteLockHoldingTx(txn, cce, true);
@@ -2129,16 +2402,18 @@ private:
      * starting from the start cc entry and whether the scan includes the start
      * cc entry's key or gap or both.
      */
-    std::pair<Iterator, ScanType> FowardScanStart(const SkT &key,
-                                                  bool inclusive)
+    std::pair<Iterator, ScanType> FowardScanStart(
+        const SecondaryKey<SkT, PkT> &key, bool inclusive)
     {
         if (key.Type() == KeyType::NegativeInf)
         {
             return std::make_pair(Begin(), ScanType::ScanGap);
         }
 
+        const SkT &look_sk = key.SKey();
+
         // The key equal to or greater than the search key.
-        auto sk_lower_it = sk_index_.lower_bound(key);
+        auto sk_lower_it = sk_index_.lower_bound(look_sk);
 
         if (sk_lower_it == sk_index_.end())
         {
@@ -2156,7 +2431,7 @@ private:
             }
         }
 
-        if (sk_lower_it->first == key)
+        if (sk_lower_it->first == look_sk)
         {
             // The search key may match more than one cc entry. Even though
             // each cc map's key is unique, this is possible when the search
@@ -2185,14 +2460,14 @@ private:
             else
             {
                 auto next_it = std::next(sk_lower_it, 1);
-                if (next_it != sk_index_.end() && next_it->first == key)
+                if (next_it != sk_index_.end() && next_it->first == look_sk)
                 {
                     // The search key matches more than one entry, e.g., WEHRE
                     // pk > 20. The start entry is the end of the repeated
                     // entries, i.e., (20, 'c').
 
                     // The key greater than the search key, i.e., (30, 'd').
-                    auto sk_upper_it = sk_index_.upper_bound(key);
+                    auto sk_upper_it = sk_index_.upper_bound(look_sk);
 
                     // The start entry is the one prior to (30, 'd'), including
                     // the gap but not the key.
@@ -2225,18 +2500,20 @@ private:
         }
     }
 
-    std::pair<Iterator, ScanType> BackwardScanStart(const SkT &key,
-                                                    bool inclusive)
+    std::pair<Iterator, ScanType> BackwardScanStart(
+        const SecondaryKey<SkT, PkT> &key, bool inclusive)
     {
-        if (key.Type() == KeyType::PostiveInf)
+        if (key.Type() == KeyType::PositiveInf)
         {
             auto start_it = End();
             --start_it;
             return std::make_pair(start_it, ScanType::ScanBoth);
         }
 
+        const SkT &look_sk = key.SKey();
+
         // The key equal to or greater than the search key.
-        auto sk_lower_it = sk_index_.lower_bound(key);
+        auto sk_lower_it = sk_index_.lower_bound(look_sk);
 
         if (sk_lower_it == sk_index_.end())
         {
@@ -2252,7 +2529,7 @@ private:
             }
         }
 
-        if (sk_lower_it->first == key)
+        if (sk_lower_it->first == look_sk)
         {
             // The search key may match more than one cc entry. Even though
             // each cc map's key is unique, this is possible when the search
@@ -2265,14 +2542,14 @@ private:
             if (inclusive)
             {
                 auto next_it = std::next(sk_lower_it, 1);
-                if (next_it != sk_index_.end() && next_it->first == key)
+                if (next_it != sk_index_.end() && next_it->first == look_sk)
                 {
                     // The search key matches more than one entry, e.g., WEHRE
                     // pk <= 20. The start entry is the end of the repeated
                     // entries, i.e., (20, 'c'), including the key and the gap
                     // (gap may have entry (20, 'd')).
 
-                    auto sk_upper_it = sk_index_.upper_bound(key);
+                    auto sk_upper_it = sk_index_.upper_bound(look_sk);
                     --sk_upper_it;
                     return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
                                           ScanType::ScanBoth);

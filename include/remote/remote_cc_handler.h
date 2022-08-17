@@ -151,17 +151,6 @@ public:
     {
     }
 
-    void CommitSecondaryKey(uint32_t src_node_id,
-                            TxNumber txn,
-                            int64_t tx_term,
-                            const TableName &table_name,
-                            const TxKey &secondary_key,
-                            uint32_t key_shard_code,
-                            bool is_delete,
-                            uint64_t ts,
-                            CcHandlerResult<Void> &hd_res,
-                            CcProtocol protocol);
-
     void UpdateCommitLowerBound(const TxId &txid,
                                 uint64_t commit_ts_lower_bound,
                                 CcHandlerResult<uint64_t> &)

@@ -107,7 +107,7 @@ public:
     // read timestamp, which pushes future transactions' commit
     // timestamps larger than the read timestamp of the current read
     // transaction;
-    //(2) PostRead under OCC/LOCKING+RepeatableRead: it will be updated to
+    // (2) PostRead under OCC/LOCKING+RepeatableRead: it will be updated to
     // max{commit_ts,last_read_ts_} after releasing read intent/lock, which
     // pushes future transactions' commit timestamps larger than the largest
     // commit timestamp of all read transactions that have released the read
@@ -125,6 +125,9 @@ public:
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{1};
+
+    // The time when a write tx acquires the write lock/intent on this cc entry.
+    uint64_t wlock_ts_;
 };
 
 /**
@@ -314,8 +317,6 @@ public:
 
     // save versions exclude the current version.(descending order)
     std::deque<ArchiveRecord<ValueT>> archives_;
-    // The time when a write tx acquires the write lock/intent on this cc entry.
-    uint64_t wlock_ts_;
 
     /**
      * @brief Move(not copy) the current version (payload, payload_status,
@@ -512,7 +513,7 @@ public:
                 return false;
             }
 
-            // MVCC update last_validation_ts_ of lastest ccentry to tell later
+            // MVCC update last_read_ts_ of lastest ccentry to tell later
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
             // same transaction will read the new updated ccentry.
@@ -525,6 +526,8 @@ public:
             rec.payload_status_ = payload_status_;
             return true;
         }
+
+        // if commit_ts_ > ts, find from archives_
         for (auto it = archives_.cbegin(); it != archives_.cend(); it++)
         {
             if (it->commit_ts_ <= ts)
@@ -538,6 +541,7 @@ public:
                 return true;
             }
         }
+
         rec.commit_ts_ = 1;
         rec.payload_status_ = RecordStatus::VersionUnknown;
         return true;

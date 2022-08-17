@@ -203,15 +203,6 @@ public:
     {
     }
 
-    void CommitSecondaryKey(TxNumber txn,
-                            int64_t tx_term,
-                            const TableName &table_name,
-                            const TxKey &secondary_key,
-                            bool is_delete,
-                            uint64_t ts,
-                            CcHandlerResult<Void> &hd_res,
-                            CcProtocol protocol) override;
-
     /// <summary>
     /// Starts a new tx and returns the tx ID.
     /// </summary>
@@ -331,7 +322,6 @@ private:
     CcRequestPool<PostReadCc> postread_pool_;
     CcRequestPool<ReadCc> read_pool;
     CcRequestPool<NegotiateCc> negoti_pool;
-    CcRequestPool<CommitSkCc> commitsk_pool;
     CcRequestPool<ScanOpenBatchCc> scan_open_pool;
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;

@@ -70,7 +70,7 @@ enum class TableType
 
 enum struct ReadType
 {
-    // Starts concurrency control for the input the key and returns the key's
+    // Starts concurrency control for the input key and returns the key's
     // value.
     Inside = 0,
     // Starts concurrency control for the input key-value pair retrieved from

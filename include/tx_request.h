@@ -103,12 +103,14 @@ public:
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
                   LockType lock_type = LockType::ReadLock,
-                  bool read_local = false)
+                  bool read_local = false,
+                  uint64_t corresponding_sk_commit_ts = 0)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
           lock_type_(lock_type),
-          read_local_(read_local)
+          read_local_(read_local),
+          corresponding_sk_commit_ts_(corresponding_sk_commit_ts)
     {
     }
 
@@ -116,13 +118,15 @@ public:
              const TxKey *key,
              TxRecord *rec,
              LockType lock_type,
-             bool read_local = false)
+             bool read_local = false,
+             uint64_t corresponding_sk_commit_ts = 0)
     {
         tab_name_ = tab_name;
         key_ = key;
         rec_ = rec;
         lock_type_ = lock_type;
         read_local_ = read_local;
+        corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
     }
 
     const TableName *tab_name_;
@@ -130,6 +134,7 @@ public:
     TxRecord *rec_;
     LockType lock_type_;
     bool read_local_;
+    uint64_t corresponding_sk_commit_ts_;
 };
 
 struct ReadOutsideTxRequest
@@ -214,16 +219,18 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 struct ScanNextTxRequest
     : public TemplateTxRequest<
           ScanNextTxRequest,
-          std::tuple<const TxKey *, const TxRecord *, RecordStatus>>
+          std::tuple<const TxKey *, const TxRecord *, RecordStatus, uint64_t>>
 {
-    ScanNextTxRequest(size_t alias, LockType lock_type, TableName table_name)
+    ScanNextTxRequest(size_t alias,
+                      LockType lock_type,
+                      const TableName &table_name)
         : alias_(alias), lock_type_(lock_type), table_name_(table_name)
     {
     }
 
     size_t alias_;
     LockType lock_type_;
-    TableName table_name_;
+    const TableName &table_name_;
 };
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
@@ -231,7 +238,7 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
     ScanCloseTxRequest(size_t alias,
                        TxKey *end_key,
                        LockType lock_type,
-                       TableName table_name)
+                       const TableName &table_name)
         : alias_(alias),
           end_key_(end_key),
           lock_type_(lock_type),
@@ -240,9 +247,9 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
     }
 
     size_t alias_;
-    TxKeyContainer end_key_;
+    TxKey *end_key_;
     LockType lock_type_;
-    TableName table_name_;
+    const TableName &table_name_;
 };
 
 struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>

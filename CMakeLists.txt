@@ -114,7 +114,7 @@ endif()
 
 if(RANGE_PARTITION_ENABLED)
   # add preprocessor defition RANGE_PARTITION_ENABLED
-  add_compile_definitions(RANGE_PARTITION_ENABLED);
+  add_compile_definitions(RANGE_PARTITION_ENABLED)
 endif()
 
 SET (TxService_SOURCES

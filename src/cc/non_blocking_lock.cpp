@@ -125,7 +125,8 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
         }
         else
         {
-            return;
+            assert(queue_head.lk_type_ == LockType::NoLock);
+            ExecuteQueuedRequest(queue_head, ccs);
         }
     }
 }
@@ -285,8 +286,9 @@ void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
         return;
     }
 
-    // If releasing the current read lock may unblock anything, it must be the
-    // write lock who is the head of the blocking queue.
+    // If releasing the current read lock may unblock anything, it may be the
+    // write lock who is the head of the blocking queue, or a no lock pk read
+    // directed from a sk scan.
     if (removed_cnt > 0 && blocking_queue_.Size() > 0 &&
         blocking_queue_.Peek().lk_type_ == LockType::WriteLock)
     {
@@ -458,6 +460,13 @@ void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
     {
         read_intentions_.erase(tx_number);
     }
+}
+
+void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
+                                          int64_t tx_term)
+{
+    blocking_queue_.EnqueueAsFirst(
+        LockQueueEntry(cc_req, LockType::NoLock, tx_term));
 }
 
 bool NonBlockingLock::IsEmpty() const

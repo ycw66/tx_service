@@ -104,7 +104,7 @@ public:
      * @param hres Result handler of the request
      * @param protocol Concurrency control protocol
      */
-    virtual void PostWrite(uint64_t tx_number,
+    virtual void PostWrite(TxNumber tx_number,
                            int64_t tx_term,
                            uint64_t commit_ts,
                            const CcEntryAddr &ccentry_addr,
@@ -293,15 +293,6 @@ public:
                                     const TxKey &sk,
                                     const TxKey &pk,
                                     CcHandlerResult<Void> &) = 0;
-
-    virtual void CommitSecondaryKey(TxNumber txn,
-                                    int64_t tx_term,
-                                    const TableName &table_name,
-                                    const TxKey &secondary_key,
-                                    bool is_delete,
-                                    uint64_t ts,
-                                    CcHandlerResult<Void> &,
-                                    CcProtocol protocol) = 0;
 
     /// <summary>
     /// Starts a new tx and returns the tx ID.

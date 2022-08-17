@@ -292,16 +292,6 @@ message ScanNextResponse {
 	uint64 scan_cache_ptr = 3;
 }
 
-message CommitSkRequest {
-	uint32 src_node_id = 1;
-	string tablename = 2;
-	bytes secondary_key = 3;
-	uint32 key_shard_code = 4;
-	uint64 ts = 5;
-	bool is_deleted = 6;
-	CcProtocolType protocol = 7;
-}
-
 message FaultInjectRequest {
   uint32 src_node_id = 1;
   string fault_name = 2;
@@ -349,7 +339,6 @@ message CcMessage {
 		ScanOpenResponse = 13;
 		ScanNextRequest = 14;
 		ScanNextResponse = 15;
-		CommitSkRequest = 16;
 		ReadOutsideRequest = 17;
 		FaultInjectRequest = 26;
 		FaultInjectResponse = 27;
@@ -380,7 +369,6 @@ message CcMessage {
 		ScanOpenResponse scan_open_resp = 21;
 		ScanNextRequest scan_next_req = 22;
 		ScanNextResponse scan_next_resp = 23;
-		CommitSkRequest commit_sk_req = 24;
 		ReadOutsideRequest read_outside_req = 25;
 		FaultInjectRequest fault_inject_req = 34;
 		FaultInjectResponse fault_inject_resp= 35;

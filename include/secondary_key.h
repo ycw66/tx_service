@@ -42,12 +42,9 @@ public:
 
     bool operator<(const TxKey &rhs) const override
     {
-        if (const SecondaryKey *rhs_ptr =
-                static_cast<const SecondaryKey *>(&rhs))
-        {
-            return sk_ < rhs_ptr->sk_ ||
-                   (sk_ == rhs_ptr->sk_ && pk_ < rhs_ptr->pk_);
-        }
+        const SecondaryKey *rhs_ptr = static_cast<const SecondaryKey *>(&rhs);
+        return sk_ < rhs_ptr->sk_ ||
+               (sk_ == rhs_ptr->sk_ && pk_ < rhs_ptr->pk_);
 
         return false;
     }

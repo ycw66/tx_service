@@ -305,11 +305,6 @@ template std::string tx_trace_associate(
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
     txservice::remote::CcMessage *,
-    txservice::remote::RemoteCommitSk *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::remote::CcMessage *,
     txservice::remote::RemoteFaultInjectCC *,
     std::string,
     std::function<std::string()> context_func);
@@ -806,10 +801,6 @@ template std::string tx_trace_action(txservice::LocalCcHandler *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::LocalCcHandler *,
                                      std::string,
-                                     txservice::CommitSkCc *,
-                                     std::function<std::string()>);
-template std::string tx_trace_action(txservice::LocalCcHandler *,
-                                     std::string,
                                      txservice::NegotiateCc *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::LocalCcHandler *,
@@ -852,10 +843,6 @@ template std::string tx_trace_action(txservice::CcMap *,
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
                                      txservice::ScanNextBatchCc *,
-                                     std::function<std::string()>);
-template std::string tx_trace_action(txservice::CcMap *,
-                                     std::string,
-                                     txservice::CommitSkCc *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
@@ -1204,10 +1191,6 @@ std::string cc_message_type_to_string(
     case txservice::remote::CcMessage::MessageType::
         CcMessage_MessageType_ScanNextResponse:
         msg_type = "CcMessage_MessageType_ScanNextResponse";
-        break;
-    case txservice::remote::CcMessage::MessageType::
-        CcMessage_MessageType_CommitSkRequest:
-        msg_type = "CcMessage_MessageType_CommitSkRequest";
         break;
     case txservice::remote::CcMessage::MessageType::
         CcMessage_MessageType_ReadOutsideRequest:
@@ -1843,40 +1826,6 @@ std::ostream &operator<<(std::ostream &outs, txservice::CkptScanCc *r)
          << ",\"node_group_\":" << r->node_group_ << "}";
     return outs;
 };
-std::ostream &operator<<(std::ostream &outs, txservice::CommitSkCc *r)
-{
-    if (!r)
-    {
-        return outs << "{}";
-    }
-    outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
-         << r->Isolation() << "\""
-         << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"secondary_key_\":" << FMT_POINTER_TO_UINT64T(r->secondary_key_)
-         << ",\"secondary_key_str_\":"
-         << FMT_POINTER_TO_UINT64T(r->secondary_key_str_)
-         << ",\"key_shard_code\":" << r->KeyShardCode()
-         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"ts_\":" << r->ts_ << ",\"is_delete_\":" << r->is_delete_ << "}";
-    return outs;
-};
-std::ostream &operator<<(std::ostream &outs,
-                         txservice::remote::RemoteCommitSk *r)
-{
-    if (!r)
-    {
-        return outs << "{}";
-    }
-    outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
-         << r->Isolation() << "\""
-         << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"key_shard_code\":" << r->KeyShardCode()
-         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
-    return outs;
-};
 std::ostream &operator<<(std::ostream &outs, txservice::NegotiateCc *r)
 {
     if (!r)
@@ -2044,8 +1993,6 @@ template std::string tx_trace_dump(txservice::ScanOpenBatchCc *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::ScanNextBatchCc *,
                                    std::function<std::string()>);
-template std::string tx_trace_dump(txservice::CommitSkCc *,
-                                   std::function<std::string()>);
 template std::string tx_trace_dump(txservice::NegotiateCc *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::FaultInjectCC *,
@@ -2073,8 +2020,6 @@ template std::string tx_trace_dump(txservice::remote::RemotePostWriteAll *,
 template std::string tx_trace_dump(txservice::remote::RemoteScanOpen *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::remote::RemoteScanNextBatch *,
-                                   std::function<std::string()>);
-template std::string tx_trace_dump(txservice::remote::RemoteCommitSk *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::remote::RemoteFaultInjectCC *,
                                    std::function<std::string()>);

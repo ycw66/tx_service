@@ -836,48 +836,6 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     local_shard.Enqueue(req);
 }
 
-void txservice::LocalCcHandler::CommitSecondaryKey(TxNumber txn,
-                                                   int64_t tx_term,
-                                                   const TableName &table_name,
-                                                   const TxKey &secondary_key,
-                                                   bool is_delete,
-                                                   uint64_t ts,
-                                                   CcHandlerResult<Void> &hres,
-                                                   CcProtocol protocol)
-{
-    uint32_t shard_code = Sharder::Instance().ShardCode(secondary_key.Hash());
-
-    uint32_t node_id = Sharder::Instance().LeaderNodeId(shard_code >> 10);
-    if (node_id == cc_shards_.node_id_)
-    {
-        CommitSkCc *req = commitsk_pool.NextRequest();
-        req->Reset(&table_name,
-                   &secondary_key,
-                   txn,
-                   shard_code,
-                   ts,
-                   is_delete,
-                   &hres,
-                   protocol);
-        TX_TRACE_ACTION(this, req);
-        TX_TRACE_DUMP(req);
-        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
-    }
-    else
-    {
-        remote_hd_.CommitSecondaryKey(cc_shards_.node_id_,
-                                      txn,
-                                      tx_term,
-                                      table_name,
-                                      secondary_key,
-                                      shard_code,
-                                      is_delete,
-                                      ts,
-                                      hres,
-                                      protocol);
-    }
-}
-
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);

@@ -12,7 +12,7 @@ namespace txservice
 enum class KeyType
 {
     NegativeInf,
-    PostiveInf,
+    PositiveInf,
     Normal
 };
 
@@ -171,7 +171,7 @@ public:
 
     KeyType Type() const override
     {
-        return KeyType::PostiveInf;
+        return KeyType::PositiveInf;
     }
 
 private:

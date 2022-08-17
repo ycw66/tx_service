@@ -616,7 +616,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      * @brief Flush all updated range entries into Cassandra
      */
     DsUpsertRangeOp ds_upsert_new_range_op_;
-    /*
+    /**
      * @brief Write log to mark removing out of data from old range
      */
     // WriteToLogOp delete_out_of_old_range_data_log_op_;
