@@ -20,6 +20,8 @@
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
 
+using namespace std::chrono_literals;
+
 namespace txservice
 {
 /**
@@ -32,20 +34,23 @@ namespace txservice
 class TxProcessor
 {
 public:
+    enum struct TxProcessorStatus
+    {
+        Terminated = 0,
+        Busy,
+        Sleep
+    };
+
+    static const int64_t t1sec = 1000000L;
+    static const int64_t t2sec = 4000000L;
+
     TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
         : thd_id_(thd_id),
-          active_tx_cnt_(0),
-          terminate_(false),
-          in_sleep_(false),
+          terminated_(false),
           local_cc_shards_(shards),
-          active_tx_list_(),
-          active_tx_mutex_(),
           free_tx_list_(),
-          waiting_mux_(shards.ShardMutex(thd_id)),
-          waiting_cv_(shards.ShardCv(thd_id)),
           txlog_hd_(txlog_hd)
     {
-        batch_.reserve(20);
     }
 
     TransactionExecution *NewTx()
@@ -55,8 +60,8 @@ public:
 
         if (!ret)
         {
-            tx =
-                std::make_unique<TransactionExecution>(cc_hd_.get(), txlog_hd_);
+            tx = std::make_unique<TransactionExecution>(
+                cc_hd_.get(), txlog_hd_, this);
         }
         else
         {
@@ -65,155 +70,171 @@ public:
 
         TransactionExecution *tx_ptr = tx.get();
 
-        // add new transaction into active_tx_list_.
+        // Adds the new allocated transaction into the collection of active
+        // tx's.
         {
             const std::lock_guard<std::mutex> lock(active_tx_mutex_);
-            active_tx_list_.emplace_back(std::move(tx));
-        }
-
-        // wake up TxProcessor worker thread if neccessary.
-        uint32_t prev_tx_cnt = active_tx_cnt_.fetch_add(1);
-        if (prev_tx_cnt == 0 && in_sleep_.load(std::memory_order_acquire))
-        {
-            waiting_cv_.notify_one();
+            active_txs_.emplace(tx_ptr, std::move(tx));
         }
 
         return tx_ptr;
     }
 
-    void RunOneRound(size_t &active_cnt, size_t &req_cnt)
+    void RunOneRound(size_t &tx_cnt, size_t &req_cnt)
     {
-        active_cnt = 0;
-        req_cnt = 0;
-        size_t sweep_batch = 20;
-        bool first_batch = true;
-        std::list<TransactionExecution::uptr>::iterator active_tx_it;
+        TransactionExecution *txs[100];
 
-        do
+        size_t tx_batch = to_exec_txs_.try_dequeue_bulk(txs, 100);
+
+        tx_cnt = tx_batch;
+        while (tx_batch > 0)
         {
-            batch_.clear();
+            for (size_t tx_idx = 0; tx_idx < tx_batch; ++tx_idx)
             {
-                const std::lock_guard<std::mutex> lock(active_tx_mutex_);
-
-                if (first_batch)
+                txs[tx_idx]->Forward();
+                if (txs[tx_idx]->TxStatus() == TxnStatus::Finished)
                 {
-                    active_tx_it = active_tx_list_.begin();
-                    first_batch = false;
-                }
+                    std::lock_guard<std::mutex> lk(active_tx_mutex_);
 
-                size_t cnt = 0;
-                while (active_tx_it != active_tx_list_.end() &&
-                       cnt < sweep_batch)
-                {
-                    if (active_tx_it->get()->tx_status_.load(
-                            std::memory_order_relaxed) == TxnStatus::Finished)
+                    auto tx_it = active_txs_.find(txs[tx_idx]);
+                    if (tx_it != active_txs_.end())
                     {
-                        // clean transaction and put it to free list.
-                        TransactionExecution::uptr tx_p =
-                            std::move(*active_tx_it);
-                        active_tx_it = active_tx_list_.erase(active_tx_it);
-                        free_tx_list_.enqueue(std::move(tx_p));
-                        active_tx_cnt_.fetch_sub(1);
-                    }
-                    else
-                    {
-                        batch_.emplace_back(active_tx_it->get());
-                        ++cnt;
-                        ++active_tx_it;
+                        free_tx_list_.enqueue(std::move(tx_it->second));
+                        active_txs_.erase(tx_it);
                     }
                 }
             }
+            tx_batch = to_exec_txs_.try_dequeue_bulk(txs, 100);
+            tx_cnt += tx_batch;
+        }
 
-            for (auto iter = batch_.begin(); iter != batch_.end(); ++iter)
-            {
-                TransactionExecution *txm = *iter;
-                // Forward transaction state machine.
-                txm->Forward();
-
-                if (txm->Idle())
-                {
-                    TxRequest *req = txm->next_req_.exchange(nullptr);
-                    if (req != nullptr)
-                    {
-                        // Process TxRequests.
-                        req->Process(txm);
-                        ++active_cnt;
-                    }
-                }
-                else
-                {
-                    ++active_cnt;
-                }
-            }
-        } while (batch_.size() == sweep_batch);
-
-        // Process CcRequests.
         req_cnt = local_cc_shards_.ProcessRequests(thd_id_);
     }
 
     void Run()
     {
-        using namespace std::chrono_literals;
-
         auto t1000ms = std::chrono::milliseconds(1000);
-        auto t100ms = std::chrono::milliseconds(100);
-        auto tstart = std::chrono::steady_clock::now();
+        size_t idle_rounds = 0;
+        size_t busy_rounds = 0;
+        auto idle_start = std::chrono::system_clock::now();
 
-        size_t idle_rnd = 0;
-
-        while (!terminate_.load(std::memory_order_acquire))
+        while (!terminated_.load(std::memory_order_relaxed))
         {
-            size_t tx_cnt, req_cnt;
+            size_t tx_cnt = 0, req_cnt = 0;
             RunOneRound(tx_cnt, req_cnt);
+
             if (tx_cnt > 0 || req_cnt > 0)
             {
-                idle_rnd = 0;
+                idle_rounds = 0;
+                ++busy_rounds;
+
+                // For every 65536 rounds, checks tx's in the waiting queue.
+                if (busy_rounds & 0xFFFF == 0)
+                {
+                    CheckWaitingTx();
+                }
+
                 continue;
             }
 
-            if (idle_rnd == 0)
+            busy_rounds = 0;
+            if (idle_rounds == 0)
             {
-                // Records the time when busy wait starts.
-                tstart = std::chrono::steady_clock::now();
+                idle_start = std::chrono::system_clock::now();
             }
 
-            ++idle_rnd;
-            if ((idle_rnd & 0x3FF) == 0)
+            ++idle_rounds;
+
+            if (idle_rounds & 0xFFFF != 0)
             {
-                // For every 1024 busy wait cycles, checks if the busy wait
-                // window exceeds 1000ms.
-                auto tnow = std::chrono::steady_clock::now();
-                if (tnow - tstart >= t1000ms)
+                continue;
+            }
+
+            // For every 65536 rounds, checks if the tx processor has been idle
+            // for 1 second. If so, the tx processor enters into the sleep mode.
+            auto now_time = std::chrono::system_clock::now();
+            while (now_time - idle_start > 2s)
+            {
+                auto [enlist_tx_cnt, waiting_queue_size] = CheckWaitingTx();
+
+                if (enlist_tx_cnt > 0)
                 {
-                    idle_rnd = 0;
+                    idle_rounds = 0;
+                    break;
+                }
 
-                    std::unique_lock<std::mutex> lk(waiting_mux_);
-                    while (active_tx_cnt_.load(std::memory_order_acquire) ==
-                               0 &&
-                           local_cc_shards_.IsIdle(thd_id_) &&
-                           !terminate_.load(std::memory_order_acquire))
-                    {
-                        // SleepNotify() notifies the cc shard that its
-                        // processor is going to enter into the sleep mode. When
-                        // the cc shard receives a cc request and detects that
-                        // the sleep flag is set, the cc shard wakes up the
-                        // processor. Since the sleep flag is not sync'ed via
-                        // the mutex, it is possible that the processor notifies
-                        // the cc shard and the cc shard sends the wakeup signal
-                        // via the condition variable BEFORE the processor
-                        // enters wait_for(), causing the processor to miss the
-                        // wakeup signal. Such a situation is rare given that
-                        // the processor only enters the sleep mode after a
-                        // period of busy wait. In the worse case scenario, the
-                        // processor waits for 100ms to restart to process the
-                        // cc request.
-                        local_cc_shards_.SleepNotify(thd_id_);
-                        in_sleep_.store(true, std::memory_order_release);
-                        waiting_cv_.wait_for(lk, t100ms);
-                    }
+                bool woke_up = false;
+                // When the waiting queue is not empty, wakes up periodically to
+                // check if the waiting tx's time out.
+                if (waiting_queue_size > 0)
+                {
+                    std::unique_lock<std::mutex> lk(sleep_mux_);
+                    woke_up = sleep_cv_.wait_for(
+                        lk,
+                        1s,
+                        [this]
+                        {
+                            int64_t now_ts =
+                                std::chrono::duration_cast<
+                                    std::chrono::microseconds>(
+                                    std::chrono::system_clock::now()
+                                        .time_since_epoch())
+                                    .count();
+                            int64_t last_wakeup_ts =
+                                last_wakeup_ts_.load(std::memory_order_relaxed);
 
-                    local_cc_shards_.WorkNotify(thd_id_);
-                    in_sleep_.store(false, std::memory_order_release);
+                            // The last wakeup timestamp is updated by
+                            // tx's who get timestamps from the local clock
+                            // at LocalCcShards. Since the clock is sync'ed
+                            // with real time in roughly every 2 seconds,
+                            // there could be up to a 2-second delay. So,
+                            // wakes the tx processor as long as the last
+                            // wakeup request falls into the 2-second
+                            // window.
+                            return terminated_.load(
+                                       std::memory_order_relaxed) ||
+                                   now_ts - last_wakeup_ts <= t2sec;
+                        });
+                }
+                else
+                {
+                    std::unique_lock<std::mutex> lk(sleep_mux_);
+
+                    sleep_cv_.wait(
+                        lk,
+                        [this]
+                        {
+                            int64_t now_ts =
+                                std::chrono::duration_cast<
+                                    std::chrono::microseconds>(
+                                    std::chrono::system_clock::now()
+                                        .time_since_epoch())
+                                    .count();
+                            int64_t last_wakeup_ts =
+                                last_wakeup_ts_.load(std::memory_order_relaxed);
+
+                            // The last wakeup timestamp is updated by
+                            // tx's who get timestamps from the local clock
+                            // at LocalCcShards. Since the clock is sync'ed
+                            // with real time in roughly every 2 seconds,
+                            // there could be up to a 2-second delay. So,
+                            // wakes the tx processor as long as the last
+                            // wakeup request falls into the 2-second
+                            // window.
+                            return terminated_.load(
+                                       std::memory_order_relaxed) ||
+                                   now_ts - last_wakeup_ts <= t2sec;
+                        });
+
+                    woke_up = true;
+                }
+
+                if (woke_up)
+                {
+                    // The tx processor is woken up by a signal. Exits the sleep
+                    // mode.
+                    idle_rounds = 0;
+                    break;
                 }
             }
         }
@@ -228,21 +249,200 @@ public:
         }
     }
 
+    std::pair<uint32_t, uint32_t> CheckWaitingTx()
+    {
+        uint32_t enlist_cnt = 0;
+        int64_t now_ts = NowTs();
+
+        std::lock_guard<std::mutex> lk(waiting_queue_mux_);
+
+        for (auto tx_it = waiting_txs_.begin(); tx_it != waiting_txs_.end();
+             ++tx_it)
+        {
+            int64_t wait_start_ts = tx_it->second.wait_start_ts_;
+            if (now_ts - wait_start_ts >= t1sec)
+            {
+                to_exec_txs_.enqueue(tx_it->first);
+                ++enlist_cnt;
+            }
+        }
+
+        return {enlist_cnt, waiting_txs_.size()};
+    }
+
+    /**
+     * @brief Enlists the input tx into the waiting queue. Tx's in the queue are
+     * periodically visited to check timeout. Timeout happens when a tx sends
+     * one or more remote requests but does not receive all responses due to
+     * various failures.
+     *
+     * @param txm The tx state machine to enlist for waiting
+     */
+    void EnlistWaitingTx(TransactionExecution *txm)
+    {
+        std::lock_guard<std::mutex> lk(waiting_queue_mux_);
+        auto tx_it = waiting_txs_.try_emplace(txm, NowTs());
+
+        if (!tx_it.second)
+        {
+            ++tx_it.first->second.remote_cnt_;
+        }
+    }
+
+    /**
+     * @brief Enlists the input tx for execution. Enlisting is either because
+     * the input tx is previously blocked on a cc request and receives the
+     * response, or because the tx receives a tx request from the external user.
+     *
+     * @param txm The tx state machine to enlist for execution
+     * @param remote_response Whether or not enlisting is triggered by a remote
+     * response.
+     */
+    void EnlistExecutingTx(TransactionExecution *txm,
+                           bool remote_response,
+                           bool skip_remote_cnt)
+    {
+        if (remote_response)
+        {
+            std::lock_guard<std::mutex> lk(waiting_queue_mux_);
+            if (skip_remote_cnt)
+            {
+                waiting_txs_.erase(txm);
+            }
+            else
+            {
+                auto waiting_tx_it = waiting_txs_.find(txm);
+                if (waiting_tx_it != waiting_txs_.end())
+                {
+                    if (waiting_tx_it->second.remote_cnt_ > 0)
+                    {
+                        --waiting_tx_it->second.remote_cnt_;
+                    }
+
+                    if (waiting_tx_it->second.remote_cnt_ > 0)
+                    {
+                        return;
+                    }
+                    else
+                    {
+                        waiting_txs_.erase(waiting_tx_it);
+                    }
+                }
+            }
+        }
+
+        to_exec_txs_.enqueue(txm);
+        WakesUp();
+    }
+
+    /**
+     * @brief Removes the tx from the waiting queue. This is called when the tx
+     * has timed out and is about to move forward to retry or abort.
+     *
+     * @param txm
+     */
+    void RemoveWaitingTx(TransactionExecution *txm)
+    {
+        std::lock_guard<std::mutex> lk(waiting_queue_mux_);
+        waiting_txs_.erase(txm);
+    }
+
+    /**
+     * @brief Wakes up the tx processor in case it is in the sleep mode. The tx
+     * processor is woken up, when (1) one of its binding tx's is enlisted for
+     * execution, or (2) a cc request is dispatched to its cc request queue for
+     * processing.
+     *
+     * @param wakeup_ts
+     */
+    void WakesUp()
+    {
+        uint64_t wakeup_ts = NowTs();
+        uint64_t last_wakeup_ts =
+            last_wakeup_ts_.load(std::memory_order_relaxed);
+        uint64_t current_wakeup_ts = last_wakeup_ts;
+
+        while (current_wakeup_ts < wakeup_ts)
+        {
+            if (last_wakeup_ts_.compare_exchange_weak(
+                    current_wakeup_ts,
+                    std::max(current_wakeup_ts, wakeup_ts),
+                    std::memory_order_acq_rel))
+            {
+                break;
+            }
+        }
+
+        // If the caller's wakeup timestamp is 1 second greater than last
+        // time when someone tries to wake up the processor, it's possible
+        // that the processor is in the sleep mode. Sends a wakeup signal
+        // via the conditional variable.
+        if (wakeup_ts < last_wakeup_ts || wakeup_ts - last_wakeup_ts >= t1sec)
+        {
+            // Locks the mutex before waking up the tx processor via the
+            // conditional variable. This ensures that the notification
+            // signal either precedes or follows the critical section in
+            // which the tx processor enters into the sleep mode. When the
+            // notification precedes, the tx processor sees the updated
+            // wakeup timestamp and only enters into the sleep mode after
+            // re-checking the condition. When the notification follows, the
+            // notification signal wakes up the sleeping tx processor.
+            std::lock_guard<std::mutex> lk(sleep_mux_);
+            sleep_cv_.notify_one();
+        }
+    }
+
+    uint64_t NowTs() const
+    {
+        return local_cc_shards_.ShardClockTs(thd_id_);
+    }
+
     size_t thd_id_;
-    std::atomic<uint32_t> active_tx_cnt_;
-    std::atomic<bool> terminate_;
-    std::atomic<bool> in_sleep_;
+    std::atomic<bool> terminated_;
 
     LocalCcShards &local_cc_shards_;
     std::unique_ptr<LocalCcHandler> cc_hd_;
 
-    std::list<TransactionExecution::uptr> active_tx_list_;
-    std::mutex active_tx_mutex_;
     moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_tx_list_;
-    std::vector<TransactionExecution *> batch_;
 
-    std::mutex &waiting_mux_;
-    std::condition_variable &waiting_cv_;
+    /**
+     * @brief A collection of tx's who are ready to be executed. A tx is ready
+     * to be executed, if it (a) receives the response from a local/remote cc
+     * request, (b) receives a new tx request from the tx user, or (c) times out
+     * on the prior cc request.
+     *
+     */
+    moodycamel::ConcurrentQueue<TransactionExecution *> to_exec_txs_;
+    std::mutex sleep_mux_;
+    std::condition_variable sleep_cv_;
+
+    struct WaitStatus
+    {
+        WaitStatus() = delete;
+        WaitStatus(uint64_t wait_start_ts)
+            : wait_start_ts_(wait_start_ts), remote_cnt_(1)
+        {
+        }
+
+        uint64_t wait_start_ts_;
+        uint32_t remote_cnt_;
+    };
+
+    /**
+     * @brief A collection of tx's being blocked on remote cc requests and the
+     * timestamp when they were blocked.
+     *
+     */
+    std::unordered_map<TransactionExecution *, WaitStatus> waiting_txs_;
+    std::mutex waiting_queue_mux_;
+    std::unordered_map<TransactionExecution *, TransactionExecution::uptr>
+        active_txs_;
+    std::mutex active_tx_mutex_;
+    /**
+     * @brief The timestamp when last caller tries to wake up this tx processor.
+     *
+     */
+    std::atomic<uint64_t> last_wakeup_ts_{0};
 
     TxLog *txlog_hd_;
 
@@ -317,7 +517,7 @@ public:
 
         for (size_t thd_idx = 0; thd_idx < thd_pool_.size(); ++thd_idx)
         {
-            pool_[thd_idx]->terminate_.store(true);
+            pool_[thd_idx]->terminated_.store(true, std::memory_order_relaxed);
         }
         for (auto &thd_idx : thd_pool_)
         {
@@ -363,6 +563,12 @@ public:
     {
         local_cc_shards_.CreateSkCcTable<SkT, PkT>(
             index_name, sk_schema, pk_schema, core_id, is_all);
+    }
+
+    void WakeUpTxProcessor(uint16_t thd_id)
+    {
+        assert(thd_id < pool_.size());
+        pool_[thd_id]->WakesUp();
     }
 
     std::vector<std::unique_ptr<TxProcessor>> pool_;

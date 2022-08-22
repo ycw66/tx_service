@@ -49,7 +49,13 @@ LocalCcShards::~LocalCcShards()
 
 uint64_t LocalCcShards::ClockTs()
 {
-    return LocalCcShards::local_clock.load(std::memory_order_acquire);
+    return LocalCcShards::local_clock.load(std::memory_order_relaxed);
+}
+
+uint64_t LocalCcShards::ShardClockTs(uint16_t core_id)
+{
+    assert(core_id < cc_shards_.size());
+    return cc_shards_[core_id]->Now();
 }
 
 void LocalCcShards::TimerRun()
@@ -98,9 +104,6 @@ const CatalogEntry *LocalCcShards::CreateCatalog(
                 : catalog_factory_->CreateTableSchema(
                       table_name, catalog_image, commit_ts, cc_ng_id),
             commit_ts);
-
-        auto ng_catalog_it = table_catalogs_.find(table_name);
-        auto catalog_it = ng_catalog_it->second.find(cc_ng_id);
     }
     else
     {
@@ -424,5 +427,10 @@ void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
     {
         node_catalog_it->second.erase(cc_ng_id);
     }
+}
+
+void LocalCcShards::WakeUpTxProcessor(uint16_t core_id)
+{
+    tx_service_->WakeUpTxProcessor(core_id);
 }
 }  // namespace txservice

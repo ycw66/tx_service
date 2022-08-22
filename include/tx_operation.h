@@ -99,16 +99,14 @@ public:
 struct ValidateOperation : TransactionOperation
 {
 public:
+    static const uint32_t default_read_set_capacity = 16;
+
     ValidateOperation(TransactionExecution *txm);
-    void Resize(size_t new_size);
-    void Reset(size_t vali_cnt);
+    void Reset(size_t read_cnt);
+    bool IsError();
     void Forward(TransactionExecution *txm) override;
 
-    std::vector<CcHandlerResult<std::vector<TxId>>> results_;
-    std::vector<const CcEntryAddr *> vali_cce_addr_;
-    size_t vali_cnt_{0};
-    std::atomic<size_t> finish_cnt_{0};
-    std::atomic<bool> error_{false};
+    CcHandlerResult<PostProcessResult> hd_result_;
 };
 
 /**
@@ -121,21 +119,21 @@ struct AcquireWriteOperation : TransactionOperation
 {
 public:
     AcquireWriteOperation(TransactionExecution *txm);
-    void Resize(size_t new_size);
     void Reset(size_t acquire_write_cnt);
+    void Reset();
+    void AggregateAcquiredKeys(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-    std::vector<CcHandlerResult<AcquireKeyResult>> results_;
+    CcHandlerResult<std::vector<AcquireKeyResult>> hd_result_;
     std::vector<WriteSetEntry *> acquire_write_entries_{16};
-    uint32_t acquire_write_cnt_{0};
-    std::atomic<uint32_t> finish_cnt_{0};
-    std::atomic<uint32_t> fail_cnt_{0};
+    // uint32_t acquire_write_cnt_{0};
+
     // Number of remote keys on which the acquire write operation needs to
     // acquire write intentions/locks.
     std::atomic<int32_t> remote_ack_cnt_{0};
     // Identify whether any keys in rset are expired (may be updated by other
-    // tx) under RepeatableRead isolation level.
-    std::atomic<bool> rset_has_expired_{false};
+    // tx) under the RepeatableRead or Serializable isolation level.
+    bool rset_has_expired_{false};
 };
 
 struct FaultInjectOp : TransactionOperation
@@ -187,16 +185,12 @@ struct UpdateTxnStatus : TransactionOperation
 struct PostProcessOp : TransactionOperation
 {
     PostProcessOp(TransactionExecution *txm);
-    void Reset(size_t read_cnt, size_t write_cnt);
-    void Resize(size_t read_cnt, size_t write_cnt);
+    void Reset(size_t write_cnt, size_t read_cnt);
     void Forward(TransactionExecution *txm) override;
 
-    std::vector<CcHandlerResult<Void>> write_results_;
-    std::vector<CcHandlerResult<std::vector<TxId>>> read_results_;
-    size_t acquire_write_cnt_{0};
-    size_t read_intention_size_{0};
-    size_t write_intention_size_{0};
-    std::atomic<size_t> finish_cnt_{0};
+    CcHandlerResult<PostProcessResult> hd_result_;
+    uint32_t write_cnt_;
+    uint32_t read_cnt_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -289,13 +283,10 @@ struct PostWriteAllOp : public TransactionOperation
 {
     PostWriteAllOp(TransactionExecution *txm);
     void Reset(uint32_t ng_cnt);
-    void Resize(uint32_t ng_cnt);
     void Forward(TransactionExecution *txm) override;
     bool IsFailed();
 
-    std::vector<CcHandlerResult<Void>> hd_results_;
-    size_t upload_cnt_{0};
-    std::atomic<size_t> finish_cnt_{0};
+    CcHandlerResult<PostProcessResult> hd_result_;
 
     const TableName *table_name_{nullptr};
     const TxKey *key_{nullptr};

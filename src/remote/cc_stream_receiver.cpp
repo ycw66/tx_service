@@ -161,7 +161,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         assert(msg->has_acquire_resp());
 
-        CcHandlerResult<AcquireKeyResult> *hd_res = nullptr;
+        CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -173,7 +173,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res = reinterpret_cast<CcHandlerResult<AcquireKeyResult> *>(
+            hd_res = reinterpret_cast<
+                CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                 msg->handler_addr());
 
             if (hd_res->Txm()->TxNumber() != msg->tx_number())
@@ -188,7 +189,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const AcquireResponse &cc_res = msg->acquire_resp();
         const CceAddr_msg &cce_addr_res = cc_res.cce_addr();
-        AcquireKeyResult &acq_res = hd_res->Value();
+        AcquireKeyResult &acq_res = hd_res->Value()[cc_res.vec_idx()];
 
         if (cc_res.error_code() != 0)
         {
@@ -197,7 +198,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(cc_res.error_code(), true);
         }
         else
         {
@@ -215,7 +216,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                              cce_addr_res.term());
                 }
 
-                acq_res.remote_ack_cnt_->fetch_sub(1);
+                // Even though the role of remote_ack_cnt_ is to bookkeep how
+                // many remote acknowledgements have been received, the cc entry
+                // address is updated and will be read by the tx processor in a
+                // separate thread. To ensure the updated address is visible to
+                // the tx processor, the memory order must be
+                // memory_order_release.
+                acq_res.remote_ack_cnt_->fetch_sub(1,
+                                                   std::memory_order_release);
             }
 
             if (!cc_res.is_ack())
@@ -228,7 +236,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
-                hd_res->SetFinished();
+                hd_res->SetFinished(true);
             }
         }
 
@@ -277,14 +285,17 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(cc_res.error_code(), true);
         }
         else
         {
             if (acq_all_res.node_term_ < 0)
             {
                 acq_all_res.node_term_ = cc_res.node_term();
-                acq_all_res.remote_ack_cnt_->fetch_sub(1);
+                // Uses memory_order_release to ensure the updated node term is
+                // visible to the tx processor, which is in a separate thread.
+                acq_all_res.remote_ack_cnt_->fetch_sub(
+                    1, std::memory_order_release);
             }
             if (!cc_res.is_ack())
             {
@@ -296,7 +307,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_all_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_all_res.commit_ts_ = cc_res.commit_ts();
-                hd_res->SetFinished();
+                hd_res->SetFinished(true);
             }
         }
 
@@ -341,7 +352,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         assert(msg->has_validate_resp());
 
-        CcHandlerResult<std::vector<TxId>> *hd_res = nullptr;
+        CcHandlerResult<PostProcessResult> *hd_res = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -353,7 +364,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res = reinterpret_cast<CcHandlerResult<std::vector<TxId>> *>(
+            hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
             if (hd_res->Txm()->TxNumber() != msg->tx_number())
@@ -370,18 +381,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(cc_res.error_code(), true);
         }
         else
         {
             if (cc_res.txs_size() == 0)
             {
-                hd_res->SetFinished();
+                hd_res->SetFinished(true);
             }
             else
             {
                 // Does not perform tx negotiations so far.
-                hd_res->SetError(1);
+                hd_res->SetError(1, true);
             }
         }
         msg_pool_.enqueue(std::move(msg));
@@ -391,7 +402,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         assert(msg->has_post_resp());
 
-        CcHandlerResult<Void> *hd_res = nullptr;
+        CcHandlerResult<PostProcessResult> *hd_res = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -403,8 +414,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res =
-                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+            hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
+                msg->handler_addr());
 
             if (hd_res->Txm()->TxNumber() != msg->tx_number())
             {
@@ -420,11 +431,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(cc_res.error_code(), true);
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetFinished(true);
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -491,7 +502,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (read_res.error_code() != 0)
         {
-            hd_res->SetError(read_res.error_code());
+            hd_res->SetError(read_res.error_code(), true);
         }
         else
         {
@@ -535,7 +546,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 }
 
                 read_result.ts_ = read_res.ts();
-                hd_res->SetFinished();
+                LOG(INFO) << "Remote read response, txn #"
+                          << hd_res->Txm()->TxNumber();
+                hd_res->SetFinished(true);
             }
         }
         msg_pool_.enqueue(std::move(msg));
@@ -585,6 +598,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
+        std::shared_ptr<CcHandlerResult<Void>> cc_res_{nullptr};
         RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
         uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
         TX_TRACE_ASSOCIATE(msg.get(), scan_open_req);
@@ -643,7 +657,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_open_res.error_code() != 0)
         {
-            hd_res->SetError(scan_open_res.error_code());
+            hd_res->SetError(scan_open_res.error_code(), true);
         }
         else
         {
@@ -680,7 +694,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
 
             hd_res->Value().cc_node_terms_[ng_id] = term;
-            hd_res->SetFinished();
+            hd_res->SetFinished(true);
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -735,7 +749,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_next_res.error_code() != 0)
         {
-            hd_res->SetError(scan_next_res.error_code());
+            hd_res->SetError(scan_next_res.error_code(), true);
         }
         else
         {
@@ -763,7 +777,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                           ng_id);
             }
 
-            hd_res->SetFinished();
+            hd_res->SetFinished(true);
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -799,11 +813,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (fi_res.error_code() != 0)
         {
-            hd_res->SetError(fi_res.error_code());
+            hd_res->SetError(fi_res.error_code(), true);
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetFinished(true);
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -842,11 +856,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (clean_res.error_code() != 0)
         {
-            hd_res->SetError(clean_res.error_code());
+            hd_res->SetError(clean_res.error_code(), true);
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetFinished(true);
         }
 
         msg_pool_.enqueue(std::move(msg));

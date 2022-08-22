@@ -121,8 +121,10 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        CcHandlerResult<AcquireKeyResult> *hd_res = req.Result();
-        AcquireKeyResult &acquire_key_result = hd_res->Value();
+        CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res = req.Result();
+        AcquireKeyResult &acquire_key_result =
+            req.IsLocal() ? hd_res->Value()[req.HandlerResultIndex()]
+                          : hd_res->Value()[0];
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
         bool resume = false;
@@ -372,7 +374,8 @@ public:
         }
         else if (req.Protocol() == CcProtocol::OCC)
         {
-            std::vector<TxId> &conflicting_txs = hd_res->Value();
+            std::vector<TxNumber> &conflicting_txs =
+                hd_res->Value().conflicting_txs_;
 
             if (gap_ts > 0)
             {
@@ -385,7 +388,7 @@ public:
                      it != cce->insert_intention_set_.end();
                      ++it)
                 {
-                    conflicting_txs.emplace_back(it->second->tx_id_);
+                    conflicting_txs.emplace_back(it->second->txn_);
                 }
             }
 

@@ -75,16 +75,6 @@ public:
         return cc_shards_[thd_id]->IsIdle();
     }
 
-    void SleepNotify(uint32_t thd_id)
-    {
-        cc_shards_[thd_id]->SleepNotify();
-    }
-
-    void WorkNotify(uint32_t thd_id)
-    {
-        cc_shards_[thd_id]->WorkNotify();
-    }
-
     size_t Count() const
     {
         return cc_shards_.size();
@@ -216,17 +206,8 @@ public:
         return node_id_;
     }
 
-    std::condition_variable &ShardCv(uint32_t core_id)
-    {
-        return cc_shards_.at(core_id)->shard_cv_;
-    }
-
-    std::mutex &ShardMutex(uint32_t core_id)
-    {
-        return cc_shards_.at(core_id)->shard_mux_;
-    }
-
     static uint64_t ClockTs();
+    uint64_t ShardClockTs(uint16_t core_id);
 
     const CatalogEntry *CreateCatalog(const std::string &table_name,
                                       NodeGroupId cc_ng_id,
@@ -319,6 +300,8 @@ public:
         }
         return min_ts;
     }
+
+    void WakeUpTxProcessor(uint16_t core_id);
 
     store::DataStoreHandler *const store_hd_;
 

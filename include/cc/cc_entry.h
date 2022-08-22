@@ -38,14 +38,7 @@ struct InsertEntry : public UntypedInsertEntry
 {
 public:
     InsertEntry(const KeyT &key,
-                const TxId &tx_id,
-                CcEntry<KeyT, ValueT> *parent_entry)
-        : key_(key), tx_id_(tx_id), parent_entry_(parent_entry)
-    {
-    }
-
-    InsertEntry(const KeyT &key,
-                TxNumber &txn,
+                TxNumber txn,
                 CcEntry<KeyT, ValueT> *parent_entry)
         : key_(key), txn_(txn), parent_entry_(parent_entry)
     {
@@ -57,7 +50,6 @@ public:
     }
 
     const KeyT key_;  // owner of key_
-    TxId tx_id_;
     TxNumber txn_;
     CcEntry<KeyT, ValueT> *parent_entry_;
 };

@@ -1,7 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
+#include <memory>  //unique_ptr
+#include <mutex>
 
 #include "cc/cc_entry.h"
 
@@ -11,8 +12,8 @@ class CcScanner;
 
 struct AcquireKeyResult
 {
-    uint64_t last_vali_ts_;
-    uint64_t commit_ts_;
+    uint64_t last_vali_ts_{0};
+    uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
     // Number of remote acquire requests to be acknowledged in the transaction's
     // upload phase. For OCC/MVCC protocols, an acquire request is non-blocking,
@@ -20,7 +21,7 @@ struct AcquireKeyResult
     // protocols, the request may be blocked. An acknowledgement is a special
     // response notifying the sender the address and the term of the cc entry on
     // which the request is blocked.
-    std::atomic<int32_t> *remote_ack_cnt_;
+    std::atomic<int32_t> *remote_ack_cnt_{nullptr};
 };
 
 struct AcquireAllResult
@@ -141,5 +142,52 @@ struct RangeMedianKeyResult
 
     std::unique_ptr<TxKey> median_key_{nullptr};
     int32_t new_partition_id_{-1};
+};
+
+struct PostProcessResult
+{
+    PostProcessResult() = default;
+
+    PostProcessResult(const PostProcessResult &rhs)
+        : conflicting_txs_(rhs.conflicting_txs_)
+    {
+    }
+
+    PostProcessResult(PostProcessResult &&rhs)
+        : conflicting_txs_(std::move(rhs.conflicting_txs_))
+    {
+    }
+
+    PostProcessResult &operator=(const PostProcessResult &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        conflicting_txs_ = rhs.conflicting_txs_;
+        return *this;
+    }
+
+    void AddConflictingTx(TxNumber txn)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        conflicting_txs_.emplace_back(txn);
+    }
+
+    size_t Size()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return conflicting_txs_.size();
+    }
+
+    void Clear()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        conflicting_txs_.clear();
+    }
+
+    std::vector<TxNumber> conflicting_txs_;
+    std::mutex mux_;
 };
 }  // namespace txservice

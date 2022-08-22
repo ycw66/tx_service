@@ -112,8 +112,10 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        CcHandlerResult<AcquireKeyResult> *hd_res = req.Result();
-        AcquireKeyResult &acquire_key_result = hd_res->Value();
+        CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res = req.Result();
+        AcquireKeyResult &acquire_key_result =
+            req.IsLocal() ? hd_res->Value()[req.HandlerResultIndex()]
+                          : hd_res->Value()[0];
         CcEntryAddr &cce_addr = acquire_key_result.cce_addr_;
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         bool resume = false;
@@ -211,13 +213,12 @@ public:
         {
             // This is an insert. The new insert results in an insert entry in
             // the intention set of the preceding key's gap.
-            const TxId *txid = req.Txid();
 
             auto ins_it = cc_entry.insert_intention_set_.find(target_key);
             if (ins_it != cc_entry.insert_intention_set_.end())
             {
                 InsertEntry<KeyT, ValueT> &insert_entry = *ins_it->second;
-                if (!(insert_entry.tx_id_ == *txid))
+                if (!(insert_entry.txn_ == req.Txn()))
                 {
                     // If the same key is already in the insert intention set,
                     // and its tx ID does not matches the request's, this is a
@@ -229,7 +230,7 @@ public:
 
             std::unique_ptr<InsertEntry<KeyT, ValueT>> insert_entry =
                 std::make_unique<InsertEntry<KeyT, ValueT>>(
-                    *target_key, *txid, cce_ptr);
+                    *target_key, req.Txn(), cce_ptr);
             cce_addr.SetInsert(reinterpret_cast<uint64_t>(insert_entry.get()),
                                ng_term,
                                req.NodeGroupId());
@@ -330,7 +331,7 @@ public:
                 auto ite =
                     prior_cce.insert_intention_set_.find(&insert_entry.key_);
                 assert(ite != prior_cce.insert_intention_set_.end());
-                assert(ite->second->tx_id_.TxNumber() == txn);
+                assert(ite->second->txn_ == txn);
 
                 shard_->DecrementMemory(new_cce->PayloadMemUsage());
                 if (payload_str == nullptr)
@@ -572,7 +573,7 @@ public:
             if (ins_it != cc_entry.insert_intention_set_.end())
             {
                 InsertEntry<KeyT, ValueT> &insert_entry = *ins_it->second;
-                if (!(insert_entry.tx_id_.TxNumber() == txn))
+                if (!(insert_entry.txn_ == txn))
                 {
                     // If the same key is already in the insert intention set,
                     // and its tx ID does not matches the request's, this is a
@@ -1084,21 +1085,18 @@ public:
         }
         else if (req.Protocol() == CcProtocol::OCC)
         {
-            std::vector<TxId> &conflicting_txs = hd_res->Value();
+            PostProcessResult &conflicting_txs = hd_res->Value();
 
             if (gap_ts > 0)
             {
                 cc_entry.gap_last_read_ts_ =
                     std::max(cc_entry.gap_last_read_ts_, commit_ts);
 
-                conflicting_txs.reserve(cc_entry.insert_intention_set_.size() +
-                                        1);
-
                 for (auto it = cc_entry.insert_intention_set_.begin();
                      it != cc_entry.insert_intention_set_.end();
                      ++it)
                 {
-                    conflicting_txs.emplace_back(it->second->tx_id_);
+                    conflicting_txs.AddConflictingTx(it->second->txn_);
                 }
             }
 
@@ -1116,7 +1114,7 @@ public:
                                            req.NodeGroupId(),
                                            ng_term);
 
-                    conflicting_txs.emplace_back(
+                    conflicting_txs.AddConflictingTx(
                         cc_entry.key_lock_.WriteLockTx());
                 }
             }

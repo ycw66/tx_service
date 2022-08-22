@@ -16,7 +16,7 @@
 namespace txservice
 {
 template <typename T>
-void CcHandlerResult<T>::SetFinished()
+void CcHandlerResult<T>::SetFinished(bool remote_response)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -39,6 +39,7 @@ void CcHandlerResult<T>::SetFinished()
             }
         });
     TX_TRACE_DUMP(static_cast<T *>(&result_));
+
     if (ref_cnted_)
     {
         auto r = ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);
@@ -50,8 +51,16 @@ void CcHandlerResult<T>::SetFinished()
             }
 
             bool expect = false;
-            is_finished_.compare_exchange_strong(
+            bool success = is_finished_.compare_exchange_strong(
                 expect, true, std::memory_order_acq_rel);
+
+            // Remote cc requests at remote nodes do not reference any tx
+            // machines. The sending tx will be enlisted for execution when it
+            // receives the response of remote cc requests.
+            if (success && txm_ != nullptr)
+            {
+                txm_->EnlistToExecute(remote_response, true);
+            }
         }
     }
     else
@@ -62,13 +71,21 @@ void CcHandlerResult<T>::SetFinished()
         }
 
         bool expect = false;
-        is_finished_.compare_exchange_strong(
+        bool success = is_finished_.compare_exchange_strong(
             expect, true, std::memory_order_acq_rel);
+
+        // Remote cc requests at remote nodes do not reference any tx machines.
+        // The sending tx will be enlisted for execution when it receives the
+        // response of remote cc requests.
+        if (success && txm_ != nullptr)
+        {
+            txm_->EnlistToExecute(remote_response, false);
+        }
     }
 };
 
 template <typename T>
-void CcHandlerResult<T>::SetError(int8_t err_code)
+void CcHandlerResult<T>::SetError(int8_t err_code, bool remote_response)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -137,11 +154,11 @@ template class CcHandlerResult<ReadKeyResult>;
 template class CcHandlerResult<ScanNextResult>;
 template class CcHandlerResult<ScanOpenResult>;
 template class CcHandlerResult<AcquireAllResult>;
-template class CcHandlerResult<AcquireKeyResult>;
+template class CcHandlerResult<std::vector<AcquireKeyResult>>;
 template class CcHandlerResult<RangeMedianKeyResult>;
 template class CcHandlerResult<Void>;
 template class CcHandlerResult<TxId>;
-template class CcHandlerResult<std::vector<txservice::TxId>>;
+template class CcHandlerResult<PostProcessResult>;
 template class CcHandlerResult<bool>;
 template class CcHandlerResult<uint64_t>;
 template class CcHandlerResult<int8_t>;

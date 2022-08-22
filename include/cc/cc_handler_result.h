@@ -32,8 +32,8 @@ class CcHandlerResultBase
 {
 public:
     virtual ~CcHandlerResultBase() = default;
-    virtual void SetError(int8_t err_code) = 0;
-    virtual void SetFinished() = 0;
+    virtual void SetError(int8_t err_code, bool remote_response = false) = 0;
+    virtual void SetFinished(bool remote_response = false) = 0;
     virtual bool IsFinished() const = 0;
     virtual bool ForceError() = 0;
     virtual bool IsError() const = 0;
@@ -43,7 +43,7 @@ template <typename T>
 class CcHandlerResult : public CcHandlerResultBase
 {
 public:
-    CcHandlerResult(const TransactionExecution *txm) : result_(), txm_(txm)
+    CcHandlerResult(TransactionExecution *txm) : result_(), txm_(txm)
     {
     }
 
@@ -97,6 +97,11 @@ public:
         ref_cnted_ = false;
     }
 
+    uint32_t RefCnt() const
+    {
+        return ref_cnt_.load(std::memory_order_relaxed);
+    }
+
     void SetValue(const T &val)
     {
         result_ = val;
@@ -117,25 +122,25 @@ public:
         return result_;
     }
 
-    void SetFinished() override;
-    void SetError(int8_t err_code) override;
+    void SetFinished(bool remote_response = false) override;
+    void SetError(int8_t err_code, bool remote_response = false) override;
     /**
      * @brief Forces the handler result to an error state.
      *
-     * The method is used exclusively to force a tx to stop waiting for a
-     * remote cc request's response and to set the request's result to an error
-     * state. In case the remote response returns at the same time (which is
-     * unlikely), ForceError() either precedes or follows the response's two
-     * consecutive invocations of (a) SetValue() or setting the error code and
-     * (b) SetFinished(). If ForceError() follows, the prior SetFinish() will
-     * prevent it from setting the error code. The request finishes normally. If
-     * ForceError() prcedes, it will prevent the invocation of SetFinish(), but
-     * cannot prevent SetError() or SetValue(). This means that when the tx
-     * moves on to cancel the current request, the request's result is
-     * guaranteed to have an error code, but the result value may be set by the
-     * remote response, or the error code is overwritten by the code returned by
-     * the remote reseponse. At any rate, this is still correct in that the
-     * request finishes with an error and the tx moves on as expected.
+     * The method is used exclusively to force a tx to stop waiting for a remote
+     * cc request's response and to set the request's result to an error state.
+     * In case the remote response returns at the same time (which is unlikely),
+     * ForceError() either precedes or follows the response's two consecutive
+     * invocations of (a) SetValue()/SetError() and (b) SetFinished(). If
+     * ForceError() follows, the prior SetFinish() will prevent it from setting
+     * the error code. The request finishes normally. If ForceError() prcedes,
+     * it will prevent the invocation of SetFinish(), but cannot prevent
+     * SetError() or SetValue(). This means that when the tx moves on to cancel
+     * the current request, the request's result is guaranteed to have an error
+     * code, but the result value may be set by the remote response, or the
+     * error code is the code returned by the remote reseponse. At any rate,
+     * this is still correct in that the request finishes with an error and the
+     * tx moves on as expected.
      *
      * @return true, if the result is forced to be errored; false, if the result
      * has already been set by the remote request's resposne.
@@ -149,7 +154,7 @@ public:
         ClearRefCnt();
     }
 
-    const TransactionExecution *Txm() const
+    TransactionExecution *Txm()
     {
         return txm_;
     }
@@ -164,7 +169,7 @@ private:
     // handler result. The handler result is bound to a fixed tx machine. The tx
     // machine, however, may be re-used repeatedly for different user-level
     // tx's.
-    const TransactionExecution *const txm_;
+    TransactionExecution *const txm_;
 
 public:
     std::function<void(CcHandlerResult<T> *)> post_lambda_;

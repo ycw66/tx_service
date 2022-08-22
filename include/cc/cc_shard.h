@@ -441,26 +441,6 @@ public:
     uint64_t log_limit_{0};
 
 private:
-    /**
-     * @brief The method invoked by the processing thread to notify the cc shard
-     * that it enters into the sleep mode.
-     *
-     */
-    void SleepNotify()
-    {
-        processor_sleep_.store(true, std::memory_order_release);
-    }
-
-    /**
-     * @brief The method invoked by the processing thread to notify the cc shard
-     * that it wakes up from the sleep mode and is working.
-     *
-     */
-    void WorkNotify()
-    {
-        processor_sleep_.store(false, std::memory_order_release);
-    }
-
     std::unordered_map<TableName, CcMap::uptr> native_ccms_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;
@@ -509,21 +489,6 @@ private:
     std::unordered_map<TxNumber, TxLockInfo> lock_holding_txs_;
 
     Checkpointer *ckpter_;
-
-    /**
-     * @brief The condition variable via which the cc shard wakes up the
-     * processing thread dedicated to it from the sleep mode.
-     *
-     */
-    std::condition_variable shard_cv_;
-    std::mutex shard_mux_;
-
-    /**
-     * @brief The variable via which the dedicated processing thread notifies
-     * the shard that it enters into the sleep mode.
-     *
-     */
-    std::atomic<bool> processor_sleep_;
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.

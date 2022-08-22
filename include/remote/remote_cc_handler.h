@@ -27,11 +27,12 @@ public:
                       const TableName &table_name,
                       const TxKey &key,
                       uint32_t key_shard_code,
-                      const TxId &txid,
+                      TxNumber txn,
                       int64_t tx_term,
                       uint64_t ts,
                       bool is_insert,
-                      CcHandlerResult<AcquireKeyResult> &hres,
+                      CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
+                      uint32_t hd_res_idx,
                       const CcProtocol proto = CcProtocol::OCC);
 
     void AcquireWriteAll(uint32_t src_node_id,
@@ -52,7 +53,7 @@ public:
                    const CcEntryAddr &cce_addr,
                    const TxRecord *record,
                    bool is_deleted,
-                   CcHandlerResult<Void> &hres,
+                   CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol);
 
     void PostWriteAll(uint32_t src_node_id,
@@ -63,7 +64,7 @@ public:
                       uint64_t tx_number,
                       int64_t tx_term,
                       uint64_t commit_ts,
-                      CcHandlerResult<Void> &hres,
+                      CcHandlerResult<PostProcessResult> &hres,
                       DmlOperation dml_op,
                       PostWriteType post_write_type);
 
@@ -74,7 +75,7 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &cce_addr,
-                  CcHandlerResult<std::vector<TxId>> &hres,
+                  CcHandlerResult<PostProcessResult> &hres,
                   CcProtocol protocol,
                   LockType lock_type);
 

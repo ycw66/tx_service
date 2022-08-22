@@ -130,6 +130,7 @@ message AcquireResponse {
 	CceAddr_msg cce_addr = 4;
 	// The response is an acknowledgement or the result
 	bool is_ack = 5;
+	uint32 vec_idx = 6;
 }
 
 message AcquireAllRequest {
@@ -165,7 +166,7 @@ message ValidateRequest {
 
 message ValidateResponse {
 	int32 error_code = 1;
-	repeated TxId_msg txs = 2;
+	repeated uint64 txs = 2;
 }
 
 message PostprocessResponse {

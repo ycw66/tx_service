@@ -22,31 +22,33 @@ txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
 void txservice::LocalCcHandler::AcquireWrite(
     const TableName &table_name,
     const TxKey &key,
-    const TxId &txid,
+    TxNumber tx_number,
     int64_t tx_term,
     uint64_t ts,
     bool is_insert,
-    CcHandlerResult<AcquireKeyResult> &hres,
+    CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
+    uint32_t hd_res_idx,
     const CcProtocol proto)
 {
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
     uint32_t ng_id = shard_code >> 10;
-    hres.Value().cce_addr_.SetNodeGroupId(ng_id);
-    hres.Value().cce_addr_.SetCce(0, -1);
+    AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
+    acquire_result.cce_addr_.SetNodeGroupId(ng_id);
+    acquire_result.cce_addr_.SetCce(0, -1);
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
-        hres.Value().remote_ack_cnt_ = nullptr;
         AcquireCc *req = acquire_pool.NextRequest();
         req->Reset(&table_name,
                    &key,
                    shard_code,
-                   &txid,
+                   tx_number,
                    tx_term,
                    ts,
                    is_insert,
                    &hres,
+                   hd_res_idx,
                    proto);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -54,16 +56,17 @@ void txservice::LocalCcHandler::AcquireWrite(
     }
     else
     {
-        hres.Value().remote_ack_cnt_->fetch_add(1);
+        acquire_result.remote_ack_cnt_->fetch_add(1, std::memory_order_relaxed);
         remote_hd_.AcquireWrite(cc_shards_.node_id_,
                                 table_name,
                                 key,
                                 shard_code,
-                                txid,
+                                tx_number,
                                 tx_term,
                                 ts,
                                 is_insert,
                                 hres,
+                                hd_res_idx,
                                 proto);
     }
 }
@@ -115,16 +118,17 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     }
 }
 
-void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
-                                             const TxKey &key,
-                                             TxRecord &rec,
-                                             NodeGroupId ng_id,
-                                             uint64_t tx_number,
-                                             int64_t tx_term,
-                                             uint64_t commit_ts,
-                                             CcHandlerResult<Void> &hres,
-                                             DmlOperation dml_op,
-                                             PostWriteType post_write_type)
+void txservice::LocalCcHandler::PostWriteAll(
+    const TableName &table_name,
+    const TxKey &key,
+    TxRecord &rec,
+    NodeGroupId ng_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t commit_ts,
+    CcHandlerResult<PostProcessResult> &hres,
+    DmlOperation dml_op,
+    PostWriteType post_write_type)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -186,14 +190,15 @@ void txservice::LocalCcHandler::PostWriteAll(const TableName &table_name,
     }
 }
 
-void txservice::LocalCcHandler::PostWrite(uint64_t tx_number,
-                                          int64_t tx_term,
-                                          uint64_t commit_ts,
-                                          const CcEntryAddr &cce_addr,
-                                          const TxRecord *record,
-                                          bool is_deleted,
-                                          CcHandlerResult<Void> &hres,
-                                          CcProtocol protocol)
+void txservice::LocalCcHandler::PostWrite(
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t commit_ts,
+    const CcEntryAddr &cce_addr,
+    const TxRecord *record,
+    bool is_deleted,
+    CcHandlerResult<PostProcessResult> &hres,
+    CcProtocol protocol)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -246,7 +251,7 @@ void txservice::LocalCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<std::vector<TxId>> &hres,
+    CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol,
     LockType lock_type)
 {

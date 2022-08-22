@@ -100,7 +100,7 @@ template std::string tx_trace_associate(
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
     txservice::AcquireWriteOperation *,
-    txservice::CcHandlerResult<AcquireKeyResult> *,
+    txservice::CcHandlerResult<std::vector<AcquireKeyResult>> *,
     std::string,
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
@@ -110,7 +110,7 @@ template std::string tx_trace_associate(
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
     txservice::ValidateOperation *,
-    txservice::CcHandlerResult<std::vector<TxId>> *,
+    txservice::CcHandlerResult<PostProcessResult> *,
     std::string,
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
@@ -125,7 +125,7 @@ template std::string tx_trace_associate(
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
     txservice::PostProcessOp *,
-    txservice::CcHandlerResult<std::vector<TxId>> *,
+    txservice::CcHandlerResult<PostProcessResult> *,
     std::string,
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(

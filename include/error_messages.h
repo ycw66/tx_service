@@ -62,6 +62,8 @@ static const std::map<TxErrorCode, std::string> error_messages{
     {TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
      "Failed at acquire write intent."},
     {TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR,
-     "Transaction failed due to write set bytes count too large."}};
+     "Transaction failed due to write set bytes count too large."},
+    {TxErrorCode::WRITE_WRITE_CONFLICT,
+     "Transaction failed due to write-write conflicts."}};
 
 }  // namespace txservice

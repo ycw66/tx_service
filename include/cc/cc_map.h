@@ -177,7 +177,7 @@ protected:
     bool AcquireWriteLockOnExistingCcEntry(
         AcquireCc &req,
         bool resume,
-        CcHandlerResult<AcquireKeyResult> *hd_res,
+        CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res,
         AcquireKeyResult &acquire_key_result,
         int64_t ng_term,
         LruEntry &cc_entry);

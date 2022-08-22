@@ -14,6 +14,7 @@
 #include "sharder.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
+#include "tx_service.h"
 #include "tx_trace.h"
 #include "type.h"
 #include "util.h"
@@ -22,9 +23,11 @@ namespace txservice
 {
 TransactionExecution::TransactionExecution(CcHandler *_handler,
                                            TxLog *txlog,
+                                           TxProcessor *tx_processor,
                                            CcProtocol proto)
     : handler(_handler),
       txlog_(txlog),
+      tx_processor_(tx_processor),
       txid_(UINT32_MAX),
       tx_number_((uint64_t) UINT32_MAX << 32L),
       tx_term_(-1),
@@ -86,7 +89,7 @@ void TransactionExecution::Reset(CcProtocol proto)
 
 void TransactionExecution::Restart()
 {
-    tx_status_.store(TxnStatus::Ongoing, std::memory_order_release);
+    tx_status_.store(TxnStatus::Ongoing, std::memory_order_relaxed);
 }
 
 bool TransactionExecution::Idle() const
@@ -96,7 +99,7 @@ bool TransactionExecution::Idle() const
 
 uint64_t TransactionExecution::TxNumber() const
 {
-    return tx_number_.load(std::memory_order_acquire);
+    return tx_number_.load(std::memory_order_relaxed);
 }
 
 int64_t TransactionExecution::TxTerm() const
@@ -116,6 +119,11 @@ void TransactionExecution::SetErrorMessage(const std::string &err_msg)
 uint32_t TransactionExecution::TxCcNodeId() const
 {
     return (tx_number_.load(std::memory_order_relaxed) >> 32L) >> 10;
+}
+
+TxnStatus TransactionExecution::TxStatus() const
+{
+    return tx_status_.load(std::memory_order_relaxed);
 }
 
 void TransactionExecution::RecoverSchemaTx(
@@ -166,15 +174,37 @@ void TransactionExecution::RecoverSchemaTx(
     }
 }
 
+void TransactionExecution::EnlistToExecute(bool remote_response,
+                                           bool skip_remote_cnt)
+{
+    tx_processor_->EnlistExecutingTx(this, remote_response, skip_remote_cnt);
+}
+
+void TransactionExecution::EnlistToWait()
+{
+    tx_processor_->EnlistWaitingTx(this);
+}
+
+void TransactionExecution::ForceToForward()
+{
+    tx_processor_->RemoveWaitingTx(this);
+}
+
 void TransactionExecution::Forward()
 {
     if (state_stack_.empty())
     {
-        return;
+        TxRequest *req = next_req_.exchange(nullptr);
+        if (req != nullptr)
+        {
+            req->Process(this);
+        }
     }
-
-    prev_op_ = state_stack_.back();
-    prev_op_->Forward(this);
+    else
+    {
+        prev_op_ = state_stack_.back();
+        prev_op_->Forward(this);
+    }
 }
 
 void TransactionExecution::ForwardTs(uint64_t candidate_ts)
@@ -199,6 +229,7 @@ int TransactionExecution::Execute(TxRequest *tx_req)
     {
         assert(next_req_.load(std::memory_order_acquire) == nullptr);
         next_req_.store(tx_req, std::memory_order_release);
+        EnlistToExecute(false, true);
         return 0;
     }
     else
@@ -211,33 +242,27 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 
 bool TransactionExecution::IsTimeOut(int wait_secs)
 {
-    ++state_forward_cnt_;
-    if (state_forward_cnt_ == LoopCnt)
+    uint64_t now_ts = LocalCcShards::ClockTs();
+    using namespace std::chrono_literals;
+    // TODO remove this hard code 10 seconds
+    uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::seconds(wait_secs))
+                            .count();
+    if (now_ts - state_clock_ > duration)
     {
-        state_forward_cnt_ = 0;
-        uint64_t now_ts = LocalCcShards::ClockTs();
-        using namespace std::chrono_literals;
-        // TODO remove this hard code 10 seconds
-        uint64_t duration =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::seconds(wait_secs))
-                .count();
-        if (now_ts - state_clock_ > duration)
-        {
-            // The local clock is advanced in roughly 2 seconds. So, if the
-            // current time is greater than the prior one by at least 4
-            // seconds(local clock advances at least two times), then we can
-            // confirm the tx machine has been stuck in this state for at least
-            // 2 seconds.
-            //
-            // local clock(s):      0          2          4
-            //                |----------|----------|----------|
-            //                          ^            ^
-            // current time:          prior         now
-            //
-            state_clock_ = now_ts;
-            return true;
-        }
+        // The local clock is advanced in roughly 2 seconds. So, if the
+        // current time is greater than the prior one by at least 4
+        // seconds(local clock advances at least two times), then we can
+        // confirm the tx machine has been stuck in this state for at least
+        // 2 seconds.
+        //
+        // local clock(s):      0          2          4
+        //                |----------|----------|----------|
+        //                          ^            ^
+        // current time:          prior         now
+        //
+        state_clock_ = now_ts;
+        return true;
     }
 
     return false;
@@ -245,7 +270,6 @@ bool TransactionExecution::IsTimeOut(int wait_secs)
 
 void TransactionExecution::StartTiming()
 {
-    state_forward_cnt_ = 0;
     state_clock_ = LocalCcShards::ClockTs();
 }
 
@@ -327,6 +351,7 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
                 .append("\"table_name:\":")
                 .append(*scan_open_req.tab_name_);
         });
+
     uint64_resp_ = &scan_open_req.tx_result_;
     uint64_resp_->Reset();
     scan_open_.tx_req_ = &scan_open_req;
@@ -409,6 +434,7 @@ void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     bool_resp_ = &commit_req.tx_result_;
     bool_resp_->Reset();
     Commit();
@@ -527,7 +553,6 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
     handler->NewTxn(init_txn.hd_result_);
     init_txn.Forward(this);
-    return;
 }
 
 void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
@@ -1417,18 +1442,15 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     {
         for (auto &[key_ptr, write_entry] : table_write_set)
         {
-            CcHandlerResult<AcquireKeyResult> &hres =
-                acquire_write.results_[idx];
-            hres.Reset();
-            hres.Value().remote_ack_cnt_ = &acquire_write.remote_ack_cnt_;
-            acquire_write.acquire_write_entries_.at(idx) = &write_entry;
+            acquire_write.acquire_write_entries_[idx] = &write_entry;
             handler->AcquireWrite(table_name,
                                   *write_entry.key_,
-                                  txid_,
+                                  TxNumber(),
                                   tx_term_,
                                   current_ts,
                                   write_entry.op_ == DmlOperation::Insert,
-                                  hres,
+                                  acquire_write.hd_result_,
+                                  idx,
                                   protocol_);
             ++idx;
         }
@@ -1452,10 +1474,9 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (acquire_write.fail_cnt_.load(std::memory_order_acquire) > 0 ||
-        acquire_write.rset_has_expired_.load(std::memory_order_acquire))
+    if (acquire_write.hd_result_.IsError() || acquire_write.rset_has_expired_)
     {
-        SetErrorMessage("Transaction abort: failed to acquire write lock.");
+        bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
         Abort();
     }
     else
@@ -1480,13 +1501,12 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
     uint64_t candidate = commit_ts_bound_;
 
     set_ts.is_running_ = true;
-    for (size_t idx = 0; idx < acquire_write_.acquire_write_cnt_; ++idx)
-    {
-        candidate = std::max(
-            candidate, acquire_write_.results_[idx].Value().last_vali_ts_ + 1);
 
-        candidate = std::max(
-            candidate, acquire_write_.results_[idx].Value().commit_ts_ + 1);
+    for (const AcquireKeyResult &acquire_key :
+         acquire_write_.hd_result_.Value())
+    {
+        candidate = std::max(candidate, acquire_key.last_vali_ts_ + 1);
+        candidate = std::max(candidate, acquire_key.commit_ts_ + 1);
     }
 
     const std::unordered_map<TableName,
@@ -1565,35 +1585,26 @@ void TransactionExecution::Process(ValidateOperation &validate)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    size_t offset = 0;
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
         &rset = rw_set_.ReadSet();
 
     validate.Reset(rw_set_.ReadSetSize());
-    validate.vali_cce_addr_.clear();
     validate.is_running_ = true;
 
     for (const auto &table_entry_it : rset)
     {
         for (const auto &[cce_addr, read_entry] : table_entry_it.second)
         {
-            validate_.vali_cce_addr_.emplace_back(&cce_addr);
-
-            CcHandlerResult<std::vector<TxId>> &hres =
-                validate.results_[offset];
-            hres.Reset();
             handler->PostRead(tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
                               read_entry.version_ts_,
                               0,
                               commit_ts_,
                               cce_addr,
-                              hres,
+                              validate.hd_result_,
                               read_entry.protocol_,
                               read_entry.lock_type_);
-
-            ++offset;
         }
     }
 
@@ -1620,9 +1631,9 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         state_stack_.pop_back();
     }
 
-    if (validate.error_.load(std::memory_order_acquire))
+    if (validate.IsError())
     {
-        SetErrorMessage("Transaction abort: validation failed.");
+        bool_resp_->SetErrorCode(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
         Abort();
     }
     else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
@@ -1898,22 +1909,41 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         });
     state_stack_.pop_back();
 
-    int wset_intention_cnt =
-        rw_set_.WriteSetSize() > 0
-            ? acquire_write_.acquire_write_cnt_ -
-                  acquire_write_.fail_cnt_.load(std::memory_order_acquire)
-            : 0;
-    if (wset_intention_cnt != 0 || rw_set_.ReadSetSize() != 0)
+    uint32_t acquire_write_cnt = rw_set_.WriteSetSize();
+    if (rw_set_.WriteSetSize() > 0 && acquire_write_.hd_result_.IsError())
     {
-        post_process_.read_intention_size_ = rw_set_.ReadSetSize();
-        post_process_.write_intention_size_ = wset_intention_cnt;
+        std::vector<AcquireKeyResult> &acquire_key_vec =
+            acquire_write_.hd_result_.Value();
+        size_t error_cnt = 0;
+        for (const AcquireKeyResult &acq_key : acquire_key_vec)
+        {
+            if (acq_key.cce_addr_.Term() < 0)
+            {
+                ++error_cnt;
+            }
+        }
+        acquire_write_cnt -= error_cnt;
+    }
+
+    if (acquire_write_cnt > 0 || rw_set_.ReadSetSize() > 0)
+    {
+        if (TxStatus() == TxnStatus::Committed)
+        {
+            // The tx is committed. Post-processing includes both primary keys
+            // that have locks and secondary keys without locks.
+            post_process_.Reset(rw_set_.WriteSetSize(), 0);
+        }
+        else
+        {
+            post_process_.Reset(acquire_write_cnt, rw_set_.ReadSetSize());
+        }
         PushOperation(&post_process_);
         Process(post_process_);
     }
     else
     {
-        // For tx's that have finished validation and have not uploaded
-        // anything, skips post-processing.
+        // For tx's that have finished validation but do not upload anything,
+        // skips post-processing.
 
         if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
         {
@@ -1943,8 +1973,6 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    size_t read_intention_size = post_process.read_intention_size_;
-    size_t write_intention_size = post_process.write_intention_size_;
     post_process.is_running_ = true;
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
@@ -1962,16 +1990,13 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : table_write_set)
             {
-                CcHandlerResult<Void> &hres = post_process.write_results_[idx];
-                hres.Reset();
-
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
                                    commit_ts_,
                                    write_entry.cce_addr_,
                                    write_entry.rec_.get(),
                                    write_entry.op_ == DmlOperation::Delete,
-                                   hres,
+                                   post_process.hd_result_,
                                    protocol_);
 
                 ++idx;
@@ -1981,31 +2006,26 @@ void TransactionExecution::Process(PostProcessOp &post_process)
     else
     {
         // If the tx failed during the acquire phase or was aborted before
-        // entering the commit phase, post-processing removes write intentions
-        // of write-set keys and clears read intentions/locks of read-set keys.
-
-        post_process.Reset(read_intention_size, write_intention_size);
+        // entering the commit phase, post-processing removes write intents of
+        // write-set keys and clears read intents/locks of read-set keys.
 
         size_t offset = 0;
         size_t idx = 0;
         const std::unordered_map<TableName, TableWriteSet> &wset =
             rw_set_.WriteSet();
+
         for (const auto &[table_name, table_write_set] : wset)
         {
             for (const auto &[key, write_entry] : table_write_set)
             {
-                if (acquire_write_.results_[idx].IsError())
+                if (write_entry.cce_addr_.Term() < 0)
                 {
-                    // Keys that were not successfully acquire write lock in the
-                    // cc map do not need post-processing.
+                    // Keys that were not successfully locked in the cc map do
+                    // not need post-processing.
                     ++idx;
                     continue;
                 }
                 assert(!write_entry.cce_addr_.Empty());
-
-                CcHandlerResult<Void> &hres =
-                    post_process.write_results_[offset];
-                hres.Reset();
 
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
@@ -2013,14 +2033,13 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    write_entry.cce_addr_,
                                    nullptr,
                                    false,
-                                   hres,
+                                   post_process.hd_result_,
                                    protocol_);
 
                 ++offset;
                 ++idx;
             }
         }
-        assert(offset == write_intention_size);
 
         idx = 0;
         const std::unordered_map<TableName,
@@ -2031,19 +2050,15 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[cce_addr, read_entry] : table_entry_it.second)
             {
-                CcHandlerResult<std::vector<TxId>> &hres =
-                    post_process.read_results_[idx];
-                hres.Reset();
                 handler->PostRead(tx_number_.load(std::memory_order_relaxed),
                                   tx_term_,
                                   0,
                                   0,
                                   0,
                                   cce_addr,
-                                  hres,
+                                  post_process.hd_result_,
                                   read_entry.protocol_,
                                   read_entry.lock_type_);
-
                 ++idx;
             }
         }
@@ -2154,8 +2169,6 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
 
     for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
     {
-        CcHandlerResult<Void> &hres = post_write_all_op.hd_results_[nid];
-        hres.Reset();
         handler->PostWriteAll(*post_write_all_op.table_name_,
                               *post_write_all_op.key_,
                               *post_write_all_op.rec_,
@@ -2163,7 +2176,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                               tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
                               commit_ts_,
-                              hres,
+                              post_write_all_op.hd_result_,
                               post_write_all_op.dml_op_,
                               post_write_all_op.write_type_);
     }

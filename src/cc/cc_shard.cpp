@@ -34,7 +34,6 @@ CcShard::CcShard(uint16_t core_id,
       tail_cce_(nullptr),
       size_(0),
       ckpter_(nullptr),
-      processor_sleep_(false),
       catalog_factory_(catalog_factory)
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
@@ -115,12 +114,7 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
     bool ret = cc_queue_.enqueue(thd_token_.at(thd_id), req);
     assert(ret == true);
 
-    // Wakes up the thread dedicated to this shard, when it is in the sleep
-    // mode.
-    if (processor_sleep_.load(std::memory_order_acquire))
-    {
-        shard_cv_.notify_one();
-    }
+    local_shards_.WakeUpTxProcessor(core_id_);
 }
 
 void CcShard::Enqueue(CcRequestBase *req)
@@ -128,12 +122,7 @@ void CcShard::Enqueue(CcRequestBase *req)
     bool ret = cc_queue_.enqueue(req);
     assert(ret == true);
 
-    // Wakes up the thread dedicated to this shard, when it is in the sleep
-    // mode.
-    if (processor_sleep_.load(std::memory_order_acquire))
-    {
-        shard_cv_.notify_one();
-    }
+    local_shards_.WakeUpTxProcessor(core_id_);
 }
 
 TEntry &CcShard::NewTx()

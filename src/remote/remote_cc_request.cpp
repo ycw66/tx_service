@@ -12,19 +12,22 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_AcquireResponse);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<AcquireKeyResult> *res)
+    cc_res_.post_lambda_ =
+        [this](CcHandlerResult<std::vector<AcquireKeyResult>> *res)
     {
-        output_msg_.set_tx_number(txid_obj_.TxNumber());
+        output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
 
+        const AcquireRequest &acquire_req = input_msg_->acquire_req();
         AcquireResponse *resp = output_msg_.mutable_acquire_resp();
         resp->set_is_ack(false);
         resp->set_error_code(res->ErrorCode());
+        resp->set_vec_idx(acquire_req.vec_idx());
 
         if (!cc_res_.IsError())
         {
-            const AcquireKeyResult &acquire_key_res = cc_res_.Value();
+            const AcquireKeyResult &acquire_key_res = cc_res_.Value()[0];
 
             resp->set_vali_ts(acquire_key_res.last_vali_ts_);
             resp->set_commit_ts(acquire_key_res.commit_ts_);
@@ -56,24 +59,24 @@ void txservice::remote::RemoteAcquire::Reset(
     assert(input_msg->has_acquire_req());
 
     cc_res_.Reset();
+    cc_res_.Value().resize(1);
+    cc_res_.Value()[0].cce_addr_.SetCce(0, -1);
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
     output_msg_.clear_acquire_resp();
 
     const AcquireRequest &req = input_msg->acquire_req();
-    txid_obj_.Reset((uint32_t) (input_msg->tx_number() >> 32L),
-                    (uint32_t) (input_msg->tx_number() & 0xFFFFFFFFL),
-                    req.vec_idx());
 
     AcquireCc::Reset(&req.tablename(),
                      &req.key(),
                      req.key_shard_code(),
-                     &txid_obj_,
+                     input_msg->tx_number(),
                      input_msg->tx_term(),
                      req.ts(),
                      req.insert(),
                      &cc_res_,
+                     req.vec_idx(),
                      ToLocalType::ConvertProtocol(req.protocol()));
 
     input_msg_ = std::move(input_msg);
@@ -86,16 +89,18 @@ void txservice::remote::RemoteAcquire::Reset(
 
 void txservice::remote::RemoteAcquire::Acknowledge()
 {
-    output_msg_.set_tx_number(txid_obj_.TxNumber());
+    output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
 
+    const AcquireRequest &acquire_req = input_msg_->acquire_req();
     AcquireResponse *acquire_resp = output_msg_.mutable_acquire_resp();
     acquire_resp->set_is_ack(true);
     acquire_resp->set_error_code(0);
+    acquire_resp->set_vec_idx(acquire_req.vec_idx());
 
     CceAddr_msg *resp_addr = acquire_resp->mutable_cce_addr();
-    const CcEntryAddr &addr = cc_res_.Value().cce_addr_;
+    const CcEntryAddr &addr = cc_res_.Value()[0].cce_addr_;
     assert(addr.CcePtr() != 0 || addr.InsertPtr() != 0);
     if (addr.CcePtr() != 0)
     {
@@ -197,7 +202,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ValidateResponse);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<std::vector<TxId>> *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
@@ -208,12 +213,13 @@ txservice::remote::RemotePostRead::RemotePostRead()
 
         if (!res->IsError())
         {
-            for (TxId &tx : res->Value())
+            // RemotePostRead at the remote node accesses one key, which locates
+            // in a single shard. Hence, there are no concurrent modifications
+            // of PostReadResult. It is safe to access the result's array
+            // without the mutex protection.
+            for (TxNumber &txn : res->Value().conflicting_txs_)
             {
-                TxId_msg *txid_msg = resp->add_txs();
-                txid_msg->set_core_id(tx.GlobalCoreId());
-                txid_msg->set_ident(tx.Identity());
-                txid_msg->set_vec_idx(tx.VecIdx());
+                resp->add_txs(txn);
             }
         }
 
@@ -414,7 +420,7 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
@@ -483,7 +489,7 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
 
-    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());

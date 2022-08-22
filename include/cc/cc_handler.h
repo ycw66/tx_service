@@ -42,14 +42,16 @@ public:
      * @param hres Result handler of the request
      * @param proto Concurrency control protocol
      */
-    virtual void AcquireWrite(const TableName &table_name,
-                              const TxKey &key,
-                              const TxId &txid,
-                              int64_t tx_term,
-                              uint64_t ts,
-                              bool is_insert,
-                              CcHandlerResult<AcquireKeyResult> &hres,
-                              CcProtocol proto) = 0;
+    virtual void AcquireWrite(
+        const TableName &table_name,
+        const TxKey &key,
+        TxNumber tx_number,
+        int64_t tx_term,
+        uint64_t ts,
+        bool is_insert,
+        CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
+        uint32_t hd_res_idx,
+        CcProtocol proto) = 0;
 
     /**
      * @brief Acquires write locks for the input key in all shards. This method
@@ -84,7 +86,7 @@ public:
                               uint64_t tx_number,
                               int64_t tx_term,
                               uint64_t ts,
-                              CcHandlerResult<Void> &hres,
+                              CcHandlerResult<PostProcessResult> &hres,
                               DmlOperation dml_op,
                               PostWriteType post_write_type) = 0;
 
@@ -110,7 +112,7 @@ public:
                            const CcEntryAddr &ccentry_addr,
                            const TxRecord *record,
                            bool is_deleted,
-                           CcHandlerResult<Void> &hres,
+                           CcHandlerResult<PostProcessResult> &hres,
                            CcProtocol protocol) = 0;
 
     /**
@@ -140,7 +142,7 @@ public:
                           uint64_t gap_ts,
                           uint64_t commit_ts,
                           const CcEntryAddr &ccentry_addr,
-                          CcHandlerResult<std::vector<TxId>> &hres,
+                          CcHandlerResult<PostProcessResult> &hres,
                           CcProtocol protocol,
                           LockType lock_type) = 0;
 

@@ -531,8 +531,16 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     txid.Reset(1, 1, 1);
     TableName tbl = "tbl";
     string key_str = "1";
-    req.Reset(
-        &tbl, &key_str, 0, &txid, 1, 1, false, nullptr, CcProtocol::Locking);
+    req.Reset(&tbl,
+              &key_str,
+              0,
+              txid.TxNumber(),
+              1,
+              1,
+              false,
+              nullptr,
+              0,
+              CcProtocol::Locking);
     entry.key_lock_.AcquireWriteLock(&req, 1, CcProtocol::Locking);
     entry.wlock_ts_ = 13;
 

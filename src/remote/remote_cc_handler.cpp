@@ -18,11 +18,12 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     const TableName &table_name,
     const TxKey &key,
     uint32_t key_shard_code,
-    const TxId &txid,
+    TxNumber txn,
     int64_t tx_term,
     uint64_t ts,
     bool is_insert,
-    CcHandlerResult<AcquireKeyResult> &hres,
+    CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
+    uint32_t hd_res_idx,
     const CcProtocol proto)
 {
     /*message AcquireRequest
@@ -40,7 +41,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
 
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_AcquireRequest);
-    send_msg.set_tx_number(txid.TxNumber());
+    send_msg.set_tx_number(txn);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
     send_msg.set_tx_term(tx_term);
 
@@ -50,13 +51,14 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->clear_key();
     key.Serialize(*acq->mutable_key());
 
-    acq->set_vec_idx(txid.VecIdx());
+    acq->set_vec_idx(hd_res_idx);
     acq->set_ts(ts);
     acq->set_insert(is_insert);
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::AcquireWriteAll(
@@ -91,17 +93,19 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
-void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
-                                                   TxNumber tx_number,
-                                                   int64_t tx_term,
-                                                   uint64_t commit_ts,
-                                                   const CcEntryAddr &cce_addr,
-                                                   const TxRecord *record,
-                                                   bool is_deleted,
-                                                   CcHandlerResult<Void> &hres,
-                                                   CcProtocol protocol)
+void txservice::remote::RemoteCcHandler::PostWrite(
+    uint32_t src_node_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint64_t commit_ts,
+    const CcEntryAddr &cce_addr,
+    const TxRecord *record,
+    bool is_deleted,
+    CcHandlerResult<PostProcessResult> &hres,
+    CcProtocol protocol)
 {
     CcMessage send_msg;
 
@@ -142,6 +146,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(uint32_t src_node_id,
     post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::PostWriteAll(
@@ -153,7 +158,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     uint64_t tx_number,
     int64_t tx_term,
     uint64_t commit_ts,
-    CcHandlerResult<Void> &hres,
+    CcHandlerResult<PostProcessResult> &hres,
     DmlOperation dml_op,
     PostWriteType post_write_type)
 {
@@ -198,6 +203,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_commit_type(commit_type);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::PostRead(
@@ -208,7 +214,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<std::vector<TxId>> &hres,
+    CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol,
     LockType lock_type)
 {
@@ -233,6 +239,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     stream_sender_.SendMessage(cce_addr.NodeGroupId(), send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::Read(
@@ -293,6 +300,7 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_ts(ts);
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 /*
@@ -401,6 +409,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(node_group_id, send_msg, &hd_res);
+    hd_res.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::ScanNext(
@@ -440,6 +449,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_ckpt(is_ckpt);
 
     stream_sender_.SendMessage(ng_id, send_msg, &hd_res);
+    hd_res.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::FaultInject(
@@ -465,6 +475,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     fi_req->set_fault_paras(fault_paras);
 
     stream_sender_.SendMessage(node_id, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }
 
 void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
@@ -494,4 +505,5 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->set_key_shard_code(key_shard_code);
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
+    hres.Txm()->EnlistToWait();
 }

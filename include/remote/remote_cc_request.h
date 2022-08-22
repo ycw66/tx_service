@@ -47,8 +47,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    TxId txid_obj_;
-    CcHandlerResult<AcquireKeyResult> cc_res_{nullptr};
+    CcHandlerResult<std::vector<AcquireKeyResult>> cc_res_{nullptr};
 };
 
 struct RemoteAcquireAll : public AcquireAllCc
@@ -102,7 +101,7 @@ private:
     CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<std::vector<TxId>> cc_res_{nullptr};
+    CcHandlerResult<PostProcessResult> cc_res_{nullptr};
 };
 
 struct RemoteRead : public ReadCc
@@ -223,7 +222,7 @@ private:
     CcStreamSender *hd_{nullptr};
 
     CcEntryAddr cce_addr_;
-    CcHandlerResult<Void> cc_res_{nullptr};
+    CcHandlerResult<PostProcessResult> cc_res_{nullptr};
 };
 
 struct RemotePostWriteAll : public PostWriteAllCc
@@ -248,7 +247,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    CcHandlerResult<Void> cc_res_{nullptr};
+    CcHandlerResult<PostProcessResult> cc_res_{nullptr};
 };
 
 struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>

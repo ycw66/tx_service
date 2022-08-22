@@ -299,14 +299,14 @@ protected:
     bool parallel_req_{false};
 };
 
-struct AcquireCc : public TemplatedCcRequest<AcquireCc, AcquireKeyResult>
+struct AcquireCc
+    : public TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>
 {
 public:
     AcquireCc()
         : key_(nullptr),
           key_str_(nullptr),
           key_shard_code_(0),
-          txid_(nullptr),
           tx_term_(-1),
           ts_(0),
           is_insert_(false)
@@ -321,47 +321,51 @@ public:
     void Reset(const TableName *tname,
                const TxKey *key,
                const uint32_t key_shard_code,
-               const TxId *txid,
+               TxNumber txn,
                int64_t tx_term,
                uint64_t ts,
                bool is_insert,
-               CcHandlerResult<AcquireKeyResult> *res,
+               CcHandlerResult<std::vector<AcquireKeyResult>> *res,
+               uint32_t hd_res_idx,
                CcProtocol proto)
     {
-        TemplatedCcRequest<AcquireCc, AcquireKeyResult>::Reset(
-            tname, res, key_shard_code >> 10, txid->TxNumber(), proto);
+        TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
+            tname, res, key_shard_code >> 10, txn, proto);
 
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
-        txid_ = txid;
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
+        hd_result_idx_ = hd_res_idx;
+        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
                const std::string *key_str,
                const uint32_t key_shard_code,
-               const TxId *txid,
+               TxNumber txn,
                int64_t tx_term,
                uint64_t ts,
                bool is_insert,
-               CcHandlerResult<AcquireKeyResult> *res,
+               CcHandlerResult<std::vector<AcquireKeyResult>> *res,
+               uint32_t hd_res_idx,
                CcProtocol proto)
     {
-        TemplatedCcRequest<AcquireCc, AcquireKeyResult>::Reset(
-            tname, res, key_shard_code >> 10, txid->TxNumber(), proto);
+        TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
+            tname, res, key_shard_code >> 10, txn, proto);
 
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
-        txid_ = txid;
         tx_term_ = tx_term;
         ts_ = ts;
         is_insert_ = is_insert;
         cce_ptr_ = nullptr;
+        hd_result_idx_ = hd_res_idx;
+        is_local_ = false;
     }
 
     const TxKey *Key() const
@@ -372,11 +376,6 @@ public:
     const std::string *KeyStr() const
     {
         return key_str_;
-    }
-
-    const TxId *Txid() const
-    {
-        return txid_;
     }
 
     int64_t TxTerm() const
@@ -409,11 +408,20 @@ public:
         return cce_ptr_;
     }
 
+    uint32_t HandlerResultIndex() const
+    {
+        return hd_result_idx_;
+    }
+
+    bool IsLocal() const
+    {
+        return is_local_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
-    const TxId *txid_;
     int64_t tx_term_;
     uint64_t ts_;
     bool is_insert_;
@@ -423,6 +431,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+    uint32_t hd_result_idx_{0};
+    bool is_local_{true};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
@@ -544,7 +554,7 @@ private:
     LruEntry *cce_ptr_{nullptr};
 };
 
-struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, Void>
+struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
 {
 public:
     PostWriteCc()
@@ -564,10 +574,10 @@ public:
                uint64_t ts,
                const TxRecord *rec,
                bool is_deleted,
-               CcHandlerResult<Void> *res,
+               CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
-        TemplatedCcRequest<PostWriteCc, Void>::Reset(
+        TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, proto);
 
         cce_addr_ = addr;
@@ -595,10 +605,10 @@ public:
                uint64_t ts,
                const std::string *rec,
                bool is_deleted,
-               CcHandlerResult<Void> *res,
+               CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
-        TemplatedCcRequest<PostWriteCc, Void>::Reset(
+        TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, proto);
 
         cce_addr_ = addr;
@@ -654,7 +664,8 @@ private:
     bool is_deleted_;
 };
 
-struct PostWriteAllCc : public TemplatedCcRequest<PostWriteAllCc, Void>
+struct PostWriteAllCc
+    : public TemplatedCcRequest<PostWriteAllCc, PostProcessResult>
 {
 public:
     PostWriteAllCc() = default;
@@ -668,11 +679,11 @@ public:
                uint64_t ts,
                TxRecord *rec,
                DmlOperation dml_op,
-               CcHandlerResult<Void> *res,
+               CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
     {
-        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+        TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
 
         key_ = key;
@@ -694,11 +705,11 @@ public:
                uint64_t ts,
                std::unique_ptr<TxRecord> rec,
                DmlOperation dml_op,
-               CcHandlerResult<Void> *res,
+               CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
     {
-        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+        TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
 
         key_ = key;
@@ -720,11 +731,11 @@ public:
                uint64_t ts,
                const std::string *rec,
                DmlOperation dml_op,
-               CcHandlerResult<Void> *res,
+               CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
     {
-        TemplatedCcRequest<PostWriteAllCc, Void>::Reset(
+        TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
 
         key_ = nullptr;
@@ -801,10 +812,10 @@ public:
         ccm_ = nullptr;
     }
 
-    int64_t TxTerm()
-    {
-        return tx_term_;
-    }
+    // int64_t TxTerm()
+    // {
+    //     return tx_term_;
+    // }
 
 private:
     const TxKey *key_{nullptr};
@@ -825,7 +836,7 @@ private:
     int64_t tx_term_{0};
 };
 
-struct PostReadCc : public TemplatedCcRequest<PostReadCc, std::vector<TxId>>
+struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
 {
 public:
     PostReadCc() : cce_addr_(nullptr), commit_ts_(0), key_ts_(0), gap_ts_(0)
@@ -840,11 +851,11 @@ public:
                uint64_t commit_ts,
                uint64_t key_ts,
                uint64_t gap_ts,
-               CcHandlerResult<std::vector<TxId>> *res,
+               CcHandlerResult<PostProcessResult> *res,
                CcProtocol protocol,
                LockType lock_type)
     {
-        TemplatedCcRequest<PostReadCc, std::vector<TxId>>::Reset(
+        TemplatedCcRequest<PostReadCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, protocol);
 
         cce_addr_ = addr;
@@ -852,7 +863,7 @@ public:
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
         lock_type_ = lock_type;
-        res->Value().clear();
+        res->Value().Clear();
 
         const LruEntry *lru_entry =
             reinterpret_cast<const LruEntry *>(addr->CcePtr());

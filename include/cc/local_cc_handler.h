@@ -19,11 +19,12 @@ public:
 
     void AcquireWrite(const TableName &table_name,
                       const TxKey &key,
-                      const TxId &txid,
+                      TxNumber tx_number,
                       int64_t tx_term,
                       uint64_t ts,
                       bool is_insert,
-                      CcHandlerResult<AcquireKeyResult> &hres,
+                      CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
+                      uint32_t hd_res_idx,
                       const CcProtocol proto) override;
 
     void AcquireWriteAll(const TableName &table_name,
@@ -43,7 +44,7 @@ public:
                       uint64_t tx_number,
                       int64_t tx_term,
                       uint64_t commit_ts,
-                      CcHandlerResult<Void> &hres,
+                      CcHandlerResult<PostProcessResult> &hres,
                       DmlOperation dml_op,
                       PostWriteType post_write_type) override;
 
@@ -66,7 +67,7 @@ public:
                    const CcEntryAddr &ccentry_addr,
                    const TxRecord *record,
                    bool is_deleted,
-                   CcHandlerResult<Void> &hres,
+                   CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol) override;
 
     /// <summary>
@@ -85,7 +86,7 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &ccentry_addr,
-                  CcHandlerResult<std::vector<TxId>> &hres,
+                  CcHandlerResult<PostProcessResult> &hres,
                   CcProtocol protocol,
                   LockType lock_type) override;
 
