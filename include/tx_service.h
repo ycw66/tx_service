@@ -113,7 +113,6 @@ public:
 
     void Run()
     {
-        auto t1000ms = std::chrono::milliseconds(1000);
         size_t idle_rounds = 0;
         size_t busy_rounds = 0;
         auto idle_start = std::chrono::system_clock::now();
@@ -129,7 +128,7 @@ public:
                 ++busy_rounds;
 
                 // For every 65536 rounds, checks tx's in the waiting queue.
-                if (busy_rounds & 0xFFFF == 0)
+                if ((busy_rounds & 0xFFFF) == 0)
                 {
                     CheckWaitingTx();
                 }
@@ -145,7 +144,7 @@ public:
 
             ++idle_rounds;
 
-            if (idle_rounds & 0xFFFF != 0)
+            if ((idle_rounds & 0xFFFF) != 0)
             {
                 continue;
             }
