@@ -165,7 +165,10 @@ public:
 
     size_t Clean();
 
-    bool FlushEntry(LruEntry *entry, bool only_archives = true);
+    bool FlushEntryForTest(LruEntry *entry,
+                           std::vector<FlushRecord> &ckpt_vec,
+                           std::vector<FlushRecord> &archives,
+                           bool only_archives);
 
     void NotifyCkpt();
 
@@ -319,12 +322,6 @@ public:
         return min_ts;
     }
 
-    // Statistic the min start ts of active transactions on this shard and
-    // cache to "min_tx_start_ts_".
-    uint64_t StatMinTxStartTs();
-
-    uint64_t GlobalMinTxStartTs();
-
     const CatalogEntry *CreateCatalog(const TableName &table_name,
                                       NodeGroupId cc_ng_id,
                                       const std::string &catalog_image,
@@ -429,9 +426,14 @@ public:
     // Estimate size: Key + Value
     size_t estimate_ccshard_log_size_{0};
 
-    // cache min{start_ts of all tx in this shard, ts_base} last calculated
-    std::atomic<uint64_t> min_tx_start_ts_{0U};
-    std::atomic<int64_t> min_tx_start_ts_term_{-1};
+    bool EnableMvcc() const;
+    void AddActiveSiTx(TxNumber txn, uint64_t start_ts);
+    void RemoveActiveSiTx(TxNumber txn);
+    void ClearActvieSiTxs();
+    // Scan {active_si_txs_} to update {min_si_tx_start_ts_}
+    void UpdateLocalMinSiTxStartTs();
+    uint64_t LocalMinSiTxStartTs();
+    uint64_t GlobalMinSiTxStartTs();
 
     // shard level memory limit.
     uint64_t memory_limit_{0};
@@ -496,6 +498,14 @@ private:
 
     // The number of cc entries to free in one invocation of Clean().
     static constexpr uint64_t freeBatchSize = 100;
+
+    // cache all tx info under SI isolation level in this shard,
+    // format: {txn->start_ts}
+    std::unordered_map<TxNumber, uint64_t> active_si_txs_;
+    // min start_ts of tx in "active_si_txs_"
+    std::atomic<uint64_t> min_si_tx_start_ts_{1U};
+    // last timestamp of updating "min_si_tx_start_ts_"
+    uint64_t last_scan_txs_ts_{0U};
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

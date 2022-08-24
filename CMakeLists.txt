@@ -123,7 +123,6 @@ SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/checkpointer.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_trace.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_start_ts_collector.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/archives_flusher.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/sharder.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/catalog_key_record.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_entry.cpp

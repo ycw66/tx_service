@@ -937,7 +937,7 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                LockType lock_type,
-               const std::vector<VersionedRecord> *archives = nullptr)
+               std::vector<VersionTxRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
@@ -981,7 +981,7 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                LockType lock_type,
-               const std::vector<VersionedRecord> *archives = nullptr)
+               std::vector<VersionTxRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
@@ -1078,12 +1078,12 @@ public:
         return cce_ptr_;
     }
 
-    void SetArchivesPtr(const std::vector<VersionedRecord> *ptr)
+    void SetArchivesPtr(std::vector<VersionTxRecord> *ptr)
     {
         archives_ = ptr;
     }
 
-    const std::vector<VersionedRecord> *ArchivesPtr() const
+    std::vector<VersionTxRecord> *ArchivesPtr() const
     {
         return archives_;
     }
@@ -1105,7 +1105,7 @@ private:
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
 
-    const std::vector<VersionedRecord> *archives_{nullptr};
+    std::vector<VersionTxRecord> *archives_{nullptr};
 };
 
 struct ScanOpenBatchCc
@@ -1318,7 +1318,7 @@ public:
           finish_cnt_(0),
           shard_cnt_(shard_cnt)
     {
-        for (int i = 0; i < shard_cnt_; i++)
+        for (size_t i = 0; i < shard_cnt_; i++)
         {
             memory_usage_kb_vec_.emplace_back(0);
             log_usage_kb_vec_.emplace_back(0);
@@ -1406,10 +1406,14 @@ public:
 
     CkptScanCc(const TableName &table_name,
                const uint64_t ckpt_ts,
-               std::vector<LruEntry *> &ckpt_vec)
+               std::vector<FlushRecord> &ckpt_vec,
+               std::vector<FlushRecord> &archive_vec,
+               std::vector<LruEntry *> &extra_vec)
         : table_name_(table_name),
           ckpt_ts_(ckpt_ts),
           ckpt_vec_(ckpt_vec),
+          archive_vec_(archive_vec),
+          extra_vec_(extra_vec),
           start_entry_(nullptr),
           status_(CkptScanStatus::Ongoing),
           mux_(),
@@ -1474,7 +1478,10 @@ public:
 private:
     const TableName &table_name_;
     const uint64_t ckpt_ts_;
-    std::vector<LruEntry *> &ckpt_vec_;
+    std::vector<FlushRecord> &ckpt_vec_;
+    std::vector<FlushRecord> &archive_vec_;
+    // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
+    std::vector<LruEntry *> &extra_vec_;
     LruEntry *start_entry_;
     CkptScanStatus status_;
     std::mutex mux_;
@@ -1861,93 +1868,6 @@ private:
     const std::string *fault_paras_;
 };
 
-struct StatMinTxStartTsCc : public CcRequestBase
-{
-public:
-    explicit StatMinTxStartTsCc(size_t shard_cnt)
-        : min_start_ts_(UINT64_MAX),
-          mux_(),
-          cv_(),
-          finish_cnt_(0),
-          shard_cnt_(shard_cnt)
-    {
-    }
-
-    StatMinTxStartTsCc() = delete;
-    StatMinTxStartTsCc(const StatMinTxStartTsCc &) = delete;
-    StatMinTxStartTsCc(StatMinTxStartTsCc &&) = delete;
-
-    bool Execute(CcShard &ccs) override
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        min_start_ts_ = std::min(min_start_ts_, ccs.StatMinTxStartTs());
-        assert(finish_cnt_ < shard_cnt_);
-        ++finish_cnt_;
-        if (finish_cnt_ == shard_cnt_)
-        {
-            cv_.notify_one();
-        }
-
-        // return false since StatMinTxStartTsCc is not reused and does not need
-        // to call CcRequestBase::Free
-        return false;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return finish_cnt_ == shard_cnt_; });
-    }
-
-    uint64_t GetMinStartTs() const
-    {
-        return min_start_ts_;
-    }
-
-private:
-    uint64_t min_start_ts_;
-    std::mutex mux_;
-    std::condition_variable cv_;
-    std::atomic<size_t> finish_cnt_;
-    size_t shard_cnt_;
-};
-
-struct KickoutArchivesCc : public CcRequestBase
-{
-public:
-    KickoutArchivesCc()
-    {
-    }
-
-    void Set(LruEntry *entry,
-             uint32_t ng_id,
-             int64_t term,
-             uint64_t upper_bound_ts)
-    {
-        lru_entry_ = entry;
-        node_grou_id_ = ng_id;
-        term_ = term;
-        upper_bound_ts_ = upper_bound_ts;
-    }
-
-    bool Execute(CcShard &ccs) override
-    {
-        if (Sharder::Instance().CheckLeaderTerm(node_grou_id_, term_))
-        {
-            ccs.DecrementMemory(
-                lru_entry_->KickOutFlushedArchiveRecords(upper_bound_ts_));
-        }
-
-        delete this;
-        return false;
-    }
-
-    LruEntry *lru_entry_;
-    uint32_t node_grou_id_{0};
-    int64_t term_{-1};
-    uint64_t upper_bound_ts_;
-};
-
 struct CleanCcEntryForTestCc
     : public TemplatedCcRequest<CleanCcEntryForTestCc, bool>
 {
@@ -1966,6 +1886,7 @@ public:
     void Reset(const TableName *tn,
                const TxKey *key,
                bool only_archives,
+               bool flush,
                uint32_t key_shard_code,
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
@@ -1976,12 +1897,14 @@ public:
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
         only_archives_ = only_archives;
+        flush_ = flush;
         res_ = res;
     }
 
     void Reset(const TableName *tn,
                const std::string *key_str,
                bool only_archives,
+               bool flush,
                uint32_t key_shard_code,
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
@@ -1992,6 +1915,7 @@ public:
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;
         only_archives_ = only_archives;
+        flush_ = flush;
         res_ = res;
     }
 
@@ -2005,11 +1929,17 @@ public:
         return only_archives_;
     }
 
+    bool WithFlush() const
+    {
+        return flush_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
     bool only_archives_;
+    bool flush_;
 };
 
 }  // namespace txservice

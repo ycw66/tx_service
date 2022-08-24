@@ -8,7 +8,6 @@
 #include <thread>
 #include <vector>
 
-#include "archives_flusher.h"
 #include "catalog.h"
 #include "catalog_factory.h"
 #include "checkpointer.h"
@@ -458,18 +457,21 @@ public:
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
-              std::unique_ptr<TxLog> log_hd = nullptr)
+              std::unique_ptr<TxLog> log_hd = nullptr,
+              bool enable_mvcc = true)
         : local_cc_shards_(node_id,
                            conf.find("core_num")->second,
                            conf.find("node_memory_limit_mb")->second,
                            conf.find("node_log_limit_mb")->second,
                            catalog_factory,
                            store_hd,
-                           this),
+                           this,
+                           enable_mvcc),
           ckpt_(local_cc_shards_,
                 store_hd,
                 conf.find("checkpointer_interval")->second,
-                log_hd.get())
+                log_hd.get(),
+                conf.find("checkpointer_delay_seconds")->second)
     {
         uint32_t core_cnt = conf.find("core_num")->second;
         pool_.reserve(core_cnt);
@@ -496,8 +498,10 @@ public:
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
 
-        TxStartTsCollector::Instance(&local_cc_shards_).Start();
-        ArchivesFlusher::Instance(local_cc_shards_.store_hd_).Start();
+        if (local_cc_shards_.EnableMvcc())
+        {
+            TxStartTsCollector::Instance(&local_cc_shards_).Start();
+        }
     }
 
     void WaitClusterReady()
@@ -509,8 +513,10 @@ public:
     {
         ckpt_.Terminate();
         ckpt_.Join();
-        TxStartTsCollector::Instance().Shutdown();
-        ArchivesFlusher::Instance().Shutdown();
+        if (local_cc_shards_.EnableMvcc())
+        {
+            TxStartTsCollector::Instance().Shutdown();
+        }
 
         Sharder::Instance().Shutdown();
 

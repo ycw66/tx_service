@@ -116,10 +116,10 @@ void CcNodeService::GetMinTxStartTs(
 
     uint32_t ng_id = request->ng_id();
     uint64_t min_ts = UINT64_MAX;
-    if (Sharder::Instance().LeaderNodeId(ng_id) == local_shards_.NodeId())
+    if (Sharder::Instance().LeaderTerm(local_shards_.NodeId()) > 0)
     {
         auto term = Sharder::Instance().LeaderTerm(ng_id);
-        min_ts = local_shards_.MinStartTsOfLocalActiveTxs(term);
+        min_ts = local_shards_.StatsLocalActiveSiTxs();
 
         response->set_term(term);
         response->set_ts(min_ts);

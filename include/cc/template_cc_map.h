@@ -4,7 +4,7 @@
 #include <map>
 #include <string>
 #include <unordered_set>
-#include <utility>
+#include <utility>  // std::pair
 #include <vector>
 
 #include "cc_entry.h"
@@ -336,12 +336,12 @@ public:
                 shard_->DecrementMemory(new_cce->PayloadMemUsage());
                 if (payload_str == nullptr)
                 {
-                    new_cce->payload_ = std::make_shared<ValueT>(*commit_val);
+                    new_cce->payload_ = std::make_unique<ValueT>(*commit_val);
                 }
                 else
                 {
                     size_t offset = 0;
-                    new_cce->payload_ = std::make_shared<ValueT>();
+                    new_cce->payload_ = std::make_unique<ValueT>();
                     new_cce->payload_->Deserialize(payload_str->data(), offset);
                 }
                 shard_->mem_usage_ += new_cce->PayloadMemUsage();
@@ -397,9 +397,9 @@ public:
             if (commit_ts > 0)
             {
                 // for mvcc
-                if (req.Protocol() == CcProtocol::MVCC)
+                if (shard_->EnableMvcc())
                 {
-                    uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
+                    uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce.KickOutArchiveRecords(recycle_ts);
                     size_t added_mem_usage = cce.ArchiveBeforeUpdate();
                     shard_->mem_usage_ += added_mem_usage;
@@ -410,12 +410,12 @@ public:
                 shard_->DecrementMemory(cce.PayloadMemUsage());
                 if (payload_str == nullptr && !is_del)
                 {
-                    cce.payload_ = std::make_shared<ValueT>(*commit_val);
+                    cce.payload_ = std::make_unique<ValueT>(*commit_val);
                 }
                 else if (!is_del)
                 {
                     size_t offset = 0;
-                    cce.payload_ = std::make_shared<ValueT>();
+                    cce.payload_ = std::make_unique<ValueT>();
                     cce.payload_->Deserialize(payload_str->data(), offset);
                 }
                 shard_->mem_usage_ += cce.PayloadMemUsage();
@@ -901,7 +901,7 @@ public:
                         return false;
                     }
 
-                    new_cce->payload_ = std::make_shared<ValueT>(*payload);
+                    new_cce->payload_ = std::make_unique<ValueT>(*payload);
                     new_cce->payload_status_ = RecordStatus::Normal;
 
                     // Splits the gap.
@@ -968,7 +968,7 @@ public:
             {
                 if (commit_ts > 0)
                 {
-                    cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
+                    cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
 
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
@@ -1358,14 +1358,14 @@ public:
                 if (req.Record() != nullptr)
                 {
                     ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                    cce->payload_ = std::make_shared<ValueT>(*typed_rec);
+                    cce->payload_ = std::make_unique<ValueT>(*typed_rec);
                 }
                 else
                 {
                     assert(req.RecordBlob() != nullptr);
 
                     size_t offset = 0;
-                    cce->payload_ = std::make_shared<ValueT>();
+                    cce->payload_ = std::make_unique<ValueT>();
                     cce->payload_->Deserialize(req.RecordBlob()->data(),
                                                offset);
                 }
@@ -1381,7 +1381,8 @@ public:
         }
 
         // Refill mvcc archives
-        if ((req.Type() == ReadType::OutsideNormal ||
+        if (shard_->EnableMvcc() &&
+            (req.Type() == ReadType::OutsideNormal ||
              req.Type() == ReadType::OutsideDeleted) &&
             req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
         {
@@ -1395,7 +1396,7 @@ public:
             assert(req.Protocol() == CcProtocol::MVCC);
             assert(req.Type() == ReadType::Inside);
 
-            VersionRecord<ValueT> v_rec;
+            VersionResultRecord<ValueT> v_rec;
             bool res = cce->MvccGet(req.ReadTimestamp(), v_rec);
             if (res)  // Finds a visible version.
             {
@@ -1498,16 +1499,35 @@ public:
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
-                cce->payload_ = std::make_shared<ValueT>();
+                cce->payload_ = std::make_unique<ValueT>();
                 cce->payload_->Deserialize(req.rec_str_->data(), offset);
             }
             cce->commit_ts_ = req.CommitTs();
             cce->payload_status_ = req.RecordStatus();
         }
         // Refill mvcc archives.
-        if (req.Archives().size() > 0)
+        if (shard_->EnableMvcc())
         {
-            cce->AddArchiveRecords(req.Archives());
+            const remote::ReadOutsideRequest &tmp_req =
+                req.input_msg_->read_outside_req();
+            if (tmp_req.archives_size() > 0)
+            {
+                // de-serialize records
+                std::vector<VersionTxRecord> archives;
+                for (auto &vrec_msg : tmp_req.archives())
+                {
+                    auto &v_rec = archives.emplace_back();
+                    v_rec.commit_ts_ = vrec_msg.version_ts();
+                    v_rec.record_status_ =
+                        remote::ToLocalType::ConvertRecordStatusType(
+                            vrec_msg.rec_status());
+                    v_rec.record_ = std::make_unique<ValueT>();
+                    size_t offset = 0;
+                    v_rec.record_->Deserialize(vrec_msg.record().data(),
+                                               offset);
+                }
+                cce->AddArchiveRecords(archives);
+            }
         }
 
         req.Finish();
@@ -2340,25 +2360,54 @@ public:
             return false;
         }
 
+        uint64_t recycle_ts = 1U;
+        if (shard_->EnableMvcc())
+        {
+            recycle_ts = shard_->GlobalMinSiTxStartTs();
+        }
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
+            if (shard_->EnableMvcc())
+            {
+                cce->KickOutArchiveRecords(recycle_ts);
+                if (cce->commit_ts_ > req.ckpt_ts_)
+                {
+                    // Don't do checkpoint but flush undo
+                    if (cce->ExportArchives(req.archive_vec_, req.ckpt_ts_) > 0)
+                    {
+                        req.extra_vec_.push_back(cce);
+                    }
+                }
+            }
+
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
-                shard_->DecrementMemory(cce->payload_ckpt_.first.MemUsage());
+                auto &ref = req.ckpt_vec_.emplace_back();
+                ref.cce_ = cce;
+                ref.payload_status_ = cce->payload_status_;
+                ref.commit_ts_ = cce->commit_ts_;
                 if (cce->payload_ != nullptr)
                 {
-                    cce->payload_ckpt_.first = *(cce->payload_);
+                    if (shard_->EnableMvcc())
+                    {
+                        ref.SetPayload(cce->payload_.get());
+                    }
+                    else
+                    {
+                        ref.SetPayload(
+                            std::make_unique<ValueT>(*cce->payload_));
+                    }
                 }
-                cce->payload_ckpt_.second =
-                    cce->payload_status_ == RecordStatus::Deleted;
+                if (shard_->EnableMvcc())
+                {
+                    // Also flush undo before truncating redo log.
+                    cce->ExportArchives(req.archive_vec_, req.ckpt_ts_);
+                }
 
                 cce->parent_map_->shard_->estimate_ccshard_log_size_ -=
                     cce->estimate_ccentry_log_size_;
                 cce->estimate_ccentry_log_size_ = 0;
-
-                req.ckpt_vec_.emplace_back(cce);
-                shard_->mem_usage_ += cce->payload_ckpt_.first.MemUsage();
             }
             else if (cce->commit_ts_ <=
                      cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -2471,19 +2520,39 @@ public:
             if (cce->commit_ts_ >= req.CommitTs())
             {
                 // If the key exists in the cc map and its commit ts is
-                // greater than that of the log record, skips installing the
-                // log record in the cc map and moves to the next key in the
-                // log record.
-                if (delete_flag == 0)
+                // greater than that of the log record, and if (1) mvcc is
+                // enabled, then install  the log record into archives; (2) mvcc
+                // is not enabled, then skips installing the log record in the
+                // cc map and moves to the next key in the log record.
+                if (shard_->EnableMvcc())
+                {
+                    auto rec_ptr = std::make_unique<ValueT>();
+                    RecordStatus rec_status = RecordStatus::Normal;
+                    if (delete_flag == 0)
+                    {
+                        rec_ptr->Deserialize(log_blob.data(), offset);
+                    }
+                    else
+                    {
+                        rec_status = RecordStatus::Deleted;
+                    }
+                    cce->AddArchiveRecord(
+                        std::move(rec_ptr), rec_status, req.CommitTs());
+                }
+                else if (delete_flag == 0)
                 {
                     rec.Deserialize(log_blob.data(), offset);
                 }
             }
             else
             {
+                if (shard_->EnableMvcc())
+                {
+                    cce->ArchiveBeforeUpdate();
+                }
                 if (delete_flag == 0)
                 {
-                    cce->payload_ = std::make_shared<ValueT>();
+                    cce->payload_ = std::make_unique<ValueT>();
                     cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
                 }
@@ -2528,7 +2597,8 @@ public:
     {
         const TxKey *key_ptr = req.Key();
         bool only_archives = req.OnlyCleanArchives();
-        CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
+        CcEntry<KeyT, ValueT> *cce = nullptr;
+        assert(key_ptr != nullptr);
         if (key_ptr != nullptr)
         {
             // find cc entry
@@ -2537,26 +2607,45 @@ public:
             auto lb_it = ccm_.lower_bound(key);
             if (lb_it != ccm_.end() && lb_it->first == key)
             {
-                cce_ptr = &lb_it->second;
+                cce = &lb_it->second;
             }
-            if (cce_ptr != nullptr)
+
+            if (cce != nullptr)
             {
-                if (cce_ptr->payload_ != nullptr)
+                if (req.WithFlush())
                 {
-                    cce_ptr->payload_ckpt_.first = *(cce_ptr->payload_);
+                    std::vector<FlushRecord> tmp_ckpt_vec;
+                    auto &ref = tmp_ckpt_vec.emplace_back();
+                    ref.cce_ = cce;
+                    ref.payload_status_ = cce->payload_status_;
+                    ref.commit_ts_ = cce->commit_ts_;
+                    if (cce->payload_ != nullptr)
+                    {
+                        if (shard_->EnableMvcc())
+                        {
+                            ref.SetPayload(cce->payload_.get());
+                        }
+                        else
+                        {
+                            ref.SetPayload(
+                                std::make_unique<ValueT>(*cce->payload_));
+                        }
+                    }
+
+                    std::vector<FlushRecord> tmp_akvs;
+                    cce->ExportArchives(tmp_akvs, cce->commit_ts_ - 1);
+                    bool res = shard_->FlushEntryForTest(
+                        cce, tmp_ckpt_vec, tmp_akvs, only_archives);
+                    assert(res == true);
                 }
-                cce_ptr->payload_ckpt_.second =
-                    (cce_ptr->payload_status_ == RecordStatus::Deleted);
-                bool res = shard_->FlushEntry(cce_ptr, only_archives);
-                assert(res == true);
                 if (only_archives)
                 {
-                    cce_ptr->archives_.clear();
+                    cce->archives_.clear();
                 }
                 else
                 {
                     ccm_has_full_entries_ = false;
-                    Clean(cce_ptr);
+                    Clean(cce);
                 }
             }
         }
@@ -2633,19 +2722,6 @@ public:
         {
             Clean(neg_inf_.map_next_);
         }
-    }
-
-    void GetCkptKeyRecord(const LruEntry *lru_entry,
-                          const TxKey *&key,
-                          const TxRecord *&rec,
-                          bool &is_deleted) const override
-    {
-        const CcEntry<KeyT, ValueT> *cce =
-            static_cast<const CcEntry<KeyT, ValueT> *>(lru_entry);
-
-        key = cce->key_;
-        rec = &cce->payload_ckpt_.first;
-        is_deleted = cce->payload_ckpt_.second;
     }
 
     TableType Type() const override
@@ -3309,7 +3385,7 @@ protected:
 
         if (iso_level == IsolationLevel::Snapshot)
         {
-            VersionRecord<ValueT> v_rec;
+            VersionResultRecord<ValueT> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
             if (!res)
             {
@@ -3354,7 +3430,7 @@ protected:
 
         if (iso_level == IsolationLevel::Snapshot)
         {
-            VersionRecord<ValueT> v_rec;
+            VersionResultRecord<ValueT> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
             if (!res)
             {

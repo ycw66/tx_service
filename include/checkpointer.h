@@ -24,7 +24,8 @@ public:
     Checkpointer(LocalCcShards &shards,
                  store::DataStoreHandler *write_hd,
                  const uint32_t &checkpoint_interval,
-                 TxLog *log_agent);
+                 TxLog *log_agent,
+                 uint32_t ckpt_delay_seconds);
 
     ~Checkpointer();
 
@@ -34,7 +35,9 @@ public:
      * @brief Checkpoint one Entry to KvStore synchronously.
      * Now, only used for test.
      */
-    bool CkptEntry(LruEntry *entry);
+    bool CkptEntryForTest(LruEntry *entry, std::vector<FlushRecord> &ckpt_vec);
+    bool FlushArchiveForTest(LruEntry *entry,
+                             std::vector<FlushRecord> &archives);
 
     void Run();
 
@@ -72,6 +75,8 @@ private:
     std::thread thd_;
     Status status_;
     const uint32_t checkpoint_interval_;
+    // ckpt_ts = {min_being_held_locks_ts} - {ckpt_delay_time_}
+    uint32_t ckpt_delay_time_;  // unit: Microsecond
 
     TxService *tx_service_;
     TxLog *log_agent_;

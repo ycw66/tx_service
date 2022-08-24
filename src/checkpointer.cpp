@@ -8,7 +8,8 @@ namespace txservice
 Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
                            const uint32_t &checkpoint_interval,
-                           TxLog *log_agent)
+                           TxLog *log_agent,
+                           uint32_t ckpt_delay_seconds)
     : local_shards_(shards),
       last_ckpt_ts_(0),
       mux_(),
@@ -17,6 +18,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       store_hd_(write_hd),
       status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
+      ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent)
 {
     tx_service_ = shards.tx_service_;
@@ -53,8 +55,11 @@ void Checkpointer::Ckpt()
         return;
     }
 
-    std::vector<LruEntry *> ckpt_vec;
+    std::vector<FlushRecord> ckpt_vec;
     ckpt_vec.reserve(10000);
+    std::vector<FlushRecord> archive_vec;
+    // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
+    std::vector<LruEntry *> extra_vec;
 
     size_t shard_cnt = local_shards_.Count();
     CkptTsCc ckpt_req(shard_cnt);
@@ -71,6 +76,22 @@ void Checkpointer::Ckpt()
 
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
+
+    if (local_shards_.EnableMvcc())
+    {
+        archive_vec.reserve(10000);
+        uint64_t min_si_tx_ts =
+            TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+        uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
+        if (min_si_tx_ts < delayed_ckpt_ts)
+        {
+            ckpt_ts = delayed_ckpt_ts;
+        }
+        else if (min_si_tx_ts < ckpt_req.GetCkptTs())
+        {
+            ckpt_ts = min_si_tx_ts;
+        }
+    }
 
     LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
               << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
@@ -185,8 +206,12 @@ void Checkpointer::Ckpt()
                 continue;
             }
 
+            // Clear the container.
             ckpt_vec.clear();
-            CkptScanCc ckpt_scan_cc(table_name, ckpt_ts, ckpt_vec);
+            archive_vec.clear();
+            extra_vec.clear();
+            CkptScanCc ckpt_scan_cc(
+                table_name, ckpt_ts, ckpt_vec, archive_vec, extra_vec);
 
             for (auto &ccs : local_shards_.cc_shards_)
             {
@@ -202,6 +227,7 @@ void Checkpointer::Ckpt()
             {
                 // Flushes to the data store
                 bool ckpt_ret = false;
+                bool flush_undo_ret = true;
 
                 CcMap *ccm;
                 auto iter = shard.native_ccms_.find(table_name);
@@ -254,14 +280,38 @@ void Checkpointer::Ckpt()
                     }
                 }
 
+                if (ckpt_ret && local_shards_.EnableMvcc())
+                {
+                    flush_undo_ret = store_hd_->PutArchivesAll(
+                        node_group, table_name, archive_vec);
+
+                    if (flush_undo_ret)
+                    {
+                        for (auto &ref : extra_vec)
+                        {
+                            ref->ckpt_ts_.store(ckpt_ts,
+                                                std::memory_order_release);
+                        }
+                    }
+                    else
+                    {
+                        // If ckpt succeeds and flushing undo fails, it is safe
+                        // to update the local checkpoint timestamp, but not
+                        // safe to truncate the redo log.
+                        flushed = false;
+                        LOG(INFO) << "checkpointer PutArchivesAll flush to "
+                                     "cassandra failed";
+                    }
+                }
+
                 // If flush to data store succeeds, update the ckpt_ts for each
                 // entry in ccmap.
                 if (ckpt_ret)
                 {
-                    for (LruEntry *&entry : ckpt_vec)
+                    for (auto &ref : ckpt_vec)
                     {
-                        entry->ckpt_ts_.store(ckpt_ts,
-                                              std::memory_order_release);
+                        ref.cce_->ckpt_ts_.store(ckpt_ts,
+                                                 std::memory_order_release);
                     }
                 }
                 else
@@ -290,37 +340,6 @@ void Checkpointer::Ckpt()
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
     }
-}
-
-bool Checkpointer::CkptEntry(LruEntry *entry)
-{
-    bool ckpt_ret = false;
-    std::vector<LruEntry *> ckpt_vec;
-    ckpt_vec.push_back(entry);
-    CcMap *ccm = entry->parent_map_;
-    TableName table_name = ccm->table_name_;
-    uint32_t node_group = Sharder::Instance().NodeId();
-    if (ccm->Type() == TableType::Primary)
-    {
-        const Schema *key_schema = ccm->KeySchema();
-        const Schema *rec_schema = ccm->RecordSchema();
-        ckpt_ret = store_hd_->PutAll(
-            table_name,
-            ckpt_vec,
-            key_schema,
-            rec_schema,
-            ccm->SchemaTs(),
-            node_group,
-            Sharder::Instance().GetDsRangeEvaluateOperationService());
-    }
-    else
-    {
-        const SecondaryKeySchema *sk_schema =
-            static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
-        ckpt_ret = store_hd_->PutSkAll(
-            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), node_group);
-    }
-    return ckpt_ret;
 }
 
 void Checkpointer::Run()
@@ -402,4 +421,55 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
 {
     log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
 }
+
+bool Checkpointer::CkptEntryForTest(LruEntry *entry,
+                                    std::vector<FlushRecord> &ckpt_vec)
+{
+    bool ckpt_ret = false;
+    CcMap *ccm = entry->parent_map_;
+    TableName table_name = ccm->table_name_;
+    uint32_t ng = Sharder::Instance().NodeId();
+    if (ccm->Type() == TableType::Primary)
+    {
+        const Schema *key_schema = ccm->KeySchema();
+        const Schema *rec_schema = ccm->RecordSchema();
+        ckpt_ret = store_hd_->PutAll(
+            table_name,
+            ckpt_vec,
+            key_schema,
+            rec_schema,
+            ccm->SchemaTs(),
+            ng,
+            Sharder::Instance().GetDsRangeEvaluateOperationService());
+    }
+    else
+    {
+        const SecondaryKeySchema *sk_schema =
+            static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
+        uint32_t ng = 0;
+        ckpt_ret = store_hd_->PutSkAll(
+            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), ng);
+    }
+    return ckpt_ret;
+}
+
+bool Checkpointer::FlushArchiveForTest(LruEntry *entry,
+                                       std::vector<FlushRecord> &archives)
+{
+    bool ckpt_ret = false;
+    CcMap *ccm = entry->parent_map_;
+    TableName table_name = ccm->table_name_;
+    uint32_t ng = Sharder::Instance().NodeId();
+    ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
+    if (ccm->Type() == TableType::Primary)
+    {
+        ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
+    }
+    else
+    {
+        ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
+    }
+    return ckpt_ret;
+}
+
 }  // namespace txservice

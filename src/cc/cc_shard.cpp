@@ -1,6 +1,5 @@
 #include "cc/cc_shard.h"
 
-#include "archives_flusher.h"
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
@@ -34,7 +33,8 @@ CcShard::CcShard(uint16_t core_id,
       tail_cce_(nullptr),
       size_(0),
       ckpter_(nullptr),
-      catalog_factory_(catalog_factory)
+      catalog_factory_(catalog_factory),
+      active_si_txs_()
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
@@ -371,39 +371,6 @@ void CcShard::ClearTx(TxNumber txn)
     lock_holding_txs_.erase(tx_it);
 }
 
-uint64_t CcShard::StatMinTxStartTs()
-{
-    const int64_t term = Sharder::Instance().LeaderTerm(node_id_);
-    if (tx_vec_.size() == 0)
-    {
-        min_tx_start_ts_term_.store(term);
-        min_tx_start_ts_ = ts_base_.load(std::memory_order_acquire);
-    }
-    else
-    {
-        uint64_t min_ts = ts_base_.load(std::memory_order_acquire);
-        for (const auto &tx : tx_vec_)
-        {
-            if (tx.term_ != term || tx.status_ == TxnStatus::Finished ||
-                tx.status_ == TxnStatus::Aborted ||
-                tx.status_ == TxnStatus::Committed)
-            {
-                continue;
-            }
-            min_ts = std::min(min_ts, tx.lower_bound_);
-        }
-
-        min_tx_start_ts_term_.store(term);
-        min_tx_start_ts_.store(min_ts);
-    }
-    return min_tx_start_ts_;
-}
-
-uint64_t CcShard::GlobalMinTxStartTs()
-{
-    return TxStartTsCollector::Instance().GlobalMinTxStartTs();
-}
-
 /**
  * @brief Kick out freeable entries from ccmap.
  *
@@ -412,53 +379,22 @@ uint64_t CcShard::GlobalMinTxStartTs()
 size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;
-
-    // 1- Clean the lru entry which is free and has no historical versions.
     size_t free_cnt = 0;
-    size_t mem_size = 0;
-    size_t scan_cnt = 0;
-    size_t scan_batch_size = CcShard::freeBatchSize * 2;
-    uint64_t recyle_ts = GlobalMinTxStartTs();
-    while (scan_cnt < scan_batch_size && cce != &tail_cce_)
+    while (free_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
     {
         LruEntry *next_cce = cce->lru_next_;
-        mem_size += cce->KickOutArchiveRecords(recyle_ts);
-        if (cce->IsFree() && cce->ArchiveRecordsCount() == 0)
+        if (cce->IsFree())
         {
-            cce->parent_map_->ccm_has_full_entries_ = false;
             cce->parent_map_->Clean(cce);
             --size_;
             ++free_cnt;
         }
 
         cce = next_cce;
-        scan_cnt++;
     }
 
-    if (mem_size > 0 || free_cnt > 0)
-    {
-        DecrementMemory(mem_size);
-        return 1;
-    }
-
-    // 2- Flush historical versions and clean entry.
-    scan_cnt = 0;
-    cce = head_cce_.lru_next_;
-    while (scan_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
-    {
-        LruEntry *next_cce = cce->lru_next_;
-        if (cce->IsFree())
-        {
-            // Save archives to data store.
-            ArchivesFlusher::Instance().AddTask(cce);
-            ++scan_cnt;
-        }
-
-        cce = next_cce;
-    }
-
-    // 3- Notify the checkpointer thread to do checkpoint if there is not
-    // freeable entries to be kicked out from ccmap.
+    // notify the checkpointer thread to do checkpoint if there is not freeable
+    // entries to be kicked out from ccmap.
     if (free_cnt == 0)
     {
         NotifyCkpt();
@@ -471,17 +407,20 @@ size_t CcShard::Clean()
  * @brief Flush Entry to KvStore. Now, only used for test.
  *
  */
-bool CcShard::FlushEntry(LruEntry *entry, bool only_archives)
+bool CcShard::FlushEntryForTest(LruEntry *entry,
+                                std::vector<FlushRecord> &ckpt_vec,
+                                std::vector<FlushRecord> &archives,
+                                bool only_archives)
 {
     // TODO(lzx): Now, only flush archives synchronously for test.
     if (only_archives)
     {
-        return ArchivesFlusher::Instance().Flush(entry);
+        return ckpter_->FlushArchiveForTest(entry, archives);
     }
     else
     {
-        return (ckpter_->CkptEntry(entry)) &&
-               (ArchivesFlusher::Instance().Flush(entry));
+        return (ckpter_->CkptEntryForTest(entry, ckpt_vec)) &&
+               (ckpter_->FlushArchiveForTest(entry, archives));
     }
 }
 
@@ -801,6 +740,85 @@ void CcShard::DecrementMemory(size_t mem_size)
     {
         mem_usage_ = 0;
     }
+}
+
+bool CcShard::EnableMvcc() const
+{
+    return local_shards_.EnableMvcc();
+}
+
+void CcShard::AddActiveSiTx(TxNumber txn, uint64_t start_ts)
+{
+    active_si_txs_.try_emplace(txn, start_ts);
+
+    if (active_si_txs_.size() == 1)
+    {
+        min_si_tx_start_ts_.store(start_ts);
+        last_scan_txs_ts_ = Now();
+        return;
+    }
+
+    UpdateLocalMinSiTxStartTs();
+}
+
+void CcShard::RemoveActiveSiTx(TxNumber txn)
+{
+    active_si_txs_.erase(txn);
+
+    UpdateLocalMinSiTxStartTs();
+}
+
+void CcShard::ClearActvieSiTxs()
+{
+    active_si_txs_.clear();
+    min_si_tx_start_ts_.store(Now());
+}
+
+void CcShard::UpdateLocalMinSiTxStartTs()
+{
+    uint64_t now_ts = Now();
+    if (active_si_txs_.size() == 0)
+    {
+        min_si_tx_start_ts_.store(now_ts);
+        last_scan_txs_ts_ = now_ts;
+        return;
+    }
+
+    // Scan "active_si_txs_" to update "min_si_tx_start_ts_".
+    if (now_ts - last_scan_txs_ts_ < 5000000)
+    {
+        return;
+    }
+
+    uint64_t min_ts = UINT64_MAX;
+    for (auto it = active_si_txs_.begin(); it != active_si_txs_.end(); it++)
+    {
+        uint64_t start_ts = it->second;
+        if (start_ts < min_ts)
+        {
+            min_ts = start_ts;
+        }
+    }
+
+    min_si_tx_start_ts_.store(min_ts);
+    last_scan_txs_ts_ = now_ts;
+}
+
+uint64_t CcShard::LocalMinSiTxStartTs()
+{
+    if (active_si_txs_.size() > 0)
+    {
+        return min_si_tx_start_ts_.load();
+    }
+    else
+    {
+        return Now();
+    }
+}
+
+uint64_t CcShard::GlobalMinSiTxStartTs()
+{
+    return TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
 }
 
 }  // namespace txservice

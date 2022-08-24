@@ -105,6 +105,11 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
 {
     ccs.DropCcms(cc_ng_id_);
 
+    if (cc_ng_id_ == ccs.node_id_)
+    {
+        ccs.ClearActvieSiTxs();
+    }
+
     std::unique_lock<std::mutex> lk(mux_);
     ++finish_cnt_;
     if (finish_cnt_ == core_cnt_)

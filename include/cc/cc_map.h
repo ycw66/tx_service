@@ -87,12 +87,6 @@ public:
     virtual void Clean(LruEntry *remove_entry) = 0;
     virtual void Clean() = 0;
 
-    virtual TxKey::Uptr ExportSecondaryKey(LruEntry *entry) const
-    {
-        assert(false);
-        return nullptr;
-    }
-
     /**
      * @brief If the new cc_entry is not in the checkpoint list, enlists the new
      * entry.
@@ -105,26 +99,6 @@ public:
      * Used for debug to verify the map_link is complete.
      */
     virtual size_t VerifyOrdering() = 0;
-
-    virtual void GetCkptKeyRecord(const LruEntry *lru_entry,
-                                  const TxKey *&key,
-                                  const TxRecord *&rec,
-                                  bool &is_deleted) const
-    {
-        key = nullptr;
-        rec = nullptr;
-        is_deleted = false;
-    }
-
-    virtual void GetCkptSk(const LruEntry *lru_entry,
-                           const TxKey *&sk,
-                           const TxKey *&pk,
-                           bool &is_deleted) const
-    {
-        sk = nullptr;
-        pk = nullptr;
-        is_deleted = false;
-    }
 
     virtual TableType Type() const = 0;
     virtual const Schema *KeySchema() const = 0;

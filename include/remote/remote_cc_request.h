@@ -174,11 +174,6 @@ public:
         return rec_status_;
     }
 
-    const std::vector<VersionedRecord> &Archives()
-    {
-        return archives_;
-    }
-
 private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
@@ -189,8 +184,6 @@ private:
 
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
-
-    std::vector<VersionedRecord> archives_;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

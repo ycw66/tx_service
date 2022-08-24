@@ -2,10 +2,9 @@
 
 #include <algorithm>
 #include <map>
-#include <memory>  // make_shared
-#include <set>
+#include <memory>  // make_shared,make_unique
 #include <string>
-#include <unordered_set>
+#include <vector>  // vector
 
 #include "secondary_key.h"
 #include "template_cc_map.h"
@@ -14,7 +13,6 @@
 
 namespace txservice
 {
-
 template <typename SkT, typename PkT>
 struct SkRecord : public TxRecord
 {
@@ -84,11 +82,11 @@ public:
           compound_schema_(sk_schema, pk_schema)
     {
         neg_inf_.key_ = nullptr;
-        neg_inf_.payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        neg_inf_.payload_ = std::make_unique<SkRecord<SkT, PkT>>();
         neg_inf_.payload_->sk_ = NegativeInfinity<SkT>::Instance();
         neg_inf_.payload_->pk_ = NegativeInfinity<PkT>::Instance();
         pos_inf_.key_ = nullptr;
-        pos_inf_.payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        pos_inf_.payload_ = std::make_unique<SkRecord<SkT, PkT>>();
         pos_inf_.payload_->sk_ = PositiveInfinity<SkT>::Instance();
         pos_inf_.payload_->pk_ = PositiveInfinity<PkT>::Instance();
 
@@ -173,18 +171,19 @@ public:
 
             if (req.IsInsert())
             {
-                // Finds the greatest cc entry whose key is less than or equal
-                // to the input key. If the map is empty, the floor key is
-                // negative infinity.
+                // Finds the greatest cc entry whose key is less than or
+                // equal to the input key. If the map is empty, the floor
+                // key is negative infinity.
 
                 cce_ptr =
                     std::get<2>(*FowardScanStart(*target_key, true).first);
 
                 if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
                 {
-                    // The floor entry's key is equal to the insert key. If the
-                    // key is deleted, the insert becomes an update. Or the
-                    // insert is aborted due to the duplidate key conflict.
+                    // The floor entry's key is equal to the insert key. If
+                    // the key is deleted, the insert becomes an update. Or
+                    // the insert is aborted due to the duplidate key
+                    // conflict.
                     if (cce_ptr->payload_status_ == RecordStatus::Deleted)
                     {
                         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
@@ -208,9 +207,9 @@ public:
 
                 if (cce_ptr == nullptr)
                 {
-                    // The acquire request needs a new cc entry but the cc map
-                    // has reached the maximal capacity. Blocks the request by
-                    // putting it back to the cc request queue.
+                    // The acquire request needs a new cc entry but the cc
+                    // map has reached the maximal capacity. Blocks the
+                    // request by putting it back to the cc request queue.
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
                 }
@@ -223,8 +222,9 @@ public:
             }
         }
 
-        // Cce ptr either points to the cc entry whose gap will accommodate the
-        // new insert, or the cc entry whose key will be updated/deleted.
+        // Cce ptr either points to the cc entry whose gap will accommodate
+        // the new insert, or the cc entry whose key will be
+        // updated/deleted.
         CcEntry<VoidKey, SkRecord<SkT, PkT>> &cc_entry = *cce_ptr;
 
         if (cce_addr.CcePtr() == 0)
@@ -294,14 +294,14 @@ public:
                 // for mvcc
                 if (req.Protocol() == CcProtocol::MVCC)
                 {
-                    uint64_t recycle_ts = shard_->GlobalMinTxStartTs();
+                    uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce->KickOutArchiveRecords(recycle_ts);
                     size_t added_mem_usage = cce->ArchiveBeforeUpdate(false);
                     shard_->mem_usage_ += added_mem_usage;
                 }
 
-                // sk entry does not need to install the payload since it has
-                // been installed in AcquireCc(just two pointers)
+                // sk entry does not need to install the payload since it
+                // has been installed in AcquireCc(just two pointers)
 
                 cce->commit_ts_ = commit_ts;
                 cce->payload_status_ =
@@ -363,11 +363,11 @@ public:
         if ((key_ts > 0 && key_ts != cce->commit_ts_) ||
             (gap_ts > 0 && gap_ts != cce->gap_commit_ts_))
         {
-            // 2PL is a blocking protocol. Once a read lock is acquired, no one
-            // can possibly change the key. There is no validation step under
-            // MVCC protocol.(MVCC using history versions to ensure repeatable
-            // read.) So, this branch is only reachable for OCC protocol
-            // validating version stability.
+            // 2PL is a blocking protocol. Once a read lock is acquired, no
+            // one can possibly change the key. There is no validation step
+            // under MVCC protocol.(MVCC using history versions to ensure
+            // repeatable read.) So, this branch is only reachable for OCC
+            // protocol validating version stability.
             assert(req.Protocol() == CcProtocol::OCC);
 
             hd_res->SetError(1);  // broken repeatable read, set error.
@@ -418,12 +418,12 @@ public:
             // lock. In contrast to the conventional 2PL where read locks
             // are released after logging, our protocol releases the read
             // lock before the log is persisted. This difference demands
-            // that future write transactions modifying this key cannot commit
-            // prior to this read tx. This is achieved via updating the
-            // last_read_ts field of the cc entry, which pushes future
-            // transactions' commit timestamps larger than the largest commit
-            // timestamp of all read transactions that have released the read
-            // lock on the key.
+            // that future write transactions modifying this key cannot
+            // commit prior to this read tx. This is achieved via updating
+            // the last_read_ts field of the cc entry, which pushes future
+            // transactions' commit timestamps larger than the largest
+            // commit timestamp of all read transactions that have released
+            // the read lock on the key.
 
             if (gap_ts > 0)
             {
@@ -438,9 +438,9 @@ public:
 
             // For 2PL, releasing read locks may spend extra cycles to
             // process unblocked requests. Sets the handler's finish signal
-            // before releasing read locks, so that if blocking requests come
-            // from a different core or a remote node, their tx's can move
-            // forward immediately.
+            // before releasing read locks, so that if blocking requests
+            // come from a different core or a remote node, their tx's can
+            // move forward immediately.
             hd_res->SetFinished();
         }
 
@@ -478,10 +478,11 @@ public:
             return true;
         }
 
-        // The payload of the cc map of a secondary index is void. A tx never
-        // issues a key-oriented read toward the cc map of a secondary index,
-        // except for using the read request to bring an index entry (sk, pk)
-        // into the cc map for concurrency control, i.e., read outside.
+        // The payload of the cc map of a secondary index is void. A tx
+        // never issues a key-oriented read toward the cc map of a secondary
+        // index, except for using the read request to bring an index entry
+        // (sk, pk) into the cc map for concurrency control, i.e., read
+        // outside.
         if (req.Isolation() == IsolationLevel::Snapshot)
         {
             // Notice(lzx): this case only for debug testing.
@@ -530,7 +531,7 @@ public:
         if (req.Isolation() == IsolationLevel::Snapshot)
         {
             // Notice(lzx): this case only for debug testing.
-            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            VersionResultRecord<SkRecord<SkT, PkT>> v_rec;
             bool res = cce_ptr->MvccGet(req.ReadTimestamp(), v_rec);
             if (!res)
             {
@@ -1372,25 +1373,48 @@ public:
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
             static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(lru_cce);
 
+        uint64_t recycle_ts = 1U;
+        if (shard_->EnableMvcc())
+        {
+            recycle_ts = shard_->GlobalMinSiTxStartTs();
+        }
+
         size_t cnt = 0;
         while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_)
         {
-            // The checkpoint ts should be smaller than the ts when an ongoing
-            // tx acquired the write intention. Or, there is a possibility that
-            // the tx commits prior to the checkpoint.
+            // The checkpoint ts should be smaller than the ts when an
+            // ongoing tx acquired the write intention. Or, there is a
+            // possibility that the tx commits prior to the checkpoint.
             assert(!cce->key_lock_.HasWriteLock() ||
                    req.ckpt_ts_ <= cce->last_read_ts_);
+
+            if (shard_->EnableMvcc())
+            {
+                cce->KickOutArchiveRecords(recycle_ts);
+                if (cce->commit_ts_ > req.ckpt_ts_)
+                {
+                    // Don't do checkpoint but flush undo
+                    if (cce->ExportArchives(req.archive_vec_, req.ckpt_ts_) > 0)
+                    {
+                        req.extra_vec_.push_back(cce);
+                    }
+                }
+            }
 
             if (cce->commit_ts_ <= req.ckpt_ts_ &&
                 cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
-                // no need to update memory usage since this payload_ckpt_ has a
-                // fixed size
-                cce->payload_ckpt_.first = *(cce->payload_);
-                cce->payload_ckpt_.second =
-                    cce->payload_status_ == RecordStatus::Deleted;
-
-                req.ckpt_vec_.emplace_back(cce);
+                auto &ref = req.ckpt_vec_.emplace_back();
+                ref.cce_ = cce;
+                ref.payload_status_ = cce->payload_status_;
+                ref.commit_ts_ = cce->commit_ts_;
+                // Payload of sk ccentry is not changed.
+                ref.SetPayload(cce->payload_.get());
+                if (shard_->EnableMvcc())
+                {
+                    // Also flush undo before truncating redo log.
+                    cce->ExportArchives(req.archive_vec_, req.ckpt_ts_);
+                }
             }
             else if (cce->commit_ts_ <=
                      cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -1475,11 +1499,27 @@ public:
                 return false;
             }
 
-            // If the key exists in the cc map and its commit ts is
-            // greater than that of the log record, skips installing the
-            // log record in the cc map and moves to the next key in the
-            // log record.
-            if (cce->commit_ts_ < req.CommitTs())
+            // If the key exists in the cc map and its commit ts is greater than
+            // that of the log record and if (1) mvcc is enabled, then install
+            // the log record into archives; (2) mvcc is not enabled, skips
+            // installing.
+            if (cce->commit_ts_ >= req.CommitTs())
+            {
+                if (shard_->EnableMvcc())
+                {
+                    if (delete_flag == 0)
+                    {
+                        cce->AddSkArchiveRecord(RecordStatus::Normal,
+                                                req.CommitTs());
+                    }
+                    else
+                    {
+                        cce->AddSkArchiveRecord(RecordStatus::Deleted,
+                                                req.CommitTs());
+                    }
+                }
+            }
+            else
             {
                 if (delete_flag == 0)
                 {
@@ -1500,7 +1540,8 @@ public:
                     // lock, the lock's owner must be the tx that commits
                     // the log record.
                     // TODO: it is safer if we ship the tx ID with the
-                    // recovering message and match it against the lock holder.
+                    // recovering message and match it against the lock
+                    // holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
                     cce->key_lock_.ReleaseWriteLock(txn, shard_);
                     shard_->DeleteLockHoldingTx(txn, cce, true);
@@ -1531,7 +1572,7 @@ public:
     {
         const TxKey *key_ptr = req.Key();
         bool only_archives = req.OnlyCleanArchives();
-        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce_ptr = nullptr;
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
 
         if (key_ptr != nullptr)
         {
@@ -1556,19 +1597,23 @@ public:
 
                 if (pk_it != pk_group->end() && pk_it->first == pk)
                 {
-                    cce_ptr = &pk_it->second;
+                    cce = &pk_it->second;
                 }
             }
 
-            if (cce_ptr != nullptr)
+            if (cce != nullptr)
             {
-                if (cce_ptr->payload_ != nullptr)
-                {
-                    cce_ptr->payload_ckpt_.first = *(cce_ptr->payload_);
-                }
-                cce_ptr->payload_ckpt_.second =
-                    (cce_ptr->payload_status_ == RecordStatus::Deleted);
-                bool res = shard_->FlushEntry(cce_ptr, only_archives);
+                std::vector<FlushRecord> tmp_ckpt_vec;
+                auto &ref = tmp_ckpt_vec.emplace_back();
+                ref.cce_ = cce;
+                ref.payload_status_ = cce->payload_status_;
+                ref.commit_ts_ = cce->commit_ts_;
+                ref.SetPayload(cce->payload_.get());
+
+                std::vector<FlushRecord> tmp_akvs;
+                cce->ExportArchives(tmp_akvs, cce->commit_ts_ - 1);
+                bool res = shard_->FlushEntryForTest(
+                    cce, tmp_ckpt_vec, tmp_akvs, only_archives);
                 if (!res)
                 {
                     req.Result()->SetValue(false);
@@ -1578,12 +1623,12 @@ public:
                     req.Result()->SetValue(true);
                     if (only_archives)
                     {
-                        cce_ptr->archives_.clear();
+                        cce->archives_.clear();
                     }
                     else
                     {
                         ccm_has_full_entries_ = false;
-                        Clean(cce_ptr);
+                        Clean(cce);
                     }
                 }
             }
@@ -1653,8 +1698,8 @@ public:
                                     cce->payload_->pk_->MemUsage() +
                                     cce->payload_->sk_->MemUsage());
 
-            // The (sk,pk) pair is the last entry of this sk group. Removes the
-            // sk from the index.
+            // The (sk,pk) pair is the last entry of this sk group. Removes
+            // the sk from the index.
             sk_index_.erase(*cce->payload_->sk_);
         }
 
@@ -1680,21 +1725,6 @@ public:
             entry->ckpt_next_ = &pos_inf_;
             pos_inf_.ckpt_prev_ = entry;
         }
-    }
-
-    void GetCkptSk(const LruEntry *lru_entry,
-                   const TxKey *&sk,
-                   const TxKey *&pk,
-                   bool &is_deleted) const override
-    {
-        const CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
-            static_cast<const CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
-                lru_entry);
-
-        const SkRecord<SkT, PkT> &sk_record = cce->payload_ckpt_.first;
-        sk = sk_record.sk_;
-        pk = sk_record.pk_;
-        is_deleted = cce->payload_ckpt_.second;
     }
 
     TableType Type() const override
@@ -1735,15 +1765,6 @@ public:
         return cnt;
     }
 
-    TxKey::Uptr ExportSecondaryKey(LruEntry *entry) const override
-    {
-        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce =
-            static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(entry);
-
-        return std::make_unique<SecondaryKey<SkT, PkT>>(*cce->payload_->sk_,
-                                                        *cce->payload_->pk_);
-    }
-
 private:
     void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
@@ -1758,7 +1779,7 @@ private:
         sk.PKey() = *cce->payload_->pk_;
         if (iso_level == IsolationLevel::Snapshot)
         {
-            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            VersionResultRecord<SkRecord<SkT, PkT>> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
             if (!res)
             {
@@ -1794,7 +1815,7 @@ private:
 
         if (iso_level == IsolationLevel::Snapshot)
         {
-            VersionRecord<SkRecord<SkT, PkT>> v_rec;
+            VersionResultRecord<SkRecord<SkT, PkT>> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
             if (!res)
             {
@@ -1825,8 +1846,8 @@ private:
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(term);
 
-        // For remote scans, the returned cc entries' node group ID is set on
-        // the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
     }
 
     void ScanGap(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
@@ -1850,8 +1871,8 @@ private:
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(term);
 
-        // For remote scans, the returned cc entries' node group ID is set on
-        // the sender side when the sender receives the response.
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
     }
 
     CcEntry<VoidKey, SkRecord<SkT, PkT>> *FindEmplace(const SkT &sk,
@@ -1878,8 +1899,8 @@ private:
         if (shard_->Full())
         {
             // The shard has reached the maximal capacity. Tries to clean cc
-            // entries that have been checkpointed but are not being accessed by
-            // active tx's.
+            // entries that have been checkpointed but are not being
+            // accessed by active tx's.
             size_t free_cnt = shard_->Clean();
             if (free_cnt == 0)
             {
@@ -1903,8 +1924,8 @@ private:
 
         if (pk_group == nullptr)
         {
-            // The input sk does not exist in the index. Creates a new pk group
-            // for the input sk.
+            // The input sk does not exist in the index. Creates a new pk
+            // group for the input sk.
             sk_it = sk_index_.emplace_hint(sk_it,
                                            std::piecewise_construct,
                                            std::forward_as_tuple(sk),
@@ -1926,20 +1947,21 @@ private:
 
         new_cce = &pk_it->second;
         new_cce->key_ = nullptr;
-        new_cce->payload_ = std::make_shared<SkRecord<SkT, PkT>>();
+        new_cce->payload_ = std::make_unique<SkRecord<SkT, PkT>>();
         new_cce->payload_->sk_ = &sk_it->first;
         new_cce->payload_->pk_ = &pk_it->first;
 
         if (pk_it == pk_group->begin())
         {
-            // The newly inserted pk is the first element in the pk group. The
-            // prior cc entry points to the last element of the prior sk's pk
-            // group.
+            // The newly inserted pk is the first element in the pk group.
+            // The prior cc entry points to the last element of the prior
+            // sk's pk group.
 
             if (sk_it == sk_index_.begin())
             {
-                // There is no prior sk. The new (sk,pk) is the first entry in
-                // the sk index. The prior cc entry points to negative infinity.
+                // There is no prior sk. The new (sk,pk) is the first entry
+                // in the sk index. The prior cc entry points to negative
+                // infinity.
                 prev_cce = &neg_inf_;
             }
             else
@@ -1962,16 +1984,17 @@ private:
 
         if (pk_it == pk_group->end())
         {
-            // The newly inserted pk is the last element in the pk group. The
-            // next cc entry points to the first element of the next sk's pk
-            // group.
+            // The newly inserted pk is the last element in the pk group.
+            // The next cc entry points to the first element of the next
+            // sk's pk group.
 
             ++sk_it;
 
             if (sk_it == sk_index_.end())
             {
                 // There is no next sk. The new (sk,pk) is the last entry in
-                // the sk index. The next cc entry points to positive infinity.
+                // the sk index. The next cc entry points to positive
+                // infinity.
                 next_cce = &pos_inf_;
             }
             else
@@ -2011,8 +2034,8 @@ private:
 
         if (sk_it == sk_index_.end())
         {
-            // When the search sk is greater than all the keys in the index, the
-            // floor entry is the last index entry.
+            // When the search sk is greater than all the keys in the index,
+            // the floor entry is the last index entry.
             std::map<PkT, CcEntry<VoidKey, SkRecord<SkT, PkT>>> &last_pk_group =
                 sk_index_.rbegin()->second;
 
@@ -2033,20 +2056,22 @@ private:
             }
             else if (direction == ScanDirection::Backward && !inclusive)
             {
-                // < sk. The floor entry is the entry preceding the pk group.
+                // < sk. The floor entry is the entry preceding the pk
+                // group.
                 floor_cce = &pk_group.begin()->second;
                 floor_cce = floor_cce->map_prev_;
             }
             else
             {
-                // > sk or <= sk. The floor entry is the last of the pk group.
+                // > sk or <= sk. The floor entry is the last of the pk
+                // group.
                 floor_cce = &pk_group.rbegin()->second;
             }
         }
         else
         {
-            // When the search sk is between sk1 and sk2 (sk1 < sk2), the floor
-            // entry is the last of the pk group of sk1.
+            // When the search sk is between sk1 and sk2 (sk1 < sk2), the
+            // floor entry is the last of the pk group of sk1.
             if (sk_it == sk_index_.begin())
             {
                 return &neg_inf_;
@@ -2085,9 +2110,9 @@ private:
             : internal_sk_it_(sk_map_it), neg_inf_cce_(neg_inf_cce)
         {
             // When constructing Iterator using a sk_map_it, internal_pk_it_
-            // should always point to the last entry of current pk map. Under no
-            // circumstances should a scan starts from the beginning of a pk
-            // map.
+            // should always point to the last entry of current pk map.
+            // Under no circumstances should a scan starts from the
+            // beginning of a pk map.
             internal_pk_it_ = std::prev(internal_sk_it_->second.end(), 1);
             UpdateCurrent();
         }
@@ -2195,8 +2220,8 @@ private:
                 }
                 else
                 {
-                    // The map is empty. The next entry of negative infinity is
-                    // positive infinity.
+                    // The map is empty. The next entry of negative infinity
+                    // is positive infinity.
                     std::get<0>(current_) = PositiveInfinity<SkT>::Instance();
                     std::get<1>(current_) = PositiveInfinity<PkT>::Instance();
                     std::get<2>(current_) = nullptr;
@@ -2268,8 +2293,8 @@ private:
                 }
                 else
                 {
-                    // Sk map is empty. The prior entry of positive infinity is
-                    // negative infinity.
+                    // Sk map is empty. The prior entry of positive infinity
+                    // is negative infinity.
                     std::get<0>(current_) = NegativeInfinity<SkT>::Instance();
                     std::get<1>(current_) = NegativeInfinity<PkT>::Instance();
                     std::get<2>(current_) = neg_inf_cce_;
@@ -2292,8 +2317,8 @@ private:
                     }
                     else
                     {
-                        // If the current sk_it points to the beginning of the
-                        // map, the prior entry is negative infinity.
+                        // If the current sk_it points to the beginning of
+                        // the map, the prior entry is negative infinity.
                         std::get<0>(current_) =
                             NegativeInfinity<SkT>::Instance();
                         std::get<1>(current_) =
@@ -2310,9 +2335,9 @@ private:
                     }
                     else
                     {
-                        // If the current pk_it points to the beginning of the
-                        // pk map, decrement internal_sk_it_ and let pk_it
-                        // points to the last item of current pk map.
+                        // If the current pk_it points to the beginning of
+                        // the pk map, decrement internal_sk_it_ and let
+                        // pk_it points to the last item of current pk map.
                         --internal_sk_it_;
                         internal_pk_it_ =
                             std::prev(internal_sk_it_->second.end(), 1);
@@ -2344,9 +2369,9 @@ private:
 
         friend bool operator==(const Iterator &lhs, const Iterator &rhs)
         {
-            // The two iterators are equal, if they point to the same cc entry.
-            // Note that when the iterator points to positive infinity, the
-            // pointed cc entry is null.
+            // The two iterators are equal, if they point to the same cc
+            // entry. Note that when the iterator points to positive
+            // infinity, the pointed cc entry is null.
             return std::get<2>(lhs.current_) == std::get<2>(rhs.current_);
         };
 
@@ -2402,8 +2427,8 @@ private:
      * @param inclusive Whether or not the start key is included in the scan
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
      * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
-     * starting from the start cc entry and whether the scan includes the start
-     * cc entry's key or gap or both.
+     * starting from the start cc entry and whether the scan includes the
+     * start cc entry's key or gap or both.
      */
     std::pair<Iterator, ScanType> FowardScanStart(
         const SecondaryKey<SkT, PkT> &key, bool inclusive)
@@ -2426,8 +2451,9 @@ private:
             }
             else
             {
-                // sk_lower_it must be pointing to the end of the map. The start
-                // entry is the last in the map, only including the gap.
+                // sk_lower_it must be pointing to the end of the map. The
+                // start entry is the last in the map, only including the
+                // gap.
                 --sk_lower_it;
                 return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
                                       ScanType::ScanGap);
@@ -2440,14 +2466,14 @@ private:
             // each cc map's key is unique, this is possible when the search
             // key is a prefix of a compound key. For example, the cc map's
             // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk >= 20 or WHERE
-            // pk > 20. The search key is considered equal to both (20, 'b') and
-            // (20, 'c').
+            // (30,'d'), and the search condition is 20: WEHRE pk >= 20 or
+            // WHERE pk > 20. The search key is considered equal to both
+            // (20, 'b') and (20, 'c').
             if (inclusive)
             {
                 // WEHRE pk >= 20. The start entry is the entry before lower
-                // bound, i.e., (10, 'a'), including the gap, which may contain
-                // (20, 'a').
+                // bound, i.e., (10, 'a'), including the gap, which may
+                // contain (20, 'a').
 
                 if (sk_lower_it == sk_index_.begin())
                 {
@@ -2465,15 +2491,15 @@ private:
                 auto next_it = std::next(sk_lower_it, 1);
                 if (next_it != sk_index_.end() && next_it->first == look_sk)
                 {
-                    // The search key matches more than one entry, e.g., WEHRE
-                    // pk > 20. The start entry is the end of the repeated
-                    // entries, i.e., (20, 'c').
+                    // The search key matches more than one entry, e.g.,
+                    // WEHRE pk > 20. The start entry is the end of the
+                    // repeated entries, i.e., (20, 'c').
 
                     // The key greater than the search key, i.e., (30, 'd').
                     auto sk_upper_it = sk_index_.upper_bound(look_sk);
 
-                    // The start entry is the one prior to (30, 'd'), including
-                    // the gap but not the key.
+                    // The start entry is the one prior to (30, 'd'),
+                    // including the gap but not the key.
                     --sk_upper_it;
                     return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
                                           ScanType::ScanGap);
@@ -2488,8 +2514,8 @@ private:
         }
         else
         {
-            // The search key falls into a gap between two existing keys. The
-            // start entry precedes the lower bound, excluding the key.
+            // The search key falls into a gap between two existing keys.
+            // The start entry precedes the lower bound, excluding the key.
             if (sk_lower_it == sk_index_.begin())
             {
                 return std::make_pair(Begin(), ScanType::ScanGap);
@@ -2538,19 +2564,19 @@ private:
             // each cc map's key is unique, this is possible when the search
             // key is a prefix of a compound key. For example, the cc map's
             // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or WHERE
-            // pk < 20. The search key is considered equal to both (20, 'b') and
-            // (20, 'c').
+            // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or
+            // WHERE pk < 20. The search key is considered equal to both
+            // (20, 'b') and (20, 'c').
 
             if (inclusive)
             {
                 auto next_it = std::next(sk_lower_it, 1);
                 if (next_it != sk_index_.end() && next_it->first == look_sk)
                 {
-                    // The search key matches more than one entry, e.g., WEHRE
-                    // pk <= 20. The start entry is the end of the repeated
-                    // entries, i.e., (20, 'c'), including the key and the gap
-                    // (gap may have entry (20, 'd')).
+                    // The search key matches more than one entry, e.g.,
+                    // WEHRE pk <= 20. The start entry is the end of the
+                    // repeated entries, i.e., (20, 'c'), including the key
+                    // and the gap (gap may have entry (20, 'd')).
 
                     auto sk_upper_it = sk_index_.upper_bound(look_sk);
                     --sk_upper_it;
@@ -2581,9 +2607,9 @@ private:
         }
         else
         {
-            // The search key falls into a gap between two existing keys. The
-            // start entry precedes the lower bound, including the key and the
-            // gap.
+            // The search key falls into a gap between two existing keys.
+            // The start entry precedes the lower bound, including the key
+            // and the gap.
 
             if (sk_lower_it == sk_index_.begin())
             {

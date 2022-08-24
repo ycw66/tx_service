@@ -103,20 +103,12 @@ std::string fmt_hex(uint64_t i);
 template <typename T>
 std::string demangled_type_name(T t);
 
-static const char *associate_fmt =
-    "{\"associate\":{\"%s\":\"%x\",\"%s\":\"%x\",\"id\":\"%s\"}}";
-static const char *associate_fmt_context =
-    "{\"associate\":{\"%s\":\"%x\",\"%s\":\"%x\",\"id\":\"%s\", %s}}";
 template <typename T, typename K>
 std::string tx_trace_associate(T *t,
                                K *k,
                                std::string id,
                                std::function<std::string()> context_func);
 
-static const char *action_fmt =
-    "{\"action\":{\"%s\":\"%x\",\"action\":\"%s\",\"%s\":\"%x\"}}";
-static const char *action_fmt_context =
-    "{\"action\":{\"%s\":\"%x\",\"action\":\"%s\",\"%s\":\"%x\",%s}}";
 template <typename T, typename K>
 std::string tx_trace_action(T *t,
                             std::string action,
@@ -128,13 +120,6 @@ std::string tx_trace_action(T *t,
                             K *k,
                             std::function<std::string()> context_func);
 
-static const char *dump_fmt = "{\"dump\":{\"%s\":\"%x\",\"dump\":\"%s\"}}";
-static const char *dump_fmt_tx_number =
-    "{\"dump\":{\"%s\":\"%d\",\"dump\":\"%s\"}}";
-static const char *dump_fmt_context =
-    "{\"dump\":{\"%s\":\"%x\",\"dump\":\"%s\",%s}}";
-static const char *dump_fmt_context_tx_number =
-    "{\"dump\":{\"%s\":\"%d\",\"dump\":\"%s\",%s}}";
 template <typename T>
 std::string tx_trace_dump(T *t, std::function<std::string()> context_func);
 std::string tx_trace_dump(txservice::Void *result,

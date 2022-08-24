@@ -25,19 +25,19 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
 
     entry.commit_ts_ = 1U;
-    entry.payload_ = std::make_shared<CompositeRecord<int>>(1);
-    entry.payload_status_ = RecordStatus::Normal;
+    entry.payload_ = std::make_unique<CompositeRecord<int>>(1);
+    entry.payload_status_ = RecordStatus::Unknown;
 
     entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 
     entry.commit_ts_ = 2U;
-    entry.payload_ = std::make_shared<CompositeRecord<int>>(2);
+    entry.payload_ = std::make_unique<CompositeRecord<int>>(2);
     entry.payload_status_ = RecordStatus::Normal;
     entry.ArchiveBeforeUpdate();
 
     entry.commit_ts_ = 3U;
-    entry.payload_ = std::make_shared<CompositeRecord<int>>(3);
+    entry.payload_ = std::make_unique<CompositeRecord<int>>(3);
     entry.payload_status_ = RecordStatus::Normal;
     entry.ArchiveBeforeUpdate();
     REQUIRE(entry.ArchiveRecordsCount() == 2);
@@ -56,14 +56,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
 
     // [6,5,3]->...=>[6,5,3]
-    std::vector<VersionedRecord> records;  // desc order
+    std::vector<VersionTxRecord> records;  // desc order
 
     std::vector<int> nums{6, 5, 3};
     for (auto n : nums)
     {
         auto &ref = records.emplace_back();
         ref.commit_ts_ = n;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(n);
         ref.record_status_ = RecordStatus::Normal;
     }
 
@@ -83,7 +83,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         records.clear();
         auto &ref = records.emplace_back();
         ref.commit_ts_ = 8U;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(8);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(8);
         ref.record_status_ = RecordStatus::Normal;
 
         nums = {8, 6, 5, 3};
@@ -105,7 +105,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         records.clear();
         auto &ref = records.emplace_back();
         ref.commit_ts_ = 2U;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(2);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(2);
         ref.record_status_ = RecordStatus::Normal;
 
         nums = {8, 6, 5, 3, 2};
@@ -130,7 +130,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         {
             auto &ref = records.emplace_back();
             ref.commit_ts_ = n;
-            ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+            ref.record_ = std::make_unique<CompositeRecord<int>>(n);
             ref.record_status_ = RecordStatus::Normal;
         }
 
@@ -156,7 +156,7 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         {
             auto &ref = records.emplace_back();
             ref.commit_ts_ = n;
-            ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+            ref.record_ = std::make_unique<CompositeRecord<int>>(n);
             ref.record_status_ = RecordStatus::Normal;
         }
 
@@ -182,13 +182,13 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
     entry.payload_status_ = RecordStatus::Deleted;
 
     // [10,9,8,6,3,2]
-    std::vector<VersionedRecord> records;  // desc order
+    std::vector<VersionTxRecord> records;  // desc order
     std::vector<int> nums{10, 9, 8, 6, 3, 2};
     for (auto n : nums)
     {
         auto &ref = records.emplace_back();
         ref.commit_ts_ = n;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(n);
         ref.record_status_ = RecordStatus::Normal;
     }
     entry.AddArchiveRecords(records);
@@ -303,98 +303,6 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
     }
 }
 
-TEST_CASE("CcEntry KickOutFlushedArchiveRecords", "[cc-entry]")
-{
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
-    entry.commit_ts_ = 12U;
-    entry.payload_status_ = RecordStatus::Deleted;
-
-    // [10,9,8,6,3,2]
-    std::vector<VersionedRecord> records;  // desc order
-    std::vector<int> nums{10, 9, 8, 6, 3, 2};
-    for (auto n : nums)
-    {
-        auto &ref = records.emplace_back();
-        ref.commit_ts_ = n;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(n);
-        ref.record_status_ = RecordStatus::Normal;
-    }
-    entry.AddArchiveRecords(records);
-    REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-    // (upper_bound_ts: 1)->... => [10, 9, 8, 6, 3, 2]
-    {
-        uint64_t upper_bound_ts = 1;
-        nums = {10, 9, 8, 6, 3, 2};
-
-        entry.KickOutFlushedArchiveRecords(upper_bound_ts);
-        REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-        for (size_t i = 0; i < nums.size(); i++)
-        {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
-        }
-    }
-
-    // (upper_bound_ts: 6)->... => [10,9,8]
-    {
-        uint64_t upper_bound_ts = 6;
-        nums = {10, 9, 8};
-
-        entry.KickOutFlushedArchiveRecords(upper_bound_ts);
-        REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-        for (size_t i = 0; i < nums.size(); i++)
-        {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
-        }
-    }
-
-    // (upper_bound_ts: 10)->... => []
-    {
-        uint64_t upper_bound_ts = 10;
-        nums = {};
-
-        entry.KickOutFlushedArchiveRecords(upper_bound_ts);
-        REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-        for (size_t i = 0; i < nums.size(); i++)
-        {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
-        }
-    }
-
-    // (upper_bound_ts: 11)->... => []
-    {
-        uint64_t upper_bound_ts = 11;
-        nums = {};
-
-        entry.KickOutFlushedArchiveRecords(upper_bound_ts);
-        REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-        for (size_t i = 0; i < nums.size(); i++)
-        {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
-        }
-    }
-}
-
 TEST_CASE("CcEntry MvccGet", "[cc-entry]")
 {
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
@@ -403,7 +311,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     // (read_ts: 5)->... => Unknown
     {
         uint64_t ts = 5;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -412,13 +320,13 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
 
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
-    entry.payload_ = std::make_shared<CompositeRecord<int>>(12);
+    entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
     // (read_ts: 5)->... => VersionUnknown
     {
         uint64_t ts = 5;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -429,7 +337,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     {
         uint64_t ts = 15;
         uint64_t target = 12;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -439,13 +347,13 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     }
 
     //== Filled historical versions: [10,9,8,6,3,2]
-    std::vector<VersionedRecord> records;  // desc order
+    std::vector<VersionTxRecord> records;  // desc order
     std::vector<int> nums{10, 9, 8, 6, 3, 2};
     for (auto n : nums)
     {
         auto &ref = records.emplace_back();
         ref.commit_ts_ = n;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(n);
         ref.record_status_ = RecordStatus::Normal;
     }
     entry.AddArchiveRecords(records);
@@ -455,7 +363,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     {
         uint64_t ts = 1;
         uint64_t target = 1;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -467,7 +375,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     {
         uint64_t ts = 2;
         uint64_t target = 2;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -481,7 +389,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     {
         uint64_t ts = 7;
         uint64_t target = 6;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -495,7 +403,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     {
         uint64_t ts = 15;
         uint64_t target = 12;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -510,16 +418,16 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
-    entry.payload_ = std::make_shared<CompositeRecord<int>>(12);
+    entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
 
     // [10,9,8,6,3,2]
-    std::vector<VersionedRecord> records;  // desc order
+    std::vector<VersionTxRecord> records;  // desc order
     std::vector<int> nums{10, 9, 8, 6, 3, 2};
     for (auto n : nums)
     {
         auto &ref = records.emplace_back();
         ref.commit_ts_ = n;
-        ref.record_ = std::make_shared<CompositeRecord<int>>(n);
+        ref.record_ = std::make_unique<CompositeRecord<int>>(n);
         ref.record_status_ = RecordStatus::Normal;
     }
     entry.AddArchiveRecords(records);
@@ -548,7 +456,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     {
         uint64_t ts = 9;
         uint64_t target = 9;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -562,7 +470,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     {
         uint64_t ts = 13;
         uint64_t target = 12;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE(res);
@@ -574,7 +482,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     // (read_ts: 15)->... => false
     {
         uint64_t ts = 15;
-        VersionRecord<CompositeRecord<int>> rec;
+        VersionResultRecord<CompositeRecord<int>> rec;
 
         bool res = entry.MvccGet(ts, rec);
         REQUIRE_FALSE(res);

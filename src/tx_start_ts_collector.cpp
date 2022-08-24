@@ -22,11 +22,19 @@ TxStartTsCollector::TxStartTsCollector(LocalCcShards *shards,
 
 TxStartTsCollector::~TxStartTsCollector()
 {
+    if (!local_shards_->EnableMvcc())
+    {
+        return;
+    }
     thd_.join();
 }
 
 void TxStartTsCollector::Start()
 {
+    if (!local_shards_->EnableMvcc())
+    {
+        return;
+    }
     active_.store(true);
     thd_ = std::thread([this] { Run(); });
 }
@@ -80,17 +88,7 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
 
         if (dest_node_id == local_shards_->NodeId())
         {
-            // Statistic min{ start_ts of all tx , ts_base} in native ng
-            size_t shard_cnt = local_shards_->Count();
-            StatMinTxStartTsCc ts_req(shard_cnt);
-
-            for (uint32_t shard_code = 0; shard_code < shard_cnt; ++shard_code)
-            {
-                local_shards_->EnqueueCcRequest(shard_code, &ts_req);
-            }
-            ts_req.Wait();
-            min_start_ts_map_[ng_id] = ts_req.GetMinStartTs();
-
+            min_start_ts_map_[ng_id] = local_shards_->StatsLocalActiveSiTxs();
             continue;
         }
 
@@ -102,6 +100,7 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
         {
             LOG(ERROR) << "Fail to init the channel to the node("
                        << dest_node_id << ") .";
+
             continue;
         }
 
@@ -123,8 +122,7 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
         }
         else
         {
-            const int64_t term = Sharder::Instance().LeaderTerm(ng_id);
-            if (!res.error() && res.term() >= term)
+            if (!res.error() && res.term() > 0)
             {
                 min_start_ts_map_[ng_id] = res.ts();
             }

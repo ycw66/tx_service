@@ -551,7 +551,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
     init_txn.Reset();
 
-    handler->NewTxn(init_txn.hd_result_);
+    handler->NewTxn(init_txn.hd_result_, iso_level_);
     init_txn.Forward(this);
 }
 
@@ -1890,6 +1890,7 @@ void TransactionExecution::Process(UpdateTxnStatus &update_txn)
     update_txn.Reset();
     update_txn.is_running_ = true;
     handler->UpdateTxnStatus(txid_,
+                             iso_level_,
                              tx_status_.load(std::memory_order_relaxed),
                              update_txn.hd_result_);
     update_txn.Forward(this);
@@ -2310,8 +2311,10 @@ void TransactionExecution::ProcessTxRequest(
     bool_resp_ = &clean_req.tx_result_;
     bool_resp_->Reset();
 
-    clean_entry_op_.Set(
-        clean_req.tab_name_, clean_req.key_, clean_req.only_archives_);
+    clean_entry_op_.Set(clean_req.tab_name_,
+                        clean_req.key_,
+                        clean_req.only_archives_,
+                        clean_req.flush_);
     PushOperation(&clean_entry_op_);
     Process(clean_entry_op_);
 }
@@ -2334,6 +2337,7 @@ void TransactionExecution::Process(CleanCcEntryForTestOp &clean_entry_op)
     handler->CleanCcEntryForTest(*clean_entry_op_.tab_name_,
                                  *clean_entry_op_.key_,
                                  clean_entry_op_.only_archives_,
+                                 clean_entry_op_.flush_,
                                  tx_number_.load(std::memory_order_relaxed),
                                  tx_term_,
                                  clean_entry_op_.hd_result_);

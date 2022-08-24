@@ -545,7 +545,7 @@ public:
         }
         if (cce->payload_ == nullptr)
         {
-            cce->payload_ = std::make_shared<CatalogRecord>();
+            cce->payload_ = std::make_unique<CatalogRecord>();
         }
         cce->payload_->Set(catalog_entry->schema_.get(),
                            catalog_entry->dirty_schema_.get(),

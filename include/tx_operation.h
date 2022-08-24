@@ -413,11 +413,15 @@ struct CleanCcEntryForTestOp : TransactionOperation
 public:
     explicit CleanCcEntryForTestOp(TransactionExecution *txm);
 
-    void Set(const TableName *tn, const TxKey *key, bool only_archives)
+    void Set(const TableName *tn,
+             const TxKey *key,
+             bool only_archives,
+             bool flush)
     {
         tab_name_ = tn;
         key_ = key;
         only_archives_ = only_archives;
+        flush_ = flush;
         succeed_ = false;
     }
 
@@ -431,6 +435,7 @@ public:
     const TableName *tab_name_{nullptr};
     const TxKey *key_{nullptr};
     bool only_archives_{false};
+    bool flush_{true};
 
     bool succeed_{false};
     CcHandlerResult<bool> hd_result_;

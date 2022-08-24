@@ -21,7 +21,7 @@ static MockCatalogFactory mock_catalog_factory{};
 static std::vector<std::string> ips{"127.0.0.1"};
 static std::vector<uint16_t> ports{8600};
 
-TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
+TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
 {
     //== Create and start TxService
     std::filesystem::path output_dir = std::filesystem::path("/tmp/");
@@ -31,7 +31,7 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
     std::string local_path = "local://" + output_dir.string();
     std::cout << "output_dir: " << local_path << std::endl;
     uint32_t node_id = 0;
-    uint32_t core_num = 5;
+    uint32_t core_num = 3;
 
     std::map<std::string, uint32_t> tx_service_conf;
     tx_service_conf.insert(
@@ -75,12 +75,12 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
                                        txlog_server->LogGroupReplicaNum()));
 
     tx_service_->Start();
-    TxStartTsCollector::Instance().SetDelaySeconds(5);
+    TxStartTsCollector::Instance().SetDelaySeconds(2);
 
-    sleep(5);
+    sleep(3);
 
     //== Init serveral transactions
-    size_t tx_count = 5;
+    size_t tx_count = 2 * core_num;
     std::vector<TransactionExecution *> txs;
     txs.resize(tx_count);
     std::vector<InitTxRequest *> init_tx_reqs;
@@ -88,7 +88,8 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
 
     for (size_t i = 0; i < tx_count; i++)
     {
-        init_tx_reqs[i] = new InitTxRequest();
+        init_tx_reqs[i] =
+            new InitTxRequest(IsolationLevel::Snapshot, CcProtocol::MVCC);
         init_tx_reqs[i]->Reset();
         txs[i] = tx_service_->NewTx();
         // REQUIRE(txs[i]->GetStartTs() == 0U);
@@ -114,19 +115,17 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
         }
     }
 
-    sleep(10);  // Assure "TxStartTsCollector" has collected the min start ts.
+    sleep(3);  // Assure "TxStartTsCollector" has collected the min start ts.
 
     uint64_t collected_min_ts =
-        TxStartTsCollector::Instance().GlobalMinTxStartTs();
+        TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
     REQUIRE(min_tx_ts == collected_min_ts);
 
-    // commit tx1
+    // commit the tx which is begin first.
     CommitTxRequest commit_req1;
     txs[min_tx_index]->Execute(&commit_req1);
     commit_req1.Wait();
     size_t committed_tx_index = min_tx_index;
-
-    sleep(10);
 
     min_tx_ts = UINT64_MAX;
     for (size_t i = 0; i < tx_count; i++)
@@ -138,7 +137,10 @@ TEST_CASE("TxStartTsCollector GlobalMinTxStartTs", "[start-ts-collector]")
         }
     }
 
-    collected_min_ts = TxStartTsCollector::Instance().GlobalMinTxStartTs();
+    sleep(3);  // Assure "TxStartTsCollector" has collected the min start ts.
+
+    collected_min_ts = TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+
     REQUIRE(min_tx_ts == collected_min_ts);
 
     for (auto *req : init_tx_reqs)

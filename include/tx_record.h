@@ -199,6 +199,10 @@ public:
     {
     }
 
+    VoidRecord(VoidRecord &&rhs)
+    {
+    }
+
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {
     }
@@ -226,6 +230,11 @@ public:
         return *this;
     }
 
+    VoidRecord &operator=(VoidRecord &&other) noexcept
+    {
+        return *this;
+    }
+
     std::string ToString() const override
     {
         return std::string("");
@@ -237,19 +246,17 @@ public:
  * @param record_status_ : txservice::RecordStatus
  * @param commit_ts_ : uint64_t
  */
-struct VersionedRecord
+struct VersionTxRecord
 {
 public:
-    VersionedRecord()
+    VersionTxRecord()
         : record_(nullptr),
-          record_blob_(nullptr),
           record_status_(RecordStatus::Unknown),
           commit_ts_(1UL)
     {
     }
 
-    std::shared_ptr<TxRecord> record_;
-    const std::string *record_blob_;
+    std::unique_ptr<TxRecord> record_;
     RecordStatus record_status_;
     uint64_t commit_ts_;
 };

@@ -368,7 +368,7 @@ void txservice::LocalCcHandler::ReadOutside(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     CcHandlerResult<ReadKeyResult> &hres,
-    const std::vector<VersionedRecord> *archives)
+    std::vector<VersionTxRecord> *archives)
 {
     assert(cce_addr.CcePtr() != 0);
 
@@ -841,7 +841,8 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     local_shard.Enqueue(req);
 }
 
-void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
+void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
+                                       IsolationLevel iso_level)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
 
@@ -861,9 +862,16 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres)
         TEntry &tx = ccs.NewTx();
         InitTxResult &init_tx_res = hres.Value();
         init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId());
+        TxNumber txn = init_tx_res.txid_.TxNumber();
         init_tx_res.start_ts_ = tx.lower_bound_;
         init_tx_res.term_ = tx.term_;
         hres.SetFinished();
+
+        // Update active tx info
+        if (iso_level == IsolationLevel::Snapshot)
+        {
+            ccs.AddActiveSiTx(txn, tx.lower_bound_);
+        }
     }
     else
     {
@@ -913,6 +921,7 @@ void txservice::LocalCcHandler::UpdateCommitLowerBound(
 }
 
 void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
+                                                IsolationLevel iso_level,
                                                 TxnStatus status,
                                                 CcHandlerResult<Void> &hres)
 {
@@ -921,6 +930,12 @@ void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
     assert(te.ident_ == txid.ident_);
     te.status_ = status;
     hres.SetFinished();
+
+    // Update active tx info
+    if (iso_level == IsolationLevel::Snapshot)
+    {
+        ccs.RemoveActiveSiTx(txid.TxNumber());
+    }
 }
 
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
@@ -981,6 +996,7 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                                     const TxKey &key,
                                                     bool only_archives,
+                                                    bool flush,
                                                     uint64_t tx_number,
                                                     int64_t tx_term,
                                                     CcHandlerResult<bool> &hres)
@@ -992,8 +1008,13 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
     if (dest_node_id == cc_shards_.node_id_)
     {
         CleanCcEntryForTestCc *req = clean_cc_entry_pool.NextRequest();
-        req->Reset(
-            &table_name, &key, only_archives, shard_code, tx_number, &hres);
+        req->Reset(&table_name,
+                   &key,
+                   only_archives,
+                   flush,
+                   shard_code,
+                   tx_number,
+                   &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -1004,6 +1025,7 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                        table_name,
                                        key,
                                        only_archives,
+                                       flush,
                                        shard_code,
                                        tx_number,
                                        tx_term,

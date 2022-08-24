@@ -792,17 +792,6 @@ void txservice::remote::RemoteReadOutside::Reset(
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
 
-    // set archives_
-    archives_.clear();
-    for (auto &vrec_msg : req.archives())
-    {
-        auto &v_rec = archives_.emplace_back();
-        v_rec.commit_ts_ = vrec_msg.version_ts();
-        v_rec.record_status_ =
-            ToLocalType::ConvertRecordStatusType(vrec_msg.rec_status());
-        v_rec.record_blob_ = &vrec_msg.record();
-    }
-
     input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
@@ -813,7 +802,6 @@ void txservice::remote::RemoteReadOutside::Reset(
 
 void txservice::remote::RemoteReadOutside::Finish()
 {
-    archives_.clear();
     hd_->RecycleCcMsg(std::move(input_msg_));
 }
 
@@ -903,6 +891,7 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
     CleanCcEntryForTestCc::Reset(&req.tablename(),
                                  &req.key(),
                                  req.only_archives(),
+                                 req.flush(),
                                  req.key_shard_code(),
                                  input_msg->tx_number(),
                                  &cc_res_);

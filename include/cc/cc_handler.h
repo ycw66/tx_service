@@ -198,7 +198,7 @@ public:
         uint64_t commit_ts,
         const CcEntryAddr &cce_addr,
         CcHandlerResult<ReadKeyResult> &hres,
-        const std::vector<VersionedRecord> *archives = nullptr) = 0;
+        std::vector<VersionTxRecord> *archives = nullptr) = 0;
 
     /**
      * @brief ReadLocal is used to read replicated cc maps, which contain a cc
@@ -303,7 +303,8 @@ public:
     /// <param name="local_time"></param>
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
-    virtual void NewTxn(CcHandlerResult<InitTxResult> &) = 0;
+    virtual void NewTxn(CcHandlerResult<InitTxResult> &hres,
+                        IsolationLevel iso_level) = 0;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.
@@ -336,6 +337,7 @@ public:
     /// <param name="extension"></param>
     /// <param name=""></param>
     virtual void UpdateTxnStatus(const TxId &txn_id,
+                                 IsolationLevel iso_level,
                                  TxnStatus status,
                                  CcHandlerResult<Void> &) = 0;
 
@@ -388,6 +390,7 @@ public:
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,
                                      bool only_archives,
+                                     bool flush,
                                      uint64_t tx_number,
                                      int64_t tx_term,
                                      CcHandlerResult<bool> &hres) = 0;

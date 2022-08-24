@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>  // std::vector
+
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
 #include "ds_range_evaluate_service.h"
@@ -34,7 +36,7 @@ public:
      * @return whether all entries are written to data store successfully
      */
     virtual bool PutAll(const TableName &table_name,
-                        std::vector<LruEntry *> &batch,
+                        std::vector<FlushRecord> &batch,
                         const Schema *key_schema,
                         const Schema *rec_schema,
                         uint64_t schema_ts,
@@ -53,7 +55,7 @@ public:
      * @return whether all entries are written to data store successfully
      */
     virtual bool PutSkAll(const txservice::TableName &table_name,
-                          std::vector<txservice::LruEntry *> &batch,
+                          std::vector<FlushRecord> &batch,
                           const txservice::SecondaryKeySchema *sk_schema,
                           uint64_t schema_ts,
                           uint32_t node_group) = 0;
@@ -113,13 +115,11 @@ public:
         bool scan_foward) = 0;
 
     /**
-     * @brief Write historical versions into DataStore.
-     *
+     * @brief Write batch historical versions into DataStore.
      */
-    virtual bool PutArchives(
-        const txservice::TableName &table_name,
-        const txservice::TxKey &key,
-        const std::vector<txservice::VersionedRecord> &archives) = 0;
+    virtual bool PutArchivesAll(uint32_t node_group,
+                                const txservice::TableName &table_name,
+                                std::vector<txservice::FlushRecord> &batch) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
@@ -138,7 +138,7 @@ public:
     virtual bool FetchArchives(
         const txservice::TableName &table_name,
         const txservice::TxKey &key,
-        std::vector<txservice::VersionedRecord> &archives,
+        std::vector<txservice::VersionTxRecord> &archives,
         uint64_t from_ts) = 0;
 
     void SetTxService(txservice::TxService *tx_service)

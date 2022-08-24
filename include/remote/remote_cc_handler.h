@@ -9,7 +9,7 @@
 #include "remote/cc_stream_sender.h"
 #include "remote_cc_request.h"
 #include "tx_operation_result.h"
-#include "tx_record.h"  // RecordStatus;VersionedRecord
+#include "tx_record.h"  // RecordStatus;VersionTxRecord
 
 namespace txservice
 {
@@ -98,7 +98,7 @@ public:
                      bool is_deleted,
                      uint64_t commit_ts,
                      const CcEntryAddr &cce_addr,
-                     const std::vector<VersionedRecord> *archives = nullptr);
+                     std::vector<VersionTxRecord> *archives = nullptr);
 
     void ScanOpen(uint32_t src_node_id,
                   const TableName &table_name,
@@ -170,6 +170,7 @@ public:
                              const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,
+                             bool flush,
                              uint32_t key_shard_code,
                              uint64_t tx_number,
                              int64_t tx_term,

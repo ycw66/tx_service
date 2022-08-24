@@ -173,7 +173,7 @@ message PostprocessResponse {
 	int32 error_code = 1;
 }
 
-message VersionedRecord_msg {
+message VersionTxRecord_msg {
 	bytes record = 1;
 	RecordStatusType rec_status = 2;
 	uint64 version_ts = 3;
@@ -213,7 +213,7 @@ message ReadOutsideRequest {
 	RecordStatusType rec_status = 3;
 	uint64 commit_ts = 4;
 	CceAddr_msg cce_addr = 5;
-	repeated VersionedRecord_msg archives = 6;
+	repeated VersionTxRecord_msg archives = 6;
 }
 
 message PostCommitRequest {
@@ -309,6 +309,7 @@ message CleanCcEntryForTestRequest {
   bytes key = 3;
   uint32 key_shard_code = 4;
   bool only_archives=5;
+  bool flush=6;
 }
 
 message CleanCcEntryForTestResponse {

@@ -14,12 +14,14 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint32_t log_limit_mb,
                              CatalogFactory *catalog_factory,
                              store::DataStoreHandler *store_hd,
-                             TxService *tx_service)
+                             TxService *tx_service,
+                             bool enable_mvcc)
     : store_hd_(store_hd),
       node_id_(node_id),
       timer_terminate_(false),
       catalog_factory_(catalog_factory),
-      tx_service_(tx_service)
+      tx_service_(tx_service),
+      enable_mvcc_(enable_mvcc)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(

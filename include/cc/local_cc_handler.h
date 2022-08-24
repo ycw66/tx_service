@@ -114,14 +114,13 @@ public:
               CcProtocol proto = CcProtocol::OCC,
               LockType lock_type = LockType::ReadLock) override;
 
-    void ReadOutside(
-        int64_t tx_term,
-        TxRecord &rec,
-        bool is_deleted,
-        uint64_t commit_ts,
-        const CcEntryAddr &cce_addr,
-        CcHandlerResult<ReadKeyResult> &hres,
-        const std::vector<VersionedRecord> *archives = nullptr) override;
+    void ReadOutside(int64_t tx_term,
+                     TxRecord &rec,
+                     bool is_deleted,
+                     uint64_t commit_ts,
+                     const CcEntryAddr &cce_addr,
+                     CcHandlerResult<ReadKeyResult> &hres,
+                     std::vector<VersionTxRecord> *archives = nullptr) override;
 
     void ReadLocal(const TableName &table_name,
                    const TxKey &key,
@@ -211,7 +210,8 @@ public:
     /// <param name="local_time"></param>
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
-    void NewTxn(CcHandlerResult<InitTxResult> &hres) override;
+    void NewTxn(CcHandlerResult<InitTxResult> &hres,
+                IsolationLevel iso_level) override;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.
@@ -244,6 +244,7 @@ public:
     /// <param name="extension"></param>
     /// <param name=""></param>
     void UpdateTxnStatus(const TxId &txid,
+                         IsolationLevel iso_level,
                          TxnStatus status,
                          CcHandlerResult<Void> &hres) override;
 
@@ -264,6 +265,7 @@ public:
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,
+                             bool flush,
                              uint64_t tx_number,
                              int64_t tx_term,
                              CcHandlerResult<bool> &hres) override;

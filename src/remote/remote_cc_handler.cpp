@@ -312,7 +312,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     bool is_deleted,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    const std::vector<VersionedRecord> *archives)
+    std::vector<VersionTxRecord> *archives)
 {
     CcMessage send_msg;
 
@@ -341,9 +341,9 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
 
     if (archives != nullptr)
     {
-        for (const VersionedRecord &vrecord : *archives)
+        for (const VersionTxRecord &vrecord : *archives)
         {
-            VersionedRecord_msg *vrec_msg = read_outside->add_archives();
+            VersionTxRecord_msg *vrec_msg = read_outside->add_archives();
             vrec_msg->set_version_ts(vrecord.commit_ts_);
             vrec_msg->set_rec_status(
                 ToRemoteType::ConvertRecordStatus(vrecord.record_status_));
@@ -483,6 +483,7 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     const TableName &table_name,
     const TxKey &key,
     bool only_archives,
+    bool flush,
     uint32_t key_shard_code,
     uint64_t tx_number,
     int64_t tx_term,
@@ -503,6 +504,8 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->clear_key();
     key.Serialize(*clean_req->mutable_key());
     clean_req->set_key_shard_code(key_shard_code);
+    clean_req->set_only_archives(only_archives);
+    clean_req->set_flush(flush);
 
     stream_sender_.SendMessage(key_shard_code >> 10, send_msg, &hres);
     hres.Txm()->EnlistToWait();

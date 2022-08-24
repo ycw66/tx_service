@@ -144,7 +144,7 @@ public:
     ReadOutsideTxRequest(TxRecord &rec,
                          bool is_deleted,
                          uint64_t commit_ts,
-                         std::vector<VersionedRecord> *archives = nullptr)
+                         std::vector<VersionTxRecord> *archives = nullptr)
         : rec_(rec),
           is_deleted_(is_deleted),
           commit_ts_(commit_ts),
@@ -155,7 +155,7 @@ public:
     TxRecord &rec_;
     bool is_deleted_;
     uint64_t commit_ts_;
-    const std::vector<VersionedRecord> *archives_;
+    std::vector<VersionTxRecord> *archives_;
 };
 
 struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
@@ -326,14 +326,19 @@ struct CleanCcEntryForTestTxRequest
 {
     CleanCcEntryForTestTxRequest(const TableName *tab_name = nullptr,
                                  const TxKey *key = nullptr,
-                                 bool only_archives = false)
-        : tab_name_(tab_name), key_(key), only_archives_{only_archives}
+                                 bool only_archives = false,
+                                 bool flush = true)
+        : tab_name_(tab_name),
+          key_(key),
+          only_archives_{only_archives},
+          flush_{flush}
     {
     }
 
     const TableName *tab_name_;
     const TxKey *key_;
     bool only_archives_;
+    bool flush_;
 };
 
 }  // namespace txservice

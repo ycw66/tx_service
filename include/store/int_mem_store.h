@@ -8,7 +8,7 @@
 
 #include "store/data_store_handler.h"
 #include "tx_key.h"     //CompositeKey
-#include "tx_record.h"  //CompositeRecord,VersionedRecord
+#include "tx_record.h"  //CompositeRecord,VersionTxRecord
 
 namespace txservice::store
 {
@@ -25,7 +25,7 @@ public:
     }
 
     bool PutAll(const TableName &table_name,
-                std::vector<LruEntry *> &batch,
+                std::vector<FlushRecord> &batch,
                 const Schema *key_schema,
                 const Schema *rec_schema,
                 uint64_t schema_ts,
@@ -33,18 +33,17 @@ public:
                 DsRangeEvaluateOperationService
                     *ds_range_evaluate_operation_service) override
     {
-        for (const auto &entry : batch)
+        for (const auto &ref : batch)
         {
             CcEntry<CompositeKey<int>, CompositeRecord<int>> *cce =
                 static_cast<CcEntry<CompositeKey<int>, CompositeRecord<int>> *>(
-                    entry);
+                    ref.cce_);
 
             const CompositeKey<int> &key = *cce->key_;
-            const CompositeRecord<int> &rec = cce->payload_ckpt_.first;
-            bool is_deleted = cce->payload_ckpt_.second;
+            const CompositeRecord<int> &rec = *ref.Payload();
 
             int key_val = std::get<0>(key.Tuple());
-            if (is_deleted)
+            if (ref.payload_status_ == RecordStatus::Deleted)
             {
                 int_store_.erase(key_val);
             }
@@ -64,44 +63,13 @@ public:
     }
 
     bool PutSkAll(const TableName &table_name,
-                  std::vector<LruEntry *> &batch,
+                  std::vector<FlushRecord> &batch,
                   const SecondaryKeySchema *sk_schema,
                   uint64_t schema_ts,
                   uint32_t node_group) override
     {
-        for (const auto &entry : batch)
-        {
-            using KeyPair = std::pair<CompositeKey<int>, CompositeKey<int>>;
-            using KeyPtrPair =
-                std::pair<const CompositeKey<int> *, const CompositeKey<int> *>;
-
-            CcEntry<KeyPair, KeyPtrPair> *cce =
-                static_cast<CcEntry<KeyPair, KeyPtrPair> *>(entry);
-
-            const CompositeKey<int> &sk = *cce->payload_ckpt_.first.first;
-            const CompositeKey<int> &pk = *cce->payload_ckpt_.first.second;
-            bool is_del = cce->payload_ckpt_.second;
-
-            int sk_val = std::get<0>(sk.Tuple());
-            int pk_val = std::get<0>(pk.Tuple());
-
-            std::pair<int, int> key(sk_val, pk_val);
-            if (is_del)
-            {
-                int_index_.erase(key);
-            }
-            else
-            {
-                int_index_.try_emplace(key);
-            }
-
-            if (int_index_.size() > 1000)
-            {
-                int_index_.erase(int_index_.begin());
-            }
-        }
-
-        return true;
+        assert(false);
+        return false;
     }
 
     void UpsertTable(
@@ -114,11 +82,13 @@ public:
     {
     }
 
-    void FetchTableCatalog(const TableName &ccm_table_name, void *fetch_req)
+    void FetchTableCatalog(const TableName &ccm_table_name,
+                           void *fetch_req) override
     {
     }
 
-    void FetchTableRanges(const TableName &range_table_name, void *fetch_req)
+    void FetchTableRanges(const TableName &range_table_name,
+                          void *fetch_req) override
     {
     }
 
@@ -250,18 +220,14 @@ public:
     }
 
     /**
-     * @brief Write historical versions into DataStore.
+     * @brief Write batch historical versions into DataStore.
      *
      */
-    bool PutArchives(const txservice::TableName &table_name,
-                     const txservice::TxKey &key,
-                     const std::vector<txservice::VersionedRecord> &archives)
+    bool PutArchivesAll(uint32_t node_group,
+                        const txservice::TableName &table_name,
+                        std::vector<txservice::FlushRecord> &batch) override
     {
-        auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
-        int int_key = std::get<0>(typed_key.Tuple());
-        int_archives_[std::pair<TableName, int>(table_name, int_key)] =
-            archives;
-
+        assert(false);
         return true;
     }
 
@@ -274,7 +240,7 @@ public:
                              const uint64_t upper_bound_ts,
                              txservice::TxRecord &rec,
                              txservice::RecordStatus &rec_status,
-                             uint64_t &commit_ts)
+                             uint64_t &commit_ts) override
     {
         auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
         int int_key = std::get<0>(typed_key.Tuple());
@@ -299,8 +265,8 @@ public:
      */
     bool FetchArchives(const txservice::TableName &table_name,
                        const txservice::TxKey &key,
-                       std::vector<txservice::VersionedRecord> &archives,
-                       uint64_t from_ts)
+                       std::vector<txservice::VersionTxRecord> &archives,
+                       uint64_t from_ts) override
     {
         auto &typed_key = dynamic_cast<const CompositeKey<int> &>(key);
         int int_key = std::get<0>(typed_key.Tuple());
@@ -310,7 +276,10 @@ public:
         {
             if (ref[i].commit_ts_ >= from_ts)
             {
-                archives.emplace_back(ref[i]);
+                auto &tmp = archives.emplace_back();
+                tmp.commit_ts_ = ref[i].commit_ts_;
+                tmp.record_status_ = ref[i].record_status_;
+                tmp.record_ = ref[i].record_->Clone();
             }
         }
 
@@ -335,7 +304,7 @@ public:
 private:
     std::map<int, int> int_store_;
     std::map<std::pair<int, int>, Void> int_index_;
-    std::map<std::pair<TableName, int>, std::vector<VersionedRecord>>
+    std::map<std::pair<TableName, int>, std::vector<VersionTxRecord>>
         int_archives_;
 };
 }  // namespace txservice::store

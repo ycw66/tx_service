@@ -42,7 +42,8 @@ public:
                   uint32_t log_limit_mb = 1000,
                   CatalogFactory *catalog_factory = nullptr,
                   store::DataStoreHandler *store_hd = nullptr,
-                  TxService *tx_service = nullptr);
+                  TxService *tx_service = nullptr,
+                  bool enable_mvcc = true);
 
     ~LocalCcShards();
 
@@ -284,24 +285,22 @@ public:
      */
     void DropCatalogs(NodeGroupId cc_ng_id);
 
-    uint64_t MinStartTsOfLocalActiveTxs(int64_t term)
+    uint64_t StatsLocalActiveSiTxs()
     {
         uint64_t min_ts = UINT64_MAX;
         for (auto &ccs : cc_shards_)
         {
-            if (ccs->min_tx_start_ts_term_.load() == term)
-            {
-                min_ts = std::min(ccs->min_tx_start_ts_.load(), min_ts);
-            }
-            else
-            {
-                min_ts = std::min(ccs->ts_base_.load(), min_ts);
-            }
+            min_ts = std::min(ccs->LocalMinSiTxStartTs(), min_ts);
         }
         return min_ts;
     }
 
     void WakeUpTxProcessor(uint16_t core_id);
+
+    bool EnableMvcc() const
+    {
+        return enable_mvcc_;
+    }
 
     store::DataStoreHandler *const store_hd_;
 
@@ -330,6 +329,8 @@ private:
     std::shared_mutex catalog_mux_;
 
     TxService *tx_service_;
+
+    bool enable_mvcc_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

@@ -1,9 +1,9 @@
 #pragma once
 
 #include <atomic>
-#include <map>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "cc/cc_entry.h"  // LruEntry
 #include "cc/local_cc_shards.h"
@@ -26,7 +26,7 @@ public:
     void Start();
     void Shutdown();
 
-    uint64_t GlobalMinTxStartTs()
+    uint64_t GlobalMinSiTxStartTs()
     {
         CODE_FAULT_INJECTOR("stop_safely_clean_archives", {
             std::cout << "stop_safely_clean_archives" << std::endl;
@@ -53,7 +53,7 @@ private:
     std::atomic<bool> active_;
 
     // {ng_id -> min_tx_start_ts}
-    std::map<uint32_t, uint64_t> min_start_ts_map_;
+    std::unordered_map<uint32_t, uint64_t> min_start_ts_map_;
     std::atomic<uint64_t> min_start_ts_;
     // Run time period of scheduled recycling task
     uint32_t delay_seconds_;
