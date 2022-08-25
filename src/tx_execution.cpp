@@ -128,6 +128,7 @@ TxnStatus TransactionExecution::TxStatus() const
 
 void TransactionExecution::RecoverSchemaTx(
     const ::txlog::SchemaOpMessage &schema_op,
+    const CatalogRecord *catalog_rec,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts)
@@ -145,8 +146,7 @@ void TransactionExecution::RecoverSchemaTx(
 
         std::unique_ptr<UpsertTableOp> table_op =
             std::make_unique<UpsertTableOp>(schema_op.table_name(),
-                                            schema_op.catalog_blob().data(),
-                                            schema_op.catalog_blob().length(),
+                                            catalog_rec,
                                             table_msg.is_deleted(),
                                             this);
 
@@ -476,12 +476,8 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
-    schema_op_ = std::make_unique<UpsertTableOp>(*req.table_name_,
-                                                 req.catalog_image_,
-                                                 req.catalog_length_,
-                                                 req.is_deleted_,
-                                                 this);
-
+    schema_op_ = std::make_unique<UpsertTableOp>(
+        *req.table_name_, req.catalog_record_, req.is_deleted_, this);
     PushOperation(schema_op_.get());
     Forward();
 }
@@ -524,8 +520,7 @@ void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
     bool_resp_->Reset();
 
     ds_split_range_op_ = std::make_unique<DsSplitRangeOp>(req.range_table_name_,
-                                                          req.key_schema_,
-                                                          req.record_schema_,
+                                                          req.table_schema_,
                                                           req.range_key_,
                                                           req.range_record_,
                                                           this);
@@ -2228,9 +2223,7 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
-    handler->DataStoreUpsertTable(*ds_upsert_table_op.table_name_,
-                                  ds_upsert_table_op.table_schema_,
-                                  &ds_upsert_table_op.index_names_,
+    handler->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
                                   ds_upsert_table_op.is_deleted_,
                                   commit_ts_,
                                   ds_upsert_table_op.hd_result_);
@@ -2380,9 +2373,8 @@ void TransactionExecution::Process(
     ds_find_range_median_key_op.is_running_ = true;
 
     handler->DataStoreFindRangeMedianKey(
-        *ds_find_range_median_key_op.table_name_,
         ds_find_range_median_key_op.partition_id_,
-        ds_find_range_median_key_op.key_schema,
+        ds_find_range_median_key_op.table_schema_,
         ds_find_range_median_key_op.hd_result_);
 }
 
@@ -2419,13 +2411,11 @@ void TransactionExecution::Process(DsCopyRangeDataOp &ds_copy_range_data_op)
     ds_copy_range_data_op.hd_result_.Reset();
     ds_copy_range_data_op.is_running_ = true;
 
-    handler->DataStoreCopyRangeData(ds_copy_range_data_op.table_name_,
-                                    ds_copy_range_data_op.old_partition_id_,
+    handler->DataStoreCopyRangeData(ds_copy_range_data_op.old_partition_id_,
                                     ds_copy_range_data_op.new_partition_id_,
                                     ds_copy_range_data_op.middle_key_,
                                     ds_copy_range_data_op.filter_ts_,
-                                    ds_copy_range_data_op.key_schema_,
-                                    ds_copy_range_data_op.record_schema_,
+                                    ds_copy_range_data_op.table_schema_,
                                     ds_copy_range_data_op.hd_result_);
 }
 
@@ -2461,10 +2451,9 @@ void TransactionExecution::Process(
     ds_delete_out_of_range_data_op.hd_result_.Reset();
     ds_delete_out_of_range_data_op.is_running_ = true;
     handler->DataStoreDeleteOutOfRangeData(
-        ds_delete_out_of_range_data_op.table_name_,
         ds_delete_out_of_range_data_op.partition_id_,
         ds_delete_out_of_range_data_op.middle_key_,
-        ds_delete_out_of_range_data_op.key_schema_,
+        ds_delete_out_of_range_data_op.table_schema_,
         ds_delete_out_of_range_data_op.hd_result_);
 }
 
@@ -2499,8 +2488,7 @@ void TransactionExecution::Process(DsUpsertRangeOp &ds_upsert_range_op)
         });
     ds_upsert_range_op.Reset();
     ds_upsert_range_op.is_running_ = true;
-    handler->DataStoreUpsertRange(ds_upsert_range_op.range_table_name_,
-                                  ds_upsert_range_op.key_schema_,
+    handler->DataStoreUpsertRange(ds_upsert_range_op.table_schema_,
                                   ds_upsert_range_op.key_,
                                   ds_upsert_range_op.partition_id_,
                                   ds_upsert_range_op.ts_,

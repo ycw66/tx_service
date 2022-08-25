@@ -266,40 +266,34 @@ struct UpsertTableTxRequest
     : public TemplateTxRequest<UpsertTableTxRequest, bool>
 {
     UpsertTableTxRequest(const TableName *table_name,
-                         const char *catalog_image,
-                         size_t catalog_len,
+                         const CatalogRecord *catalog_record,
                          bool is_deleted)
         : table_name_(table_name),
-          catalog_image_(catalog_image),
-          catalog_length_(catalog_len),
+          catalog_record_(catalog_record),
           is_deleted_(is_deleted)
     {
     }
 
     const TableName *table_name_;
-    const char *catalog_image_;
-    size_t catalog_length_;
+    const CatalogRecord *catalog_record_;
     bool is_deleted_;
 };
 
 struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
 {
     SplitRangeTxRequest(const TableName &range_table_name,
-                        const Schema *key_schema,
-                        const Schema *record_schema,
+                        const TableSchema *table_schema,
                         const TxKey *range_key,
                         RangeRecord *range_record)
         : range_table_name_(range_table_name),
-          key_schema_(key_schema),
-          record_schema_(record_schema),
+          table_schema_(table_schema),
           range_key_(range_key),
           range_record_(range_record)
     {
     }
 
     const TableName &range_table_name_{nullptr};
-    const Schema *key_schema_{nullptr};
-    const Schema *record_schema_{nullptr};
+    const TableSchema *table_schema_{nullptr};
     const TxKey *range_key_;
     RangeRecord *range_record_{nullptr};
 };

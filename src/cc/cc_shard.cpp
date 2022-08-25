@@ -264,9 +264,11 @@ void CcShard::UpdateEstimateLogSize(LruEntry *entry,
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr,
-                                         bool is_key_write_lock)
+                                         bool is_key_write_lock,
+                                         bool is_schema_op)
 {
-    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
+    auto em_it =
+        lock_holding_txs_.try_emplace(txn, tx_term, Now(), is_schema_op);
     em_it.first->second.cce_list_.emplace(cce_ptr);
     if (is_key_write_lock)
     {
@@ -441,8 +443,19 @@ const CatalogEntry *CcShard::CreateCatalog(const TableName &table_name,
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
+const CatalogEntry *CcShard::CreateReplayCatalog(
+    const TableName &table_name,
+    NodeGroupId cc_ng_id,
+    const std::string &old_schema_image,
+    const std::string &new_schema_image,
+    uint64_t commit_ts)
+{
+    return local_shards_.CreateReplayCatalog(
+        table_name, cc_ng_id, old_schema_image, new_schema_image, commit_ts);
+}
+
 const CatalogEntry *CcShard::CreateDirtyCatalog(
-    const std::string &table_name,
+    const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
@@ -494,6 +507,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
 
 void CcShard::FetchTableRanges(const TableName &range_table_name,
                                const Schema *key_schema,
+                               const KVCatalogInfo *kv_info,
                                CcRequestBase *requester)
 {
     auto table_it =
@@ -506,7 +520,8 @@ void CcShard::FetchTableRanges(const TableName &range_table_name,
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchTableRanges(range_table_name, fetch_req);
+        local_shards_.store_hd_->FetchTableRanges(
+            range_table_name, kv_info, fetch_req);
     }
 }
 

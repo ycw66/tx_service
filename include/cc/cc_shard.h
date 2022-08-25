@@ -50,12 +50,13 @@ public:
 struct TxLockInfo
 {
     TxLockInfo() = delete;
-    TxLockInfo(int64_t tx_coord_term, uint64_t ts)
+    TxLockInfo(int64_t tx_coord_term, uint64_t ts, bool is_schema_op = false)
         : tx_coord_term_(tx_coord_term),
           ts_(ts),
           last_recover_ts_(0),
           cce_list_(),
-          key_write_lock_count_(0)
+          key_write_lock_count_(0),
+          is_schema_op_tx_(is_schema_op)
     {
     }
 
@@ -74,6 +75,8 @@ struct TxLockInfo
     std::unordered_set<LruEntry *> cce_list_;
     // How many write locks in this tx for current shard
     int32_t key_write_lock_count_;
+    // tmp fix of recover tx lock on cc catalog map
+    bool is_schema_op_tx_;
 };
 
 class CcShard
@@ -235,7 +238,8 @@ public:
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
                                     int64_t tx_term,
                                     LruEntry *cce_ptr,
-                                    bool is_key_write_lock);
+                                    bool is_key_write_lock,
+                                    bool is_schema_op = false);
 
     void DeleteLockHoldingTx(TxNumber txn,
                              LruEntry *cce_ptr,
@@ -314,7 +318,10 @@ public:
                      iter != lock_holding_txs_.end();
                      iter++)
                 {
-                    CheckRecoverTx(iter->first, ng_id, ng_term);
+                    if (!iter->second.is_schema_op_tx_)
+                    {
+                        CheckRecoverTx(iter->first, ng_id, ng_term);
+                    }
                 }
             }
         }
@@ -331,6 +338,12 @@ public:
                                            NodeGroupId cc_ng_id,
                                            const std::string &catalog_image,
                                            uint64_t commit_ts);
+
+    const CatalogEntry *CreateReplayCatalog(const TableName &table_name,
+                                            NodeGroupId cc_ng_id,
+                                            const std::string &old_schema_image,
+                                            const std::string &new_schema_image,
+                                            uint64_t commit_ts);
 
     void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
@@ -380,6 +393,7 @@ public:
 
     void FetchTableRanges(const TableName &range_table_name,
                           const Schema *key_schema,
+                          const KVCatalogInfo *kv_info,
                           CcRequestBase *requester);
 
     void RemoveFetchRequest(const TableName &table_name);

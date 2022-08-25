@@ -255,9 +255,7 @@ public:
                      std::vector<int> &vct_node_id,
                      CcHandlerResult<bool> &hres) override;
 
-    void DataStoreUpsertTable(const TableName &table_name,
-                              const TableSchema *schema,
-                              const std::vector<txservice::TableName> *indexes,
+    void DataStoreUpsertTable(const TableSchema *schema,
                               bool is_deleted,
                               uint64_t commit_ts,
                               CcHandlerResult<Void> &hres) override;
@@ -271,31 +269,26 @@ public:
                              CcHandlerResult<bool> &hres) override;
 
     void DataStoreFindRangeMedianKey(
-        const txservice::TableName &table_name,
         int32_t partition,
-        const txservice::Schema *key_schema,
+        const TableSchema *table_schema,
         CcHandlerResult<RangeMedianKeyResult> &hd_res) override;
 
-    void DataStoreCopyRangeData(const txservice::TableName &table_name,
-                                int32_t old_partition_id,
+    void DataStoreCopyRangeData(int32_t old_partition_id,
                                 int32_t new_partition_id,
                                 const TxKey *start_key,
                                 uint64_t tx_ts,
-                                const txservice::Schema *key_schema,
-                                const txservice::Schema *rec_schema,
+                                const TableSchema *table_schema,
                                 CcHandlerResult<Void> &hd_res) override;
 
-    void DataStoreUpsertRange(const txservice::TableName &range_table_name,
-                              const txservice::Schema *key_schema,
+    void DataStoreUpsertRange(const TableSchema *table_schema,
                               txservice::TxKey *key,
                               int32_t partition_id,
                               int64_t ts,
                               CcHandlerResult<Void> &hd_res) override;
 
-    void DataStoreDeleteOutOfRangeData(const txservice::TableName &table_name,
-                                       int32_t partition_id,
+    void DataStoreDeleteOutOfRangeData(int32_t partition_id,
                                        const TxKey *start_key,
-                                       const txservice::Schema *key_schema,
+                                       const TableSchema *table_schema,
                                        CcHandlerResult<Void> &hd_res) override;
     /*
      * Get the node id which runs the current transaction.

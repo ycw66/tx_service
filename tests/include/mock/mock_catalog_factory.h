@@ -47,11 +47,18 @@ public:
     MockTableSchema(const std::string &table_name,
                     const std::string &catalog_image,
                     uint64_t version)
-        : schema_image_(catalog_image), version_(version)
+        : table_name_(table_name),
+          schema_image_(catalog_image),
+          version_(version)
     {
     }
     ~MockTableSchema()
     {
+    }
+
+    const TableName &GetTableName() const override
+    {
+        return table_name_;
     }
 
     const Schema *KeySchema() const override
@@ -85,18 +92,30 @@ public:
 
         return index_names;
     }
-    const Schema *IndexKeySchema(const TableName &index_name) const override
+    const SecondaryKeySchema *IndexKeySchema(
+        const TableName &index_name) const override
     {
         assert(false);
         return nullptr;
     }
+    const KVCatalogInfo *GetKVCatalogInfo() const override
+    {
+        assert(false);
+        return nullptr;
+    }
+    void SetKVCatalogInfo(const std::string &kv_info_str) override
+    {
+        assert(false);
+    }
 
 private:
     std::unordered_map<uint, std::pair<std::string, MockKeySchema>> indexes_;
+    TableName table_name_;
     std::string schema_image_;
     uint64_t version_;
     std::unique_ptr<MockKeySchema> key_schema_;
     MockRecordSchema record_schema_;
+    KVCatalogInfo::uptr kv_info_;
 };
 
 class MockCatalogFactory : public CatalogFactory
@@ -124,12 +143,7 @@ public:
     {
         return std::make_unique<
             txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
-            shard,
-            table_name,
-            schema_ts,
-            table_schema->KeySchema(),
-            table_schema->RecordSchema(),
-            ccm_has_full_entries);
+            shard, table_name, schema_ts, table_schema, ccm_has_full_entries);
     }
 
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,

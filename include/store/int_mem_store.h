@@ -24,10 +24,8 @@ public:
         return true;
     }
 
-    bool PutAll(const TableName &table_name,
-                std::vector<FlushRecord> &batch,
-                const Schema *key_schema,
-                const Schema *rec_schema,
+    bool PutAll(std::vector<FlushRecord> &batch,
+                const txservice::TableSchema *table_schema,
                 uint64_t schema_ts,
                 uint32_t node_group,
                 DsRangeEvaluateOperationService
@@ -62,9 +60,9 @@ public:
         return true;
     }
 
-    bool PutSkAll(const TableName &table_name,
+    bool PutSkAll(const TableName &index_name,
                   std::vector<FlushRecord> &batch,
-                  const SecondaryKeySchema *sk_schema,
+                  const txservice::TableSchema *table_schema,
                   uint64_t schema_ts,
                   uint32_t node_group) override
     {
@@ -73,9 +71,7 @@ public:
     }
 
     void UpsertTable(
-        const txservice::TableName &ccm_table_name,
         const txservice::TableSchema *table_schema,
-        const std::vector<txservice::TableName> *indexes,
         bool is_deleted,
         uint64_t commit_ts,
         txservice::CcHandlerResult<txservice::Void> *hd_res) override
@@ -88,6 +84,7 @@ public:
     }
 
     void FetchTableRanges(const TableName &range_table_name,
+                          const txservice::KVCatalogInfo *kv_info,
                           void *fetch_req) override
     {
     }
@@ -99,6 +96,7 @@ public:
               uint64_t &version_ts,
               const txservice::Schema *key_schema,
               const txservice::Schema *rec_schema,
+              const txservice::KVCatalogInfo *kv_info,
               uint64_t table_schema_ts) override
     {
         assert(false);
@@ -109,14 +107,6 @@ public:
                     std::string &schema_image,
                     bool &found,
                     uint64_t &version_ts) const override
-    {
-        assert(false);
-        return false;
-    }
-
-    bool FetchTable(const txservice::TableName &table_name,
-                    std::string &schema_image,
-                    bool &found) const override
     {
         assert(false);
         return false;
@@ -162,59 +152,56 @@ public:
         const std::string &search_cond,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
+        const txservice::KVCatalogInfo *kv_info,
         bool scan_foward) override
     {
         assert(false);
         return nullptr;
     }
 
-    bool GetRangeSize(const TableName &table_name,
+    bool GetRangeSize(const TableSchema *table_schema,
                       int32_t partition_id,
-                      int64_t *size)
+                      int64_t *size) override
     {
         return true;
     }
 
-    bool FindRangeMedianKey(
-        const TableName &table_name,
-        int32_t partition_id,
-        const txservice::Schema *key_schema,
-        txservice::CcHandlerResult<RangeMedianKeyResult> *out_median_key_result)
+    bool FindRangeMedianKey(int32_t partition_id,
+                            const txservice::TableSchema *table_schema,
+                            txservice::CcHandlerResult<RangeMedianKeyResult>
+                                *out_median_key_result) override
     {
         return true;
     }
 
-    bool CopyRangeData(const TableName &table_name,
-                       int32_t old_partition_id,
+    bool CopyRangeData(int32_t old_partition_id,
                        int32_t new_partition_id,
                        const txservice::TxKey *start_key,
                        uint64_t tx_ts,
-                       const txservice::Schema *key_schema,
-                       const txservice::Schema *rec_schema)
+                       const txservice::TableSchema *table_schema) override
     {
         return true;
     }
 
-    bool DeleteOutOfRangeData(const TableName &table_name,
-                              int32_t partition_id,
-                              const TxKey *start_key,
-                              const txservice::Schema *key_schema)
+    bool DeleteOutOfRangeData(
+        int32_t partition_id,
+        const TxKey *start_key,
+        const txservice::TableSchema *table_schema) override
     {
         return true;
     }
 
     bool GetNextRangePartitionId(const txservice::TableName &tablename,
                                  int32_t *out_next_partition_id,
-                                 int retry_count = 5)
+                                 int retry_count = 5) override
     {
         return true;
     }
 
-    bool UpsertRange(const TableName &range_table_name,
-                     const Schema *key_schema,
+    bool UpsertRange(const TableSchema *table_schema,
                      TxKey *key,
                      int32_t partition_id,
-                     int64_t ts)
+                     int64_t ts) override
     {
         return true;
     }
@@ -284,6 +271,20 @@ public:
         }
 
         return true;
+    }
+
+    std::string CreateKVCatalogInfo(
+        const txservice::TableSchema *table_schema) const override
+    {
+        assert(false);
+        return std::string("");
+    }
+
+    KVCatalogInfo::uptr DeserializeKVCatalogInfo(const std::string &kv_info_str,
+                                                 size_t &offset) const override
+    {
+        assert(false);
+        return KVCatalogInfo::uptr(nullptr);
     }
 
     size_t Size() const

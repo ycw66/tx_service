@@ -125,6 +125,48 @@ const CatalogEntry *LocalCcShards::CreateCatalog(
     return &catalog_entry;
 }
 
+const CatalogEntry *LocalCcShards::CreateReplayCatalog(
+    const std::string &table_name,
+    NodeGroupId cc_ng_id,
+    const std::string &old_catalog_image,
+    const std::string &new_catalog_image,
+    uint64_t commit_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
+    auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
+    CatalogEntry &catalog_entry = catalog_it.first->second;
+
+    if (catalog_it.second || catalog_entry.Version() == 0)
+    {
+        // If catalog entry is not initialized yet, use the old schema image
+        // stored in prepare log to restore old schema.
+        // Using 1 as commit ts here as a place holder. Commit ts here should
+        // not matter since the old schema should be removed once replay is
+        // done.
+        catalog_entry.InitSchema(
+            old_catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, old_catalog_image, 1, cc_ng_id),
+            1);
+    }
+    if (catalog_entry.Version() < commit_ts &&
+        catalog_entry.DirtyVersion() < commit_ts)
+    {
+        // For idempotency, only installs the dirty version when the input ts is
+        // greater than the existing version and dirty version.
+        catalog_entry.SetDirtySchema(
+            new_catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, new_catalog_image, commit_ts, cc_ng_id),
+            commit_ts);
+    }
+    return &catalog_entry;
+}
+
 const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const std::string &table_name,
     NodeGroupId cc_ng_id,
@@ -219,12 +261,14 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames(
 
 void LocalCcShards::CreateSchemaRecoveryTx(
     const ::txlog::SchemaOpMessage &schema_op_msg,
+    const CatalogRecord *catalog_record,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts)
 {
     TransactionExecution *txm = tx_service_->NewTx();
-    txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
+    txm->RecoverSchemaTx(
+        schema_op_msg, catalog_record, txn, tx_term, commit_ts);
 }
 
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,

@@ -307,8 +307,6 @@ struct DsUpsertTableOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
-    // Store a copy of index table names for DDL
-    std::vector<txservice::TableName> index_names_;
     bool is_deleted_{false};
     CcHandlerResult<Void> hd_result_;
 };
@@ -316,21 +314,19 @@ struct DsUpsertTableOp : public TransactionOperation
 struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
-    SchemaOp(const TableName &table_name,
-             const char *image_ptr,
-             size_t image_len);
+    SchemaOp(const TableName &table_name, const CatalogRecord &catalog_rec);
 
     CatalogKey table_key_;
     CatalogRecord catalog_rec_;
     std::string image_str_{""};
+    std::string dirty_image_str_{""};
 };
 
 struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
     UpsertTableOp(const TableName &table_name,
-                  const char *image_ptr,
-                  size_t len,
+                  const CatalogRecord *catalog_rec,
                   bool is_deleted,
                   TransactionExecution *txm);
 
@@ -445,15 +441,13 @@ struct DsFindRangeMedianKeyOp : public TransactionOperation
 {
     DsFindRangeMedianKeyOp() = delete;
 
-    DsFindRangeMedianKeyOp(const TableName *table_name,
-                           TransactionExecution *txm);
+    DsFindRangeMedianKeyOp(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    const TableName *table_name_;
     int32_t partition_id_;
-    const Schema *key_schema;
+    const TableSchema *table_schema_;
     CcHandlerResult<RangeMedianKeyResult> hd_result_;
 };
 
@@ -461,17 +455,15 @@ struct DsCopyRangeDataOp : public TransactionOperation
 {
     DsCopyRangeDataOp() = delete;
 
-    DsCopyRangeDataOp(const TableName &table_name, TransactionExecution *txm);
+    DsCopyRangeDataOp(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    const TableName &table_name_;
     TxKey *middle_key_;
     int32_t old_partition_id_;
     int32_t new_partition_id_;
-    const Schema *key_schema_;
-    const Schema *record_schema_;
+    const TableSchema *table_schema_;
     // additional filtering condition beside middle key
     // which guarantte a definite data set for copying
     uint64_t filter_ts_;
@@ -481,13 +473,11 @@ struct DsCopyRangeDataOp : public TransactionOperation
 struct DsUpsertRangeOp : TransactionOperation
 {
     DsUpsertRangeOp() = delete;
-    DsUpsertRangeOp(const TableName &range_table_name,
-                    TransactionExecution *txm);
+    DsUpsertRangeOp(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    const TableName &range_table_name_;
-    const Schema *key_schema_;
+    const TableSchema *table_schema_;
     TxKey *key_;
     int32_t partition_id_;
     int64_t ts_;
@@ -498,16 +488,14 @@ struct DsDeleteOutOfRangeDataOp : public TransactionOperation
 {
     DsDeleteOutOfRangeDataOp() = delete;
 
-    DsDeleteOutOfRangeDataOp(const TableName &table_name,
-                             TransactionExecution *txm);
+    DsDeleteOutOfRangeDataOp(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    const TableName &table_name_;
     int32_t partition_id_;
     TxKey *middle_key_{nullptr};
-    const Schema *key_schema_;
+    const TableSchema *table_schema_;
     CcHandlerResult<Void> hd_result_;
 };
 
@@ -523,8 +511,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     DsSplitRangeOp() = delete;
 
     DsSplitRangeOp(const TableName &table_name,
-                   const Schema *key_schema,
-                   const Schema *record_schema,
+                   const TableSchema *table_schema,
                    const TxKey *range_key,
                    RangeRecord *splitting_range_record,
                    TransactionExecution *txm);
@@ -537,10 +524,8 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     void ForceToFinish(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-    const TableName &table_name_{""};
     TableName range_table_name_{""};
-    const Schema *key_schema_{nullptr};
-    const Schema *record_schema_{nullptr};
+    const TableSchema *table_schema_{nullptr};
     int32_t partition_id_{-1};
     const TxKey *range_key_{nullptr};
     RangeRecord *old_range_record_{nullptr};

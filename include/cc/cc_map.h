@@ -43,6 +43,7 @@ enum struct ScanType
 };
 
 class CcShard;
+struct TableSchema;
 
 class CcMap
 {
@@ -51,12 +52,14 @@ public:
 
     CcMap(CcShard *shard,
           const TableName &table_name,
+          const TableSchema *table_schema,
           uint64_t schema_ts,
           bool ccm_has_full_entries = false)
         : shard_(shard),
           table_name_(table_name),
           ccm_has_full_entries_(ccm_has_full_entries),
-          schema_ts_(schema_ts)
+          schema_ts_(schema_ts),
+          table_schema_(table_schema)
     {
     }
 
@@ -129,6 +132,21 @@ public:
         return schema_ts_;
     }
 
+    const TableSchema *GetTableSchema() const
+    {
+        return table_schema_;
+    }
+
+    /**
+     * @brief Temp fix for schema op replay. This should be removed once
+     * we fix the logic of not releasing write lock of schema op transaction
+     * during RecoverTx.
+     *
+     * @return true
+     * @return false
+     */
+    virtual bool IsCatalogCcMap() const = 0;
+
     CcShard *const shard_;
     TableName table_name_;
     // Kv store can be skipped if we know ccm contains all the entries. This is
@@ -157,5 +175,6 @@ protected:
         LruEntry &cc_entry);
 
     uint64_t schema_ts_{1};
+    const TableSchema *table_schema_;
 };
 }  // namespace txservice

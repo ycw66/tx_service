@@ -7,18 +7,32 @@
 
 namespace txservice
 {
+struct KVCatalogInfo
+{
+    using uptr = std::unique_ptr<KVCatalogInfo>;
+
+    KVCatalogInfo() = default;
+    virtual ~KVCatalogInfo() = default;
+    virtual std::string Serialize() const = 0;
+    virtual void Deserialize(const char *buf, size_t &offset) = 0;
+};
+
 struct TableSchema
 {
     using uptr = std::unique_ptr<TableSchema>;
 
     virtual ~TableSchema() = default;
+    virtual const TableName &GetTableName() const = 0;
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
+    virtual const KVCatalogInfo *GetKVCatalogInfo() const = 0;
+    virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
     virtual std::vector<TableName> IndexNames() const = 0;
-    virtual const Schema *IndexKeySchema(const TableName &index_name) const = 0;
+    virtual const SecondaryKeySchema *IndexKeySchema(
+        const TableName &index_name) const = 0;
 };
 
 class CatalogFactory

@@ -91,7 +91,7 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                             continue;
                         }
                         local_cc_shards_.store_hd_->GetRangeSize(
-                            table_name, partition_id, &range_size);
+                            catalog_rec.Schema(), partition_id, &range_size);
                         txservice::CommitTxRequest commit_tx_req;
                         commit_tx_req.Reset();
                         txm->Execute(&commit_tx_req);
@@ -149,8 +149,6 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                                     node_group_id);
                                 continue;
                             }
-                            const txservice::TableSchema *table_schema =
-                                catalog_rec.Schema();
 
                             // Read range record
                             txservice::RangeRecord range_record;
@@ -179,8 +177,7 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                             // Split range request
                             txservice::SplitRangeTxRequest range_split_req(
                                 table_name,
-                                table_schema->KeySchema(),
-                                table_schema->RecordSchema(),
+                                catalog_rec.Schema(),
                                 range_key,
                                 &range_record);
                             txm->Execute(&range_split_req);

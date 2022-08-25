@@ -102,8 +102,10 @@ public:
                         // ranges and initializes the table's range cc map.
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
-                        ccs.FetchTableRanges(
-                            *table_name_, table_schema->KeySchema(), this);
+                        ccs.FetchTableRanges(*table_name_,
+                                             table_schema->KeySchema(),
+                                             table_schema->GetKVCatalogInfo(),
+                                             this);
                         return false;
                     }
                 }
@@ -1333,9 +1335,6 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs());
-        memory_usage_kb_vec_[ccs.LocalCoreId()] = ccs.mem_usage_ / 1000;
-        log_usage_kb_vec_[ccs.LocalCoreId()] =
-            ccs.estimate_ccshard_log_size_ / 1000;
 
         assert(finish_cnt_ < shard_cnt_);
         ++finish_cnt_;

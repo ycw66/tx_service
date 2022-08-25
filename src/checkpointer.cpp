@@ -244,15 +244,11 @@ void Checkpointer::Ckpt()
 
                 if (ccm->Type() == TableType::Primary)
                 {
-                    const Schema *key_schema = ccm->KeySchema();
-                    const Schema *rec_schema = ccm->RecordSchema();
                     // todo: stop flush process if this node is no longer node
                     //  group leader
                     ckpt_ret = store_hd_->PutAll(
-                        table_name,
                         ckpt_vec,
-                        key_schema,
-                        rec_schema,
+                        ccm->GetTableSchema(),
                         ccm->SchemaTs(),
                         node_group,
                         Sharder::Instance()
@@ -265,12 +261,9 @@ void Checkpointer::Ckpt()
                 }
                 else
                 {
-                    const SecondaryKeySchema *sk_schema =
-                        static_cast<const SecondaryKeySchema *>(
-                            ccm->KeySchema());
                     ckpt_ret = store_hd_->PutSkAll(table_name,
                                                    ckpt_vec,
-                                                   sk_schema,
+                                                   ccm->GetTableSchema(),
                                                    ccm->SchemaTs(),
                                                    node_group);
                     if (!ckpt_ret)
@@ -283,7 +276,7 @@ void Checkpointer::Ckpt()
                 if (ckpt_ret && local_shards_.EnableMvcc())
                 {
                     flush_undo_ret = store_hd_->PutArchivesAll(
-                        node_group, table_name, archive_vec);
+                        node_group, ccm->table_name_, archive_vec);
 
                     if (flush_undo_ret)
                     {
@@ -431,24 +424,18 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
     uint32_t ng = Sharder::Instance().NodeId();
     if (ccm->Type() == TableType::Primary)
     {
-        const Schema *key_schema = ccm->KeySchema();
-        const Schema *rec_schema = ccm->RecordSchema();
         ckpt_ret = store_hd_->PutAll(
-            table_name,
             ckpt_vec,
-            key_schema,
-            rec_schema,
+            ccm->GetTableSchema(),
             ccm->SchemaTs(),
             ng,
             Sharder::Instance().GetDsRangeEvaluateOperationService());
     }
     else
     {
-        const SecondaryKeySchema *sk_schema =
-            static_cast<const SecondaryKeySchema *>(ccm->KeySchema());
         uint32_t ng = 0;
         ckpt_ret = store_hd_->PutSkAll(
-            table_name, ckpt_vec, sk_schema, ccm->SchemaTs(), ng);
+            table_name, ckpt_vec, ccm->GetTableSchema(), ccm->SchemaTs(), ng);
     }
     return ckpt_ret;
 }
@@ -458,17 +445,8 @@ bool Checkpointer::FlushArchiveForTest(LruEntry *entry,
 {
     bool ckpt_ret = false;
     CcMap *ccm = entry->parent_map_;
-    TableName table_name = ccm->table_name_;
     uint32_t ng = Sharder::Instance().NodeId();
-    ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
-    if (ccm->Type() == TableType::Primary)
-    {
-        ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
-    }
-    else
-    {
-        ckpt_ret = store_hd_->PutArchivesAll(ng, table_name, archives);
-    }
+    ckpt_ret = store_hd_->PutArchivesAll(ng, ccm->table_name_, archives);
     return ckpt_ret;
 }
 

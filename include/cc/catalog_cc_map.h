@@ -33,6 +33,11 @@ public:
     {
     }
 
+    bool IsCatalogCcMap() const override
+    {
+        return true;
+    }
+
     using TemplateCcMap::Execute;
 
     bool Execute(PostWriteAllCc &req) override
@@ -128,7 +133,7 @@ public:
                 catalog_entry =
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                req.NodeGroupId(),
-                                               schema_rec->SchemaImage(),
+                                               schema_rec->DirtySchemaImage(),
                                                req.CommitTs());
 
                 schema_rec->Set(catalog_entry->schema_.get(),
@@ -465,6 +470,57 @@ public:
         const CatalogEntry *catalog_entry = nullptr;
         if (shard_->core_id_ == 0)
         {
+            uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            int64_t tx_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+
+            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
+            {
+                // If the coordinating tx is bound to the recoverying cc
+                // node, re-resumes the tx. But before that we need to restore
+                // schemas in catalog entry from replay log so that kv
+                // operations can be performed properly.
+                catalog_entry = shard_->CreateReplayCatalog(
+                    schema_op_msg.table_name(),
+                    req.NodeGroupId(),
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.new_catalog_blob(),
+                    req.CommitTs());
+                CatalogKey table_key(schema_op_msg.table_name());
+                CcEntry<CatalogKey, CatalogRecord> *cce =
+                    FindEmplace(table_key, req.CommitTs());
+
+                // FindEmplace return null if ccmap is full, which should not
+                // happen during replay.
+                assert(cce != nullptr);
+                if (cce->payload_ == nullptr)
+                {
+                    cce->payload_ = std::make_unique<CatalogRecord>();
+                }
+                bool success = cce->key_lock_.AcquireWriteLock(
+                    &req, 0, CcProtocol::Locking);
+
+                // When a cc node recovers, no one should be holding read locks.
+                // So, the acquire operation should always succeed.
+                // TODO: when a cc node steps down as the leader, should clear
+                // the node group's cc maps.
+                assert(success);
+                cce->payload_->Set(catalog_entry->schema_.get(),
+                                   catalog_entry->dirty_schema_.get(),
+                                   catalog_entry->DirtyVersion());
+                cce->payload_->SetDirtySchemaImage(
+                    schema_op_msg.new_catalog_blob());
+                cce->payload_->SetSchemaImage(schema_op_msg.old_catalog_blob());
+                shard_->local_shards_.CreateSchemaRecoveryTx(
+                    schema_op_msg,
+                    cce->payload_.get(),
+                    req.Txn(),
+                    tx_candidate_term,
+                    req.CommitTs());
+                req.SetFinish();
+                return false;
+            }
+
             if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
                                              SchemaOpMessage_Stage_CommitSchema)
             {
@@ -474,7 +530,7 @@ public:
                 catalog_entry =
                     shard_->CreateCatalog(schema_op_msg.table_name(),
                                           req.NodeGroupId(),
-                                          schema_op_msg.catalog_blob(),
+                                          schema_op_msg.new_catalog_blob(),
                                           commit_ts);
 
                 const TableSchema *committed_schema =
@@ -499,11 +555,12 @@ public:
             }
             else
             {
-                catalog_entry =
-                    shard_->CreateDirtyCatalog(schema_op_msg.table_name(),
-                                               req.NodeGroupId(),
-                                               schema_op_msg.catalog_blob(),
-                                               req.CommitTs());
+                catalog_entry = shard_->CreateReplayCatalog(
+                    schema_op_msg.table_name(),
+                    req.NodeGroupId(),
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.new_catalog_blob(),
+                    req.CommitTs());
             }
         }
         else
@@ -558,25 +615,6 @@ public:
         }
         else
         {
-            uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
-
-            if (tx_node_id == req.NodeGroupId())
-            {
-                int64_t tx_candidate_term =
-                    Sharder::Instance().CandidateLeaderTerm(tx_node_id);
-
-                if (tx_candidate_term >= 0)
-                {
-                    // If the coordinating tx is bound to the recoverying cc
-                    // node, re-resumes the tx.
-                    shard_->local_shards_.CreateSchemaRecoveryTx(
-                        schema_op_msg,
-                        req.Txn(),
-                        tx_candidate_term,
-                        req.CommitTs());
-                }
-            }
-
             req.SetFinish();
         }
 

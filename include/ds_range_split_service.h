@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "catalog_factory.h"
 #include "cc_handler_result.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -19,49 +20,41 @@ struct RangeMedianKeyResult;
 struct DsFindRangeMedianKeyWorkSettings
 {
     DsFindRangeMedianKeyWorkSettings(
-        const txservice::TableName &table_name,
         int32_t partition_id,
-        const txservice::Schema *key_schema,
+        const TableSchema *table_schema,
         CcHandlerResult<RangeMedianKeyResult> *hd_res);
 
-    const txservice::TableName &table_name_;
     int32_t partition_id_;
-    const txservice::Schema *key_schema_;
+    const TableSchema *table_schema_;
     CcHandlerResult<RangeMedianKeyResult> *hd_res_;
 };
 
 struct DsCopyRangeDataWorkSettings
 {
-    DsCopyRangeDataWorkSettings(const txservice::TableName &table_name,
-                                int32_t old_partition_id,
+    DsCopyRangeDataWorkSettings(int32_t old_partition_id,
                                 int32_t new_partition_id,
                                 const TxKey *start_key,
                                 uint64_t tx_ts,
-                                const txservice::Schema *key_schema,
-                                const txservice::Schema *rec_schema,
+                                const TableSchema *table_schema,
                                 CcHandlerResult<Void> *hd_res);
 
-    const txservice::TableName &table_name_;
     int32_t old_partition_id_;
     int32_t new_partition_id_;
     const TxKey *start_key_;
     uint64_t tx_ts_;
-    const txservice::Schema *key_schema_;
-    const txservice::Schema *rec_schema_;
+    const TableSchema *table_schema_;
     CcHandlerResult<Void> *hd_res_;
 };
 
 struct DsUpsertRangeWorkingSetting
 {
-    DsUpsertRangeWorkingSetting(const TableName &range_table_name,
-                                const Schema *key_schema,
+    DsUpsertRangeWorkingSetting(const TableSchema *table_schema,
                                 TxKey *key,
                                 int32_t partition_id,
                                 int64_t ts,
                                 CcHandlerResult<Void> *hd_result);
 
-    const TableName &range_table_name_;
-    const Schema *key_schema_;
+    const TableSchema *table_schema_;
     TxKey *key_;
     int32_t partition_id_;
     int64_t ts_;
@@ -70,16 +63,14 @@ struct DsUpsertRangeWorkingSetting
 
 struct DsDeleteOutOfRangeDataWorkSettings
 {
-    DsDeleteOutOfRangeDataWorkSettings(const txservice::TableName &table_name,
-                                       int32_t partition_id,
+    DsDeleteOutOfRangeDataWorkSettings(int32_t partition_id,
                                        const TxKey *start_key,
-                                       const txservice::Schema *key_schema,
+                                       const TableSchema *table_schema,
                                        CcHandlerResult<Void> *hd_res);
 
-    const txservice::TableName &table_name_;
     int32_t partition_id_;
     const TxKey *start_key_;
-    const txservice::Schema *key_schema_;
+    const TableSchema *table_schema_;
     CcHandlerResult<Void> *hd_res_;
 };
 
@@ -92,28 +83,23 @@ public:
     void Shutdown();
 
     void SubmitFindRangeMedianKeyWork(
-        const txservice::TableName &table_name,
         int32_t partition_id,
-        const txservice::Schema *key_schema,
+        const TableSchema *table_schema,
         CcHandlerResult<RangeMedianKeyResult> *hd_res);
 
-    void SubmitCopyRangeDataWork(const txservice::TableName &table_name,
-                                 int32_t old_partition_id,
+    void SubmitCopyRangeDataWork(int32_t old_partition_id,
                                  int32_t new_partition_id,
                                  const TxKey *start_key,
                                  uint64_t tx_ts,
-                                 const txservice::Schema *key_schema,
-                                 const txservice::Schema *rec_schema,
+                                 const TableSchema *table_schema,
                                  CcHandlerResult<Void> *hd_res);
 
-    void SubmitDeleteOutOfRangeDataWork(const txservice::TableName &table_name,
-                                        int32_t partition_id,
+    void SubmitDeleteOutOfRangeDataWork(int32_t partition_id,
                                         const TxKey *start_key,
-                                        const txservice::Schema *key_schema,
+                                        const TableSchema *table_schema,
                                         CcHandlerResult<Void> *hd_res);
 
-    void SubmitUpsertRangeWork(const TableName &range_table_name,
-                               const Schema *key_schema,
+    void SubmitUpsertRangeWork(const TableSchema *table_schema,
                                TxKey *key,
                                int32_t partition_id,
                                int64_t ts,

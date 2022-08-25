@@ -1946,12 +1946,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::DsCopyRangeDataOp *r)
     {
         return outs << "{}";
     }
-    outs << "{\"table_name_\":\"" << r->table_name_ << "\""
+    outs << "{\"table_name_\":\"" << r->table_schema_->GetTableName() << "\""
          << ",\"middle_key_\":\"" << r->middle_key_ << "\""
          << ",\"old_partition_id_\":\"" << r->old_partition_id_ << "\""
          << ",\"new_partition_id_\":\"" << r->new_partition_id_ << "\""
-         << ",\"key_schema_\":\"" << r->key_schema_ << "\""
-         << ",\"rec_schema_\":\"" << r->record_schema_ << "\""
+         << ",\"table_schema_\":\"" << r->table_schema_ << "\""
          << ",\"filter_ts_\":\"" << r->filter_ts_ << "\""
          << "}";
     return outs;

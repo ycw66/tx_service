@@ -740,6 +740,17 @@ void AcquireAllOp::Reset(size_t node_cnt)
     fail_cnt_.store(0, std::memory_order_relaxed);
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
     upload_cnt_ = node_cnt;
+
+    // Reset results since we rely on node term to decide if
+    // the received ack is the first ack message. See OnReceiveCcMsg
+    // in cc_stream_receiver.cpp
+    for (size_t idx = 0; idx < hd_results_.size(); ++idx)
+    {
+        AcquireAllResult &res = hd_results_.at(idx).Value();
+        res.node_term_ = -1;
+        res.last_vali_ts_ = 1;
+        res.commit_ts_ = 1;
+    }
     Resize(node_cnt);
 }
 
@@ -998,20 +1009,19 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 SchemaOp::SchemaOp(const TableName &table_name,
-                   const char *image_ptr,
-                   size_t image_len)
+                   const CatalogRecord &catalog_rec)
     : table_key_(table_name)
 {
-    image_str_ = std::string(image_ptr, image_len);
-    catalog_rec_.SetSchemaImage(image_str_);
+    catalog_rec_ = catalog_rec;
+    image_str_ = catalog_rec_.SchemaImage();
+    dirty_image_str_ = catalog_rec_.DirtySchemaImage();
 }
 
 UpsertTableOp::UpsertTableOp(const TableName &table_name,
-                             const char *image_ptr,
-                             size_t len,
+                             const CatalogRecord *catalog_rec,
                              bool is_deleted,
                              TransactionExecution *txm)
-    : SchemaOp(table_name, image_ptr, len),
+    : SchemaOp(table_name, *catalog_rec),
       is_deleted_(is_deleted),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -1179,10 +1189,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (is_deleted_)
         {
-            // Store a copy of index table names for UpsertSkTable()
-            upsert_kv_table_op_.index_names_ =
-                catalog_rec_.Schema()->IndexNames();
-
             // For DROP TABLE operations, the data store operation of
             // deleting the k-v table happens after the commit log is
             // flushed.
@@ -1317,7 +1323,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             if (is_deleted_)
             {
                 op_ = &upsert_kv_table_op_;
-                upsert_kv_table_op_.table_schema_ = nullptr;
+                upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
@@ -1453,16 +1459,15 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
     ::txlog::SchemaOpMessage *prepare_schema_msg =
         prepare_log_rec->mutable_log_content()->mutable_schema_log();
     prepare_schema_msg->set_table_name(table_key_.Name());
-
+    prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
+    prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
     if (is_deleted_)
     {
         prepare_schema_msg->mutable_table_op()->set_is_deleted(true);
-        prepare_schema_msg->clear_catalog_blob();
     }
     else
     {
         prepare_schema_msg->mutable_table_op()->set_is_deleted(false);
-        prepare_schema_msg->set_catalog_blob(catalog_rec_.SchemaImage());
     }
     prepare_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareSchema);
 
@@ -1623,9 +1628,8 @@ void NoOp::Forward(TransactionExecution *txm)
     }
 }
 
-DsCopyRangeDataOp::DsCopyRangeDataOp(const TableName &table_name,
-                                     TransactionExecution *txm)
-    : table_name_(table_name), hd_result_(txm)
+DsCopyRangeDataOp::DsCopyRangeDataOp(TransactionExecution *txm)
+    : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1665,9 +1669,8 @@ void DsCopyRangeDataOp::Reset()
     hd_result_.Reset();
 }
 
-DsDeleteOutOfRangeDataOp::DsDeleteOutOfRangeDataOp(const TableName &table_name,
-                                                   TransactionExecution *txm)
-    : table_name_(table_name), hd_result_(txm)
+DsDeleteOutOfRangeDataOp::DsDeleteOutOfRangeDataOp(TransactionExecution *txm)
+    : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1707,9 +1710,8 @@ void DsDeleteOutOfRangeDataOp::Reset()
     hd_result_.Reset();
 }
 
-DsFindRangeMedianKeyOp::DsFindRangeMedianKeyOp(const TableName *table_name,
-                                               TransactionExecution *txm)
-    : table_name_(table_name), hd_result_(txm)
+DsFindRangeMedianKeyOp::DsFindRangeMedianKeyOp(TransactionExecution *txm)
+    : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1748,9 +1750,7 @@ void DsFindRangeMedianKeyOp::Reset()
     hd_result_.Reset();
 }
 
-DsUpsertRangeOp::DsUpsertRangeOp(const TableName &range_table_name,
-                                 TransactionExecution *txm)
-    : range_table_name_(range_table_name), hd_result_(txm)
+DsUpsertRangeOp::DsUpsertRangeOp(TransactionExecution *txm) : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1810,33 +1810,30 @@ void CompositeTransactionOperation::RetrySubOperation(TransactionExecution *txm,
 }
 
 DsSplitRangeOp::DsSplitRangeOp(const TableName &table_name,
-                               const Schema *key_schema,
-                               const Schema *record_schema,
+                               const TableSchema *table_schema,
                                const TxKey *range_key,
                                RangeRecord *splitting_range_record,
                                TransactionExecution *txm)
     : CompositeTransactionOperation(),
-      table_name_(table_name),
       range_table_name_(GetRangeTablenameFromTablename(table_name)),
-      key_schema_(key_schema),
-      record_schema_(record_schema),
+      table_schema_(table_schema),
       range_key_(range_key),
       old_range_record_(splitting_range_record),
       upload_range_entry_(nullptr),
       upload_range_record_(nullptr),
       acquire_all_intent_for_update_old_range_op_(txm),
-      ds_find_median_key_for_old_range_op_(&table_name_, txm),
+      ds_find_median_key_for_old_range_op_(txm),
       acquire_all_lock_for_update_old_range_op_(txm),
       prepare_log_for_update_old_range_op_(txm),
       post_all_lock_for_update_old_range_op_(txm),
-      ds_copy_old_range_data_op_(table_name_, txm),
+      ds_copy_old_range_data_op_(txm),
       ds_copy_old_range_data_finished_log_op_(txm),
       acquire_all_lock_for_dirty_old_range_op_(txm),
       commit_log_for_dirty_old_range_op_(txm),
       post_write_all_for_dirty_old_range_op_(txm),
-      ds_upsert_new_range_op_(range_table_name_, txm),
+      ds_upsert_new_range_op_(txm),
       delete_out_of_old_range_data_log_op_(txm),
-      delete_out_of_old_range_data_op_(table_name_, txm),
+      delete_out_of_old_range_data_op_(txm),
       clean_log_op_(txm)
 {
     partition_id_ = old_range_record_->RangeEntry()->partition_id_;
@@ -1945,9 +1942,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                 acquire_all_intent_for_update_old_range_op_.MaxTs();
             txm->ForwardTs(candidate_max_ts);
             // Set the partition id going to find for the median key
-            ds_find_median_key_for_old_range_op_.table_name_ = &table_name_;
             ds_find_median_key_for_old_range_op_.partition_id_ = partition_id_;
-            ds_find_median_key_for_old_range_op_.key_schema = key_schema_;
+            ds_find_median_key_for_old_range_op_.table_schema_ = table_schema_;
             ForwardToSubOperation(txm, &ds_find_median_key_for_old_range_op_);
         }
     }
@@ -2056,8 +2052,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             ds_copy_old_range_data_op_.middle_key_ = new_range_key_.get();
             ds_copy_old_range_data_op_.old_partition_id_ = partition_id_;
             ds_copy_old_range_data_op_.new_partition_id_ = new_partition_id_;
-            ds_copy_old_range_data_op_.key_schema_ = key_schema_;
-            ds_copy_old_range_data_op_.record_schema_ = record_schema_;
+            ds_copy_old_range_data_op_.table_schema_ = table_schema_;
             ds_copy_old_range_data_op_.filter_ts_ = txm->commit_ts_;
             ForwardToSubOperation(txm, &ds_copy_old_range_data_op_);
         }
@@ -2199,7 +2194,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            ds_upsert_new_range_op_.key_schema_ = key_schema_;
+            ds_upsert_new_range_op_.table_schema_ = table_schema_;
             ds_upsert_new_range_op_.key_ = new_range_key_.get();
             ds_upsert_new_range_op_.partition_id_ = new_partition_id_;
             ds_upsert_new_range_op_.ts_ = txm->commit_ts_;
@@ -2251,7 +2246,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         {
             delete_out_of_old_range_data_op_.partition_id_ = partition_id_;
             delete_out_of_old_range_data_op_.middle_key_ = new_range_key_.get();
-            delete_out_of_old_range_data_op_.key_schema_ = key_schema_;
+            delete_out_of_old_range_data_op_.table_schema_ = table_schema_;
             ForwardToSubOperation(txm, &delete_out_of_old_range_data_op_);
         }
     }

@@ -27,18 +27,14 @@ public:
     /**
      * flush entries in @param batch to data store, stop and return false if
      * node_group is no longer leader
-     * @param table_name
      * @param batch
-     * @param key_schema
-     * @param rec_schema
+     * @param table_schema
      * @param schema_ts
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(const TableName &table_name,
-                        std::vector<FlushRecord> &batch,
-                        const Schema *key_schema,
-                        const Schema *rec_schema,
+    virtual bool PutAll(std::vector<FlushRecord> &batch,
+                        const TableSchema *table_schema,
                         uint64_t schema_ts,
                         uint32_t node_group,
                         DsRangeEvaluateOperationService
@@ -47,50 +43,45 @@ public:
     /**
      * flush entries in @param batch to data store, stop and return false if
      * node_group is no longer leader
-     * @param table_name
+     * @param index_name
      * @param batch
      * @param sk_schema
      * @param schema_ts
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutSkAll(const txservice::TableName &table_name,
+    virtual bool PutSkAll(const TableName &index_name,
                           std::vector<FlushRecord> &batch,
-                          const txservice::SecondaryKeySchema *sk_schema,
+                          const TableSchema *table_schema,
                           uint64_t schema_ts,
                           uint32_t node_group) = 0;
 
-    virtual void UpsertTable(
-        const txservice::TableName &ccm_table_name,
-        const txservice::TableSchema *table_schema,
-        const std::vector<txservice::TableName> *indexes,
-        bool is_deleted,
-        uint64_t commit_ts,
-        txservice::CcHandlerResult<txservice::Void> *hd_res) = 0;
+    virtual void UpsertTable(const TableSchema *table_schema,
+                             bool is_deleted,
+                             uint64_t commit_ts,
+                             CcHandlerResult<Void> *hd_res) = 0;
 
-    virtual void FetchTableCatalog(const txservice::TableName &ccm_table_name,
+    virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    void *fetch_req) = 0;
 
-    virtual void FetchTableRanges(const txservice::TableName &range_table_name,
+    virtual void FetchTableRanges(const TableName &range_table_name,
+                                  const KVCatalogInfo *kv_info,
                                   void *fetch_req) = 0;
 
-    virtual bool Read(const txservice::TableName &table_name,
-                      const txservice::TxKey &key,
-                      txservice::TxRecord &rec,
+    virtual bool Read(const TableName &table_name,
+                      const TxKey &key,
+                      TxRecord &rec,
                       bool &found,
                       uint64_t &version_ts,
-                      const txservice::Schema *key_schema,
-                      const txservice::Schema *rec_schema,
+                      const Schema *key_schema,
+                      const Schema *rec_schema,
+                      const KVCatalogInfo *kv_info,
                       uint64_t table_schema_ts) = 0;
 
-    virtual bool FetchTable(const txservice::TableName &table_name,
+    virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
                             uint64_t &version_ts) const = 0;
-
-    virtual bool FetchTable(const txservice::TableName &table_name,
-                            std::string &schema_image,
-                            bool &found) const = 0;
 
     virtual bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec) const = 0;
@@ -105,13 +96,14 @@ public:
     virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
 
     virtual std::unique_ptr<DataStoreScanner> ScanForward(
-        const txservice::TableName &table_name,
-        const txservice::TxKey &start_key,
+        const TableName &table_name,
+        const TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
         const std::string &search_cond,
-        const txservice::Schema *key_schema,
-        const txservice::Schema *rec_schema,
+        const Schema *key_schema,
+        const Schema *rec_schema,
+        const KVCatalogInfo *kv_info,
         bool scan_foward) = 0;
 
     /**
@@ -125,11 +117,11 @@ public:
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
      * version.
      */
-    virtual bool FetchVisibleArchive(const txservice::TableName &table_name,
-                                     const txservice::TxKey &key,
+    virtual bool FetchVisibleArchive(const TableName &table_name,
+                                     const TxKey &key,
                                      const uint64_t upper_bound_ts,
-                                     txservice::TxRecord &rec,
-                                     txservice::RecordStatus &rec_status,
+                                     TxRecord &rec,
+                                     RecordStatus &rec_status,
                                      uint64_t &commit_ts) = 0;
 
     /**
@@ -141,47 +133,47 @@ public:
         std::vector<txservice::VersionTxRecord> &archives,
         uint64_t from_ts) = 0;
 
-    void SetTxService(txservice::TxService *tx_service)
+    void SetTxService(TxService *tx_service)
     {
         tx_service_ = tx_service;
     }
 
-    virtual bool GetRangeSize(const TableName &table_name,
+    virtual bool GetRangeSize(const TableSchema *table_schema,
                               int32_t partition_id,
                               int64_t *size) = 0;
 
     virtual bool FindRangeMedianKey(
-        const TableName &table_name,
         int32_t partition_id,
-        const txservice::Schema *key_schema,
-        txservice::CcHandlerResult<RangeMedianKeyResult>
-            *out_median_key_result) = 0;
+        const TableSchema *table_schema,
+        CcHandlerResult<RangeMedianKeyResult> *out_median_key_result) = 0;
 
-    virtual bool CopyRangeData(const TableName &table_name,
-                               int32_t old_partition_id,
+    virtual bool CopyRangeData(int32_t old_partition_id,
                                int32_t new_partition_id,
-                               const txservice::TxKey *start_key,
+                               const TxKey *start_key,
                                uint64_t tx_ts,
-                               const txservice::Schema *key_schema,
-                               const txservice::Schema *rec_schema) = 0;
+                               const TableSchema *table_schema) = 0;
 
-    virtual bool DeleteOutOfRangeData(const TableName &table_name,
-                                      int32_t partition_id,
+    virtual bool DeleteOutOfRangeData(int32_t partition_id,
                                       const TxKey *start_key,
-                                      const txservice::Schema *key_schema) = 0;
+                                      const TableSchema *table_schema) = 0;
 
-    virtual bool GetNextRangePartitionId(const txservice::TableName &tablename,
+    virtual bool GetNextRangePartitionId(const TableName &tablename,
                                          int32_t *out_next_partition_id,
                                          int retry_count = 5) = 0;
 
-    virtual bool UpsertRange(const TableName &range_table_name,
-                             const Schema *key_schema,
+    virtual bool UpsertRange(const TableSchema *table_schema,
                              TxKey *key,
                              int32_t partition_id,
                              int64_t ts) = 0;
 
+    virtual std::string CreateKVCatalogInfo(
+        const TableSchema *table_schema) const = 0;
+
+    virtual KVCatalogInfo::uptr DeserializeKVCatalogInfo(
+        const std::string &kv_info_str, size_t &offset) const = 0;
+
 protected:
-    txservice::TxService *tx_service_;
+    TxService *tx_service_;
 };
 }  // namespace store
 }  // namespace txservice

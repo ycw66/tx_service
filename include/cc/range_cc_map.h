@@ -58,11 +58,8 @@ public:
                const txservice::TableSchema *table_schema,
                uint64_t schema_ts,
                CcShard *shard)
-        : TemplateCcMap<KeyT, RangeRecord>(shard,
-                                           range_table_name,
-                                           schema_ts,
-                                           table_schema->KeySchema(),
-                                           nullptr),
+        : TemplateCcMap<KeyT, RangeRecord>(
+              shard, range_table_name, schema_ts, table_schema),
           range_table_name_(range_table_name)
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
@@ -237,7 +234,7 @@ public:
             decoded_key->Deserialize(
                 req.KeyStr()->data(),
                 offset,
-                TemplateCcMap<KeyT, RangeRecord>::key_schema_);
+                TemplateCcMap<KeyT, RangeRecord>::KeySchema());
             range_key = decoded_key.get();
             req.SetDecodedKey(std::move(decoded_key));
         }

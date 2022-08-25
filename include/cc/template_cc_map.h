@@ -38,15 +38,13 @@ public:
     TemplateCcMap(CcShard *shard,
                   const TableName &table_name,
                   uint64_t schema_ts,
-                  const Schema *key_schema = nullptr,
-                  const Schema *rec_schema = nullptr,
+                  const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false)
-        : CcMap(shard, table_name, schema_ts, ccm_has_full_entries),
+        : CcMap(
+              shard, table_name, table_schema, schema_ts, ccm_has_full_entries),
           ccm_(),
           neg_inf_(this),
-          pos_inf_(this),
-          key_schema_(key_schema),
-          record_schema_(rec_schema)
+          pos_inf_(this)
     {
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
@@ -95,6 +93,11 @@ public:
     virtual ~TemplateCcMap()
     {
         Clean();
+    }
+
+    bool IsCatalogCcMap() const override
+    {
+        return false;
     }
 
     bool Execute(AcquireCc &req) override
@@ -155,7 +158,7 @@ public:
                 assert(key_str != nullptr);
 
                 size_t offset = 0;
-                decoded_key.Deserialize(key_str->data(), offset, key_schema_);
+                decoded_key.Deserialize(key_str->data(), offset, KeySchema());
                 target_key = &decoded_key;
             }
 
@@ -497,7 +500,7 @@ public:
                 assert(key_str != nullptr);
                 std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
                 size_t offset = 0;
-                decoded_key->Deserialize(key_str->data(), offset, key_schema_);
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
                 target_key = decoded_key.get();
                 req.SetDecodedKey(std::move(decoded_key));
             }
@@ -632,7 +635,8 @@ public:
                     req.Txn(),
                     req.TxTerm(),
                     cce_ptr,
-                    req.GetLockType() == LockType::WriteLock);
+                    req.GetLockType() == LockType::WriteLock,
+                    IsCatalogCcMap());
 
                 // Updates last_vali_ts such that it is no smaller than (1) all
                 // read transactions that have read the item in all shards, and
@@ -829,7 +833,7 @@ public:
             assert(key_str != nullptr);
             std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
             size_t offset = 0;
-            decoded_key->Deserialize(key_str->data(), offset, key_schema_);
+            decoded_key->Deserialize(key_str->data(), offset, KeySchema());
             target_key = decoded_key.get();
             req.SetDecodedKey(std::move(decoded_key));
         }
@@ -1227,7 +1231,7 @@ public:
                 KeyT decoded_key;
                 size_t offset = 0;
                 decoded_key.Deserialize(
-                    req.KeyBlob()->data(), offset, key_schema_);
+                    req.KeyBlob()->data(), offset, KeySchema());
                 cce = FindEmplace(decoded_key, req.ReadTimestamp());
             }
 
@@ -1967,7 +1971,7 @@ public:
         default:
             size_t offset = 0;
             key_obj.Deserialize(
-                req.start_key_str_->data(), offset, key_schema_);
+                req.start_key_str_->data(), offset, KeySchema());
             look_key = &key_obj;
             break;
         }
@@ -2491,7 +2495,7 @@ public:
 
         while (offset < log_blob.size())
         {
-            key.Deserialize(log_blob.data(), offset, key_schema_);
+            key.Deserialize(log_blob.data(), offset, KeySchema());
             uint8_t delete_flag =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
@@ -2663,7 +2667,7 @@ public:
         ScanDirection direction) const override
     {
         return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
-            direction, ScanIndexType::Primary, key_schema_);
+            direction, ScanIndexType::Primary, KeySchema());
     }
 
     /**
@@ -2743,12 +2747,12 @@ public:
 
     const Schema *KeySchema() const override
     {
-        return key_schema_;
+        return table_schema_ ? table_schema_->KeySchema() : nullptr;
     }
 
     const Schema *RecordSchema() const override
     {
-        return record_schema_;
+        return table_schema_ ? table_schema_->RecordSchema() : nullptr;
     }
 
 protected:
@@ -2784,7 +2788,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key, key_schema_), this);
+        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key, KeySchema()), this);
         new_cce_ptr = &em_it->second;
         new_cce_ptr->key_ = &em_it->first;
 
@@ -2833,7 +2837,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.try_emplace(KeyT(key, key_schema_), this);
+        auto em_it = ccm_.try_emplace(KeyT(key, KeySchema()), this);
         new_cce_ptr = &em_it.first->second;
 
         if (em_it.second)
@@ -3505,7 +3509,5 @@ protected:
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
-    const Schema *key_schema_;
-    const Schema *record_schema_;
 };
 }  // namespace txservice

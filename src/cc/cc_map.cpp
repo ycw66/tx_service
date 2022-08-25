@@ -29,7 +29,10 @@ void CcMap::RecoverReadLocks(LruEntry &cce, uint32_t node_group_id)
 void CcMap::RecoverWriteLock(const TxNumber &tx_number, uint32_t node_group_id)
 {
     int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id);
-    shard_->CheckRecoverTx(tx_number, node_group_id, ng_term);
+    if (!IsCatalogCcMap())
+    {
+        shard_->CheckRecoverTx(tx_number, node_group_id, ng_term);
+    }
 }
 
 void CcMap::RecoverWriteIntent(LruEntry &cce, uint32_t node_group_id)
@@ -185,7 +188,8 @@ bool CcMap::AcquireWriteLockOnExistingCcEntry(
 
     if (lock_success)
     {
-        shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), &cc_entry, true);
+        shard_->UpsertLockHoldingTx(
+            req.Txn(), req.TxTerm(), &cc_entry, true, IsCatalogCcMap());
         // for mvcc
         uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
         cc_entry.wlock_ts_ = lock_ts;

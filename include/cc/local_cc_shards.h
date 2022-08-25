@@ -220,6 +220,13 @@ public:
                                            const std::string &catalog_image,
                                            uint64_t commit_ts);
 
+    const CatalogEntry *CreateReplayCatalog(
+        const std::string &table_name,
+        NodeGroupId cc_ng_id,
+        const std::string &old_catalog_image,
+        const std::string &new_catalog_image,
+        uint64_t commit_ts);
+
     void CommitDirtyCatalog(const std::string &table_name,
                             NodeGroupId cc_ng_id);
 
@@ -229,6 +236,7 @@ public:
     std::unordered_set<TableName> CatalogTableNames(NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
+                                const CatalogRecord *catalog_rec,
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);

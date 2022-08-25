@@ -179,7 +179,8 @@ static inline bool ReplaceAllInString(std::string &str,
 }
 
 /** @brief
-  Replace all prefix of index, ranges in table name with a given replace string
+  Replace all prefix of index, ranges in table name with a given replace
+  string
 
   Output: is any prefix found in str
  */

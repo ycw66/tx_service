@@ -74,12 +74,11 @@ public:
     SkCcMap(CcShard *shard,
             const TableName &index_name,
             uint64_t schema_ts,
-            const Schema *sk_schema = nullptr,
-            const Schema *pk_schema = nullptr)
-        : CcMap(shard, index_name, schema_ts),
+            const TableSchema *table_schema)
+        : CcMap(shard, index_name, table_schema, schema_ts),
           neg_inf_(this),
           pos_inf_(this),
-          compound_schema_(sk_schema, pk_schema)
+          compound_schema_(*table_schema->IndexKeySchema(index_name))
     {
         neg_inf_.key_ = nullptr;
         neg_inf_.payload_ = std::make_unique<SkRecord<SkT, PkT>>();
@@ -102,6 +101,11 @@ public:
     virtual ~SkCcMap()
     {
         Clean();
+    }
+
+    bool IsCatalogCcMap() const override
+    {
+        return false;
     }
 
     bool Execute(AcquireCc &req) override

@@ -99,6 +99,7 @@ struct CatalogEntry
         {
             dirty_schema_ = nullptr;
         }
+        dirty_schema_version_ = 0;
     }
 
     /**
@@ -153,6 +154,9 @@ public:
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
     void SetSchemaImage(const std::string &schema_image);
+    const std::string &DirtySchemaImage() const;
+    void SetDirtySchemaImage(std::string &&schema_image);
+    void SetDirtySchemaImage(const std::string &schema_image);
     const TableSchema *Schema() const;
     uint64_t SchemaTs() const;
     const TableSchema *DirtySchema() const;
@@ -170,12 +174,14 @@ private:
      * in memory. The schema_image_ in this case contains serialized images of
      * the schema. (3) A tx modifies a table's schema and uses the catalog
      * record to install a dirty version of the schema in the tx service. The
-     * schema_image_ is the binary image of the dirty schema.
+     * schema_image_ is the binary image of the current schema and
+     * dirty_schema_image_ is the binary image of the new schema.
      *
      */
     const TableSchema *schema_{nullptr};
     const TableSchema *dirty_schema_{nullptr};
     uint64_t schema_ts_{0};
     std::string schema_image_{""};
+    std::string dirty_schema_image_{""};
 };
 }  // namespace txservice

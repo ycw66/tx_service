@@ -520,7 +520,7 @@ void txservice::LocalCcHandler::ScanOpen(
             return;
         }
 
-        const Schema *index_key_schema =
+        const SecondaryKeySchema *index_key_schema =
             catalog_entry->schema_->IndexKeySchema(table_name);
         if (index_key_schema == nullptr)
         {
@@ -982,15 +982,12 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 }
 
 void txservice::LocalCcHandler::DataStoreUpsertTable(
-    const TableName &table_name,
     const TableSchema *schema,
-    const std::vector<txservice::TableName> *indexes,
     bool is_deleted,
     uint64_t commit_ts,
     CcHandlerResult<Void> &hres)
 {
-    cc_shards_.store_hd_->UpsertTable(
-        table_name, schema, indexes, is_deleted, commit_ts, &hres);
+    cc_shards_.store_hd_->UpsertTable(schema, is_deleted, commit_ts, &hres);
 }
 
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
@@ -1051,42 +1048,36 @@ uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
 }
 
 void txservice::LocalCcHandler::DataStoreFindRangeMedianKey(
-    const txservice::TableName &table_name,
     int32_t partition,
-    const txservice::Schema *key_schema,
+    const TableSchema *table_schema,
     CcHandlerResult<RangeMedianKeyResult> &hd_res)
 {
     DsRangeSplitOperationService *ds_range_split_operation_service =
         Sharder::Instance().GetDsRangeSplitOperationService();
     ds_range_split_operation_service->SubmitFindRangeMedianKeyWork(
-        table_name, partition, key_schema, &hd_res);
+        partition, table_schema, &hd_res);
 }
 
 void txservice::LocalCcHandler::DataStoreCopyRangeData(
-    const txservice::TableName &table_name,
     int32_t old_partition_id,
     int32_t new_partition_id,
     const TxKey *start_key,
     uint64_t tx_ts,
-    const txservice::Schema *key_schema,
-    const txservice::Schema *rec_schema,
+    const TableSchema *table_schema,
     CcHandlerResult<Void> &hd_res)
 {
     DsRangeSplitOperationService *ds_range_split_operation_service =
         Sharder::Instance().GetDsRangeSplitOperationService();
-    ds_range_split_operation_service->SubmitCopyRangeDataWork(table_name,
-                                                              old_partition_id,
+    ds_range_split_operation_service->SubmitCopyRangeDataWork(old_partition_id,
                                                               new_partition_id,
                                                               start_key,
                                                               tx_ts,
-                                                              key_schema,
-                                                              rec_schema,
+                                                              table_schema,
                                                               &hd_res);
 }
 
 void txservice::LocalCcHandler::DataStoreUpsertRange(
-    const txservice::TableName &range_table_name,
-    const txservice::Schema *key_schema,
+    const TableSchema *table_schema,
     txservice::TxKey *key,
     int32_t partition_id,
     int64_t ts,
@@ -1095,18 +1086,17 @@ void txservice::LocalCcHandler::DataStoreUpsertRange(
     DsRangeSplitOperationService *ds_range_split_operation_service =
         Sharder::Instance().GetDsRangeSplitOperationService();
     ds_range_split_operation_service->SubmitUpsertRangeWork(
-        range_table_name, key_schema, key, partition_id, ts, &hd_res);
+        table_schema, key, partition_id, ts, &hd_res);
 }
 
 void txservice::LocalCcHandler::DataStoreDeleteOutOfRangeData(
-    const txservice::TableName &table_name,
     int32_t partition_id,
     const TxKey *start_key,
-    const txservice::Schema *key_schema,
+    const TableSchema *table_schema,
     CcHandlerResult<Void> &hd_res)
 {
     DsRangeSplitOperationService *ds_range_split_operation_service =
         Sharder::Instance().GetDsRangeSplitOperationService();
     ds_range_split_operation_service->SubmitDeleteOutOfRangeDataWork(
-        table_name, partition_id, start_key, key_schema, &hd_res);
+        partition_id, start_key, table_schema, &hd_res);
 }
