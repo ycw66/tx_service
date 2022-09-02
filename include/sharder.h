@@ -282,6 +282,8 @@ private:
 
     ~Sharder() = default;
 
+    void SetCommandLineOptions();
+
     /**
      * @brief Registers all cc node groups and their configurations in the braft
      * cache.

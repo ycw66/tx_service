@@ -219,6 +219,8 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
+    SetCommandLineOptions();
+
     cc_node_service_ = std::make_unique<remote::CcNodeService>(local_shards_);
     if (cc_node_server_.AddService(cc_node_service_.get(),
                                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
@@ -544,5 +546,14 @@ void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
     {
         it->second->UnpinData();
     }
+}
+
+void Sharder::SetCommandLineOptions()
+{
+    // set brpc circuit_breaker max isolation duration smaller than election
+    // timeout so that restarted node will join raft group before trying to
+    // start a new vote
+    google::SetCommandLineOption("circuit_breaker_max_isolation_duration_ms",
+                                 "4500");
 }
 }  // namespace txservice
