@@ -26,7 +26,7 @@ struct TableSchema
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
-    virtual const KVCatalogInfo *GetKVCatalogInfo() const = 0;
+    virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
     virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
