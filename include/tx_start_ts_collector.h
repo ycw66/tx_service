@@ -21,7 +21,7 @@ public:
         return instance_;
     }
 
-    ~TxStartTsCollector();
+    ~TxStartTsCollector() = default;
 
     void Start();
     void Shutdown();

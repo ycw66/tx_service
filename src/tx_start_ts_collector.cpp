@@ -20,21 +20,8 @@ TxStartTsCollector::TxStartTsCollector(LocalCcShards *shards,
     }
 }
 
-TxStartTsCollector::~TxStartTsCollector()
-{
-    if (!local_shards_->EnableMvcc())
-    {
-        return;
-    }
-    thd_.join();
-}
-
 void TxStartTsCollector::Start()
 {
-    if (!local_shards_->EnableMvcc())
-    {
-        return;
-    }
     active_.store(true);
     thd_ = std::thread([this] { Run(); });
 }
@@ -42,6 +29,7 @@ void TxStartTsCollector::Start()
 void TxStartTsCollector::Shutdown()
 {
     active_.store(false);
+    thd_.join();
 }
 
 void TxStartTsCollector::Run()
