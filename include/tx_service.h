@@ -519,9 +519,8 @@ public:
 
     TransactionExecution *NewTx()
     {
-        thread_local uint16_t run_cnt = 0;
+        uint32_t run_cnt = tx_runs_.fetch_add(1, std::memory_order_relaxed);
         size_t sid = run_cnt % pool_.size();
-        ++run_cnt;
         return pool_[sid]->NewTx();
     }
 
@@ -567,5 +566,8 @@ public:
     std::vector<std::thread> thd_pool_;
     LocalCcShards local_cc_shards_;
     Checkpointer ckpt_;
+    // tx runs shared by all the clients of tx_service. It is used to balance
+    // workloads between TxProcessors.
+    std::atomic<uint32_t> tx_runs_{0};
 };
 }  // namespace txservice
