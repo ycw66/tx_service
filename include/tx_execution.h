@@ -73,6 +73,13 @@ public:
      */
     void Restart();
 
+    void Recycle()
+    {
+        assert(tx_status_.load(std::memory_order_relaxed) ==
+               TxnStatus::Finished);
+        tx_status_.store(TxnStatus::Recycled, std::memory_order_relaxed);
+    }
+
     /**
      * @brief Check whether transction is idle and waiting for new TxRequest
      * from runtime.

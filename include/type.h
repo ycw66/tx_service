@@ -54,7 +54,12 @@ enum class TxnStatus
      * include schema evolution and range splitting and merging.
      *
      */
-    Recovering
+    Recovering,
+    /**
+     * @brief A tx is ready to be recycled for the next user tx.
+     *
+     */
+    Recycled
 };
 
 using TableName = std::string;

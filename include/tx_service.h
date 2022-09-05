@@ -54,26 +54,21 @@ public:
 
     TransactionExecution *NewTx()
     {
-        TransactionExecution::uptr tx = nullptr;
-        bool ret = free_tx_list_.try_dequeue(tx);
+        TransactionExecution *tx_ptr = nullptr;
+        bool found = free_tx_list_.try_dequeue(tx_ptr);
 
-        if (!ret)
+        if (found)
         {
-            tx = std::make_unique<TransactionExecution>(
-                cc_hd_.get(), txlog_hd_, this);
+            tx_ptr->Restart();
         }
         else
         {
-            tx->Restart();
-        }
+            std::unique_ptr<TransactionExecution> new_tx =
+                std::make_unique<TransactionExecution>(
+                    cc_hd_.get(), txlog_hd_, this);
 
-        TransactionExecution *tx_ptr = tx.get();
-
-        // Adds the new allocated transaction into the collection of active
-        // tx's.
-        {
-            const std::lock_guard<std::mutex> lock(active_tx_mutex_);
-            active_txs_.emplace(tx_ptr, std::move(tx));
+            tx_ptr = new_tx.get();
+            txs_.enqueue(std::move(new_tx));
         }
 
         return tx_ptr;
@@ -93,14 +88,8 @@ public:
                 txs[tx_idx]->Forward();
                 if (txs[tx_idx]->TxStatus() == TxnStatus::Finished)
                 {
-                    std::lock_guard<std::mutex> lk(active_tx_mutex_);
-
-                    auto tx_it = active_txs_.find(txs[tx_idx]);
-                    if (tx_it != active_txs_.end())
-                    {
-                        free_tx_list_.enqueue(std::move(tx_it->second));
-                        active_txs_.erase(tx_it);
-                    }
+                    txs[tx_idx]->Recycle();
+                    free_tx_list_.enqueue(txs[tx_idx]);
                 }
             }
             tx_batch = to_exec_txs_.try_dequeue_bulk(txs, 100);
@@ -401,7 +390,8 @@ public:
     LocalCcShards &local_cc_shards_;
     std::unique_ptr<LocalCcHandler> cc_hd_;
 
-    moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_tx_list_;
+    moodycamel::ConcurrentQueue<TransactionExecution::uptr> txs_;
+    moodycamel::ConcurrentQueue<TransactionExecution *> free_tx_list_;
 
     /**
      * @brief A collection of tx's who are ready to be executed. A tx is ready
@@ -433,9 +423,6 @@ public:
      */
     std::unordered_map<TransactionExecution *, WaitStatus> waiting_txs_;
     std::mutex waiting_queue_mux_;
-    std::unordered_map<TransactionExecution *, TransactionExecution::uptr>
-        active_txs_;
-    std::mutex active_tx_mutex_;
     /**
      * @brief The timestamp when last caller tries to wake up this tx processor.
      *

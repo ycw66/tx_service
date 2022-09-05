@@ -546,8 +546,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 }
 
                 read_result.ts_ = read_res.ts();
-                LOG(INFO) << "Remote read response, txn #"
-                          << hd_res->Txm()->TxNumber();
                 hd_res->SetFinished(true);
             }
         }
