@@ -98,7 +98,7 @@ public:
         assert(false);
         return nullptr;
     }
-    const KVCatalogInfo *GetKVCatalogInfo() const override
+    KVCatalogInfo *GetKVCatalogInfo() const override
     {
         assert(false);
         return nullptr;

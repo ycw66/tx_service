@@ -182,18 +182,6 @@ int Sharder::Init(const std::string &path)
 
     if (ips_.size() > 1)
     {
-        cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-
-        for (uint32_t nid = 0; nid < ips_.size(); ++nid)
-        {
-            if (nid == node_id_)
-            {
-                continue;
-            }
-
-            cc_stream_sender_->AddRemoteNode(nid, ips_.at(nid), ports_.at(nid));
-        }
-
         cc_stream_receiver_ = std::make_unique<remote::CcStreamReceiver>(
             local_shards_, msg_pool_);
         if (cc_stream_server_.AddService(cc_stream_receiver_.get(),
@@ -208,6 +196,16 @@ int Sharder::Init(const std::string &path)
         {
             LOG(FATAL) << "Fail to start the cc stream server.";
             return -1;
+        }
+
+        cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
+        for (uint32_t nid = 0; nid < ips_.size(); ++nid)
+        {
+            // Build a stream to every node even to ourselves because the
+            // current node can become leader of multiple node groups during
+            // failover. In that case we might need to handle remote requests
+            // sent from the same node but from different node group.
+            cc_stream_sender_->AddRemoteNode(nid, ips_.at(nid), ports_.at(nid));
         }
     }
 
@@ -422,7 +420,7 @@ void Sharder::WaitClusterReady()
                     recover_req->set_src_node_id(node_id_);
                     recover_req->set_node_group_id(ng_id);
 
-                    cc_stream_sender_->SendMessage(ng_id, send_msg);
+                    cc_stream_sender_->SendMessageToNg(ng_id, send_msg);
                 }
             }
         }

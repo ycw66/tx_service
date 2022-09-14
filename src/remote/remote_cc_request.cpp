@@ -47,7 +47,7 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 
         ACTION_FAULT_INJECTOR("remote_acquire_before_sendmessage");
         const AcquireRequest &req = input_msg_->acquire_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
@@ -113,7 +113,7 @@ void txservice::remote::RemoteAcquire::Acknowledge()
     resp_addr->set_term(addr.Term());
 
     const AcquireRequest &req = input_msg_->acquire_req();
-    hd_->SendMessage(req.src_node_id(), output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
@@ -143,7 +143,7 @@ txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
         }
 
         const AcquireAllRequest &req = input_msg_->acquire_all_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -192,7 +192,7 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
     acquire_all_resp->set_node_term(cc_res_.Value().node_term_);
 
     const AcquireAllRequest &req = input_msg_->acquire_all_req();
-    hd_->SendMessage(req.src_node_id(), output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemotePostRead::RemotePostRead()
@@ -224,7 +224,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
         }
 
         const ValidateRequest &req = input_msg_->validate_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -305,7 +305,7 @@ txservice::remote::RemoteRead::RemoteRead()
         }
 
         const ReadRequest &req = input_msg_->read_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -410,7 +410,7 @@ void txservice::remote::RemoteRead::Acknowledge()
     resp_addr->set_term(addr.Term());
 
     const ReadRequest &req = input_msg_->read_req();
-    hd_->SendMessage(req.src_node_id(), output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemotePostWrite::RemotePostWrite()
@@ -430,7 +430,7 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
         resp->set_error_code(res->ErrorCode());
 
         const PostCommitRequest &req = input_msg_->postcommit_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -499,7 +499,7 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
         resp->set_error_code(res->ErrorCode());
 
         const PostWriteAllRequest &req = input_msg_->post_write_all_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -592,7 +592,7 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
 
         scan_open->set_node_group_id(node_group_id_);
         const ScanOpenRequest &req = input_msg_->scan_open_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -724,7 +724,7 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
             scan_next->mutable_scan_tuple()->Clear();
         }
 
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -822,7 +822,7 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
         resp->set_error_code(res->ErrorCode());
 
         const FaultInjectRequest &req = input_msg_->fault_inject_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -870,7 +870,7 @@ txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
 
         const CleanCcEntryForTestRequest &req =
             input_msg_->clean_cc_entry_req();
-        hd_->SendMessage(req.src_node_id(), output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }

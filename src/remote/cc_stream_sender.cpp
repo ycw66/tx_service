@@ -32,13 +32,23 @@ void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
     msg_pool_.enqueue(std::move(msg));
 }
 
-bool CcStreamSender::SendMessage(uint32_t node_group_id,
-                                 const CcMessage &msg,
-                                 CcHandlerResultBase *res,
-                                 bool resend)
+/**
+ * @brief Send message to a specific node. Failed message will
+ * be put into a retry list once the stream to the node is
+ * reconstructed.
+ *
+ * @param dest_node_id
+ * @param msg
+ * @param res
+ * @param resend
+ * @return true
+ * @return false
+ */
+bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
+                                       const CcMessage &msg,
+                                       CcHandlerResultBase *res,
+                                       bool resend)
 {
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
-
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &msg,
@@ -124,8 +134,11 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
             }
 
             // put the failed message into the resend_message_list.
-            resend_message_list_.enqueue(
-                std::make_unique<ResendMessage>(node_group_id, msg, res));
+            auto resend_message_list = resend_message_list_.try_emplace(
+                dest_node_id,
+                std::move(moodycamel::ConcurrentQueue<ResendMessage::Uptr>()));
+            resend_message_list.first->second.enqueue(
+                std::make_unique<ResendMessage>(msg, res));
 
             // always wake up connector thread to either reconnect streams or
             // resend messages.
@@ -136,6 +149,27 @@ bool CcStreamSender::SendMessage(uint32_t node_group_id,
     }
 
     return error_code == 0;
+}
+
+/**
+ * @brief Send a message to a node group leader. Failed message will
+ * be put into a retry list once the stream to the node group leader is
+ * reconstructed.
+ *
+ * @param node_group_id
+ * @param msg
+ * @param res
+ * @param resend
+ * @return true
+ * @return false
+ */
+bool CcStreamSender::SendMessageToNg(uint32_t node_group_id,
+                                     const CcMessage &msg,
+                                     CcHandlerResultBase *res,
+                                     bool resend)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
+    return SendMessageToNode(dest_node_id, msg, res, resend);
 }
 
 void CcStreamSender::AddRemoteNode(uint32_t node_id,
@@ -192,6 +226,29 @@ void CcStreamSender::ConnectStreams()
             {
                 LOG(INFO) << "Establish the cc stream to node "
                           << outbound_channels_.at(nid).second;
+                // Resend failed messages to the reconnected node.
+                if (resend_message_list_.find(nid) !=
+                    resend_message_list_.end())
+                {
+                    // release lock before resend queued messages.
+                    lk.unlock();
+                    moodycamel::ConcurrentQueue<ResendMessage::Uptr>
+                        &resend_message_list = resend_message_list_.at(nid);
+                    while (!resend_message_list.is_empty())
+                    {
+                        ResendMessage::Uptr messages[100];
+                        size_t msg_cnt =
+                            resend_message_list.try_dequeue_bulk(messages, 100);
+                        for (size_t i = 0; i < msg_cnt; ++i)
+                        {
+                            SendMessageToNode(nid,
+                                              messages[i]->msg_,
+                                              messages[i]->res_,
+                                              true);
+                        }
+                    }
+                    lk.lock();
+                }
             }
             else
             {
@@ -199,23 +256,6 @@ void CcStreamSender::ConnectStreams()
                            << outbound_channels_.at(nid).second;
             }
         }
-
-        // release lock before resend queued messages.
-        lk.unlock();
-        while (!resend_message_list_.is_empty())
-        {
-            ResendMessage::Uptr messages[100];
-            size_t msg_cnt =
-                resend_message_list_.try_dequeue_bulk(messages, 100);
-            for (size_t i = 0; i < msg_cnt; ++i)
-            {
-                SendMessage(messages[i]->node_group_id_,
-                            messages[i]->msg_,
-                            messages[i]->res_,
-                            true);
-            }
-        }
-        lk.lock();
     }
 }
 

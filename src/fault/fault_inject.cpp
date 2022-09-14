@@ -179,7 +179,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
                     fi_req->set_fault_name(fault_name);
                     fi_req->set_fault_paras(fault_paras);
 
-                    b = ss->SendMessage(dest_node_id, send_msg);
+                    b = ss->SendMessageToNode(dest_node_id, send_msg);
                 }
 
                 // If CcStreamSender == nullptr or failed to send, send to local

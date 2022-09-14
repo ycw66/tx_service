@@ -26,14 +26,11 @@ struct ResendMessage
 public:
     using Uptr = std::unique_ptr<ResendMessage>;
     ResendMessage();
-    ResendMessage(uint32_t node_group_id,
-                  const CcMessage &msg,
-                  CcHandlerResultBase *res)
-        : node_group_id_(node_group_id), msg_(msg), res_(res)
+    ResendMessage(const CcMessage &msg, CcHandlerResultBase *res)
+        : msg_(msg), res_(res)
     {
     }
 
-    uint32_t node_group_id_;
     CcMessage msg_;
     CcHandlerResultBase *res_;
 };
@@ -46,10 +43,14 @@ public:
     ~CcStreamSender();
 
     void RecycleCcMsg(std::unique_ptr<CcMessage> msg);
-    bool SendMessage(uint32_t node_group_id,
-                     const CcMessage &msg,
-                     CcHandlerResultBase *res = nullptr,
-                     bool resend = false);
+    bool SendMessageToNg(uint32_t node_group_id,
+                         const CcMessage &msg,
+                         CcHandlerResultBase *res = nullptr,
+                         bool resend = false);
+    bool SendMessageToNode(uint32_t dest_node_id,
+                           const CcMessage &msg,
+                           CcHandlerResultBase *res = nullptr,
+                           bool resend = false);
     void AddRemoteNode(uint32_t node_id, const std::string &ip, uint16_t port);
 
     /**
@@ -76,7 +77,10 @@ private:
                        std::pair<brpc::StreamId, std::atomic<int64_t>>>
         outbound_streams_;
     std::unordered_map<uint32_t, int64_t> to_connect_nodes_;
-    moodycamel::ConcurrentQueue<ResendMessage::Uptr> resend_message_list_;
+    // <node_id, resend_queue_to_node_id>
+    std::unordered_map<uint32_t,
+                       moodycamel::ConcurrentQueue<ResendMessage::Uptr>>
+        resend_message_list_;
 
     // The background thread that establishes cc streams to remote nodes.
     std::thread connect_thd_;

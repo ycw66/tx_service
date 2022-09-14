@@ -335,7 +335,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             CcStreamSender *cc_stream_sender =
                 Sharder::Instance().GetCcStreamSender();
 
-            cc_stream_sender->SendMessage(req.src_node_id(), return_msg);
+            cc_stream_sender->SendMessageToNode(req.src_node_id(), return_msg);
             msg_pool_.enqueue(std::move(msg));
         }
         else
@@ -572,8 +572,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             CcStreamSender *cc_stream_sender =
                 Sharder::Instance().GetCcStreamSender();
-            cc_stream_sender->SendMessage(post_commit.src_node_id(),
-                                          return_msg);
+            cc_stream_sender->SendMessageToNode(post_commit.src_node_id(),
+                                                return_msg);
             msg_pool_.enqueue(std::move(msg));
         }
         else
@@ -889,8 +889,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         recover_resp->set_node_group_id(req.node_group_id());
 
-        Sharder::Instance().GetCcStreamSender()->SendMessage(req.src_node_id(),
-                                                             send_msg);
+        Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
+            req.src_node_id(), send_msg);
 
         break;
     }
