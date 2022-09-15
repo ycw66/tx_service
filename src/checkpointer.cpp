@@ -139,25 +139,15 @@ void Checkpointer::Ckpt()
                 break;
             }
 
-            if (table_name == catalog_ccm_name || IsRangeTablename(table_name))
+            if (table_name.Type() == TableType::Catalog ||
+                table_name.Type() == TableType::RangePartition)
             {
                 continue;
             }
 
             // Only issue tx_request using base table name
-            const TableName *base_table_name_;
-            TableName sk_base_table_name_;
-            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-            if (pos != std::string::npos)
-            {
-                sk_base_table_name_ = table_name;
-                sk_base_table_name_ = sk_base_table_name_.substr(0, pos);
-                base_table_name_ = &sk_base_table_name_;
-            }
-            else
-            {
-                base_table_name_ = &table_name;
-            }
+            const TableName base_table_name_{table_name.GetBaseTableName(),
+                                             TableType::Primary};
 
             // Init a tx_request to acquire read lock on catalog cc_entry in one
             // shard, which is good enough to block schema change.
@@ -180,7 +170,7 @@ void Checkpointer::Ckpt()
 
             // If table_name has been dropped at this point, read lock would not
             // be acquired.
-            CatalogKey table_key(*base_table_name_);
+            CatalogKey table_key(base_table_name_);
             CatalogRecord catalog_rec;
 
             ReadTxRequest read_req;
@@ -420,7 +410,8 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
 {
     bool ckpt_ret = false;
     CcMap *ccm = entry->parent_map_;
-    TableName table_name = ccm->table_name_;
+    TableName table_name{ccm->table_name_.StringView(),
+                         ccm->table_name_.Type()};
     uint32_t ng = Sharder::Instance().NodeId();
     if (ccm->Type() == TableType::Primary)
     {

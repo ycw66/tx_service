@@ -21,14 +21,18 @@ class LocalCcShards;
 class DsEvaluateRangeSizeWorkSettings
 {
 public:
-    DsEvaluateRangeSizeWorkSettings(const txservice::TableName table_name,
+    DsEvaluateRangeSizeWorkSettings(const txservice::TableName &table_name,
                                     std::map<int32_t, const TxKey *> ranges)
-        : table_name_(table_name), ranges_(std::move(ranges)){};
+        : table_name_(table_name.StringView(),
+                      txservice::TableType::RangePartition),
+          ranges_(std::move(ranges)){};
 
     DsEvaluateRangeSizeWorkSettings(DsEvaluateRangeSizeWorkSettings &&ws)
-        : table_name_(ws.table_name_), ranges_(std::move(ws.ranges_)){};
+        : table_name_(std::move(ws.table_name_)),
+          ranges_(std::move(ws.ranges_)){};
 
-    const txservice::TableName table_name_;
+    const txservice::TableName
+        table_name_;  // not string owner, sv -> MysqlTableSchema
     std::map<int32_t /*range partition id*/, const TxKey * /*range key*/>
         ranges_;
 };
@@ -42,7 +46,7 @@ public:
     void Shutdown();
 
     void SubmitEvaluateRangeSizeWork(
-        const txservice::TableName range_table_name,
+        const txservice::TableName &range_table_name,
         std::map<int32_t /*range partition id*/, const TxKey * /*range key*/>
             &&ranges);
 

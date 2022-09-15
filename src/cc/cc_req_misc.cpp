@@ -23,7 +23,10 @@ size_t FetchCc::RequesterCount() const
 FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
                                CcShard &ccs,
                                uint32_t cc_ng_id)
-    : FetchCc(ccs, cc_ng_id), table_name_(table_name)
+    : FetchCc(ccs, cc_ng_id),
+      table_name_(table_name.StringView().data(),
+                  table_name.StringView().size(),
+                  table_name.Type())
 {
 }
 
@@ -116,7 +119,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     {
         ccs.local_shards_.DropCatalogs(cc_ng_id_);
         LOG(INFO) << "ccshard: " << ccs.core_id_
-                  << "clear ccmaps and catalogs of node group: " << cc_ng_id_;
+                  << "; clear ccmaps and catalogs of node group: " << cc_ng_id_;
         wait_cv_.notify_one();
     }
 

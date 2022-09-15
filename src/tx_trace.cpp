@@ -1839,7 +1839,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::CkptScanCc *r)
     outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_\":\"" << r->table_name_ << "\""
+         << ",\"table_name_\":\"" << r->table_name_.StringView() << "\""
          << ",\"ckpt_ts_\":" << r->ckpt_ts_
          << ",\"node_group_\":" << r->node_group_ << "}";
     return outs;
@@ -1890,7 +1890,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReplayLogCc *r)
     outs << "{\"tx_number_\":" << r->Txn() << ",\"isolation_level\":\""
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_str_\":\"" << r->table_name_str_ << "\""
+         << ",\"table_name_holder_\":\"" << r->table_name_holder_.StringView()
+         << "\""
          << "}";
     return outs;
 };
@@ -1946,7 +1947,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::DsCopyRangeDataOp *r)
     {
         return outs << "{}";
     }
-    outs << "{\"table_name_\":\"" << r->table_schema_->GetTableName() << "\""
+    outs << "{\"table_name_\":\""
+         << r->table_schema_->GetTableName().StringView() << "\""
          << ",\"middle_key_\":\"" << r->middle_key_ << "\""
          << ",\"old_partition_id_\":\"" << r->old_partition_id_ << "\""
          << ",\"new_partition_id_\":\"" << r->new_partition_id_ << "\""

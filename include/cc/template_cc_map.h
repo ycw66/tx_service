@@ -71,7 +71,7 @@ public:
                     .append(std::to_string(
                         reinterpret_cast<uint64_t>(&this->neg_inf_.key_)))
                     .append("\"table_name_\":")
-                    .append(this->table_name_);
+                    .append(this->table_name_.StringView());
             });
 
         TX_TRACE_ASSOCIATE_WITH_CONTEXT(
@@ -86,7 +86,7 @@ public:
                     .append(std::to_string(
                         reinterpret_cast<uint64_t>(&this->pos_inf_.key_)))
                     .append("\"table_name_\":")
-                    .append(this->table_name_);
+                    .append(this->table_name_.StringView());
             });
     }
 
@@ -3385,7 +3385,7 @@ protected:
                  IsolationLevel iso_level,
                  bool is_ckpt_delta = false) const
     {
-        tuple->Key() = *cce->key_;
+        tuple->Key().Copy(*cce->key_);
 
         if (iso_level == IsolationLevel::Snapshot)
         {

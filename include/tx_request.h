@@ -285,14 +285,16 @@ struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
                         const TableSchema *table_schema,
                         const TxKey *range_key,
                         RangeRecord *range_record)
-        : range_table_name_(range_table_name),
+        : range_table_name_(range_table_name.StringView(),
+                            range_table_name.Type()),
           table_schema_(table_schema),
           range_key_(range_key),
           range_record_(range_record)
     {
     }
 
-    const TableName &range_table_name_{nullptr};
+    const TableName
+        range_table_name_;  // not string owner, sv -> MysqlTableSchema
     const TableSchema *table_schema_{nullptr};
     const TxKey *range_key_;
     RangeRecord *range_record_{nullptr};

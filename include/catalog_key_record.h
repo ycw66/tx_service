@@ -43,6 +43,9 @@ public:
     TableName &Name();
 
 private:
+    // table_name_ is string owner if the CatalogKey is stored in CcMap. When
+    // the CatalogKey is constructed to perform a lookup(most of the time), it
+    // should use string_view.
     TableName table_name_;
 };
 

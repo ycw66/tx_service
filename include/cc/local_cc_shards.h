@@ -23,6 +23,7 @@
 #include "store/data_store_handler.h"
 #include "table_lock.h"
 #include "template_cc_map.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -149,7 +150,8 @@ public:
 
     void PrintCcMap()
     {
-        std::unordered_map<TableName, size_t> mapsizes;
+        std::unordered_map<TableName, size_t>
+            mapsizes;  // not string owner, sv -> native_ccms_
         for (const auto &cc_shard : cc_shards_)
         {
             CcShard &shard = *cc_shard;
@@ -170,13 +172,17 @@ public:
                 }
                 else
                 {
-                    mapsizes.emplace(tab_name, map_iter->second->size());
+                    mapsizes.emplace(
+                        std::piecewise_construct,
+                        std::forward_as_tuple(tab_name.StringView(),
+                                              tab_name.Type()),
+                        std::forward_as_tuple(map_iter->second->size()));
                 }
 
                 // Excludes negative and positive infinity.
                 entry_cnt += map_iter->second->size();
 
-                std::cout << "Table '" << tab_name << "' core ID "
+                std::cout << "Table '" << tab_name.StringView() << "' core ID "
                           << shard.core_id_ << ": " << map_iter->second->size()
                           << std::endl;
 
@@ -210,27 +216,26 @@ public:
     static uint64_t ClockTs();
     uint64_t ShardClockTs(uint16_t core_id);
 
-    const CatalogEntry *CreateCatalog(const std::string &table_name,
+    const CatalogEntry *CreateCatalog(const TableName &table_name,
                                       NodeGroupId cc_ng_id,
                                       const std::string &catalog_image,
                                       uint64_t commit_ts);
 
-    const CatalogEntry *CreateDirtyCatalog(const std::string &table_name,
+    const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                            NodeGroupId cc_ng_id,
                                            const std::string &catalog_image,
                                            uint64_t commit_ts);
 
     const CatalogEntry *CreateReplayCatalog(
-        const std::string &table_name,
+        const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &old_catalog_image,
         const std::string &new_catalog_image,
         uint64_t commit_ts);
 
-    void CommitDirtyCatalog(const std::string &table_name,
-                            NodeGroupId cc_ng_id);
+    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
-    const CatalogEntry *GetCatalog(const std::string &table_name,
+    const CatalogEntry *GetCatalog(const TableName &table_name,
                                    NodeGroupId cc_ng_id);
 
     std::unordered_set<TableName> CatalogTableNames(NodeGroupId cc_ng_id);
@@ -331,9 +336,9 @@ private:
 
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
-        table_catalogs_;
+        table_catalogs_;  // string owner
     std::unordered_map<TableName, std::map<int32_t, TableRangeEntryWithShade>>
-        table_ranges_;
+        table_ranges_;  // string owner
     std::shared_mutex catalog_mux_;
 
     TxService *tx_service_;

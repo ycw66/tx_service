@@ -456,12 +456,12 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
              msg.schema_op_msgs())
         {
             const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
-            std::string_view catalog_table_name_view(catalog_ccm_name);
 
             std::unique_ptr<ReplayLogCc> &cc_req =
                 cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
                     cc_ng_id,
-                    catalog_table_name_view,
+                    catalog_ccm_name_sv,
+                    TableType::Catalog,
                     std::string_view(schema_op_blob.data(),
                                      schema_op_blob.length()),
                     schema_op_msg.commit_ts(),
@@ -510,6 +510,27 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                                                  table_name_len);
                 blob_offset += table_name_len;
 
+                // 1-byte integer for the type of table
+                uint8_t table_type_number = *reinterpret_cast<const uint8_t *>(
+                    blob.data() + blob_offset);
+                TableType table_type;
+                switch (table_type_number)
+                {
+                case 0:
+                    table_type = TableType::Primary;
+                    break;
+                case 1:
+                    table_type = TableType::Secondary;
+                    break;
+                case 2:
+                    table_type = TableType::Catalog;
+                    break;
+                case 3:
+                    table_type = TableType::RangePartition;
+                    break;
+                }
+                blob_offset += sizeof(uint8_t);
+
                 // 4-byte integer for the length of the serialized
                 // records from the table
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
@@ -520,6 +541,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
                         cc_ng_id,
                         table_name_view,
+                        table_type,
                         std::string_view(blob.data() + blob_offset, kv_len),
                         commit_ts,
                         0,

@@ -314,9 +314,10 @@ struct DsUpsertTableOp : public TransactionOperation
 struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
-    SchemaOp(const TableName &table_name, const CatalogRecord &catalog_rec);
+    SchemaOp(const std::string_view table_name_sv,
+             const CatalogRecord &catalog_rec);
 
-    CatalogKey table_key_;
+    CatalogKey table_key_;  // string owner
     CatalogRecord catalog_rec_;
     std::string image_str_{""};
     std::string dirty_image_str_{""};
@@ -325,7 +326,7 @@ struct SchemaOp : public TransactionOperation
 struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
-    UpsertTableOp(const TableName &table_name,
+    UpsertTableOp(const std::string_view table_name_str,
                   const CatalogRecord *catalog_rec,
                   bool is_deleted,
                   TransactionExecution *txm);
@@ -524,7 +525,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     void ForceToFinish(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-    TableName range_table_name_{""};
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
     const TableSchema *table_schema_{nullptr};
     int32_t partition_id_{-1};
     const TxKey *range_key_{nullptr};

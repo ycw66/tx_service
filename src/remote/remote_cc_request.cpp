@@ -1,5 +1,7 @@
 #include "remote/remote_cc_request.h"
 
+#include <string_view>
+
 #include "cc/ccm_scanner.h"
 #include "remote/remote_cc_handler.h"
 #include "remote/remote_type.h"
@@ -68,7 +70,12 @@ void txservice::remote::RemoteAcquire::Reset(
 
     const AcquireRequest &req = input_msg->acquire_req();
 
-    AcquireCc::Reset(&req.tablename(),
+    std::string_view table_name_sv{req.table_name_str()};
+    // Need to parse the string if not include table type in protobuf
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+
+    AcquireCc::Reset(&remote_table_name_,
                      &req.key(),
                      req.key_shard_code(),
                      input_msg->tx_number(),
@@ -160,8 +167,11 @@ void txservice::remote::RemoteAcquireAll::Reset(
     output_msg_.clear_acquire_all_resp();
 
     const AcquireAllRequest &req = input_msg->acquire_all_req();
+    std::string_view table_name_sv{req.table_name_str()};
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
 
-    AcquireAllCc::Reset(&req.tablename(),
+    AcquireAllCc::Reset(&remote_table_name_,
                         &req.key(),
                         req.node_group_id(),
                         input_msg->tx_number(),
@@ -321,6 +331,10 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
     output_msg_.clear_read_resp();
 
     const ReadRequest &req = input_msg->read_req();
+    std::string_view table_name_sv{req.table_name_str()};
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+
     ReadType read_type = ReadType::Inside;
     switch (req.read_type())
     {
@@ -343,7 +357,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
     resp->clear_record();
     if (read_type == ReadType::Inside)
     {
-        ReadCc::Reset(&req.tablename(),
+        ReadCc::Reset(&remote_table_name_,
                       &req.key(),
                       req.key_shard_code(),
                       resp->mutable_record(),
@@ -364,7 +378,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
         std::string *out_record = resp->mutable_record();
         *out_record = req.record();
 
-        ReadCc::Reset(&req.tablename(),
+        ReadCc::Reset(&remote_table_name_,
                       &req.key(),
                       req.key_shard_code(),
                       out_record,
@@ -517,6 +531,11 @@ void txservice::remote::RemotePostWriteAll::Reset(
 
     const PostWriteAllRequest &post_write_all = input_msg->post_write_all_req();
 
+    std::string_view table_name_sv{post_write_all.table_name_str()};
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(post_write_all.table_type()));
+
     uint64_t commit_ts = post_write_all.commit_ts();
     const std::string *rec_str =
         commit_ts > 0 ? &post_write_all.record() : nullptr;
@@ -527,7 +546,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
 
     int64_t tx_term = input_msg->tx_term();
 
-    PostWriteAllCc::Reset(&post_write_all.tablename(),
+    PostWriteAllCc::Reset(&remote_table_name_,
                           &post_write_all.key(),
                           post_write_all.node_group_id(),
                           input_msg->tx_number(),
@@ -609,8 +628,12 @@ void txservice::remote::RemoteScanOpen::Reset(
 
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 
+    std::string_view table_name_sv{scan_open.table_name_str()};
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(scan_open.table_type()));
+
     node_group_id_ = scan_open.shard_id();
-    table_name_ = &scan_open.tablename();
+    table_name_ = &remote_table_name_;
     tx_term_ = input_msg->tx_term();
     lock_type_ = static_cast<LockType>(scan_open.lock_type());
     isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
@@ -887,8 +910,11 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
     output_msg_.clear_acquire_resp();
 
     const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
+    std::string_view table_name_sv{req.table_name_str()};
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
 
-    CleanCcEntryForTestCc::Reset(&req.tablename(),
+    CleanCcEntryForTestCc::Reset(&remote_table_name_,
                                  &req.key(),
                                  req.only_archives(),
                                  req.flush(),

@@ -47,7 +47,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
 
     AcquireRequest *acq = send_msg.mutable_acquire_req();
     acq->set_src_node_id(src_id);
-    acq->set_tablename(table_name);
+    acq->set_table_name_str(table_name.String());
+    acq->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
     acq->clear_key();
     key.Serialize(*acq->mutable_key());
 
@@ -83,7 +84,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
 
     AcquireAllRequest *acq_all = send_msg.mutable_acquire_all_req();
     acq_all->set_src_node_id(src_node_id);
-    acq_all->set_tablename(table_name);
+    acq_all->set_table_name_str(table_name.String());
+    acq_all->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
     acq_all->clear_key();
     key.Serialize(*acq_all->mutable_key());
 
@@ -172,7 +174,9 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
 
     PostWriteAllRequest *post_write_all = send_msg.mutable_post_write_all_req();
     post_write_all->set_src_node_id(src_node_id);
-    post_write_all->set_tablename(table_name);
+    post_write_all->set_table_name_str(table_name.String());
+    post_write_all->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
     post_write_all->set_node_group_id(ng_id);
     post_write_all->clear_key();
     key.Serialize(*post_write_all->mutable_key());
@@ -267,7 +271,8 @@ void txservice::remote::RemoteCcHandler::Read(
 
     ReadRequest *read = send_msg.mutable_read_req();
     read->set_src_node_id(src_node_id);
-    read->set_tablename(table_name);
+    read->set_table_name_str(table_name.String());
+    read->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
     read->clear_key();
     key.Serialize(*read->mutable_key());
     read->set_key_shard_code(key_shard_code);
@@ -383,7 +388,9 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
 
     ScanOpenRequest *scan_open = send_msg.mutable_scan_open_req();
     scan_open->set_src_node_id(src_node_id);
-    scan_open->set_tablename(table_name);
+    scan_open->set_table_name_str(table_name.String());
+    scan_open->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
     scan_open->set_shard_id(node_group_id);
 
     switch (start_key.Type())
@@ -500,7 +507,9 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     CleanCcEntryForTestRequest *clean_req =
         send_msg.mutable_clean_cc_entry_req();
     clean_req->set_src_node_id(src_node_id);
-    clean_req->set_tablename(table_name);
+    clean_req->set_table_name_str(table_name.String());
+    clean_req->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
     clean_req->clear_key();
     key.Serialize(*clean_req->mutable_key());
     clean_req->set_key_shard_code(key_shard_code);

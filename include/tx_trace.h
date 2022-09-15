@@ -18,8 +18,9 @@
 #define FMT_POINTER_TO_UINT64T(pointer) \
     fmt_hex(reinterpret_cast<uint64_t>(pointer))
 
-#define GET_TABLE_NAME(req) \
-    (req->GetTableName() == nullptr ? "nullptr" : *req->GetTableName())
+#define GET_TABLE_NAME(req)                     \
+    (req->GetTableName() == nullptr ? "nullptr" \
+                                    : req->GetTableName()->StringView())
 
 #define GET_MACRO3(_1, _2, _3, NAME, ...) NAME
 #define GET_MACRO4(_1, _2, _3, _4, NAME, ...) NAME

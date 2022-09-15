@@ -112,9 +112,17 @@ enum CommitType {
 	PostCommit = 1;
 }
 
+enum CcTableType {
+    Primary = 0;
+    Secondary = 1;
+    Catalog = 2;
+    RangePartition = 3;
+}
+
 message AcquireRequest {
 	uint32 src_node_id = 1;
-	string tablename = 2;
+	string table_name_str = 2;
+	CcTableType table_type = 9;
 	bytes key = 3;
 	uint32 key_shard_code = 4;
 	uint32 vec_idx = 5;
@@ -135,7 +143,8 @@ message AcquireResponse {
 
 message AcquireAllRequest {
 	uint32 src_node_id = 1;
-	string tablename = 2;
+	string table_name_str = 2;
+	CcTableType table_type = 8;
 	bytes key = 3;
 	uint32 node_group_id = 4;
 	bool insert = 5;
@@ -181,7 +190,8 @@ message VersionTxRecord_msg {
 
 message ReadRequest {
 	uint32 src_node_id = 1;
-	string tablename = 2;
+	string table_name_str = 2;
+	CcTableType table_type = 11;
 	bytes key = 3;
 	uint32 key_shard_code = 4;
 	bytes record = 5;
@@ -228,7 +238,8 @@ message PostCommitRequest {
 
 message PostWriteAllRequest {
 	uint32 src_node_id = 1;
-	string tablename = 2;
+	string table_name_str = 2;
+	CcTableType table_type = 9;
 	uint32 node_group_id = 3;
 	bytes key = 4;
 	uint64 commit_ts = 5;
@@ -249,7 +260,8 @@ message ScanTuple_msg {
 message ScanOpenRequest {
 	uint32 src_node_id = 1;
 	uint32 shard_id = 2;
-	string tablename = 3;
+	string table_name_str = 3;
+	CcTableType table_type = 14;
 	oneof start_key {
 		bytes key = 4;
 		bool neg_inf = 5;
@@ -305,7 +317,8 @@ message FaultInjectResponse {
 
 message CleanCcEntryForTestRequest {
   uint32 src_node_id = 1;
-  string tablename = 2;
+  string table_name_str = 2;
+  CcTableType table_type = 7;
   bytes key = 3;
   uint32 key_shard_code = 4;
   bool only_archives=5;

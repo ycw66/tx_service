@@ -457,6 +457,7 @@ public:
     uint64_t log_limit_{0};
 
 private:
+    // below are all string owners
     std::unordered_map<TableName, CcMap::uptr> native_ccms_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
         failover_ccms_;

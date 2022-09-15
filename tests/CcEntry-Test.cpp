@@ -437,7 +437,8 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     AcquireCc req;
     TxId txid;
     txid.Reset(1, 1, 1);
-    TableName tbl = "tbl";
+    string tbl_str{"tbl"};
+    TableName tbl{tbl_str.data(), tbl_str.size(), TableType::Primary};
     string key_str = "1";
     req.Reset(&tbl,
               &key_str,

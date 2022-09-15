@@ -56,7 +56,9 @@ public:
           uint64_t schema_ts,
           bool ccm_has_full_entries = false)
         : shard_(shard),
-          table_name_(table_name),
+          table_name_(table_name.StringView().data(),
+                      table_name.StringView().size(),
+                      table_name.Type()),
           ccm_has_full_entries_(ccm_has_full_entries),
           schema_ts_(schema_ts),
           table_schema_(table_schema)
@@ -148,7 +150,7 @@ public:
     virtual bool IsCatalogCcMap() const = 0;
 
     CcShard *const shard_;
-    TableName table_name_;
+    TableName table_name_;  // string owner
     // Kv store can be skipped if we know ccm contains all the entries. This is
     // crucial for performance. This flag is true when the table is created and
     // no LRU kickout happens on this ccm. In future, we should make it at range

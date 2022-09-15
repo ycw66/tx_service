@@ -42,7 +42,7 @@ public:
     virtual ~CatalogFactory() = default;
 
     virtual TableSchema::uptr CreateTableSchema(
-        const std::string &table_name,
+        const TableName &table_name,
         const std::string &catalog_image,
         uint64_t version,
         NodeGroupId cc_ng_id) = 0;

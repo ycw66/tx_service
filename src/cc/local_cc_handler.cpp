@@ -506,13 +506,12 @@ void txservice::LocalCcHandler::ScanOpen(
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
 
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
-    std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-    if (pos != std::string::npos)
+    if (table_name.Type() == TableType::Secondary)
     {
-        // The target ccm is an index.
-        TableName sk_base_table_name = table_name.substr(0, pos);
+        const TableName base_table_name{table_name.GetBaseTableName(),
+                                        TableType::Primary};
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(sk_base_table_name, local_shard.node_id_);
+            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
 
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
@@ -670,10 +669,10 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     const Schema *schema = nullptr;
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
-    if (txservice::IsRangeTablename(table_name))
+    if (table_name.Type() == TableType::RangePartition)
     {
-        const txservice::TableName base_table_name =
-            GetBaseTableNameFromRangeTableName(table_name);
+        const TableName base_table_name{table_name.StringView(),
+                                        TableType::Primary};
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(base_table_name, local_shard.node_id_);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
@@ -684,12 +683,12 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         ccm_scanner = local_shard.catalog_factory_->CreatePkRangeCcmScanner(
             direction, schema);
     }
-    else if (txservice::IsIndexTableName(table_name))
+    else if (table_name.Type() == TableType::Secondary)
     {
-        const txservice::TableName sk_base_table_name =
-            GetBaseTablenameFromIndexTableName(table_name);
+        const TableName base_table_name{table_name.StringView(),
+                                        TableType::Primary};
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(sk_base_table_name, local_shard.node_id_);
+            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
         {
             schema = catalog_entry->schema_.get()->IndexKeySchema(table_name);

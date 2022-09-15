@@ -209,7 +209,8 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         }
         case FaultAction::CLEAN_PKMAP:
         {
-            Sharder::Instance().CleanCcTable(para);
+            Sharder::Instance().CleanCcTable(
+                TableName(para, TableType::Primary));
             break;
         }
         case FaultAction::NOTIFY_CHECKPOINTER:

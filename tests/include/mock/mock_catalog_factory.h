@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>  //unique_ptr
+#include <unordered_map>
+#include <utility>  //pair
+#include <vector>
 
 #include "catalog_factory.h"     // TableSchema,CatalogFactory
 #include "cc/template_cc_map.h"  // CcMap,TemplateCcMap
@@ -44,10 +47,12 @@ public:
 struct MockTableSchema : public TableSchema
 {
 public:
-    MockTableSchema(const std::string &table_name,
+    MockTableSchema(const TableName &table_name,
                     const std::string &catalog_image,
                     uint64_t version)
-        : table_name_(table_name),
+        : table_name_(table_name.StringView().data(),
+                      table_name.StringView().size(),
+                      table_name.Type()),
           schema_image_(catalog_image),
           version_(version)
     {
@@ -83,11 +88,14 @@ public:
     }
     std::vector<TableName> IndexNames() const override
     {
-        std::vector<txservice::TableName> index_names;
+        std::vector<TableName> index_names;
         index_names.reserve(indexes_.size());
         for (const auto &index_entry : indexes_)
         {
-            index_names.emplace_back(index_entry.second.first);
+            index_names.emplace_back(
+                index_entry.second.first.StringView().data(),
+                index_entry.second.first.StringView().size(),
+                TableType::Secondary);
         }
 
         return index_names;
@@ -109,8 +117,9 @@ public:
     }
 
 private:
-    std::unordered_map<uint, std::pair<std::string, MockKeySchema>> indexes_;
-    TableName table_name_;
+    std::unordered_map<uint, std::pair<TableName, MockKeySchema>>
+        indexes_;           // string owner
+    TableName table_name_;  // string owner
     std::string schema_image_;
     uint64_t version_;
     std::unique_ptr<MockKeySchema> key_schema_;
@@ -126,7 +135,7 @@ public:
     {
     }
 
-    TableSchema::uptr CreateTableSchema(const std::string &table_name,
+    TableSchema::uptr CreateTableSchema(const TableName &table_name,
                                         const std::string &catalog_image,
                                         uint64_t version,
                                         NodeGroupId cc_ng_id) override

@@ -86,11 +86,12 @@ void LocalCcShards::TimerRun()
 }
 
 const CatalogEntry *LocalCcShards::CreateCatalog(
-    const std::string &table_name,
+    const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
 {
+    assert(table_name.Type() == TableType::Primary);
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
 
     auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
@@ -126,7 +127,7 @@ const CatalogEntry *LocalCcShards::CreateCatalog(
 }
 
 const CatalogEntry *LocalCcShards::CreateReplayCatalog(
-    const std::string &table_name,
+    const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &old_catalog_image,
     const std::string &new_catalog_image,
@@ -168,7 +169,7 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
 }
 
 const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
-    const std::string &table_name,
+    const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
     uint64_t commit_ts)
@@ -195,7 +196,7 @@ const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     return &catalog_entry;
 }
 
-void LocalCcShards::CommitDirtyCatalog(const std::string &table_name,
+void LocalCcShards::CommitDirtyCatalog(const TableName &table_name,
                                        NodeGroupId cc_ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
@@ -218,7 +219,7 @@ void LocalCcShards::CommitDirtyCatalog(const std::string &table_name,
     return;
 }
 
-const CatalogEntry *LocalCcShards::GetCatalog(const std::string &table_name,
+const CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
                                               NodeGroupId cc_ng_id)
 {
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
@@ -247,11 +248,15 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames(
             const CatalogEntry &catalog_entry = catalog_it->second;
             if (catalog_entry.schema_ != nullptr)
             {
-                table_set.emplace(base_table_name);
+                table_set.emplace(base_table_name.StringView().data(),
+                                  base_table_name.StringView().size(),
+                                  base_table_name.Type());
                 for (txservice::TableName &index_table_name :
                      catalog_entry.schema_->IndexNames())
                 {
-                    table_set.emplace(index_table_name);
+                    table_set.emplace(index_table_name.StringView().data(),
+                                      index_table_name.StringView().size(),
+                                      index_table_name.Type());
                 }
             }
         }

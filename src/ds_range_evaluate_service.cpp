@@ -35,12 +35,12 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                 {
                     DsEvaluateRangeSizeWorkSettings ws =
                         std::move(ds_evaluate_range_size_work_queue_.front());
+                    assert(!ws.table_name_.IsStringOwner() &&
+                           ws.table_name_.Type() ==
+                               txservice::TableType::RangePartition);
                     ds_evaluate_range_size_work_queue_.pop_front();
                     lk.unlock();
 
-                    const TableName table_name = ws.table_name_;
-                    const TableName range_table_name =
-                        txservice::GetRangeTablenameFromTablename(table_name);
                     for (auto it = ws.ranges_.begin(); it != ws.ranges_.end();
                          it++)
                     {
@@ -67,7 +67,7 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                         {
                             break;
                         }
-                        CatalogKey table_key(table_name);
+                        CatalogKey table_key(ws.table_name_);
                         CatalogRecord catalog_rec;
                         txservice::ReadTxRequest read_catalog_tx_req;
                         read_catalog_tx_req.Reset();
@@ -154,7 +154,7 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                             txservice::RangeRecord range_record;
                             txservice::ReadTxRequest read_range_tx_req;
                             read_range_tx_req.Reset();
-                            read_range_tx_req.Set(&range_table_name,
+                            read_range_tx_req.Set(&ws.table_name_,
                                                   range_key,
                                                   &range_record,
                                                   txservice::LockType::ReadLock,
@@ -176,7 +176,7 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
 
                             // Split range request
                             txservice::SplitRangeTxRequest range_split_req(
-                                table_name,
+                                ws.table_name_,
                                 catalog_rec.Schema(),
                                 range_key,
                                 &range_record);
@@ -213,11 +213,11 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
 }
 
 void DsRangeEvaluateOperationService::SubmitEvaluateRangeSizeWork(
-    const txservice::TableName table_name,
+    const txservice::TableName &range_table_name,
     std::map<int32_t, const TxKey *> &&ranges)
 {
     std::unique_lock lk(queue_mutex_);
-    DsEvaluateRangeSizeWorkSettings ws(table_name, std::move(ranges));
+    DsEvaluateRangeSizeWorkSettings ws(range_table_name, std::move(ranges));
     ds_evaluate_range_size_work_queue_.emplace_back(std::move(ws));
     queue_cv_.notify_one();
 }

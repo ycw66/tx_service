@@ -349,3 +349,6 @@ log_service
 
 # pre-commit
 .pre-commit-config.yaml
+
+# macOS garbage
+.DS_Store

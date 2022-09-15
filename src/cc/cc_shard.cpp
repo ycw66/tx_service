@@ -470,7 +470,7 @@ void CcShard::CommitDirtyCatalog(const TableName &table_name,
     local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
 }
 
-const CatalogEntry *CcShard::GetCatalog(const std::string &table_name,
+const CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
                                         NodeGroupId cc_ng_id)
 {
     return local_shards_.GetCatalog(table_name, cc_ng_id);
@@ -591,6 +591,7 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                                             schema_ts,
                                             ccm_has_full_entries,
                                             this));
+        assert(ccm_it.first->first.IsStringOwner());
         return ccm_it.first->second.get();
     }
     else

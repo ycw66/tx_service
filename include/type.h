@@ -1,6 +1,12 @@
 #pragma once
 
+#include <cassert>
+#include <iostream>
 #include <string>
+#include <string_view>
+#include <utility>  //move
+
+#include "constants.h"
 
 namespace txservice
 {
@@ -62,15 +68,191 @@ enum class TxnStatus
     Recycled
 };
 
-using TableName = std::string;
 using NodeGroupId = uint32_t;
 
-enum class TableType
+enum class TableType : uint8_t
 {
-    Primary,
+    Primary = 0,
     Secondary,
     Catalog,
     RangePartition
+};
+
+struct TableName
+{
+    TableName &operator=(const TableName &) = delete;
+
+    explicit TableName(std::string_view name_view, TableType type)
+        : name_view_(name_view), own_string_(false), type_(type)
+    {
+    }
+
+    explicit TableName(const char *name_ptr, size_t name_len, TableType type)
+        : name_str_(name_ptr, name_len), own_string_(true), type_(type)
+    {
+    }
+
+    // Copy constructor always creates a string owner
+    TableName(const TableName &rhs)
+        : name_str_(rhs.StringView().data(), rhs.StringView().size()),
+          own_string_(true),
+          type_(rhs.type_)
+    {
+    }
+
+    // TableName needs to be MoveInsertable in case like
+    // std::vector<txservice::TableName>
+    TableName(TableName &&rhs)
+    {
+        if (rhs.own_string_)
+        {
+            new (&name_str_) std::string(rhs.name_str_);
+        }
+        else
+        {
+            name_view_ = rhs.name_view_;
+        }
+        type_ = rhs.type_;
+        own_string_ = rhs.own_string_;
+    }
+
+    TableName &operator=(TableName &&rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        if (rhs.own_string_)
+        {
+            if (own_string_)
+            {
+                name_str_ = std::move(rhs.name_str_);
+            }
+            else
+            {
+                new (&name_str_) std::string(std::move(rhs.name_str_));
+            }
+        }
+        else
+        {
+            if (own_string_)
+            {
+                name_str_.~basic_string();
+            }
+
+            name_view_ = rhs.StringView();
+        }
+
+        type_ = rhs.type_;
+        own_string_ = rhs.own_string_;
+
+        return *this;
+    }
+
+    ~TableName()
+    {
+        if (own_string_)
+        {
+            name_str_.~basic_string();
+        }
+    }
+
+    bool operator==(const TableName &rhs) const
+    {
+        return type_ == rhs.type_ && this->StringView() == rhs.StringView();
+    }
+
+    bool operator<(const TableName &rhs) const
+    {
+        return type_ == rhs.type_ && this->StringView() < rhs.StringView();
+    }
+
+    std::string_view StringView() const
+    {
+        if (own_string_)
+        {
+            return {name_str_.data(), name_str_.size()};
+        }
+        else
+        {
+            return name_view_;
+        }
+    }
+
+    std::string String() const
+    {
+        if (own_string_)
+        {
+            return name_str_;
+        }
+        else
+        {
+            return std::string(name_view_);
+        }
+    }
+
+    void CopyFrom(const TableName &other)
+    {
+        if (other.own_string_)
+        {
+            if (own_string_)
+            {
+                name_str_ = other.name_str_;
+            }
+            else
+            {
+                new (&name_str_) std::string(other.name_str_);
+            }
+        }
+        else
+        {
+            if (own_string_)
+            {
+                name_str_.~basic_string();
+            }
+
+            name_view_ = other.StringView();
+        }
+
+        type_ = other.type_;
+        own_string_ = other.own_string_;
+    }
+
+    const std::string_view GetBaseTableName() const
+    {
+        if (type_ == TableType::Secondary)
+        {
+            size_t pos = this->StringView().find(INDEX_NAME_PREFIX);
+            assert(pos != std::string_view::npos);
+            std::string_view base_table_name =
+                this->StringView().substr(0, pos);
+
+            return base_table_name;
+        }
+        return this->StringView();
+    }
+
+    bool IsStringOwner() const
+    {
+        return own_string_;
+    }
+
+    const TableType &Type() const
+    {
+        return type_;
+    }
+
+private:
+    // base or index table name
+    union
+    {
+        std::string name_str_;
+        std::string_view name_view_;
+    };
+
+    bool own_string_;
+    TableType type_;
 };
 
 enum struct ReadType
@@ -110,5 +292,23 @@ enum class PostWriteType
     PostCommit
 };
 
-inline static TableName catalog_ccm_name{"__catalog"};
+using namespace std::string_view_literals;
+
+inline static std::string_view empty_sv = "__empty"sv;
+inline static std::string_view catalog_ccm_name_sv = "__catalog"sv;
+
+inline static TableName catalog_ccm_name{
+    catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
 }  // namespace txservice
+
+namespace std
+{
+template <>
+struct hash<txservice::TableName>
+{
+    size_t operator()(const txservice::TableName &name) const
+    {
+        return std::hash<std::string_view>()(name.StringView());
+    }
+};
+}  // namespace std

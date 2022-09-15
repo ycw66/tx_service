@@ -63,9 +63,22 @@ public:
                  LockType lock_type,
                  const TableName *table_name)
     {
-        auto table_it = rset_.try_emplace(*table_name);
-        auto [it, inserted] = table_it.first->second.try_emplace(
-            cce_addr, read_ts, proto, lock_type);
+        auto iter = rset_.find(*table_name);
+        if (iter == rset_.end())
+        {
+            rset_.emplace(std::piecewise_construct,
+                          std::forward_as_tuple(table_name->StringView(),
+                                                table_name->Type()),
+                          std::forward_as_tuple(
+                              std::unordered_map<CcEntryAddr, ReadSetEntry>()));
+        }
+
+        // find again to locate iter
+        iter = rset_.find(*table_name);
+        assert(!iter->first.IsStringOwner());
+
+        auto [it, inserted] =
+            iter->second.try_emplace(cce_addr, read_ts, proto, lock_type);
         if (!inserted)
         {
             it->second.version_ts_ = read_ts;
@@ -125,7 +138,7 @@ public:
         return read_ts;
     }
 
-    bool AddWrite(const TableName &tabname,
+    bool AddWrite(const TableName &table_name,
                   TxKey::Uptr key,
                   TxRecord::Uptr rec,
                   DmlOperation op_type)
@@ -138,13 +151,20 @@ public:
             return false;
         }
 
-        auto table_iter = wset_.find(tabname);
-        if (table_iter == wset_.end())
+        auto iter = wset_.find(table_name);
+        if (iter == wset_.end())
         {
-            auto iter = wset_.try_emplace(tabname);
-            table_iter = iter.first;
+            wset_.emplace(std::piecewise_construct,
+                          std::forward_as_tuple(table_name.StringView(),
+                                                table_name.Type()),
+                          std::forward_as_tuple(TableWriteSet()));
         }
-        TableWriteSet &tws = table_iter->second;
+
+        // find again to locate iter
+        iter = wset_.find(table_name);
+        assert(!iter->first.IsStringOwner());
+
+        TableWriteSet &tws = iter->second;
 
         WriteSetEntry wset_entry;
         wset_entry.key_ = std::move(key);
@@ -311,7 +331,11 @@ public:
         }
         else
         {
-            read_cache_.try_emplace(table_name, key.Clone(), record.Clone());
+            read_cache_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_name.StringView(),
+                                      table_name.Type()),
+                std::forward_as_tuple(key.Clone(), record.Clone()));
         }
     }
 
@@ -334,6 +358,7 @@ public:
     }
 
 private:
+    // rset_, wset_cnt_, read_cache_ are not string owner.
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
         rset_;
     std::unordered_map<TableName, TableWriteSet> wset_;

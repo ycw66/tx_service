@@ -1,17 +1,29 @@
 #include "catalog_key_record.h"
 
+#include <butil/logging.h>
+
 namespace txservice
 {
-CatalogKey::CatalogKey()
+CatalogKey::CatalogKey() : table_name_(empty_sv, TableType::Primary)
 {
 }
 
-CatalogKey::CatalogKey(const TableName &name) : table_name_(name)
+CatalogKey::CatalogKey(const TableName &name)
+    : table_name_(name.IsStringOwner()
+                      ? TableName{name.StringView().data(),
+                                  name.StringView().size(),
+                                  name.Type()}
+                      : TableName{name.StringView(), name.Type()})
 {
 }
 
 CatalogKey::CatalogKey(const CatalogKey &rhs, const Schema *)
-    : table_name_(rhs.table_name_)
+    : table_name_(
+          rhs.table_name_.IsStringOwner()
+              ? TableName{rhs.table_name_.StringView().data(),
+                          rhs.table_name_.StringView().size(),
+                          rhs.table_name_.Type()}
+              : TableName{rhs.table_name_.StringView(), rhs.table_name_.Type()})
 {
 }
 
@@ -37,21 +49,28 @@ bool operator<(const CatalogKey &lhs, const CatalogKey &rhs)
 
 size_t CatalogKey::Hash() const
 {
-    return std::hash<std::string>{}(table_name_);
+    return std::hash<TableName>{}(table_name_);
 }
 
 void CatalogKey::Serialize(std::vector<char> &buf, size_t &offset) const
 {
     // A 2-byte integer represents lengths up to 65535, which is far more enough
     // for table names.
-    uint16_t len_val = (uint16_t) table_name_.size();
+    uint16_t len_val = (uint16_t) table_name_.StringView().size();
     buf.resize(offset + sizeof(uint16_t) + len_val);
     const char *val_ptr =
         static_cast<const char *>(static_cast<const void *>(&len_val));
     std::copy(val_ptr, val_ptr + sizeof(uint16_t), buf.begin() + offset);
     offset += sizeof(uint16_t);
 
-    std::copy(table_name_.begin(), table_name_.end(), buf.begin() + offset);
+    std::copy(table_name_.StringView().begin(),
+              table_name_.StringView().end(),
+              buf.begin() + offset);
+    offset += len_val;
+    // 1 byte integer for table type
+    const char *type_ptr = static_cast<const char *>(
+        static_cast<const void *>(&table_name_.Type()));
+    std::copy(type_ptr, type_ptr + sizeof(uint8_t), buf.begin() + offset);
     offset += len_val;
 }
 
@@ -60,24 +79,48 @@ void CatalogKey::Serialize(std::string &str) const
     size_t len_sizeof = sizeof(uint16_t);
     // A 2-byte integer represents lengths up to 65535, which is far more enough
     // for table names.
-    uint16_t len_val = (uint16_t) table_name_.size();
-    const char *len_ptr = reinterpret_cast<const char *>(&len_val);
+    uint16_t len_val = (uint16_t) table_name_.StringView().size();
+    const char *ptr = reinterpret_cast<const char *>(&len_val);
 
-    str.append(len_ptr, len_sizeof);
-    str.append(table_name_.data(), len_val);
+    str.append(ptr, len_sizeof);
+    str.append(table_name_.StringView().data(), len_val);
+    // 1 byte integer for table type
+    ptr = reinterpret_cast<const char *>(&table_name_.Type());
+    str.append(ptr, sizeof(uint8_t));
 }
 
 void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
 {
+    // construct table name string_view
     uint16_t *len_ptr = (uint16_t *) (buf + offset);
     uint16_t len_val = *len_ptr;
     offset += sizeof(uint16_t);
 
-    table_name_.clear();
-    table_name_.reserve(len_val);
-
-    table_name_.append(buf + offset, len_val);
+    std::string_view str_view{buf + offset, len_val};
     offset += len_val;
+
+    // construct table type
+    TableType table_type;
+    uint8_t *type_ptr = (uint8_t *) (buf + offset);
+    uint8_t type_val = *type_ptr;
+    switch (type_val)
+    {
+    case 0:
+        table_type = TableType::Primary;
+        break;
+    case 1:
+        table_type = TableType::Secondary;
+        break;
+    case 2:
+        table_type = TableType::Catalog;
+        break;
+    case 3:
+        table_type = TableType::RangePartition;
+        break;
+    }
+    offset += sizeof(uint8_t);
+
+    table_name_ = std::move(TableName{str_view, table_type});
 }
 
 TxKey::Uptr CatalogKey::Clone() const
@@ -88,12 +131,12 @@ TxKey::Uptr CatalogKey::Clone() const
 void CatalogKey::Copy(const TxKey &rhs)
 {
     const CatalogKey &typed_rhs = static_cast<const CatalogKey &>(rhs);
-    table_name_ = typed_rhs.table_name_;
+    table_name_.CopyFrom(typed_rhs.table_name_);
 }
 
 std::string CatalogKey::ToString() const
 {
-    return table_name_;
+    return table_name_.String();
 }
 
 const TableName &CatalogKey::Name() const

@@ -59,8 +59,7 @@ public:
                uint64_t schema_ts,
                CcShard *shard)
         : TemplateCcMap<KeyT, RangeRecord>(
-              shard, range_table_name, schema_ts, table_schema),
-          range_table_name_(range_table_name)
+              shard, range_table_name, schema_ts, table_schema)
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
             CcMap::shard_->GetAllTableRangesForATable(range_table_name);
@@ -293,7 +292,7 @@ public:
                 // upload the dirty range attributes to local cc shards
                 const TableRangeEntryWithShade *range_entry_shade =
                     shard_->CreateDirtyTableRange(
-                        range_table_name_,
+                        this->table_name_,
                         range_entry_vo->partition_id_,
                         std::move(range_entry_vo->new_key_),
                         range_entry_vo->new_partition_id_,
@@ -309,7 +308,7 @@ public:
                 // simplely reset the binary_value_ to the local shards dirty
                 // table range, and update the cc map
                 const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->GetTableRangeWithShade(range_table_name_,
+                    shard_->GetTableRangeWithShade(this->table_name_,
                                                    partition_id);
                 cc_map_range_rec->range_entry_ =
                     range_entry_shade->shade_.get();
@@ -324,7 +323,7 @@ public:
                 // commit dirty range, old_range_entry switch back to shader
                 std::pair<TableRangeEntry *, TableRangeEntry *> entries =
                     shard_->CommitDirtyTableRange(
-                        range_table_name_, partition_id, req.CommitTs());
+                        this->table_name_, partition_id, req.CommitTs());
                 old_range_entry = entries.first;
                 new_range_entry = entries.second;
             }
@@ -332,12 +331,12 @@ public:
             {
                 // switch old range rec pointer from shade_ to shader_
                 const TableRangeEntryWithShade *old_partition_shader =
-                    shard_->GetTableRangeWithShade(range_table_name_,
+                    shard_->GetTableRangeWithShade(this->table_name_,
                                                    partition_id);
                 old_range_entry = old_partition_shader->shader_.get();
                 // get the new range entry added by shard 0
                 const TableRangeEntryWithShade *new_partition_shader =
-                    shard_->GetTableRangeWithShade(range_table_name_,
+                    shard_->GetTableRangeWithShade(this->table_name_,
                                                    new_partition_id);
                 new_range_entry = new_partition_shader->shader_.get();
                 assert(new_range_entry != nullptr);
@@ -363,15 +362,12 @@ public:
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
                 // clear shade_ on old partition
-                shard_->PostCommitDirtyTableRange(range_table_name_,
+                shard_->PostCommitDirtyTableRange(this->table_name_,
                                                   partition_id);
             }
         }
 
         return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
     }
-
-private:
-    TableName range_table_name_;
 };
 }  // namespace txservice

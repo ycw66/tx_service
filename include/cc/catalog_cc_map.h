@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "../log_service/include/log_type.h"
 #include "../log_service/proto/raft_log.pb.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
@@ -28,7 +29,7 @@ public:
      *
      * @param shard
      */
-    CatalogCcMap(CcShard *shard, const std::string &table_name)
+    CatalogCcMap(CcShard *shard, const TableName &table_name)
         : TemplateCcMap<CatalogKey, CatalogRecord>(shard, table_name, 1)
     {
     }
@@ -218,11 +219,11 @@ public:
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
                 shard_->DropCcm(table_key->Name(), req.NodeGroupId());
-                TableName range_table_name =
-                    GetRangeTablenameFromTablename(table_key->Name());
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Drop range table if exist
+                TableName range_table_name{table_key->Name().StringView(),
+                                           TableType::RangePartition};
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
 #endif
                 if (old_schema != nullptr)
@@ -232,11 +233,13 @@ public:
                     for (const TableName &index_name : index_names)
                     {
                         shard_->DropCcm(index_name, req.NodeGroupId());
+#ifdef RANGE_PARTITION_ENABLED
                         // Drop range table if exist
-                        TableName index_range_table_name =
-                            GetRangeTablenameFromTablename(index_name);
+                        TableName index_range_table_name{
+                            index_name.StringView(), TableType::RangePartition};
                         shard_->DropCcm(index_range_table_name,
                                         req.NodeGroupId());
+#endif
                     }
                 }
             }
@@ -278,8 +281,8 @@ public:
             // Drop table range before drop catalog
             if (new_schema == nullptr)
             {
-                TableName range_table_name =
-                    GetRangeTablenameFromTablename(table_key->Name());
+                TableName range_table_name{table_key->Name().StringView(),
+                                           TableType::RangePartition};
                 shard_->CleanTableRange(range_table_name, req.NodeGroupId());
 
                 if (old_schema != nullptr)
@@ -289,8 +292,8 @@ public:
                     for (const TableName &index_name : index_names)
                     {
                         // Drop range table if exist
-                        TableName index_range_table_name =
-                            GetRangeTablenameFromTablename(index_name);
+                        TableName index_range_table_name{
+                            index_name.StringView(), TableType::RangePartition};
                         shard_->CleanTableRange(index_range_table_name,
                                                 req.NodeGroupId());
                     }
@@ -468,6 +471,13 @@ public:
         schema_op_msg.ParseFromArray(content.data(), content.length());
 
         const CatalogEntry *catalog_entry = nullptr;
+
+        // Need to parse the string if not include table type in protobuf
+        TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
+            schema_op_msg.table_type());
+        std::string_view table_name_sv{schema_op_msg.table_name_str()};
+        TableName table_name{table_name_sv, table_type};
+
         if (shard_->core_id_ == 0)
         {
             uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
@@ -481,12 +491,12 @@ public:
                 // schemas in catalog entry from replay log so that kv
                 // operations can be performed properly.
                 catalog_entry = shard_->CreateReplayCatalog(
-                    schema_op_msg.table_name(),
+                    table_name,
                     req.NodeGroupId(),
                     schema_op_msg.old_catalog_blob(),
                     schema_op_msg.new_catalog_blob(),
                     req.CommitTs());
-                CatalogKey table_key(schema_op_msg.table_name());
+                CatalogKey table_key(table_name);
                 CcEntry<CatalogKey, CatalogRecord> *cce =
                     FindEmplace(table_key, req.CommitTs());
 
@@ -528,7 +538,7 @@ public:
                 assert(commit_ts > 0);
 
                 catalog_entry =
-                    shard_->CreateCatalog(schema_op_msg.table_name(),
+                    shard_->CreateCatalog(table_name,
                                           req.NodeGroupId(),
                                           schema_op_msg.new_catalog_blob(),
                                           commit_ts);
@@ -537,7 +547,7 @@ public:
                     catalog_entry->schema_.get();
                 if (committed_schema != nullptr)
                 {
-                    shard_->CreatePkCcMap(schema_op_msg.table_name(),
+                    shard_->CreatePkCcMap(table_name,
                                           committed_schema,
                                           req.NodeGroupId(),
                                           catalog_entry->Version());
@@ -556,7 +566,7 @@ public:
             else
             {
                 catalog_entry = shard_->CreateReplayCatalog(
-                    schema_op_msg.table_name(),
+                    table_name,
                     req.NodeGroupId(),
                     schema_op_msg.old_catalog_blob(),
                     schema_op_msg.new_catalog_blob(),
@@ -565,11 +575,10 @@ public:
         }
         else
         {
-            catalog_entry = shard_->GetCatalog(schema_op_msg.table_name(),
-                                               req.NodeGroupId());
+            catalog_entry = shard_->GetCatalog(table_name, req.NodeGroupId());
         }
 
-        CatalogKey table_key(schema_op_msg.table_name());
+        CatalogKey table_key(table_name);
         CcEntry<CatalogKey, CatalogRecord> *cce =
             FindEmplace(table_key, req.CommitTs());
 

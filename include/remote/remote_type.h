@@ -106,6 +106,25 @@ public:
             return RecordStatusType::UNDEFINED;
         }
     }
+
+    static txservice::remote::CcTableType ConvertTableType(
+        txservice::TableType table_type)
+    {
+        switch (table_type)
+        {
+        case TableType::Primary:
+            return CcTableType::Primary;
+        case TableType::Secondary:
+            return CcTableType::Secondary;
+        case TableType::Catalog:
+            return CcTableType::Catalog;
+        case TableType::RangePartition:
+            return CcTableType::RangePartition;
+        default:
+            assert(false);
+            return CcTableType::Primary;
+        }
+    }
 };
 
 class ToLocalType
@@ -197,6 +216,22 @@ public:
             return RecordStatus::Unknown;
         default:
             return RecordStatus::Unknown;
+        }
+    }
+
+    static txservice::TableType ConvertCcTableType(
+        txservice::remote::CcTableType table_type)
+    {
+        switch (table_type)
+        {
+        case CcTableType::Primary:
+            return TableType::Primary;
+        case CcTableType::Secondary:
+            return TableType::Secondary;
+        case CcTableType::Catalog:
+            return TableType::Catalog;
+        default:
+            return TableType::RangePartition;
         }
     }
 };

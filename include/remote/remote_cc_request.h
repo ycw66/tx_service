@@ -46,6 +46,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcHandlerResult<std::vector<AcquireKeyResult>> cc_res_{nullptr};
 };
@@ -74,6 +75,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcHandlerResult<AcquireAllResult> cc_res_{nullptr};
 };
@@ -99,6 +101,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -126,6 +129,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
     CcHandlerResult<ReadKeyResult> cc_res_{nullptr};
 };
 
@@ -213,6 +217,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -239,6 +244,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
 };
@@ -291,6 +297,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     KeyType key_type_{KeyType::Normal};
     const std::string *start_key_str_{nullptr};
@@ -456,6 +463,7 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
 
     CcHandlerResult<bool> cc_res_{nullptr};
 

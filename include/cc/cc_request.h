@@ -59,16 +59,17 @@ public:
 
         if (parallel_req_ || ccm_ == nullptr)
         {
-            assert(table_name_ != nullptr);
+            assert(table_name_ != nullptr &&
+                   table_name_->StringView() != empty_sv);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
             if (ccm == nullptr)
             {
-                if (txservice::IsRangeTablename(*table_name_))
+                if (table_name_->Type() == TableType::RangePartition)
                 {
                     // Get original table name for the range table name
-                    const txservice::TableName base_table_name =
-                        GetBaseTableNameFromRangeTableName(*table_name_);
+                    const TableName base_table_name{
+                        table_name_->GetBaseTableName(), TableType::Primary};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     // When a tx sends a request toward a table's range
@@ -115,7 +116,8 @@ public:
                     // Fecth/Get Catalog is based on base table name, but Get
                     // ccmap is based on the real table name, for example, index
                     // should get the correspond sk_ccmap.
-                    TableName base_table_name = GetBaseTableName(*table_name_);
+                    const TableName base_table_name{
+                        table_name_->GetBaseTableName(), TableType::Primary};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
 
@@ -229,7 +231,8 @@ protected:
      */
     const CatalogEntry *InitCcm(CcShard &ccs)
     {
-        TableName base_table_name = GetBaseTableName(*table_name_);
+        const TableName base_table_name{table_name_->GetBaseTableName(),
+                                        TableType::Primary};
 
         const CatalogEntry *catalog_entry =
             ccs.GetCatalog(base_table_name, node_group_id_);
@@ -264,29 +267,6 @@ protected:
         }
 
         return catalog_entry;
-    }
-
-    /**
-     * @brief Get the base table name from normal table or index table. For
-     * index table, we need to remove the suffix.
-     *
-     * @param table_name: input table name, could be normal table or index
-     * table.
-     * @return base table name
-     */
-    std::string GetBaseTableName(const std::string &table_name)
-    {
-        std::string base_table_name;
-        std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-        if (pos != std::string::npos)
-        {
-            base_table_name = table_name.substr(0, pos);
-        }
-        else
-        {
-            base_table_name = table_name;
-        }
-        return base_table_name;
     }
 
     CcHandlerResult<ResultType> *res_{nullptr};
@@ -1678,6 +1658,7 @@ struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 public:
     ReplayLogCc(uint32_t ng_id,
                 const std::string_view &table_name_view,
+                const TableType table_type,
                 std::string_view &&blob,
                 uint64_t commit_ts,
                 uint64_t txn,
@@ -1685,7 +1666,7 @@ public:
                 std::condition_variable &cv,
                 uint32_t &finish_cnt,
                 bool &recovery_error)
-        : table_name_str_(table_name_view),
+        : table_name_holder_(table_name_view, table_type),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
           result_(nullptr),
@@ -1694,7 +1675,7 @@ public:
           finish_cnt_(finish_cnt),
           recovery_error_(recovery_error)
     {
-        table_name_ = &table_name_str_;
+        table_name_ = &table_name_holder_;
         node_group_id_ = ng_id;
         tx_number_ = txn;
         res_ = &result_;
@@ -1810,7 +1791,7 @@ public:
     }
 
 private:
-    std::string table_name_str_;
+    TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
     uint64_t commit_ts_;
     CcHandlerResult<Void> result_;

@@ -145,7 +145,7 @@ void TransactionExecution::RecoverSchemaTx(
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
         std::unique_ptr<UpsertTableOp> table_op =
-            std::make_unique<UpsertTableOp>(schema_op.table_name(),
+            std::make_unique<UpsertTableOp>(schema_op.table_name_str(),
                                             catalog_rec,
                                             table_msg.is_deleted(),
                                             this);
@@ -476,8 +476,10 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
-    schema_op_ = std::make_unique<UpsertTableOp>(
-        *req.table_name_, req.catalog_record_, req.is_deleted_, this);
+    schema_op_ = std::make_unique<UpsertTableOp>(req.table_name_->StringView(),
+                                                 req.catalog_record_,
+                                                 req.is_deleted_,
+                                                 this);
     PushOperation(schema_op_.get());
     Forward();
 }
@@ -1685,8 +1687,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         {
             uint32_t cc_node_id;
 
-            std::string::size_type pos = table_name.find(INDEX_NAME_PREFIX);
-            if (pos != std::string::npos)
+            if (table_name.Type() == TableType::Secondary)
             {
                 uint32_t shard_code =
                     Sharder::Instance().ShardCode(key_ptr->Hash());
@@ -1720,7 +1721,12 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             std::unordered_map<TableName, std::vector<const WriteSetEntry *>>
                 &table_rec_set = table_rec_it.first->second;
 
-            auto rec_vec_it = table_rec_set.try_emplace(table_name);
+            auto rec_vec_it = table_rec_set.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_name.StringView(),
+                                      table_name.Type()),
+                std::forward_as_tuple(std::vector<const WriteSetEntry *>()));
+
             rec_vec_it.first->second.emplace_back(&wset_entry);
         }
     }
@@ -1744,9 +1750,10 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         // The log blob of a table in a node group is in the following format:
         // (1) A 1-byte integer for the length of the table name, followed by
         // (2) The string of the table name.
-        // (3) A 4-byte integer for the total length of serialized key-record
+        // (3) A 1-byte integer for the type of table.
+        // (4) A 4-byte integer for the total length of serialized key-record
         // pairs modified by the tx in the node group.
-        // (4) A sequence of modified records. Each record is encoded as
+        // (5) A sequence of modified records. Each record is encoded as
         // follows:
         //   (a) The serialized key
         //   (b) A 1-byte flag to indicate if the record is normal, deleted or
@@ -1754,10 +1761,13 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
         //   (c) The serialized record if the record is normal.
         for (const auto &[table_name, wset_entry_vec] : table_rec_set)
         {
-            uint8_t tabname_len = table_name.length();
+            uint8_t tabname_len = table_name.StringView().size();
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             log_ng_blob->append(ptr, sizeof(uint8_t));
-            log_ng_blob->append(table_name.data(), tabname_len);
+            log_ng_blob->append(table_name.StringView().data(), tabname_len);
+            // 1 byte integer for table type
+            ptr = reinterpret_cast<const char *>(&table_name.Type());
+            log_ng_blob->append(ptr, sizeof(uint8_t));
 
             // The start position of the 4-byte integer for the length of
             // serialized k-v pairs.
@@ -2194,16 +2204,6 @@ void TransactionExecution::PostProcess(PostWriteAllOp &post_write_all_op)
         });
     state_stack_.pop_back();
 
-    // remove read set entry for tables that have been dropped.
-    // such as CREATE TABLE ... SELECT ... statement.
-    if (post_write_all_op.write_type_ == PostWriteType::PostCommit &&
-        post_write_all_op.dml_op_ == DmlOperation::Delete)
-    {
-        assert(post_write_all_op.key_ != nullptr);
-        const CatalogKey *table_key =
-            static_cast<const CatalogKey *>(post_write_all_op.key_);
-        rw_set_.ClearReadSet(table_key->Name());
-    }
     // So far, post-write-all is only used for schema evolution operations.
     assert(!state_stack_.empty());
     Forward();

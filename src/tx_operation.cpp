@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 
+#include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
 #include "fault/fault_inject.h"
 #include "range_record.h"
@@ -1008,20 +1009,21 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
     }
 }
 
-SchemaOp::SchemaOp(const TableName &table_name,
+SchemaOp::SchemaOp(const std::string_view table_name_sv,
                    const CatalogRecord &catalog_rec)
-    : table_key_(table_name)
+    : table_key_(TableName(
+          table_name_sv.data(), table_name_sv.size(), TableType::Primary))
 {
     catalog_rec_ = catalog_rec;
     image_str_ = catalog_rec_.SchemaImage();
     dirty_image_str_ = catalog_rec_.DirtySchemaImage();
 }
 
-UpsertTableOp::UpsertTableOp(const TableName &table_name,
+UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
                              const CatalogRecord *catalog_rec,
                              bool is_deleted,
                              TransactionExecution *txm)
-    : SchemaOp(table_name, *catalog_rec),
+    : SchemaOp(table_name_str, *catalog_rec),
       is_deleted_(is_deleted),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -1243,6 +1245,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // after the commit log is flushed.
             op_ = &post_all_lock_op_;
 
+            // Clear write set before commit dirty schema.
+            txm->rw_set_.ClearTable(table_key_.Name());
+
+            // Remove read set entry for tables that have been dropped,
+            // such as CREATE TABLE ... SELECT ... statement.
+            assert(post_all_lock_op_.key_ != nullptr);
+            const CatalogKey *table_key =
+                static_cast<const CatalogKey *>(post_all_lock_op_.key_);
+            txm->rw_set_.ClearReadSet(table_key->Name());
+
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
         }
@@ -1430,11 +1442,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (is_deleted_)
-            {
-                txm->rw_set_.ClearTable(table_key_.Name());
-            }
-
             txm->bool_resp_->Finish(true);
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
@@ -1458,7 +1465,9 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
 
     ::txlog::SchemaOpMessage *prepare_schema_msg =
         prepare_log_rec->mutable_log_content()->mutable_schema_log();
-    prepare_schema_msg->set_table_name(table_key_.Name());
+    prepare_schema_msg->set_table_name_str(table_key_.Name().String());
+    prepare_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
     prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
     if (is_deleted_)
@@ -1815,7 +1824,7 @@ DsSplitRangeOp::DsSplitRangeOp(const TableName &table_name,
                                RangeRecord *splitting_range_record,
                                TransactionExecution *txm)
     : CompositeTransactionOperation(),
-      range_table_name_(GetRangeTablenameFromTablename(table_name)),
+      range_table_name_(table_name.StringView(), TableType::RangePartition),
       table_schema_(table_schema),
       range_key_(range_key),
       old_range_record_(splitting_range_record),
