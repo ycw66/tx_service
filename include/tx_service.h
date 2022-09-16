@@ -102,7 +102,7 @@ public:
     void Run()
     {
         size_t idle_rounds = 0;
-        size_t busy_rounds = 0;
+        size_t rounds = 0;
         auto idle_start = std::chrono::system_clock::now();
 
         while (!terminated_.load(std::memory_order_relaxed))
@@ -110,35 +110,37 @@ public:
             size_t tx_cnt = 0, req_cnt = 0;
             RunOneRound(tx_cnt, req_cnt);
 
+            if ((rounds & 0xFFFFF) == 0)
+            {
+                // For every 1 million rounds, checks tx's in the waiting queue.
+                // Running one round takes from a few nano seconds (when there
+                // is no tx request or cc request to execute) to micro seconds.
+                // So, the gap between two checkings varies from milli seconds
+                // to seconds.
+                CheckWaitingTx();
+            }
+            ++rounds;
+
             if (tx_cnt > 0 || req_cnt > 0)
             {
                 idle_rounds = 0;
-                ++busy_rounds;
-
-                // For every 65536 rounds, checks tx's in the waiting queue.
-                if ((busy_rounds & 0xFFFF) == 0)
-                {
-                    CheckWaitingTx();
-                }
-
                 continue;
             }
 
-            busy_rounds = 0;
             if (idle_rounds == 0)
             {
                 idle_start = std::chrono::system_clock::now();
             }
 
             ++idle_rounds;
-
-            if ((idle_rounds & 0xFFFF) != 0)
+            if ((idle_rounds & 0xFFFFFFF) != 0)
             {
+                // It takes less than 10 nano seconds to run a loop when the tx
+                // processor processes nothing. 0xFFFFFFF = 268,435,455 rounds
+                // take no more than 2.6 seconds.
                 continue;
             }
 
-            // For every 65536 rounds, checks if the tx processor has been idle
-            // for 1 second. If so, the tx processor enters into the sleep mode.
             auto now_time = std::chrono::system_clock::now();
             while (now_time - idle_start > 2s)
             {
@@ -147,6 +149,7 @@ public:
                 if (enlist_tx_cnt > 0)
                 {
                     idle_rounds = 0;
+                    rounds = 0;
                     break;
                 }
 
@@ -221,6 +224,7 @@ public:
                     // The tx processor is woken up by a signal. Exits the sleep
                     // mode.
                     idle_rounds = 0;
+                    rounds = 0;
                     break;
                 }
             }
@@ -396,8 +400,8 @@ public:
     /**
      * @brief A collection of tx's who are ready to be executed. A tx is ready
      * to be executed, if it (a) receives the response from a local/remote cc
-     * request, (b) receives a new tx request from the tx user, or (c) times out
-     * on the prior cc request.
+     * request, or (b) receives a new tx request from the tx user, or (c) times
+     * out when waiting for a remote cc request.
      *
      */
     moodycamel::ConcurrentQueue<TransactionExecution *> to_exec_txs_;

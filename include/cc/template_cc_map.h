@@ -776,16 +776,13 @@ public:
                 }
                 else
                 {
-                    // For 2PL, a conflict blocks the tx by putting it into the
-                    // lock's blocking queue.
-
-                    uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-                    if (tx_node != req.NodeGroupId())
+                    // If the request comes from a remote node, sends
+                    // acknowledgement to the sender when the request is
+                    // blocked.
+                    if (!req.IsLocal())
                     {
                         req.Result()->Value().node_term_ = ng_term;
-                        // If the request comes from a remote node, sends
-                        // acknowledgement to the sender when the request is
-                        // blocked.
+
                         remote::RemoteAcquireAll &remote_req =
                             static_cast<remote::RemoteAcquireAll &>(req);
                         remote_req.Acknowledge();
@@ -1279,12 +1276,12 @@ public:
                                     .append(",\"term\":")
                                     .append(std::to_string(req.TxTerm()));
                             });
-                        uint32_t tx_node = (tx_number >> 32L) >> 10;
-                        if (tx_node != cce_node_group_id)
+
+                        // If the read request comes from a remote node, sends
+                        // acknowledgement to the sender when the request is
+                        // blocked.
+                        if (!req.IsLocal())
                         {
-                            // If the read request comes from a remote node,
-                            // sends acknowledgement to the sender when the
-                            // request is blocked.
                             remote::RemoteRead &remote_req =
                                 static_cast<remote::RemoteRead &>(req);
                             remote_req.Acknowledge();
@@ -1309,7 +1306,6 @@ public:
             {
                 TxNumber tx_number = req.Txn();
                 int64_t tx_term = req.TxTerm();
-                uint32_t cce_node_group_id = req.NodeGroupId();
 
                 bool lock_success = cce->key_lock_.AcquireWriteIntent(
                     &req, req.Txn(), req.Protocol());
@@ -1321,12 +1317,11 @@ public:
                         // For 2PL, a conflict blocks the tx by putting it into
                         // the lock's blocking queue.
 
-                        uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-                        if (tx_node != cce_node_group_id)
+                        // If the read request comes from a remote node, sends
+                        // acknowledgement to the sender when the request is
+                        // blocked.
+                        if (!req.IsLocal())
                         {
-                            // If the read request comes from a remote node,
-                            // sends acknowledgement to the sender when the
-                            // request is blocked.
                             remote::RemoteRead &remote_req =
                                 static_cast<remote::RemoteRead &>(req);
                             remote_req.Acknowledge();

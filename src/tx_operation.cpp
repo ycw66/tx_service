@@ -953,7 +953,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
+    else if (txm->IsTimeOut(2))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1010,20 +1010,26 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 SchemaOp::SchemaOp(const std::string_view table_name_sv,
-                   const CatalogRecord &catalog_rec)
+                   const std::string &current_image,
+                   const std::string &dirty_image,
+                   uint64_t schema_ts)
     : table_key_(TableName(
           table_name_sv.data(), table_name_sv.size(), TableType::Primary))
 {
-    catalog_rec_ = catalog_rec;
-    image_str_ = catalog_rec_.SchemaImage();
-    dirty_image_str_ = catalog_rec_.DirtySchemaImage();
+    catalog_rec_.SetSchemaImage(current_image);
+    catalog_rec_.SetDirtySchemaImage(dirty_image);
+    image_str_ = current_image;
+    dirty_image_str_ = dirty_image;
+    curr_schema_ts_ = schema_ts;
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
-                             const CatalogRecord *catalog_rec,
+                             const std::string &current_image,
+                             uint64_t curr_schema_ts,
+                             const std::string &dirty_image,
                              bool is_deleted,
                              TransactionExecution *txm)
-    : SchemaOp(table_name_str, *catalog_rec),
+    : SchemaOp(table_name_str, current_image, dirty_image, curr_schema_ts),
       is_deleted_(is_deleted),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -1241,22 +1247,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (is_deleted_)
         {
-            // For DROP TABLE statements, the data store operation happens
-            // after the commit log is flushed.
-            op_ = &post_all_lock_op_;
-
             // Clear write set before commit dirty schema.
             txm->rw_set_.ClearTable(table_key_.Name());
+            txm->rw_set_.ClearReadSet(table_key_.Name());
 
-            // Remove read set entry for tables that have been dropped,
-            // such as CREATE TABLE ... SELECT ... statement.
-            assert(post_all_lock_op_.key_ != nullptr);
-            const CatalogKey *table_key =
-                static_cast<const CatalogKey *>(post_all_lock_op_.key_);
-            txm->rw_set_.ClearReadSet(table_key->Name());
-
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            // For DROP TABLE, the data store operation happens after all write
+            // locks are acquired and before the commit log is flushed.
+            op_ = &commit_log_op_;
+            FillCommitLogRequest(txm);
+            txm->PushOperation(&commit_log_op_);
+            txm->Process(commit_log_op_);
         }
         else
         {
@@ -1296,10 +1296,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            op_ = &commit_log_op_;
-            FillCommitLogRequest(txm);
-            txm->PushOperation(&commit_log_op_);
-            txm->Process(commit_log_op_);
+            if (is_deleted_)
+            {
+                op_ = &upsert_kv_table_op_;
+                upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
+                txm->PushOperation(&upsert_kv_table_op_);
+                txm->Process(upsert_kv_table_op_);
+            }
+            else
+            {
+                op_ = &commit_log_op_;
+                FillCommitLogRequest(txm);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
         }
     }
     else if (op_ == &commit_log_op_)
@@ -1332,20 +1342,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (is_deleted_)
-            {
-                op_ = &upsert_kv_table_op_;
-                upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
-            }
-            else
-            {
-                op_ = &post_all_lock_op_;
+            op_ = &post_all_lock_op_;
 
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
-            }
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
         }
     }
     else if (op_ == &post_all_lock_op_)
@@ -1469,6 +1469,7 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
     prepare_schema_msg->set_table_type(
         ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
+    prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
     prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
     if (is_deleted_)
     {

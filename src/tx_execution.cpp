@@ -128,7 +128,6 @@ TxnStatus TransactionExecution::TxStatus() const
 
 void TransactionExecution::RecoverSchemaTx(
     const ::txlog::SchemaOpMessage &schema_op,
-    const CatalogRecord *catalog_rec,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts)
@@ -146,7 +145,9 @@ void TransactionExecution::RecoverSchemaTx(
 
         std::unique_ptr<UpsertTableOp> table_op =
             std::make_unique<UpsertTableOp>(schema_op.table_name_str(),
-                                            catalog_rec,
+                                            schema_op.old_catalog_blob(),
+                                            schema_op.catalog_ts(),
+                                            schema_op.new_catalog_blob(),
                                             table_msg.is_deleted(),
                                             this);
 
@@ -477,7 +478,9 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     bool_resp_ = &req.tx_result_;
 
     schema_op_ = std::make_unique<UpsertTableOp>(req.table_name_->StringView(),
-                                                 req.catalog_record_,
+                                                 *req.curr_image_,
+                                                 req.curr_schema_ts_,
+                                                 *req.dirty_image_,
                                                  req.is_deleted_,
                                                  this);
     PushOperation(schema_op_.get());
@@ -1519,6 +1522,7 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
         }
     }
 
+    set_ts.Reset();
     handler->SetCommitTimestamp(txid_, candidate, set_ts.hd_result_);
     set_ts.Forward(this);
 }

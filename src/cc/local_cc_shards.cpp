@@ -131,7 +131,8 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
     NodeGroupId cc_ng_id,
     const std::string &old_catalog_image,
     const std::string &new_catalog_image,
-    uint64_t commit_ts)
+    uint64_t old_schema_ts,
+    uint64_t dirty_schema_ts)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
 
@@ -150,11 +151,11 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
             old_catalog_image.empty()
                 ? nullptr
                 : catalog_factory_->CreateTableSchema(
-                      table_name, old_catalog_image, 1, cc_ng_id),
+                      table_name, old_catalog_image, old_schema_ts, cc_ng_id),
             1);
     }
-    if (catalog_entry.Version() < commit_ts &&
-        catalog_entry.DirtyVersion() < commit_ts)
+    if (catalog_entry.Version() < dirty_schema_ts &&
+        catalog_entry.DirtyVersion() < dirty_schema_ts)
     {
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
@@ -162,8 +163,8 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
             new_catalog_image.empty()
                 ? nullptr
                 : catalog_factory_->CreateTableSchema(
-                      table_name, new_catalog_image, commit_ts, cc_ng_id),
-            commit_ts);
+                      table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
+            dirty_schema_ts);
     }
     return &catalog_entry;
 }
@@ -266,14 +267,12 @@ std::unordered_set<TableName> LocalCcShards::CatalogTableNames(
 
 void LocalCcShards::CreateSchemaRecoveryTx(
     const ::txlog::SchemaOpMessage &schema_op_msg,
-    const CatalogRecord *catalog_record,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts)
 {
     TransactionExecution *txm = tx_service_->NewTx();
-    txm->RecoverSchemaTx(
-        schema_op_msg, catalog_record, txn, tx_term, commit_ts);
+    txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
 }
 
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,
@@ -472,6 +471,8 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
 
 void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
 {
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
     for (auto node_catalog_it = table_catalogs_.begin();
          node_catalog_it != table_catalogs_.end();
          ++node_catalog_it)
@@ -483,5 +484,49 @@ void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
 void LocalCcShards::WakeUpTxProcessor(uint16_t core_id)
 {
     tx_service_->WakeUpTxProcessor(core_id);
+}
+
+std::shared_ptr<TableSchema> LocalCcShards::GetSharedTableSchema(
+    const TableName &table_name, NodeGroupId ng_id)
+{
+    std::shared_lock<std::shared_mutex> shards_lk(catalog_mux_);
+
+    auto ng_catalog_it = table_catalogs_.find(table_name);
+    if (ng_catalog_it == table_catalogs_.end())
+    {
+        return nullptr;
+    }
+
+    auto catalog_it = ng_catalog_it->second.find(ng_id);
+    if (catalog_it == ng_catalog_it->second.end())
+    {
+        return nullptr;
+    }
+
+    CatalogEntry &catalog_entry = catalog_it->second;
+
+    {
+        std::shared_lock<std::shared_mutex> catalog_s_lk(catalog_entry.s_mux_);
+        if (!catalog_entry.committing_)
+        {
+            return catalog_entry.schema_;
+        }
+    }
+
+    std::unique_lock<std::shared_mutex> catalog_lk(catalog_entry.s_mux_);
+    // Releases the shared lock on the catatalog collection while keeping the
+    // exclusive lock on the specified table's catalog. This allows other tx's
+    // to create, drop or alter other tables' catalogs and the cc node to clear
+    // all associating table catalogs when it steps down from the leader.
+    // Stepping down will de-allocate the catalog entry, which synchronizes with
+    // runtime threads obtaining a catalog pointer via the catalog entry's lock.
+    shards_lk.unlock();
+
+    ++catalog_entry.waiting_thd_cnt_;
+    catalog_entry.cv_.wait(
+        catalog_lk, [&catalog_entry] { return !catalog_entry.committing_; });
+    --catalog_entry.waiting_thd_cnt_;
+
+    return catalog_entry.schema_;
 }
 }  // namespace txservice

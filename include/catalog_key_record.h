@@ -1,5 +1,7 @@
 #pragma once
 
+#include <condition_variable>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -64,6 +66,18 @@ struct CatalogEntry
 {
     CatalogEntry() = default;
 
+    ~CatalogEntry()
+    {
+        {
+            std::unique_lock<std::shared_mutex> lk(s_mux_);
+            committing_ = false;
+        }
+        cv_.notify_all();
+
+        std::unique_lock<std::shared_mutex> lk(s_mux_);
+        cv_.wait(lk, [this] { return waiting_thd_cnt_ == 0; });
+    }
+
     void InitSchema(std::unique_ptr<TableSchema> schema, uint64_t version_ts)
     {
         assert(version_ts > 0);
@@ -121,10 +135,15 @@ struct CatalogEntry
         return dirty_schema_version_;
     }
 
-    std::unique_ptr<TableSchema> schema_{nullptr};
-    std::unique_ptr<TableSchema> dirty_schema_{nullptr};
+    std::shared_ptr<TableSchema> schema_{nullptr};
+    std::shared_ptr<TableSchema> dirty_schema_{nullptr};
     uint64_t schema_version_{0};
     uint64_t dirty_schema_version_{0};
+
+    std::shared_mutex s_mux_;
+    std::condition_variable_any cv_;
+    bool committing_{false};
+    uint32_t waiting_thd_cnt_{0};
 };
 
 /**

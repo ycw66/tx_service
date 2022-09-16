@@ -266,16 +266,22 @@ struct UpsertTableTxRequest
     : public TemplateTxRequest<UpsertTableTxRequest, bool>
 {
     UpsertTableTxRequest(const TableName *table_name,
-                         const CatalogRecord *catalog_record,
+                         const std::string *curr_image,
+                         uint64_t schema_ts,
+                         const std::string *dirty_image,
                          bool is_deleted)
         : table_name_(table_name),
-          catalog_record_(catalog_record),
+          curr_image_(curr_image),
+          curr_schema_ts_(schema_ts),
+          dirty_image_(dirty_image),
           is_deleted_(is_deleted)
     {
     }
 
     const TableName *table_name_;
-    const CatalogRecord *catalog_record_;
+    const std::string *curr_image_;
+    uint64_t curr_schema_ts_;
+    const std::string *dirty_image_;
     bool is_deleted_;
 };
 

@@ -231,7 +231,8 @@ public:
         NodeGroupId cc_ng_id,
         const std::string &old_catalog_image,
         const std::string &new_catalog_image,
-        uint64_t commit_ts);
+        uint64_t old_schema_ts,
+        uint64_t dirty_schema_ts);
 
     void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
@@ -241,10 +242,10 @@ public:
     std::unordered_set<TableName> CatalogTableNames(NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
-                                const CatalogRecord *catalog_rec,
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);
+
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges);
 
@@ -314,6 +315,9 @@ public:
     {
         return enable_mvcc_;
     }
+
+    std::shared_ptr<TableSchema> GetSharedTableSchema(
+        const TableName &table_name, NodeGroupId ng_id);
 
     store::DataStoreHandler *const store_hd_;
 

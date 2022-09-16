@@ -131,7 +131,6 @@ public:
     TxnStatus TxStatus() const;
 
     void RecoverSchemaTx(const ::txlog::SchemaOpMessage &schema_op,
-                         const CatalogRecord *catalog_rec,
                          uint64_t txn,
                          int64_t tx_term,
                          uint64_t commit_ts);

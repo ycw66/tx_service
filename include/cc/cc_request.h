@@ -446,6 +446,7 @@ public:
         decoded_key_ = nullptr;
         lock_type_ = lk_type;
         cce_ptr_ = nullptr;
+        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
@@ -468,6 +469,7 @@ public:
         decoded_key_ = nullptr;
         lock_type_ = lk_type;
         cce_ptr_ = nullptr;
+        is_local_ = false;
     }
 
     const TxKey *Key() const
@@ -521,6 +523,11 @@ public:
         ccm_ = nullptr;
     }
 
+    bool IsLocal() const
+    {
+        return is_local_;
+    }
+
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
@@ -534,6 +541,7 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+    bool is_local_{true};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
@@ -935,6 +943,7 @@ public:
         lock_type_ = lock_type;
         cce_ptr_ = nullptr;
         archives_ = archives;
+        is_local_ = true;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -979,6 +988,7 @@ public:
         lock_type_ = lock_type;
         cce_ptr_ = nullptr;
         archives_ = archives;
+        is_local_ = false;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -1070,6 +1080,11 @@ public:
         return archives_;
     }
 
+    bool IsLocal() const
+    {
+        return is_local_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
@@ -1086,6 +1101,7 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+    bool is_local_{true};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };

@@ -448,10 +448,15 @@ const CatalogEntry *CcShard::CreateReplayCatalog(
     NodeGroupId cc_ng_id,
     const std::string &old_schema_image,
     const std::string &new_schema_image,
-    uint64_t commit_ts)
+    uint64_t old_schema_ts,
+    uint64_t dirty_schema_ts)
 {
-    return local_shards_.CreateReplayCatalog(
-        table_name, cc_ng_id, old_schema_image, new_schema_image, commit_ts);
+    return local_shards_.CreateReplayCatalog(table_name,
+                                             cc_ng_id,
+                                             old_schema_image,
+                                             new_schema_image,
+                                             old_schema_ts,
+                                             dirty_schema_ts);
 }
 
 const CatalogEntry *CcShard::CreateDirtyCatalog(

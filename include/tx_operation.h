@@ -315,19 +315,24 @@ struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
     SchemaOp(const std::string_view table_name_sv,
-             const CatalogRecord &catalog_rec);
+             const std::string &current_image,
+             const std::string &dirty_image,
+             uint64_t schema_ts);
 
     CatalogKey table_key_;  // string owner
     CatalogRecord catalog_rec_;
     std::string image_str_{""};
     std::string dirty_image_str_{""};
+    uint64_t curr_schema_ts_;
 };
 
 struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
     UpsertTableOp(const std::string_view table_name_str,
-                  const CatalogRecord *catalog_rec,
+                  const std::string &current_image,
+                  uint64_t curr_schema_ts,
+                  const std::string &dirty_image,
                   bool is_deleted,
                   TransactionExecution *txm);
 

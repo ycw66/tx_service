@@ -343,7 +343,8 @@ public:
                                             NodeGroupId cc_ng_id,
                                             const std::string &old_schema_image,
                                             const std::string &new_schema_image,
-                                            uint64_t commit_ts);
+                                            uint64_t old_schema_ts,
+                                            uint64_t dirty_schema_ts);
 
     void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 

@@ -47,8 +47,10 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
         else if (status_ == RecordStatus::Deleted)
         {
             assert(catalog_image_.empty());
-            ccs.CreateCatalog(
-                table_name_, cc_ng_id_, catalog_image_, ccs.Now());
+            // The catalog of the specified table does not exists. The version
+            // of the non-existent catalog starts from the beginning of history,
+            // i.e., ts=1.
+            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
         }
         else
         {
