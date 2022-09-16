@@ -58,8 +58,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::AcquireWriteAll(
@@ -94,8 +94,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq_all->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
-    stream_sender_.SendMessageToNg(node_group_id, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(node_group_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostWrite(
@@ -147,8 +147,8 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     post_commit->set_is_deleted(is_deleted);
     post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
-    stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostWriteAll(
@@ -206,8 +206,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
         ToRemoteType::ConvertPostWriteType(post_write_type);
     post_write_all->set_commit_type(commit_type);
 
-    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::PostRead(
@@ -242,8 +242,8 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_protocol(ToRemoteType::ConvertProtocol(protocol));
     vali->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
-    stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::Read(
@@ -304,8 +304,8 @@ void txservice::remote::RemoteCcHandler::Read(
 
     read->set_ts(ts);
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
 }
 
 /*
@@ -415,8 +415,8 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
     scan_open->set_ckpt(is_ckpt);
 
-    stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
     hd_res.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::ScanNext(
@@ -455,8 +455,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
     scan_next->set_ckpt(is_ckpt);
 
-    stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
     hd_res.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }
 
 void txservice::remote::RemoteCcHandler::FaultInject(
@@ -481,8 +481,8 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     fi_req->set_fault_name(fault_name);
     fi_req->set_fault_paras(fault_paras);
 
-    stream_sender_.SendMessageToNg(node_id, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(node_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
@@ -516,6 +516,6 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->set_only_archives(only_archives);
     clean_req->set_flush(flush);
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
     hres.Txm()->EnlistToWait();
+    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
 }
