@@ -1591,7 +1591,7 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(
+                    ? ForwardScanStart(
                           *look_key, req.inclusive_, req.is_include_floor_cce_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
@@ -1991,7 +1991,7 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_key, req.inclusive_)
+                    ? ForwardScanStart(*look_key, req.inclusive_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
@@ -3158,124 +3158,97 @@ protected:
         return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
     }
 
-    std::pair<Iterator, ScanType> MakeForwardScanPair(Iterator it,
-                                                      bool is_include_floor_cce)
-    {
-        if (is_include_floor_cce)
-        {
-            return std::make_pair(it, ScanType::ScanBoth);
-        }
-        else
-        {
-            return std::make_pair(it, ScanType::ScanGap);
-        }
-    }
-
     /**
      * @brief Searches the start cc entry of a forward scan.
      *
      * @param key Search key
      * @param inclusive Whether or not the start key is included in the scan
+     * @param is_include_floor_cce This param is used only by range_cc_map scan,
+     * and is always true. Range scan searches for the floor of the search key
+     * and returns both its key and gap.
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
      * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
      * starting from the start cc entry and whether the scan includes the start
      * cc entry's key or gap or both.
      */
-    std::pair<Iterator, ScanType> FowardScanStart(
+    std::pair<Iterator, ScanType> ForwardScanStart(
         const KeyT &key, bool inclusive, bool is_include_floor_cce = false)
     {
         if (key.Type() == KeyType::NegativeInf)
         {
-            return MakeForwardScanPair(Begin(), is_include_floor_cce);
+            return std::make_pair(Begin(), ScanType::ScanGap);
         }
 
-        // The key equal to or greater than the search key.
-        auto lower_it = ccm_.lower_bound(key);
-
-        if (lower_it == ccm_.end())
+        if (inclusive || is_include_floor_cce)  // >= key or range_cc_map scan,
+                                                // search for lower_bound(key)
         {
-            if (ccm_.empty())
-            {
-                return MakeForwardScanPair(Begin(), is_include_floor_cce);
-            }
-            else
-            {
-                // lower_it must be pointing to the end of the map. The start
-                // entry is the last in the map, only including the gap.
-                --lower_it;
-                return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
-                                           is_include_floor_cce);
-            }
-        }
-
-        if (lower_it->first == key)
-        {
+            auto lb_it = ccm_.lower_bound(key);
             // The search key may match more than one cc entry. Even though
             // each cc map's key is unique, this is possible when the search
             // key is a prefix of a compound key. For example, the cc map's
             // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk >= 20 or WHERE
+            // (30,'d'), and the search condition is 20: WHERE pk >= 20 or WHERE
             // pk > 20. The search key is considered equal to both (20, 'b') and
-            // (20, 'c').
-            if (inclusive)
+            // (20, 'c'). In this "WHERE pk >= 20" case, the gap of (10, 'a')
+            // also needs to be returned.
+            if (lb_it == ccm_.end() || !(lb_it->first == key) ||
+                key.IsPrefixOf(lb_it->first))
             {
-                // WEHRE pk >= 20. The start entry is the entry before lower
-                // bound, i.e., (10, 'a'), including the gap, which may contain
-                // (20, 'a').
-
-                if (lower_it == ccm_.begin())
+                // start from previous entry's gap
+                if (lb_it == ccm_.begin())
                 {
-                    return MakeForwardScanPair(Begin(), is_include_floor_cce);
+                    return std::make_pair(Begin(), ScanType::ScanGap);
                 }
                 else
                 {
-                    --lower_it;
-                    return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
-                                               is_include_floor_cce);
+                    --lb_it;
+                    if (is_include_floor_cce)  // range_cc_map scan, ScanBoth
+                    {
+                        return std::make_pair(Iterator(lb_it, &neg_inf_),
+                                              ScanType::ScanBoth);
+                    }
+                    else
+                    {
+                        return std::make_pair(Iterator(lb_it, &neg_inf_),
+                                              ScanType::ScanGap);
+                    }
                 }
             }
             else
             {
-                auto next_it = std::next(lower_it, 1);
-                if (next_it != ccm_.end() && next_it->first == key)
-                {
-                    // The search key matches more than one entry, e.g., WEHRE
-                    // pk > 20. The start entry is the end of the repeated
-                    // entries, i.e., (20, 'c').
-
-                    // The key greater than the search key, i.e., (30, 'd').
-                    auto upper_it = ccm_.upper_bound(key);
-
-                    // The start entry is the one prior to (30, 'd'), including
-                    // the gap but not the key.
-                    --upper_it;
-                    return MakeForwardScanPair(Iterator(upper_it, &neg_inf_),
-                                               is_include_floor_cce);
-                }
-                else
-                {
-                    return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
-                                               is_include_floor_cce);
-                }
+                // lb_it's key is exactly equal to key, start from lb_it and its
+                // gap, but not including previous key gap
+                return std::make_pair(Iterator(lb_it, &neg_inf_),
+                                      ScanType::ScanBoth);
             }
         }
-        else
+        else  // > key, search for the entry before upper_bound(key)
         {
-            // The search key falls into a gap between two existing keys. The
-            // start entry precedes the lower bound, excluding the key.
-            if (lower_it == ccm_.begin())
+            auto ub_it = ccm_.upper_bound(key);
+            // start from the gap of previous entry of ub_it
+            if (ub_it == ccm_.begin())
             {
-                return MakeForwardScanPair(Begin(), is_include_floor_cce);
+                return std::make_pair(Begin(), ScanType::ScanGap);
             }
             else
             {
-                --lower_it;
-                return MakeForwardScanPair(Iterator(lower_it, &neg_inf_),
-                                           is_include_floor_cce);
+                ub_it--;
+                return std::make_pair(Iterator(ub_it, &neg_inf_),
+                                      ScanType::ScanGap);
             }
         }
     }
 
+    /**
+     * @brief Searches the start cc entry of a backward scan.
+     *
+     * @param key Search key
+     * @param inclusive Whether or not the start key is included in the scan
+     * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
+     * ValueT>>::const_iterator, ScanType> A pair of a backward map iterator
+     * starting from the start cc entry and whether the scan includes the start
+     * cc entry's key or gap or both.
+     */
     std::pair<Iterator, ScanType> BackwardScanStart(const KeyT &key,
                                                     bool inclusive)
     {
@@ -3286,86 +3259,57 @@ protected:
             return std::make_pair(start_it, ScanType::ScanBoth);
         }
 
-        // The key equal to or greater than the search key.
-        auto lower_it = ccm_.lower_bound(key);
-
-        if (lower_it == ccm_.end())
+        if (inclusive)  // <= key, search for the entry before upper_bound(key)
         {
-            if (ccm_.empty())
+            auto ub_it = ccm_.upper_bound(key);
+            if (ub_it == ccm_.begin())
             {
+                // map empty or every key in ccm_ is greater than key, return
+                // neg_inf_'s gap
                 return std::make_pair(Begin(), ScanType::ScanGap);
             }
             else
             {
-                // lower_it must be pointing to the end of the map. Decrements
-                // lower_it to point to the last entry in the map.
-                --lower_it;
-                return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                      ScanType::ScanBoth);
-            }
-        }
+                ub_it--;
+                // now, ub_it is the greatest entry equal to or less than key
 
-        if (lower_it->first == key)
-        {
-            // The search key may match more than one cc entry. Even though
-            // each cc map's key is unique, this is possible when the search
-            // key is a prefix of a compound key. For example, the cc map's
-            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or WHERE
-            // pk < 20. The search key is considered equal to both (20, 'b') and
-            // (20, 'c').
-
-            if (inclusive)
-            {
-                auto next_it = std::next(lower_it, 1);
-                if (next_it != ccm_.end() && next_it->first == key)
+                // The search key may match more than one cc entry. Even though
+                // each cc map's key is unique, this is possible when the search
+                // key is a prefix of a compound key. For example, the cc map's
+                // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
+                // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or
+                // WHERE pk < 20. The search key is considered equal to both
+                // (20, 'b') and (20, 'c'). In "WHERE pk <= 20" case, the
+                // gap of (20, c) needs to be included.
+                if (!(ub_it->first == key) || key.IsPrefixOf(ub_it->first))
                 {
-                    // The search key matches more than one entry, e.g.,
-                    // WEHRE pk <= 20. The start entry is the end of the
-                    // repeated entries, i.e., (20, 'c'), including the key
-                    // and the gap (gap may have entry (20, 'd')).
-
-                    auto upper_it = ccm_.upper_bound(key);
-                    --upper_it;
-                    return std::make_pair(Iterator(upper_it, &neg_inf_),
+                    // key not equal or only prefix equal, should include the
+                    // gap
+                    return std::make_pair(Iterator(ub_it, &neg_inf_),
                                           ScanType::ScanBoth);
                 }
                 else
                 {
-                    // WHERE pk <= 10.
-                    return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                          ScanType::ScanBoth);
-                }
-            }
-            else
-            {
-                // WHERE pk < 10. The start entry precedes the lower bound.
-                if (lower_it == ccm_.begin())
-                {
-                    return std::make_pair(Begin(), ScanType::ScanGap);
-                }
-                else
-                {
-                    --lower_it;
-                    return std::make_pair(Iterator(lower_it, &neg_inf_),
-                                          ScanType::ScanBoth);
+                    // exactly full key match, not include the gap
+                    return std::make_pair(Iterator(ub_it, &neg_inf_),
+                                          ScanType::ScanKey);
                 }
             }
         }
-        else
+        else  // < key, search for the entry before lower_bound(key)
         {
-            // The search key falls into a gap between two existing keys. The
-            // start entry precedes the lower bound, including the key and the
-            // gap.
-
-            if (lower_it == ccm_.begin())
+            auto lb_it = ccm_.lower_bound(key);
+            if (lb_it == ccm_.begin())
             {
+                // map empty or every key in ccm_ is greater than or equal to
+                // key, return neg_inf_ gap
                 return std::make_pair(Begin(), ScanType::ScanGap);
             }
             else
             {
-                --lower_it;
-                return std::make_pair(Iterator(lower_it, &neg_inf_),
+                // starting from the gap and key of entry before lb_it
+                lb_it--;
+                return std::make_pair(Iterator(lb_it, &neg_inf_),
                                       ScanType::ScanBoth);
             }
         }

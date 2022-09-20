@@ -36,6 +36,19 @@ public:
     virtual std::string ToString() const = 0;
     virtual void Copy(const TxKey &rhs) = 0;
 
+    /**
+     * Whether a search key is prefix of a full key, to distinguish between
+     * prefix equality and full equality. Returns true if *this is a prefix of
+     * rhs, false if *this and rhs is exactly the same. Should be called only
+     * when *this == rhs returns true.
+     * @param rhs
+     * @return
+     */
+    virtual bool IsPrefixOf(const TxKey &rhs) const
+    {
+        return false;
+    }
+
     virtual KeyType Type() const
     {
         return KeyType::Normal;

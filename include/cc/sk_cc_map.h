@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>  // make_shared,make_unique
 #include <string>
+#include <utility>
 #include <vector>  // vector
 
 #include "secondary_key.h"
@@ -180,7 +181,7 @@ public:
                 // key is negative infinity.
 
                 cce_ptr =
-                    std::get<2>(*FowardScanStart(*target_key, true).first);
+                    std::get<2>(*ForwardScanStart(*target_key, true).first);
 
                 if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
                 {
@@ -620,7 +621,7 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_key, req.inclusive_)
+                    ? ForwardScanStart(*look_key, req.inclusive_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
@@ -1017,7 +1018,7 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? FowardScanStart(*look_key, req.inclusive_)
+                    ? ForwardScanStart(*look_key, req.inclusive_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
@@ -2434,7 +2435,7 @@ private:
      * starting from the start cc entry and whether the scan includes the
      * start cc entry's key or gap or both.
      */
-    std::pair<Iterator, ScanType> FowardScanStart(
+    std::pair<Iterator, ScanType> ForwardScanStart(
         const SecondaryKey<SkT, PkT> &key, bool inclusive)
     {
         if (key.Type() == KeyType::NegativeInf)
@@ -2444,92 +2445,42 @@ private:
 
         const SkT &look_sk = key.SKey();
 
-        // The key equal to or greater than the search key.
-        auto sk_lower_it = sk_index_.lower_bound(look_sk);
+        // The search key may match more than one cc entry. Even though each cc
+        // map's key is unique, this is possible when the search key is a prefix
+        // of a compound key. For example, the cc map's keys are two-field keys
+        // (10, 'a'), (20, 'b'), (20, 'c'), (30,'d'), and the search condition
+        // is 20: WHERE sk >= 20 or WHERE sk > 20. The search key is considered
+        // equal to both (20, 'b') and (20, 'c'). In this "WHERE sk >= 20" case,
+        // the gap of (10, 'a') also needs to be returned.
 
-        if (sk_lower_it == sk_index_.end())
+        auto sk_it = sk_index_.begin();
+
+        if (inclusive)  // >= look_sk, search for the entry before
+                        // lower_bound(look_sk)
         {
-            if (sk_index_.empty())
-            {
-                return std::make_pair(Begin(), ScanType::ScanGap);
-            }
-            else
-            {
-                // sk_lower_it must be pointing to the end of the map. The
-                // start entry is the last in the map, only including the
-                // gap.
-                --sk_lower_it;
-                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                      ScanType::ScanGap);
-            }
+            sk_it = sk_index_.lower_bound(look_sk);
+        }
+        else  // > look_sk, search for the entry before upper_bound(look_sk)
+        {
+            sk_it = sk_index_.upper_bound(look_sk);
         }
 
-        if (sk_lower_it->first == look_sk)
+        if (sk_it == sk_index_.begin())
         {
-            // The search key may match more than one cc entry. Even though
-            // each cc map's key is unique, this is possible when the search
-            // key is a prefix of a compound key. For example, the cc map's
-            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk >= 20 or
-            // WHERE pk > 20. The search key is considered equal to both
-            // (20, 'b') and (20, 'c').
-            if (inclusive)
-            {
-                // WEHRE pk >= 20. The start entry is the entry before lower
-                // bound, i.e., (10, 'a'), including the gap, which may
-                // contain (20, 'a').
-
-                if (sk_lower_it == sk_index_.begin())
-                {
-                    return std::make_pair(Begin(), ScanType::ScanGap);
-                }
-                else
-                {
-                    --sk_lower_it;
-                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                          ScanType::ScanGap);
-                }
-            }
-            else
-            {
-                auto next_it = std::next(sk_lower_it, 1);
-                if (next_it != sk_index_.end() && next_it->first == look_sk)
-                {
-                    // The search key matches more than one entry, e.g.,
-                    // WEHRE pk > 20. The start entry is the end of the
-                    // repeated entries, i.e., (20, 'c').
-
-                    // The key greater than the search key, i.e., (30, 'd').
-                    auto sk_upper_it = sk_index_.upper_bound(look_sk);
-
-                    // The start entry is the one prior to (30, 'd'),
-                    // including the gap but not the key.
-                    --sk_upper_it;
-                    return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
-                                          ScanType::ScanGap);
-                }
-                else
-                {
-                    // The search key matches only one entry.
-                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                          ScanType::ScanGap);
-                }
-            }
+            // map empty or every key in sk_index_ is greater than look_sk,
+            // return neg_inf_'s gap
+            return std::make_pair(Begin(), ScanType::ScanGap);
         }
         else
         {
-            // The search key falls into a gap between two existing keys.
-            // The start entry precedes the lower bound, excluding the key.
-            if (sk_lower_it == sk_index_.begin())
-            {
-                return std::make_pair(Begin(), ScanType::ScanGap);
-            }
-            else
-            {
-                --sk_lower_it;
-                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                      ScanType::ScanGap);
-            }
+            // start from the gap of sk_it's previous entry
+            --sk_it;
+            // When constructing Iterator using a sk_map_it, internal_pk_it_
+            // always point to the last entry of current pk map.
+            // Under no circumstances should a scan starts from the
+            // beginning of a pk map.
+            return std::make_pair(Iterator(sk_it, &neg_inf_),
+                                  ScanType::ScanGap);
         }
     }
 
@@ -2545,86 +2496,41 @@ private:
 
         const SkT &look_sk = key.SKey();
 
-        // The key equal to or greater than the search key.
-        auto sk_lower_it = sk_index_.lower_bound(look_sk);
+        // The search key may match more than one cc entry. Even though each cc
+        // map's key is unique, this is possible when the search key is a prefix
+        // of a compound key. For example, the cc map's keys are two-field keys
+        // (10, 'a'), (20, 'b'), (20, 'c'), (30,'d'), and the search condition
+        // is 20: WEHRE sk <= 20 or WHERE sk < 20. The search key is considered
+        // equal to both (20, 'b') and (20, 'c'). In "WHERE sk <= 20" case, the
+        // gap of (20, c) needs to be included.
 
-        if (sk_lower_it == sk_index_.end())
+        auto sk_it = sk_index_.begin();
+        if (inclusive)  // <= look_sk, search for the entry before
+                        // upper_bound(look_sk)
         {
-            if (sk_index_.empty())
-            {
-                return std::make_pair(Begin(), ScanType::ScanGap);
-            }
-            else
-            {
-                --sk_lower_it;
-                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                      ScanType::ScanBoth);
-            }
+            sk_it = sk_index_.upper_bound(look_sk);
+        }
+        else  // < look_sk, search for the entry before lower_bound(look_sk)
+        {
+            sk_it = sk_index_.lower_bound(look_sk);
         }
 
-        if (sk_lower_it->first == look_sk)
+        if (sk_it == sk_index_.begin())
         {
-            // The search key may match more than one cc entry. Even though
-            // each cc map's key is unique, this is possible when the search
-            // key is a prefix of a compound key. For example, the cc map's
-            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or
-            // WHERE pk < 20. The search key is considered equal to both
-            // (20, 'b') and (20, 'c').
-
-            if (inclusive)
-            {
-                auto next_it = std::next(sk_lower_it, 1);
-                if (next_it != sk_index_.end() && next_it->first == look_sk)
-                {
-                    // The search key matches more than one entry, e.g.,
-                    // WEHRE pk <= 20. The start entry is the end of the
-                    // repeated entries, i.e., (20, 'c'), including the key
-                    // and the gap (gap may have entry (20, 'd')).
-
-                    auto sk_upper_it = sk_index_.upper_bound(look_sk);
-                    --sk_upper_it;
-                    return std::make_pair(Iterator(sk_upper_it, &neg_inf_),
-                                          ScanType::ScanBoth);
-                }
-                else
-                {
-                    // WHERE pk <= 10.
-                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                          ScanType::ScanBoth);
-                }
-            }
-            else
-            {
-                // WHERE pk < 10. The start entry precedes the lower bound.
-                if (sk_lower_it == sk_index_.begin())
-                {
-                    return std::make_pair(Begin(), ScanType::ScanGap);
-                }
-                else
-                {
-                    --sk_lower_it;
-                    return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                          ScanType::ScanBoth);
-                }
-            }
+            // map empty or every key in sk_index_ is greater than look_sk,
+            // return neg_inf_'s gap
+            return std::make_pair(Begin(), ScanType::ScanGap);
         }
         else
         {
-            // The search key falls into a gap between two existing keys.
-            // The start entry precedes the lower bound, including the key
-            // and the gap.
-
-            if (sk_lower_it == sk_index_.begin())
-            {
-                return std::make_pair(Begin(), ScanType::ScanGap);
-            }
-            else
-            {
-                --sk_lower_it;
-                return std::make_pair(Iterator(sk_lower_it, &neg_inf_),
-                                      ScanType::ScanBoth);
-            }
+            // start from the gap and key of sk_it's previous entry
+            sk_it--;
+            // When constructing Iterator using a sk_map_it, internal_pk_it_
+            // always point to the last entry of current pk map.
+            // Under no circumstances should a scan starts from the
+            // beginning of a pk map.
+            return std::make_pair(Iterator(sk_it, &neg_inf_),
+                                  ScanType::ScanBoth);
         }
     }
 
