@@ -3176,7 +3176,7 @@ protected:
     {
         if (key.Type() == KeyType::NegativeInf)
         {
-            return std::make_pair(Begin(), ScanType::ScanGap);
+            return MakeForwardScanPair(Begin(), is_include_floor_cce);
         }
 
         if (inclusive || is_include_floor_cce)  // >= key or range_cc_map scan,
@@ -3194,24 +3194,17 @@ protected:
             if (lb_it == ccm_.end() || !(lb_it->first == key) ||
                 key.IsPrefixOf(lb_it->first))
             {
-                // start from previous entry's gap
+                // for template_cc_map, start from previous entry's gap;
+                // for range_cc_map, start from previous entry's key and gap
                 if (lb_it == ccm_.begin())
                 {
-                    return std::make_pair(Begin(), ScanType::ScanGap);
+                    return MakeForwardScanPair(Begin(), is_include_floor_cce);
                 }
                 else
                 {
                     --lb_it;
-                    if (is_include_floor_cce)  // range_cc_map scan, ScanBoth
-                    {
-                        return std::make_pair(Iterator(lb_it, &neg_inf_),
-                                              ScanType::ScanBoth);
-                    }
-                    else
-                    {
-                        return std::make_pair(Iterator(lb_it, &neg_inf_),
-                                              ScanType::ScanGap);
-                    }
+                    return MakeForwardScanPair(Iterator(lb_it, &neg_inf_),
+                                               is_include_floor_cce);
                 }
             }
             else
@@ -3236,6 +3229,27 @@ protected:
                 return std::make_pair(Iterator(ub_it, &neg_inf_),
                                       ScanType::ScanGap);
             }
+        }
+    }
+
+    /**
+     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map scan.
+     * For template_cc_map, start from it's gap;
+     * for range_cc_map, start from it's key and gap.
+     * @param it
+     * @param is_include_floor_cce
+     * @return
+     */
+    std::pair<Iterator, ScanType> MakeForwardScanPair(Iterator it,
+                                                      bool is_include_floor_cce)
+    {
+        if (is_include_floor_cce)  // range_cc_map scan, ScanBoth
+        {
+            return std::make_pair(it, ScanType::ScanBoth);
+        }
+        else  // template_cc_map scan, ScanGap
+        {
+            return std::make_pair(it, ScanType::ScanGap);
         }
     }
 
