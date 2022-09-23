@@ -1867,12 +1867,13 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 (int8_t) HandlerResultErrorType::Unknown)
             {
                 bool_resp_->SetErrorCode(TxErrorCode::LOG_SERVICE_UNREACHABLE);
+                tx_status_.store(TxnStatus::Unknown, std::memory_order_release);
             }
             else
             {
                 bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
-            tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             PushOperation(&update_txn_);
             Process(update_txn_);
         }
@@ -1935,7 +1936,8 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         acquire_write_cnt -= error_cnt;
     }
 
-    if (acquire_write_cnt > 0 || rw_set_.ReadSetSize() > 0)
+    if (TxStatus() != TxnStatus::Unknown &&
+        (acquire_write_cnt > 0 || rw_set_.ReadSetSize() > 0))
     {
         if (TxStatus() == TxnStatus::Committed)
         {
@@ -1952,15 +1954,17 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
     }
     else
     {
-        // For tx's that have finished validation but do not upload anything,
-        // skips post-processing.
+        // For tx's that are in unknown result, or have finished validation but
+        // do not upload anything, skips post-processing.
 
         if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
         {
             bool_resp_->Finish(true);
         }
         else if (tx_status_.load(std::memory_order_relaxed) ==
-                 TxnStatus::Aborted)
+                     TxnStatus::Aborted ||
+                 tx_status_.load(std::memory_order_relaxed) ==
+                     TxnStatus::Unknown)
         {
             bool_resp_->Finish(false);
         }

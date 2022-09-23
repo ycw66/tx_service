@@ -95,11 +95,6 @@ public:
         Clean();
     }
 
-    bool IsCatalogCcMap() const override
-    {
-        return false;
-    }
-
     bool Execute(AcquireCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -635,8 +630,7 @@ public:
                     req.Txn(),
                     req.TxTerm(),
                     cce_ptr,
-                    req.GetLockType() == LockType::WriteLock,
-                    IsCatalogCcMap());
+                    req.GetLockType() == LockType::WriteLock);
 
                 // Updates last_vali_ts such that it is no smaller than (1) all
                 // read transactions that have read the item in all shards, and

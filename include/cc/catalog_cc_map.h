@@ -34,11 +34,6 @@ public:
     {
     }
 
-    bool IsCatalogCcMap() const override
-    {
-        return true;
-    }
-
     using TemplateCcMap::Execute;
 
     bool Execute(PostWriteAllCc &req) override

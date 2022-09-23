@@ -104,11 +104,6 @@ public:
         Clean();
     }
 
-    bool IsCatalogCcMap() const override
-    {
-        return false;
-    }
-
     bool Execute(AcquireCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

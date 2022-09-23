@@ -46,6 +46,12 @@ enum class TxnStatus
      */
     Committing,
     /**
+     * @brief A tx has tried to commit, but log service is unreachable and the
+     * tx's commit result is unknown. The tx should not do postprocess and
+     * release the locks it holds.
+     */
+    Unknown,
+    /**
      * @brief A tx has committed or aborted and finished post-processing. This
      * state signals that the tx state machine can be recycled. Note that this
      * state shall not be uploaded to the tx entry in the tx service, which

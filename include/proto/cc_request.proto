@@ -30,6 +30,7 @@ message CheckTxStatusResponse {
 		ONGOING = 1;
 		COMMITTED = 2;
 		ABORTED = 3;
+		RESULT_UNKNOWN = 4;
 	}
 	TxStatus tx_status = 1;
 }

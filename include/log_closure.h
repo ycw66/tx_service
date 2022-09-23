@@ -6,6 +6,7 @@
 
 #include "../log_service/proto/raft_log.pb.h"
 #include "cc/cc_handler_result.h"
+#include "fault_inject.h"
 #include "type.h"
 
 namespace txservice
@@ -36,6 +37,10 @@ public:
     // Run() will be called when log request is processed by txlog service.
     void Run() override
     {
+        CODE_FAULT_INJECTOR("log_closure_result_unknown", {
+            hd_result_->SetError((int8_t) HandlerResultErrorType::Unknown);
+            return;
+        });
         // rpc fails including timeout indicates the status of log request is
         // unknown.
         if (cntl_.Failed() || response_.response_status() ==

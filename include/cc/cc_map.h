@@ -139,16 +139,6 @@ public:
         return table_schema_;
     }
 
-    /**
-     * @brief Temp fix for schema op replay. This should be removed once
-     * we fix the logic of not releasing write lock of schema op transaction
-     * during RecoverTx.
-     *
-     * @return true
-     * @return false
-     */
-    virtual bool IsCatalogCcMap() const = 0;
-
     CcShard *const shard_;
     TableName table_name_;  // string owner
     // Kv store can be skipped if we know ccm contains all the entries. This is

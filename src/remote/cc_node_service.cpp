@@ -67,6 +67,11 @@ void CcNodeService::CheckTxStatus(::google::protobuf::RpcController *controller,
             response->set_tx_status(CheckTxStatusResponse_TxStatus::
                                         CheckTxStatusResponse_TxStatus_ABORTED);
             break;
+        case TxnStatus::Unknown:
+            response->set_tx_status(
+                CheckTxStatusResponse_TxStatus::
+                    CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN);
+            break;
         default:
             response->set_tx_status(CheckTxStatusResponse_TxStatus::
                                         CheckTxStatusResponse_TxStatus_ONGOING);

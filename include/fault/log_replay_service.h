@@ -15,8 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "proto/cc_request.pb.h"
-#include "raft_log.pb.h"
 #include "txlog.h"
 
 namespace txservice

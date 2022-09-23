@@ -191,7 +191,9 @@ void Checkpointer::Ckpt()
                 ckpt_txm->Execute(&abort_req);
                 abort_req.Wait();
                 assert(abort_req.Result() == false);
-                LOG(INFO) << "checkpointer add table lock failed";
+                LOG(INFO) << "checkpointer add read lock on table failed, "
+                             "table name: "
+                          << table_key.Name().StringView();
                 flushed = false;
                 continue;
             }

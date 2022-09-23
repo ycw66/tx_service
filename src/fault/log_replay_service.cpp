@@ -3,6 +3,8 @@
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "fault/cc_node.h"
+#include "proto/cc_request.pb.h"
+#include "raft_log.pb.h"
 #include "sharder.h"
 #include "type.h"
 
@@ -132,6 +134,10 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                                 tx_status = remote::
                                     CheckTxStatusResponse_TxStatus_COMMITTED;
                                 break;
+                            case TxnStatus::Unknown:
+                                tx_status = remote::
+                                    CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN;
+                                break;
                             case TxnStatus::Aborted:
                                 tx_status = remote::
                                     CheckTxStatusResponse_TxStatus_ABORTED;
@@ -207,13 +213,13 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     }
                     else
                     {
-                        // The tx is either committed or not found in the tx's
-                        // cc node, either because the tx node fails or because
-                        // the tx didn't finish post-processing but decided to
-                        // move on. In either case, asks the log group: if the
-                        // tx has committed, the log group ships the tx's log
-                        // record to the cc node to recover the committed
-                        // record. Or, the tx must have aborted.
+                        // The tx is either committed or result unknown or not
+                        // found in the tx's cc node, either because the tx node
+                        // fails or because the tx didn't finish post-processing
+                        // but decided to move on. In either case, asks the log
+                        // group: if the tx has committed, the log group ships
+                        // the tx's log record to the cc node to recover the
+                        // committed record. Or, the tx must have aborted.
 
                         RecoverTxStatus status =
                             log_agent_->RecoverTx(recover_tx_info.tx_number_,
@@ -250,11 +256,16 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                         {
                             LOG(INFO) << "The tx " << recover_tx_info.tx_number_
                                       << " to be recovered has committed.";
+                            // For DML transactions, if the tx has committed,
+                            // the log group will ship the tx's committed
+                            // records to the cc node. If there is an error,
+                            // does nothing. The next conflicting tx will try a
+                            // new recovery.
+                            // For multi-stage transactions, the tx has written
+                            // log and is guaranteed to succeed and release the
+                            // lock, do nothing and the lock will be released by
+                            // the coordinator.
                         }
-                        // If the tx has committed, the log group will ship the
-                        // tx's committed records to the cc node. If there is an
-                        // error, does nothing. The next conflicting tx will try
-                        // a new recovery.
                     }
                 }
             }

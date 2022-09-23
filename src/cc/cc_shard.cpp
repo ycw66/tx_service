@@ -138,7 +138,8 @@ TEntry &CcShard::NewTx()
         TEntry &te = tx_vec_[next_tx_idx_];
         if (te.status_ == TxnStatus::Finished ||
             te.status_ == TxnStatus::Committed ||
-            te.status_ == TxnStatus::Aborted)
+            te.status_ == TxnStatus::Aborted ||
+            te.status_ == TxnStatus::Unknown)
         {
             break;
         }
@@ -264,11 +265,9 @@ void CcShard::UpdateEstimateLogSize(LruEntry *entry,
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr,
-                                         bool is_key_write_lock,
-                                         bool is_schema_op)
+                                         bool is_key_write_lock)
 {
-    auto em_it =
-        lock_holding_txs_.try_emplace(txn, tx_term, Now(), is_schema_op);
+    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
     em_it.first->second.cce_list_.emplace(cce_ptr);
     if (is_key_write_lock)
     {
@@ -333,6 +332,9 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
         uint32_t txn_node_group = lock_holding_txn >> 42L;
+
+        CODE_FAULT_INJECTOR("recover_local_txn", { txn_node_group = 12345; })
+
         if (txn_node_group == Sharder::Instance().NodeId())
         {
             LOG(WARNING)

@@ -373,18 +373,37 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
+        // For DML transactions, the coordinator must keep retrying the WriteLog
+        // request until getting a clear response, either success or failure, or
+        // the coordinator itself is no longer leader. In the last case, the
+        // committing process interrupts with an unknown result, and an error
+        // message "Log service is unreachable, transaction status is unknown"
+        // is returned. For these result unknown txns, The coordinator must skip
+        // the PostProcess and the locks on participants remain. The
+        // participants ccnodes will do the PostProcess individually via orphan
+        // lock recovery mechanism.
         if (hd_result_.ErrorCode() ==
                 (int8_t) HandlerResultErrorType::Unknown &&
-            log_type_ == TxLogType::DATA && retry_num_ > 0)
+            log_type_ == TxLogType::DATA &&
+            Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
         {
-            LOG(INFO) << "Retry Write Log Request, tx_number: "
-                      << txm->tx_number_;
-            // log request return unknown status, we need to check tx status
-            // from log service.
+            CODE_FAULT_INJECTOR("write_log_result_unknown", {
+                LOG(INFO) << "skipping to updatetxn";
+                txm->PostProcess(*this);
+                return;
+            });
+
+            LOG(WARNING)
+                << "Write Log Request result unknown, retrying, tx_number: "
+                << txm->tx_number_;
+            // log request return unknown status, we need to set retry flag to
+            // inform log service that this is a retried request
             ::txlog::LogRequest &log_req = log_closure_.LogRequest();
             ::txlog::WriteLogRequest *log_rec =
                 log_req.mutable_write_log_request();
             log_rec->set_retry(true);
+            // ReRunOp sleep for 2 seconds
+            retry_num_ = 4;
 
             ReRunOp(txm);
             return;
@@ -1134,22 +1153,68 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (prepare_log_op_.hd_result_.IsError())
         {
-            DLOG(ERROR) << "Upsert table write prepare log failed, tx_number:"
-                        << txm->tx_number_;
-            // Fails to flush the prepare log. The schema operation is
-            // considered failed if the prepare log is not flushed. The
-            // commit ts is set to 0 to signal that the following post write
-            // operation releases all write intents.
-            txm->commit_ts_ = 0;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            op_ = &post_all_lock_op_;
+            if (prepare_log_op_.hd_result_.ErrorCode() ==
+                (int8_t) HandlerResultErrorType::Unknown)
+            {
+                // prepare log result unknown, keep retrying until getting a
+                // clear response, either success or failure, or the coordinator
+                // itself is no longer leader
+                int64_t tx_node_term =
+                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+                if (tx_node_term > 0)
+                {
+                    DLOG(WARNING)
+                        << "Upsert table write prepare log result unknown, "
+                           "tx_number:"
+                        << txm->tx_number_ << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    txm->PushOperation(&prepare_log_op_);
+                    txm->Process(prepare_log_op_);
+                }
+                else
+                {
+                    DLOG(ERROR) << "Upsert table write prepare log result "
+                                   "unknown, tx_number:"
+                                << txm->tx_number_
+                                << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if it
+                    // does. Should not release the write intents. If prepare
+                    // log is not written, the write intents will be released
+                    // individually via orphan lock recovery mechanism.
+                    txm->bool_resp_->SetErrorCode(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
 
-            txm->bool_resp_->SetErrorCode(
-                TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
+                    txm->bool_resp_->Finish(false);
+                    txm->state_stack_.pop_back();
+                    assert(txm->state_stack_.empty());
+                    txm->schema_op_ = nullptr;
+                }
+            }
+            else
+            {
+                DLOG(ERROR)
+                    << "Upsert table write prepare log failed, tx_number:"
+                    << txm->tx_number_;
+                // Fails to flush the prepare log. The schema operation is
+                // considered failed if the prepare log is not flushed. The
+                // commit ts is set to 0 to signal that the following post write
+                // operation releases all write intents.
+                txm->commit_ts_ = 0;
+                // Moves to the last operation that removes all write
+                // intents/locks.
+                op_ = &post_all_lock_op_;
 
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
+
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
         }
         else
         {
@@ -1332,6 +1397,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
             {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
                 txm->PushOperation(&commit_log_op_);
                 txm->Process(commit_log_op_);
             }
@@ -1426,6 +1496,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             (tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
                                    tx_node_candid_term >= 0)))
         {
+            // set retry flag and retry clean log
+            ::txlog::WriteLogRequest *log_req =
+                clean_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
