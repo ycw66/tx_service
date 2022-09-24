@@ -40,7 +40,8 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::Execute;
     using TemplateCcMap<KeyT, RangeRecord>::FindEmplace;
     using TemplateCcMap<KeyT, RangeRecord>::Emplace;
-    using TemplateCcMap<KeyT, RangeRecord>::ReadLockCce;
+    using TemplateCcMap<KeyT, RangeRecord>::AcquireCceKeyLock;
+    using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
     using TemplateCcMap<KeyT, RangeRecord>::ccm_;
@@ -152,12 +153,19 @@ public:
         assert(req.Type() != ReadType::OutsideNormal);
 
         CcEntry<KeyT, RangeRecord> *floor_cce = nullptr;
+
+        LockType acquired_lock;
+        LockOpStatus lock_op_status;
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before. This is execution resumption
             // after the request is unblocked. The read lock/intention must have
             // been acquired.
             floor_cce = static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
+
+            acquired_lock = LockHandleForResumedRequest(
+                &req, req.TxTerm(), floor_cce, floor_cce->payload_status_);
+            lock_op_status = LockOpStatus::Successful;
         }
         else
         {
@@ -167,44 +175,54 @@ public:
             floor_cce = Floor(*look_key);
             req.SetCcePtr(floor_cce);
 
+            // try to acquire lock
             int64_t tx_term = req.TxTerm();
-            uint32_t cce_node_group_id = req.NodeGroupId();
-
-            bool lock_success =
-                ReadLockCce(floor_cce, req, tx_term, cce_node_group_id);
-            if (lock_success)
-            {
-                CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
-                cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
-                                ng_term,
-                                req.NodeGroupId());
-
-                RangeRecord *range_rec =
-                    static_cast<RangeRecord *>(req.Record());
-                *range_rec = *(floor_cce->payload_);
-                hd_result->Value().ts_ = floor_cce->commit_ts_;
-                hd_result->Value().rec_status_ = RecordStatus::Normal;
-                hd_result->SetFinished();
-                return true;
-            }
-            else
-            {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    &req,
-                    "AcquireReadLock.Fail",
-                    reinterpret_cast<LruEntry *>(floor_cce),
-                    [&req]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(req.Txn()))
-                            .append(",\"term\":")
-                            .append(std::to_string(req.TxTerm()));
-                    });
-                // You don't need a remote acknowledge here, since range read is
-                // a local read anyway
-                return false;
-            }
+            uint32_t ng_id = req.NodeGroupId();
+            IsolationLevel iso_lvl = req.Isolation();
+            CcProtocol cc_proto = req.Protocol();
+            CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                                 : CcOperation::Read;
+            tie(acquired_lock, lock_op_status) =
+                AcquireCceKeyLock(floor_cce,
+                                  floor_cce->payload_status_,
+                                  &req,
+                                  ng_id,
+                                  ng_term,
+                                  tx_term,
+                                  cc_op,
+                                  iso_lvl,
+                                  cc_proto);
         }
+
+        // after acquiring lock
+        switch (lock_op_status)
+        {
+        case LockOpStatus::Successful:
+        {
+            CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
+            cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
+                            ng_term,
+                            req.NodeGroupId());
+
+            RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
+            *range_rec = *(floor_cce->payload_);
+            hd_result->Value().ts_ = floor_cce->commit_ts_;
+            hd_result->Value().rec_status_ = RecordStatus::Normal;
+            hd_result->Value().lock_type_ = acquired_lock;
+            hd_result->SetFinished();
+            return true;
+        }
+        case LockOpStatus::Failed:
+        {
+            return true;
+        }
+        case LockOpStatus::Blocked:
+        {
+            // You don't need a remote acknowledge here, since range read is
+            // a local read anyway
+            return false;
+        }
+        }  //-- end: switch
         return true;
     }
 

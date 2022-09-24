@@ -241,6 +241,8 @@ public:
                              LruEntry *cce_ptr,
                              bool is_key_write_lock);
 
+    void DecTxHeldWriteLockCount(TxNumber txn);
+
     /**
      * @brief When a tx fails to acquire a lock, it invokes this method to check
      * how long the conflicting tx has been holding the lock. If the conflicting

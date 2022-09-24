@@ -89,8 +89,8 @@ enum IsolationType {
 
 enum CcProtocolType {
 	Occ = 0;
-	Locking = 1;
-	Mvcc = 2;
+	OccRead = 1;
+	Locking = 2;
 }
 
 enum CcLockType {
@@ -99,6 +99,13 @@ enum CcLockType {
 	WriteIntent = 2;
 	ReadLock = 3;
 	WriteLock = 4;
+}
+
+enum CcOperationType {
+   	Read = 0;
+    ReadForWrite = 1;
+    Write = 2;
+    ReadSkIndex = 3;
 }
 
 enum RecordStatusType {
@@ -123,13 +130,14 @@ enum CcTableType {
 message AcquireRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
-	CcTableType table_type = 9;
-	bytes key = 3;
-	uint32 key_shard_code = 4;
-	uint32 vec_idx = 5;
-	uint64 ts = 6;
-	bool insert = 7;
-	CcProtocolType protocol = 8;
+	CcTableType table_type = 3;
+	bytes key = 4;
+	uint32 key_shard_code = 5;
+	uint32 vec_idx = 6;
+	uint64 ts = 7;
+	bool insert = 8;
+	CcProtocolType protocol = 9;
+	IsolationType iso_level = 10;
 }
 
 message AcquireResponse {
@@ -145,12 +153,12 @@ message AcquireResponse {
 message AcquireAllRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
-	CcTableType table_type = 8;
-	bytes key = 3;
-	uint32 node_group_id = 4;
-	bool insert = 5;
-	CcProtocolType protocol = 6;
-	CcLockType lock_type = 7;
+	CcTableType table_type = 3;
+	bytes key = 4;
+	uint32 node_group_id = 5;
+	bool insert = 6;
+	CcProtocolType protocol = 7;
+	CcOperationType cc_op = 8;
 }
 
 message AcquireAllResponse {
@@ -192,20 +200,20 @@ message VersionTxRecord_msg {
 message ReadRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
-	CcTableType table_type = 11;
-	bytes key = 3;
-	uint32 key_shard_code = 4;
-	bytes record = 5;
+	CcTableType table_type = 3;
+	bytes key = 4;
+	uint32 key_shard_code = 5;
+	bytes record = 6;
 	enum ReadType {
 		INSIDE = 0;
 		OUTSIDE_NORMAL = 1;
 		OUTSIDE_DELETED = 2;
 	}
-	ReadType read_type = 6;
-	uint64 ts = 7;
-	IsolationType iso_level = 8;
-	CcProtocolType protocol = 9;
-	CcLockType lock_type = 10;
+	ReadType read_type = 7;
+	uint64 ts = 8;
+	IsolationType iso_level = 9;
+	CcProtocolType protocol = 10;
+	bool is_for_write = 11;
 }
 
 message ReadResponse {
@@ -214,8 +222,9 @@ message ReadResponse {
 	RecordStatusType rec_status = 3;
 	uint64 ts = 4;
 	CceAddr_msg cce_addr = 5;
+	CcLockType lock_type = 6;
 	// The response is an acknowledgement or the result
-	bool is_ack = 6;
+	bool is_ack = 7;
 }
 
 message ReadOutsideRequest {
@@ -240,13 +249,13 @@ message PostCommitRequest {
 message PostWriteAllRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
-	CcTableType table_type = 9;
-	uint32 node_group_id = 3;
-	bytes key = 4;
-	uint64 commit_ts = 5;
-	bytes record = 6;
-	bool is_deleted = 7;
-	CommitType commit_type = 8;
+	CcTableType table_type = 3;
+	uint32 node_group_id = 4;
+	bytes key = 5;
+	uint64 commit_ts = 6;
+	bytes record = 7;
+	bool is_deleted = 8;
+	CommitType commit_type = 9;
 }
 
 message ScanTuple_msg {
@@ -262,19 +271,19 @@ message ScanOpenRequest {
 	uint32 src_node_id = 1;
 	uint32 shard_id = 2;
 	string table_name_str = 3;
-	CcTableType table_type = 14;
+	CcTableType table_type = 4;
 	oneof start_key {
-		bytes key = 4;
-		bool neg_inf = 5;
-		bool pos_inf = 6;
+		bytes key = 5;
+		bool neg_inf = 6;
+		bool pos_inf = 7;
 	}
-	bool inclusive = 7;
-	bool direction = 8;
-	uint64 ts = 9;
-	bool ckpt = 10;
-	IsolationType iso_level = 11;
-	CcProtocolType protocol = 12;
-	CcLockType lock_type = 13;
+	bool inclusive = 8;
+	bool direction = 9;
+	uint64 ts = 10;
+	bool ckpt = 11;
+	IsolationType iso_level = 12;
+	CcProtocolType protocol = 13;
+	bool is_for_write = 14;
 }
 
 message ScanCache_msg {
@@ -297,7 +306,7 @@ message ScanNextRequest {
 	bool ckpt = 7;
 	IsolationType iso_level = 8;
 	CcProtocolType protocol = 9;
-	CcLockType lock_type = 10;
+	bool is_for_write = 10;
 }
 
 message ScanNextResponse {
@@ -319,11 +328,11 @@ message FaultInjectResponse {
 message CleanCcEntryForTestRequest {
   uint32 src_node_id = 1;
   string table_name_str = 2;
-  CcTableType table_type = 7;
-  bytes key = 3;
-  uint32 key_shard_code = 4;
-  bool only_archives=5;
-  bool flush=6;
+  CcTableType table_type = 3;
+  bytes key = 4;
+  uint32 key_shard_code = 5;
+  bool only_archives=6;
+  bool flush=7;
 }
 
 message CleanCcEntryForTestResponse {
@@ -371,6 +380,7 @@ message CcMessage {
 	uint64 tx_number = 2;
 	uint64 handler_addr = 3;
 	int64 tx_term = 4;
+	uint32 command_id=5;
 
 	oneof content {
 		AcquireRequest acquire_req = 10;

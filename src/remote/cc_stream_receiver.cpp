@@ -177,7 +177,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -270,7 +271,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -367,7 +369,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -417,7 +420,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -488,7 +492,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -541,11 +546,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     read_result.rec_status_ = RecordStatus::Unknown;
                     break;
                 }
+                case RecordStatusType::VERSIONUNDEFIND:
+                {
+                    read_result.rec_status_ = RecordStatus::VersionUnknown;
+                    break;
+                }
                 default:
                     break;
                 }
 
                 read_result.ts_ = read_res.ts();
+                read_result.lock_type_ =
+                    ToLocalType::ConvertLockType(read_res.lock_type());
                 hd_res->SetFinished(true);
             }
         }
@@ -625,7 +637,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_scan_open_resp());
 
         CcHandlerResult<ScanOpenResult> *hd_res = nullptr;
-
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
@@ -639,7 +650,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<ScanOpenResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -653,11 +665,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         uint32_t ng_id = scan_open_res.node_group_id();
         hd_res->Value().cc_node_returned_[ng_id] = 1;
 
-        if (scan_open_res.error_code() != 0)
-        {
-            hd_res->SetError(scan_open_res.error_code(), true);
-        }
-        else
+        // Even if ScanOpen operation fail, we should also move scan
+        // result into read set to release acquired lock.
         {
             CcScanner &scanner = *hd_res->Value().scanner_;
             int64_t term = -1;
@@ -692,6 +701,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
 
             hd_res->Value().cc_node_terms_[ng_id] = term;
+        }
+
+        if (scan_open_res.error_code() != 0)
+        {
+            hd_res->SetError(scan_open_res.error_code(), true);
+        }
+        else
+        {
             hd_res->SetFinished(true);
         }
 
@@ -733,7 +750,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<ScanNextResult> *>(
                 msg->handler_addr());
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number())
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -745,11 +763,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const ScanNextResponse &scan_next_res = msg->scan_next_resp();
 
-        if (scan_next_res.error_code() != 0)
-        {
-            hd_res->SetError(scan_next_res.error_code(), true);
-        }
-        else
+        // Even if ScanNext operation fail, we should also move scan
+        // result into read set to release acquired lock.
         {
             ScanCache *shard_cache =
                 reinterpret_cast<ScanCache *>(scan_next_res.scan_cache_ptr());
@@ -774,7 +789,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                           tuple_msg.cce_addr().term(),
                                           ng_id);
             }
+        }
 
+        if (scan_next_res.error_code() != 0)
+        {
+            hd_res->SetError(scan_next_res.error_code(), true);
+        }
+        else
+        {
             hd_res->SetFinished(true);
         }
 

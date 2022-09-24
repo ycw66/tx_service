@@ -57,7 +57,15 @@ public:
         return rset_;
     }
 
-    void AddRead(const CcEntryAddr &cce_addr,
+    /**
+     * @brief When adding a read key, checks if there is already one in the
+     * readset and matches the timestamp. Does not add the read key if
+     * there is a timestamp mismatch.
+     *
+     * @return true - add sucess; false - the version is different with previous
+     * read, that is, break RepeatableRead isolation level.
+     */
+    bool AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
                  CcProtocol proto,
                  LockType lock_type,
@@ -81,10 +89,43 @@ public:
             iter->second.try_emplace(cce_addr, read_ts, proto, lock_type);
         if (!inserted)
         {
-            it->second.version_ts_ = read_ts;
-            it->second.protocol_ = proto;
-            it->second.lock_type_ = lock_type;
+            // Under Occ/OccRead protocol and RepeatableRead/Serializable
+            // isolation level, the read operation adds ReadIntent locktype,
+            // not read lock. So, we must verify whether the record has been
+            // changed between current read and previous.
+            // (read_ts == 0) means it is a boundary key added gap lock.
+            // (read_ts == 1) means it's payload status is Unkonwn.
+            if (it->second.version_ts_ != read_ts)
+            {
+                if (it->second.version_ts_ > 1)
+                {
+                    if (it->second.lock_type_ == LockType::ReadIntent)
+                    {
+                        // breaks repeatable read isolation level under
+                        // Occ/OccRead protocol, return error.
+                        it->second.lock_type_ = lock_type;
+                        return false;
+                    }
+                    else
+                    {
+                        // ReadLock and WriteIntent always block update.
+                        // Case enter this branch, must be a bug.
+                        assert(false);
+                    }
+                }
+                else
+                {
+                    // The entry maybe has been backfilled.
+                    it->second.version_ts_ = read_ts;
+                }
+            }
+            else if (lock_type >= it->second.lock_type_)
+            {
+                it->second.lock_type_ = lock_type;
+                it->second.protocol_ = proto;
+            }
         }
+        return true;
     }
 
     /**

@@ -274,15 +274,6 @@ enum struct ReadType
     OutsideDeleted
 };
 
-enum class LockType
-{
-    NoLock = 0,
-    ReadIntent,
-    WriteIntent,
-    ReadLock,
-    WriteLock,
-};
-
 enum class PostWriteType
 {
     // Single commit installs the committed value and removes the write

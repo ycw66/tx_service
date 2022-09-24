@@ -20,6 +20,7 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         const AcquireRequest &acquire_req = input_msg_->acquire_req();
         AcquireResponse *resp = output_msg_.mutable_acquire_resp();
@@ -84,7 +85,8 @@ void txservice::remote::RemoteAcquire::Reset(
                      req.insert(),
                      &cc_res_,
                      req.vec_idx(),
-                     ToLocalType::ConvertProtocol(req.protocol()));
+                     ToLocalType::ConvertProtocol(req.protocol()),
+                     ToLocalType::ConvertIsolation(req.iso_level()));
 
     input_msg_ = std::move(input_msg);
 
@@ -99,6 +101,7 @@ void txservice::remote::RemoteAcquire::Acknowledge()
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
     const AcquireRequest &acquire_req = input_msg_->acquire_req();
     AcquireResponse *acquire_resp = output_msg_.mutable_acquire_resp();
@@ -135,6 +138,7 @@ txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         AcquireAllResponse *resp = output_msg_.mutable_acquire_all_resp();
         resp->set_error_code(res->ErrorCode());
@@ -179,7 +183,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
                         req.insert(),
                         &cc_res_,
                         ToLocalType::ConvertProtocol(req.protocol()),
-                        ToLocalType::ConvertLockType(req.lock_type()));
+                        ToLocalType::ConvertCcOperation(req.cc_op()));
 
     input_msg_ = std::move(input_msg);
 
@@ -194,6 +198,7 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
     AcquireAllResponse *acquire_all_resp =
         output_msg_.mutable_acquire_all_resp();
@@ -217,6 +222,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         ValidateResponse *resp = output_msg_.mutable_validate_resp();
         resp->set_error_code(res->ErrorCode());
@@ -284,6 +290,7 @@ txservice::remote::RemoteRead::RemoteRead()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         const ReadKeyResult &read_result = res->Value();
         ReadResponse *resp = output_msg_.mutable_read_resp();
@@ -368,7 +375,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       &cc_res_,
                       ToLocalType::ConvertIsolation(req.iso_level()),
                       ToLocalType::ConvertProtocol(req.protocol()),
-                      ToLocalType::ConvertLockType(req.lock_type()));
+                      req.is_for_write());
     }
     else
     {
@@ -389,7 +396,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       &cc_res_,
                       ToLocalType::ConvertIsolation(req.iso_level()),
                       ToLocalType::ConvertProtocol(req.protocol()),
-                      ToLocalType::ConvertLockType(req.lock_type()));
+                      req.is_for_write());
     }
 
     input_msg_ = std::move(input_msg);
@@ -405,6 +412,7 @@ void txservice::remote::RemoteRead::Acknowledge()
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
     ReadResponse *read_resp = output_msg_.mutable_read_resp();
     read_resp->set_is_ack(true);
@@ -439,6 +447,7 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         PostprocessResponse *resp = output_msg_.mutable_post_resp();
         resp->set_error_code(res->ErrorCode());
@@ -508,6 +517,7 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         PostprocessResponse *resp = output_msg_.mutable_post_resp();
         resp->set_error_code(res->ErrorCode());
@@ -577,6 +587,7 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         ScanOpenResponse *scan_open = output_msg_.mutable_scan_open_resp();
 
@@ -601,11 +612,45 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
         }
         else
         {
-            for (int core_id = 0; core_id < scan_open->scan_cache_size();
-                 ++core_id)
+            CcOperation cc_op =
+                IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+            if (remote_table_name_.Type() == TableType::Secondary)
             {
-                ScanCache_msg *cache = scan_open->mutable_scan_cache(core_id);
-                cache->Clear();
+                cc_op = CcOperation::ReadSkIndex;
+            }
+            LockType lock_type =
+                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
+
+            if (lock_type == LockType::NoLock)
+            {
+                // Not acquire lock, just clear scan cache.
+                for (int core_id = 0; core_id < scan_open->scan_cache_size();
+                     ++core_id)
+                {
+                    ScanCache_msg *cache =
+                        scan_open->mutable_scan_cache(core_id);
+                    cache->Clear();
+                }
+            }
+            else
+            {
+                // Acquired lock, should transfer scan cache back to release
+                // the locks through PostRead.
+                for (int core_id = 0; core_id < scan_open->scan_cache_size();
+                     ++core_id)
+                {
+                    ScanCache_msg *cache =
+                        scan_open->mutable_scan_cache(core_id);
+
+                    // The response message allocates a fixed number (the
+                    // batch size) of scan tuples up front. If the batch is not
+                    // full, removes the trailing tuples.
+                    while (scan_caches_.at(core_id).size() <
+                           (size_t) cache->scan_tuple_size())
+                    {
+                        cache->mutable_scan_tuple()->RemoveLast();
+                    }
+                }
             }
         }
 
@@ -635,7 +680,7 @@ void txservice::remote::RemoteScanOpen::Reset(
     node_group_id_ = scan_open.shard_id();
     table_name_ = &remote_table_name_;
     tx_term_ = input_msg->tx_term();
-    lock_type_ = static_cast<LockType>(scan_open.lock_type());
+    is_for_write_ = scan_open.is_for_write();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_open.protocol());
     tx_number_ = input_msg->tx_number();
@@ -674,11 +719,13 @@ void txservice::remote::RemoteScanOpen::Reset(
     assert(resp->scan_cache_size() == 0);
 
     scan_caches_.resize(core_cnt);
+    scan_caches_idxs_.resize(core_cnt);
     for (size_t cid = 0; cid < core_cnt; ++cid)
     {
         ScanCache_msg *cache_msg = resp->add_scan_cache();
         assert(cache_msg->scan_tuple_size() == 0);
         scan_caches_.at(cid).clear();
+        scan_caches_idxs_.at(cid) = 0;
 
         for (size_t idx = 0; idx < ScanCache::ScanBatchSize; ++idx)
         {
@@ -728,6 +775,7 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         ScanNextResponse *scan_next = output_msg_.mutable_scan_next_resp();
         const ScanNextRequest &req = input_msg_->scan_next_req();
@@ -744,7 +792,34 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         }
         else
         {
-            scan_next->mutable_scan_tuple()->Clear();
+            CcOperation cc_op =
+                IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+            const LruEntry *prior_lru_entry =
+                reinterpret_cast<const LruEntry *>(prior_cce_addr_);
+            if (prior_lru_entry->parent_map_->Type() == TableType::Secondary)
+            {
+                cc_op = CcOperation::ReadSkIndex;
+            }
+            LockType lock_type =
+                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
+
+            if (lock_type == LockType::NoLock)
+            {
+                // Not acquire lock, just clear scan cache.
+                scan_next->mutable_scan_tuple()->Clear();
+            }
+            else
+            {
+                // Acquired lock, should transfer scan cache back to release
+                // the locks through PostRead.
+                while (scan_cache_.size() <
+                       (size_t) scan_next->scan_tuple_size())
+                {
+                    scan_next->mutable_scan_tuple()->RemoveLast();
+                }
+
+                scan_next->set_scan_cache_ptr(req.scan_cache_ptr());
+            }
         }
 
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -766,7 +841,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     direct_ = scan_next.direction() ? ScanDirection::Forward
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
-    lock_type_ = static_cast<LockType>(scan_next.lock_type());
+    is_for_write_ = scan_next.is_for_write();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
     tx_number_ = input_msg->tx_number();
@@ -785,6 +860,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     assert(resp->scan_tuple_size() == 0);
 
     scan_cache_.clear();
+    scan_cache_idx_ = 0;
     for (size_t idx = 0; idx < ScanCache::ScanBatchSize; ++idx)
     {
         ScanTuple_msg *tuple = resp->add_scan_tuple();
@@ -839,6 +915,7 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         FaultInjectResponse *resp = output_msg_.mutable_fault_inject_resp();
@@ -885,6 +962,7 @@ txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         CleanCcEntryForTestResponse *resp =

@@ -157,6 +157,7 @@ void Checkpointer::Ckpt()
             // Set isolation level to RepeatableRead to ensure the readlock will
             // be set during the execution of the following ReadTxRequest.
             init_req.iso_level_ = IsolationLevel::RepeatableRead;
+            init_req.protocol_ = CcProtocol::Locking;
             init_req.Reset();
             ckpt_txm->Execute(&init_req);
             init_req.Wait();
@@ -178,8 +179,10 @@ void Checkpointer::Ckpt()
             read_req.Set(&catalog_ccm_name,
                          &table_key,
                          &catalog_rec,
-                         LockType::ReadLock,
-                         true);
+                         false,
+                         false,
+                         true,
+                         0UL);
             ckpt_txm->Execute(&read_req);
             read_req.Wait();
 

@@ -34,6 +34,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       commit_ts_(UINT64_MAX),
       commit_ts_bound_(0),
       tx_status_(TxnStatus::Ongoing),
+      command_id_{0},
       rw_set_(),
       cache_miss_read_cce_addr_(),
       scans_(),
@@ -75,6 +76,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     wset_reverse_iters_.clear();
     scans_.clear();
     tx_number_.store(UINT32_MAX, std::memory_order_release);
+    command_id_.store(0, std::memory_order_release);
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
     bool_resp_ = nullptr;
@@ -105,6 +107,11 @@ uint64_t TransactionExecution::TxNumber() const
 int64_t TransactionExecution::TxTerm() const
 {
     return tx_term_;
+}
+
+uint16_t TransactionExecution::CommandId() const
+{
+    return command_id_.load(std::memory_order_relaxed);
 }
 
 std::string TransactionExecution::GetErrorMessage() const
@@ -277,6 +284,7 @@ void TransactionExecution::StartTiming()
 void TransactionExecution::PushOperation(TransactionOperation *op,
                                          int retry_num)
 {
+    command_id_++;
     state_stack_.push_back(op);
     op->retry_num_ = retry_num;
     op->is_running_ = false;
@@ -311,6 +319,7 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
 
     read_.read_type_ = ReadType::Inside;
     read_.read_tx_req_ = &read_req;
+    read_.hd_result_.Value().Reset();
     PushOperation(&read_);
     Process(read_);
 }
@@ -397,7 +406,6 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
 
     ScanClose(scan_close_req.alias_,
               *scan_close_req.end_key_,
-              scan_close_req.lock_type_,
               scan_close_req.table_name_);
 }
 
@@ -611,7 +619,6 @@ void TransactionExecution::Process(ReadOperation &read)
         const TableName &table_name = *read.read_tx_req_->tab_name_;
         const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
-        read.lock_type_ = read.read_tx_req_->lock_type_;
         const uint64_t corresponding_sk_commit_ts =
             read.read_tx_req_->corresponding_sk_commit_ts_;
 
@@ -625,7 +632,14 @@ void TransactionExecution::Process(ReadOperation &read)
             // Reading catalogs needs to put read locks, regardless of the tx's
             // concurrency control protocol. So for now, a read's isolation
             // level and cc protocol is fixed.
-            read.iso_level_ = IsolationLevel::RepeatableRead;
+            if (iso_level_ < IsolationLevel::RepeatableRead)
+            {
+                read.iso_level_ = IsolationLevel::RepeatableRead;
+            }
+            else
+            {
+                read.iso_level_ = iso_level_;
+            }
             read.protocol_ = CcProtocol::Locking;
 
             handler->ReadLocal(table_name,
@@ -634,11 +648,12 @@ void TransactionExecution::Process(ReadOperation &read)
                                read.read_type_,
                                tx_number_.load(std::memory_order_relaxed),
                                tx_term_,
+                               command_id_.load(std::memory_order_relaxed),
                                start_ts_,
                                read.hd_result_,
-                               IsolationLevel::RepeatableRead,
-                               CcProtocol::Locking,
-                               read.read_tx_req_->lock_type_);
+                               read.iso_level_,
+                               read.protocol_,
+                               read.read_tx_req_->is_for_write_);
         }
         else
         {
@@ -673,11 +688,17 @@ void TransactionExecution::Process(ReadOperation &read)
                 return;
             }
 
+            // Step 3: do read.
             read.protocol_ = protocol_;
             read.iso_level_ = iso_level_;
+            if (read.read_tx_req_->is_for_share_ &&
+                iso_level_ < IsolationLevel::RepeatableRead)
+            {
+                read.iso_level_ = IsolationLevel::RepeatableRead;
+            }
 
             uint64_t read_ts = 0;
-            if (iso_level_ == IsolationLevel::Snapshot)
+            if (read.iso_level_ == IsolationLevel::Snapshot)
             {
                 read_ts = start_ts_;
             }
@@ -692,11 +713,12 @@ void TransactionExecution::Process(ReadOperation &read)
                           read.read_type_,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
                           read_ts,
                           read.hd_result_,
-                          iso_level_,
-                          protocol_,
-                          read.lock_type_);
+                          read.iso_level_,
+                          read.protocol_,
+                          read.read_tx_req_->is_for_write_);
 
             StartTiming();
 
@@ -712,6 +734,7 @@ void TransactionExecution::Process(ReadOperation &read)
                            read.read_outside_tx_req_->commit_ts_);
 
         handler->ReadOutside(tx_term_,
+                             command_id_.load(std::memory_order_relaxed),
                              record,
                              is_deleted,
                              read.read_outside_tx_req_->commit_ts_,
@@ -757,34 +780,20 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         if (read_.read_type_ == ReadType::Inside)
         {
             const TableName *table_name = read_req->tab_name_;
-            if (read_.read_tx_req_->lock_type_ == LockType::WriteIntent)
+            LockType lock_type = read_res.lock_type_;
+
+            if (lock_type != LockType::NoLock)
             {
-                rw_set_.AddRead(read_res.cce_addr_,
-                                read_res.ts_,
-                                read_.protocol_,
-                                read_.read_tx_req_->lock_type_,
-                                table_name);
-            }
-            else if (read_.iso_level_ >= IsolationLevel::RepeatableRead)
-            {
-                const ReadSetEntry *prev_read =
-                    rw_set_.FindRead(*table_name, read_res.cce_addr_);
-                if (prev_read != nullptr &&
-                    prev_read->version_ts_ != read_res.ts_)
+                bool add_res = rw_set_.AddRead(read_res.cce_addr_,
+                                               read_res.ts_,
+                                               read_.protocol_,
+                                               read_res.lock_type_,
+                                               table_name);
+                if (!add_res)
                 {
-                    // this branch is only reachable for OCC protocol
-                    assert(read_.protocol_ == CcProtocol::OCC);
                     rec_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                     return;
-                }
-                else
-                {
-                    rw_set_.AddRead(read_res.cce_addr_,
-                                    read_res.ts_,
-                                    read_.protocol_,
-                                    read_.read_tx_req_->lock_type_,
-                                    table_name);
                 }
             }
         }
@@ -825,7 +834,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool inclusive = scan_open.tx_req_->inclusive_;
     ScanDirection direction = scan_open.tx_req_->direct_;
     bool is_ckpt_delta = scan_open.tx_req_->is_ckpt_delta_;
-    LockType lock_type = scan_open.tx_req_->lock_type_;
+    bool is_for_write = scan_open.tx_req_->is_for_write_;
+    bool is_for_share = scan_open.tx_req_->is_for_share_;
 
     scan_open.Reset();
     scan_open.is_running_ = true;
@@ -844,28 +854,36 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                                inclusive,
                                tx_number_.load(std::memory_order_relaxed),
                                tx_term_,
+                               command_id_.load(std::memory_order_relaxed),
                                commit_ts_bound_,
                                scan_open.hd_result_,
                                direction,
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
-                               LockType::ReadLock,
+                               is_for_write,
                                is_ckpt_delta);
     }
     else
     {
+        IsolationLevel iso_lvl = iso_level_;
+        if (is_for_share && iso_level_ < IsolationLevel::RepeatableRead)
+        {
+            iso_lvl = IsolationLevel::RepeatableRead;
+        }
+
         handler->ScanOpen(table_name,
                           index_type,
                           start_key,
                           inclusive,
                           tx_number_.load(std::memory_order_relaxed),
                           tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
                           start_ts_,
                           scan_open.hd_result_,
                           direction,
-                          iso_level_,
+                          iso_lvl,
                           protocol_,
-                          lock_type,
+                          is_for_write,
                           is_ckpt_delta);
     }
 
@@ -890,6 +908,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     if (scan_open_.hd_result_.IsError())
     {
+        if (scan_open_.hd_result_.Value().scanner_ != nullptr)
+        {
+            const TableName &table_name = *scan_open_.tx_req_->tab_name_;
+            CcScanner &scanner = *(scan_open_.hd_result_.Value().scanner_);
+
+            // Add remaining ScanTuple into rset, so their lock can be released
+            // when transaction been committed
+            DrainOutScanCache(table_name, scanner);
+        }
         uint64_resp_->FinishError();
         return;
     }
@@ -941,7 +968,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 .append(std::to_string(this->tx_term_));
         });
     size_t alias = scan_next.tx_req_->alias_;
-    LockType lock_type = scan_next_.tx_req_->lock_type_;
 
     auto it = scans_.find(alias);
     assert(it != scans_.end());
@@ -950,19 +976,29 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     scan_next.Reset();
     scan_next.is_running_ = true;
     scan_next.Set(alias, &scanner);
-
     const ScanTuple *scan_tuple = scanner.Current();
 
     if (scan_tuple == nullptr && scanner.Status() == ScannerStatus::Blocked)
     {
-        handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
-                               tx_term_,
-                               start_ts_,
-                               scanner,
-                               scan_next.hd_result_,
-                               iso_level_,
-                               protocol_,
-                               lock_type);
+        if (scanner.read_local_)
+        {
+            handler->ScanNextBatchLocal(
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                start_ts_,
+                scanner,
+                scan_next.hd_result_);
+        }
+        else
+        {
+            handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
+                                   start_ts_,
+                                   scanner,
+                                   scan_next.hd_result_);
+        }
     }
     else
     {
@@ -1000,6 +1036,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         return;
     }
 
+    const TableName &table_name = scan_next.tx_req_->table_name_;
     const ScanTuple *cc_scan_tuple = scan_next.scanner_->Current();
     // (cc_scan_tuple->key_ts_ == 0) means it is a boundary key but outside the
     // query scope.
@@ -1011,6 +1048,25 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
            (cc_scan_tuple->key_ts_ == 0 ||
             cc_scan_tuple->rec_status_ == RecordStatus::Unknown))
     {
+        // Lock need to be released when transaction be committed.
+        LockType scan_tuple_lock_type =
+            scan_next.scanner_->DeduceScanTupleLockType(cc_scan_tuple);
+        // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is not
+        // used when do scan operation.
+        if (scan_tuple_lock_type != LockType::NoLock &&
+            cc_scan_tuple->key_ts_ != 0)
+        {
+            bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                           cc_scan_tuple->key_ts_,
+                                           scan_next.scanner_->protocol_,
+                                           scan_tuple_lock_type,
+                                           &table_name);
+            if (!add_res)
+            {
+                kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                return;
+            }
+        }
         scan_next.scanner_->MoveNext();
         cc_scan_tuple = scan_next.scanner_->Current();
 
@@ -1020,11 +1076,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             scan_next.hd_result_.Reset();
             handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
                                    start_ts_,
                                    *scan_next.scanner_,
-                                   scan_next.hd_result_,
-                                   iso_level_,
-                                   protocol_);
+                                   scan_next.hd_result_);
             // put scannext_op into state stack since we need to scan the ccmap
             // again. Note that we should not call PushOperation() since we have
             // already triggerred the ScanNextBatch.
@@ -1038,13 +1093,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     // Lock need to be released when transaction be committed, so add scan
     // result into transaction read set
-    if (cc_scan_tuple != nullptr && protocol_ != CcProtocol::MVCC &&
-        (iso_level_ >= IsolationLevel::RepeatableRead ||
-         scan_next.tx_req_->lock_type_ == LockType::WriteIntent ||
-         scan_next.scanner_->IndexType() == ScanIndexType::Secondary))
+    LockType scan_tuple_lock_type =
+        scan_next.scanner_->DeduceScanTupleLockType(cc_scan_tuple);
+    if (cc_scan_tuple != nullptr && scan_tuple_lock_type != LockType::NoLock)
     {
-        LockType lk_type = scan_next.tx_req_->lock_type_;
-
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
             "PostProcess.ScanOperation.AddReadSet.cce_ptr",
@@ -1061,12 +1113,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
                 }));
 
-        const TableName &table_name = scan_next.tx_req_->table_name_;
-        rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                        cc_scan_tuple->key_ts_,
-                        protocol_,
-                        lk_type,
-                        &table_name);
+        bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                       cc_scan_tuple->key_ts_,
+                                       scan_next.scanner_->protocol_,
+                                       scan_tuple_lock_type,
+                                       &table_name);
+        if (!add_res)
+        {
+            kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+            return;
+        }
     }
 
     if (scan_next.scanner_->Direction() == ScanDirection::Forward)
@@ -1296,7 +1352,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
 void TransactionExecution::ScanClose(size_t alias,
                                      const TxKey &end_key,
-                                     LockType lock_type,
                                      const TableName &table_name)
 {
     auto scan_it = scans_.find(alias);
@@ -1311,51 +1366,69 @@ void TransactionExecution::ScanClose(size_t alias,
 
     // Add remaining ScanTuple into rset, so their lock can be released when
     // transaction been committed
-    if ((iso_level_ >= IsolationLevel::RepeatableRead ||
-         lock_type == LockType::WriteIntent ||
-         scanner.IndexType() == ScanIndexType::Secondary) &&
-        protocol_ != CcProtocol::MVCC)
-    {
-        // drain out the scan tuple in the scan cache
-        scanner.SetDrainCacheMode(true);
-        const ScanTuple *cc_scan_tuple = scanner.Current();
-        // In case the scan status is blocked before
-        if (cc_scan_tuple == nullptr &&
-            scanner.Status() == ScannerStatus::Blocked)
-        {
-            scanner.MoveNext();
-            cc_scan_tuple = scanner.Current();
-        }
-        while (cc_scan_tuple != nullptr)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                &rw_set_,
-                (
-                    [this, cc_scan_tuple]() -> std::string
-                    {
-                        return std::string("\"tx_number\":")
-                            .append(std::to_string(this->TxNumber()))
-                            .append(",\"tx_term\":")
-                            .append(std::to_string(this->tx_term_))
-                            .append(",\"cce_ptr\":")
-                            .append(std::to_string(
-                                cc_scan_tuple->cce_addr_.CcePtr()));
-                    }));
-            rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                            cc_scan_tuple->key_ts_,
-                            protocol_,
-                            lock_type,
-                            &table_name);
-            scanner.MoveNext();
-            cc_scan_tuple = scanner.Current();
-        }
-    }
+    DrainOutScanCache(table_name, scanner);
 
     handler->ScanClose(alias, end_key, false);
     scans_.erase(scan_it);
     void_resp_->Finish(void_);
+}
+
+// drain out scan cache and move ScanTuple into readset
+void TransactionExecution::DrainOutScanCache(const TableName &table_name,
+                                             CcScanner &scanner)
+{
+    // Add remaining ScanTuple into rset, so their lock can be released when
+    // transaction been committed
+
+    // drain out the scan tuple in the scan cache
+    scanner.SetDrainCacheMode(true);
+    const ScanTuple *cc_scan_tuple = scanner.Current();
+    // In case the scan status is blocked before
+    if (cc_scan_tuple == nullptr && scanner.Status() == ScannerStatus::Blocked)
+    {
+        scanner.MoveNext();
+        cc_scan_tuple = scanner.Current();
+    }
+
+    while (cc_scan_tuple != nullptr)
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+            &rw_set_,
+            (
+                [this, cc_scan_tuple]() -> std::string
+                {
+                    return std::string("\"tx_number\":")
+                        .append(std::to_string(this->TxNumber()))
+                        .append(",\"tx_term\":")
+                        .append(std::to_string(this->tx_term_))
+                        .append(",\"cce_ptr\":")
+                        .append(
+                            std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
+                }));
+
+        LockType scan_tuple_lock_type =
+            scanner.DeduceScanTupleLockType(cc_scan_tuple);
+        // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is not
+        // used when do scan operation.
+        if (scan_tuple_lock_type != LockType::NoLock &&
+            cc_scan_tuple->key_ts_ != 0)
+        {
+            bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                           cc_scan_tuple->key_ts_,
+                                           scanner.protocol_,
+                                           scan_tuple_lock_type,
+                                           &table_name);
+            if (!add_res)
+            {
+                continue;
+            }
+        }
+        scanner.MoveNext();
+        cc_scan_tuple = scanner.Current();
+        scan_tuple_lock_type = scanner.DeduceScanTupleLockType(cc_scan_tuple);
+    }
 }
 
 void TransactionExecution::Update(const TableName &table_name,
@@ -1447,11 +1520,13 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                                   *write_entry.key_,
                                   TxNumber(),
                                   tx_term_,
+                                  command_id_.load(std::memory_order_relaxed),
                                   current_ts,
                                   write_entry.op_ == DmlOperation::Insert,
                                   acquire_write.hd_result_,
                                   idx,
-                                  protocol_);
+                                  protocol_,
+                                  iso_level_);
             ++idx;
         }
     }
@@ -1473,7 +1548,6 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
         });
     state_stack_.pop_back();
     assert(state_stack_.empty());
-
     if (acquire_write.hd_result_.IsError() || acquire_write.rset_has_expired_)
     {
         bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
@@ -1599,6 +1673,7 @@ void TransactionExecution::Process(ValidateOperation &validate)
         {
             handler->PostRead(tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
+                              command_id_.load(std::memory_order_relaxed),
                               read_entry.version_ts_,
                               0,
                               commit_ts_,
@@ -2006,13 +2081,13 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             {
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
                                    commit_ts_,
                                    write_entry.cce_addr_,
                                    write_entry.rec_.get(),
                                    write_entry.op_ == DmlOperation::Delete,
                                    post_process.hd_result_,
                                    protocol_);
-
                 ++idx;
             }
         }
@@ -2043,6 +2118,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
                                    0,
                                    write_entry.cce_addr_,
                                    nullptr,
@@ -2066,6 +2142,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             {
                 handler->PostRead(tx_number_.load(std::memory_order_relaxed),
                                   tx_term_,
+                                  command_id_.load(std::memory_order_relaxed),
                                   0,
                                   0,
                                   0,
@@ -2140,10 +2217,11 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
                                  nid,
                                  tx_number_.load(std::memory_order_relaxed),
                                  tx_term_,
+                                 command_id_.load(std::memory_order_relaxed),
                                  false,
                                  hres,
                                  acq_all_op.protocol_,
-                                 acq_all_op.lk_type_);
+                                 acq_all_op.cc_op_);
     }
 
     StartTiming();
@@ -2189,6 +2267,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                               nid,
                               tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
+                              command_id_.load(std::memory_order_relaxed),
                               commit_ts_,
                               post_write_all_op.hd_result_,
                               post_write_all_op.dml_op_,
@@ -2272,6 +2351,7 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
     handler->FaultInject(fault_inject_op_.fault_name_,
                          fault_inject_op_.fault_paras_,
                          tx_term_,
+                         command_id_.load(std::memory_order_relaxed),
                          txid_,
                          fault_inject_op_.vct_node_id_,
                          fault_inject_op_.hd_result_);
@@ -2341,6 +2421,7 @@ void TransactionExecution::Process(CleanCcEntryForTestOp &clean_entry_op)
                                  clean_entry_op_.flush_,
                                  tx_number_.load(std::memory_order_relaxed),
                                  tx_term_,
+                                 command_id_.load(std::memory_order_relaxed),
                                  clean_entry_op_.hd_result_);
     return;
 }

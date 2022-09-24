@@ -305,6 +305,15 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
     }
 }
 
+void CcShard::DecTxHeldWriteLockCount(TxNumber txn)
+{
+    auto tx_it = lock_holding_txs_.find(txn);
+    if (tx_it != lock_holding_txs_.end())
+    {
+        tx_it->second.key_write_lock_count_--;
+    }
+}
+
 void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                              uint32_t cc_ng_id,
                              int64_t cc_ng_term)

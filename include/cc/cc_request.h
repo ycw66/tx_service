@@ -35,6 +35,8 @@ class TemplateCcMap;
 template <typename SkT, typename PkT>
 class SkCcMap;
 
+class CcMap;
+
 template <typename RequestT, typename ResultType>
 struct TemplatedCcRequest : public CcRequestBase
 {
@@ -309,10 +311,11 @@ public:
                bool is_insert,
                CcHandlerResult<std::vector<AcquireKeyResult>> *res,
                uint32_t hd_res_idx,
-               CcProtocol proto)
+               CcProtocol proto,
+               IsolationLevel iso_level)
     {
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, key_shard_code >> 10, txn, proto);
+            tname, res, key_shard_code >> 10, txn, proto, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
@@ -334,7 +337,8 @@ public:
                bool is_insert,
                CcHandlerResult<std::vector<AcquireKeyResult>> *res,
                uint32_t hd_res_idx,
-               CcProtocol proto)
+               CcProtocol proto,
+               IsolationLevel iso_level)
     {
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
             tname, res, key_shard_code >> 10, txn, proto);
@@ -434,17 +438,18 @@ public:
                bool is_insert,
                CcHandlerResult<AcquireAllResult> *res,
                CcProtocol proto,
-               LockType lk_type)
+               CcOperation cc_op,
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
-            tname, res, node_group_id, tx_number, proto);
+            tname, res, node_group_id, tx_number, proto, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
-        lock_type_ = lk_type;
+        cc_op_ = cc_op;
         cce_ptr_ = nullptr;
         is_local_ = true;
     }
@@ -457,17 +462,18 @@ public:
                bool is_insert,
                CcHandlerResult<AcquireAllResult> *res,
                CcProtocol proto,
-               LockType lk_type)
+               CcOperation cc_op,
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
-            tname, res, node_group_id, tx_number, proto);
+            tname, res, node_group_id, tx_number, proto, iso_level);
 
         key_ = nullptr;
         key_str_ = key_str;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
-        lock_type_ = lk_type;
+        cc_op_ = cc_op;
         cce_ptr_ = nullptr;
         is_local_ = false;
     }
@@ -492,10 +498,15 @@ public:
         return is_insert_;
     }
 
-    LockType GetLockType() const
+    CcOperation CcOp() const
     {
-        return lock_type_;
+        return cc_op_;
     }
+
+    // LockType GetLockType() const
+    // {
+    //     return lock_type_;
+    // }
 
     TxKey *DecodedKey() const
     {
@@ -534,7 +545,7 @@ private:
     std::unique_ptr<TxKey> decoded_key_{nullptr};
     int64_t tx_term_{-1};
     bool is_insert_{false};
-    LockType lock_type_{LockType::WriteIntent};
+    CcOperation cc_op_{CcOperation::Write};
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
     // blocked due to conflicts in 2PL. After the request is unblocked and
@@ -908,7 +919,7 @@ public:
           rec_str_(nullptr),
           ts_(0),
           type_(ReadType::Inside),
-          lock_type_(LockType::ReadLock)
+          is_for_write_(false)
     {
     }
 
@@ -926,7 +937,7 @@ public:
                CcHandlerResult<ReadKeyResult> *res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type,
+               bool is_for_write = false,
                std::vector<VersionTxRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -940,7 +951,7 @@ public:
         tx_term_ = tx_term;
         ts_ = ts;
         type_ = read_type;
-        lock_type_ = lock_type;
+        is_for_write_ = is_for_write;
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
@@ -971,7 +982,7 @@ public:
                CcHandlerResult<ReadKeyResult> *res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type,
+               bool is_for_write = false,
                std::vector<VersionTxRecord> *archives = nullptr)
     {
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -985,7 +996,7 @@ public:
         tx_term_ = tx_term;
         ts_ = ts;
         type_ = read_type;
-        lock_type_ = lock_type;
+        is_for_write_ = is_for_write;
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = false;
@@ -1045,19 +1056,14 @@ public:
         return type_;
     }
 
-    LockType GetLockType() const
+    bool IsForWrite() const
     {
-        return lock_type_;
+        return is_for_write_;
     }
 
     void SetReadType(ReadType type)
     {
         type_ = type;
-    }
-
-    void SetLockType(LockType lock_type)
-    {
-        lock_type_ = lock_type;
     }
 
     void SetCcePtr(LruEntry *ptr)
@@ -1094,7 +1100,7 @@ private:
     int64_t tx_term_;
     uint64_t ts_;
     ReadType type_;
-    LockType lock_type_;
+    bool is_for_write_;
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
     // blocked due to conflicts in 2PL. After the request is unblocked and
@@ -1125,7 +1131,7 @@ public:
                CcHandlerResult<ScanOpenResult> *res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type,
+               bool is_for_write,
                bool is_delta,
                bool is_include_floor_cce = false)
     {
@@ -1139,7 +1145,7 @@ public:
         ts_ = ts;
         scan_cache_ = cache;
         term_ = term;
-        lock_type_ = lock_type;
+        is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_include_floor_cce_ = is_include_floor_cce;
         cce_ptr_ = nullptr;
@@ -1150,9 +1156,9 @@ public:
         return term_;
     }
 
-    LockType GetLockType()
+    bool IsForWrite() const
     {
-        return lock_type_;
+        return is_for_write_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1178,7 +1184,7 @@ private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
     int64_t term_{-1};
-    LockType lock_type_{LockType::ReadLock};
+    bool is_for_write_{false};
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
@@ -1195,6 +1201,8 @@ private:
 
     template <typename SkT, typename PkT>
     friend class SkCcMap;
+
+    friend class CcMap;
 
     template <typename KeyT>
     friend class RangeCcMap;
@@ -1217,7 +1225,7 @@ public:
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
                CcProtocol protocol,
-               LockType lock_type,
+               bool is_for_write,
                bool is_delta)
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
@@ -1226,7 +1234,7 @@ public:
         ts_ = ts;
         scan_cache_ = cache;
         tx_term_ = tx_term;
-        lock_type_ = lock_type;
+        is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         cce_ptr_ = nullptr;
 
@@ -1241,9 +1249,9 @@ public:
         return tx_term_;
     }
 
-    LockType GetLockType()
+    bool IsForWrite() const
     {
-        return lock_type_;
+        return is_for_write_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1265,8 +1273,8 @@ private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
     int64_t tx_term_{-1};
-    LockType lock_type_{LockType::ReadLock};
 
+    bool is_for_write_{false};
     bool is_ckpt_delta_{false};
 
     // The pointer of the cc entry to which this request is directed. The

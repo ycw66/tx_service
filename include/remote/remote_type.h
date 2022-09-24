@@ -42,8 +42,8 @@ public:
             return CcProtocolType::Occ;
         case CcProtocol::Locking:
             return CcProtocolType::Locking;
-        case CcProtocol::MVCC:
-            return CcProtocolType::Mvcc;
+        case CcProtocol::OccRead:
+            return CcProtocolType::OccRead;
         default:
             assert(false);
             return CcProtocolType::Occ;
@@ -68,6 +68,25 @@ public:
         default:
             assert(false);
             return CcLockType::NoLock;
+        }
+    }
+
+    static txservice::remote::CcOperationType ConvertCcOperation(
+        txservice::CcOperation cc_op)
+    {
+        switch (cc_op)
+        {
+        case CcOperation::Read:
+            return CcOperationType::Read;
+        case CcOperation::ReadForWrite:
+            return CcOperationType::ReadForWrite;
+        case CcOperation::ReadSkIndex:
+            return CcOperationType::ReadSkIndex;
+        case CcOperation::Write:
+            return CcOperationType::Write;
+        default:
+            assert(false);
+            return CcOperationType::Read;
         }
     }
 
@@ -155,9 +174,9 @@ public:
         {
             return CcProtocol::Locking;
         }
-        else if (proto == CcProtocolType::Mvcc)
+        else if (proto == CcProtocolType::OccRead)
         {
-            return CcProtocol::MVCC;
+            return CcProtocol::OccRead;
         }
         else
         {
@@ -187,6 +206,25 @@ public:
         else
         {
             return LockType::WriteLock;
+        }
+    }
+
+    static txservice::CcOperation ConvertCcOperation(
+        txservice::remote::CcOperationType cc_op_type)
+    {
+        switch (cc_op_type)
+        {
+        case CcOperationType::Read:
+            return CcOperation::Read;
+        case CcOperationType::ReadForWrite:
+            return CcOperation::ReadForWrite;
+        case CcOperationType::ReadSkIndex:
+            return CcOperation::ReadSkIndex;
+        case CcOperationType::Write:
+            return CcOperation::Write;
+        default:
+            assert(false);
+            return CcOperation::Read;
         }
     }
 

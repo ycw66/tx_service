@@ -102,13 +102,15 @@ public:
     ReadTxRequest(const TableName *tab_name = nullptr,
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
-                  LockType lock_type = LockType::ReadLock,
+                  bool is_for_write = false,
+                  bool is_for_share = false,
                   bool read_local = false,
                   uint64_t corresponding_sk_commit_ts = 0)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
-          lock_type_(lock_type),
+          is_for_write_(is_for_write),
+          is_for_share_(is_for_share),
           read_local_(read_local),
           corresponding_sk_commit_ts_(corresponding_sk_commit_ts)
     {
@@ -117,14 +119,16 @@ public:
     void Set(const TableName *tab_name,
              const TxKey *key,
              TxRecord *rec,
-             LockType lock_type,
+             bool is_for_write = false,
+             bool is_for_share = false,
              bool read_local = false,
              uint64_t corresponding_sk_commit_ts = 0)
     {
         tab_name_ = tab_name;
         key_ = key;
         rec_ = rec;
-        lock_type_ = lock_type;
+        is_for_write_ = is_for_write;
+        is_for_share_ = is_for_share;
         read_local_ = read_local;
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
     }
@@ -132,7 +136,8 @@ public:
     const TableName *tab_name_;
     const TxKey *key_;
     TxRecord *rec_;
-    LockType lock_type_;
+    bool is_for_write_;  // used for "select ... for update".
+    bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
 };
@@ -190,18 +195,20 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     ScanOpenTxRequest(const TableName *tabname,
                       ScanIndexType index_type,
                       const TxKey *start_key,
-                      LockType lock_type,
                       bool inclusive = true,
                       ScanDirection direction = ScanDirection::Forward,
                       bool is_ckpt = false,
+                      bool is_for_write = false,
+                      bool is_for_share = false,
                       bool is_read_local = false)
         : tab_name_(tabname),
           indx_type_(index_type),
           start_key_(start_key),
-          lock_type_(lock_type),
           inclusive_(inclusive),
           direct_(direction),
           is_ckpt_delta_(is_ckpt),
+          is_for_write_(is_for_write),
+          is_for_share_(is_for_share),
           read_local_(is_read_local)
     {
     }
@@ -209,10 +216,11 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     const TableName *tab_name_;
     ScanIndexType indx_type_;
     const TxKey *start_key_;
-    LockType lock_type_;
     bool inclusive_;
     ScanDirection direct_;
     bool is_ckpt_delta_;
+    bool is_for_write_;
+    bool is_for_share_;
     bool read_local_;
 };
 
@@ -221,15 +229,12 @@ struct ScanNextTxRequest
           ScanNextTxRequest,
           std::tuple<const TxKey *, const TxRecord *, RecordStatus, uint64_t>>
 {
-    ScanNextTxRequest(size_t alias,
-                      LockType lock_type,
-                      const TableName &table_name)
-        : alias_(alias), lock_type_(lock_type), table_name_(table_name)
+    ScanNextTxRequest(size_t alias, const TableName &table_name)
+        : alias_(alias), table_name_(table_name)
     {
     }
 
     size_t alias_;
-    LockType lock_type_;
     const TableName &table_name_;
 };
 
@@ -237,18 +242,16 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
     ScanCloseTxRequest(size_t alias,
                        TxKey *end_key,
-                       LockType lock_type,
                        const TableName &table_name)
         : alias_(alias),
           end_key_(end_key),
-          lock_type_(lock_type),
+          //   lock_type_(lock_type),
           table_name_(table_name)
     {
     }
 
     size_t alias_;
     TxKey *end_key_;
-    LockType lock_type_;
     const TableName &table_name_;
 };
 

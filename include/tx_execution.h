@@ -126,6 +126,8 @@ public:
 
     int64_t TxTerm() const;
 
+    uint16_t CommandId() const;
+
     uint32_t TxCcNodeId() const;
 
     TxnStatus TxStatus() const;
@@ -285,8 +287,10 @@ private:
     // immediately without using CcRequests.
     void ScanClose(size_t alias,
                    const TxKey &end_key,
-                   LockType lock_type,
                    const TableName &table_name);
+
+    // drain out scan cache and move ScanTuple into readset
+    void DrainOutScanCache(const TableName &table_name, CcScanner &scanner);
 
     void Update(const TableName &table_name,
                 TxKey::Uptr key,
@@ -336,6 +340,16 @@ private:
     uint64_t commit_ts_;
     uint64_t commit_ts_bound_;
     std::atomic<TxnStatus> tx_status_;
+
+    // The command id is a identifier to distinguish whether the cc request's
+    // response is expired. For remote cc request's responses do not
+    // guarantee the sequence and we re-run tx operations after timeout, that
+    // is, same one operation's cc requests maybe sent repeatedly even if the
+    // previous one is being handled, the result is chaos once some one of
+    // the expired cc request's responses reaches before transaction finishing.
+    // The {command_id_} increases when TxExectuion handle a new TxRequest or
+    // send remote cc requests.
+    std::atomic<uint16_t> command_id_;
 
     // The local time when the tx machine first moves to its current state.
     uint64_t state_clock_;

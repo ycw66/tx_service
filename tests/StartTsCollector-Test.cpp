@@ -89,7 +89,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     for (size_t i = 0; i < tx_count; i++)
     {
         init_tx_reqs[i] =
-            new InitTxRequest(IsolationLevel::Snapshot, CcProtocol::MVCC);
+            new InitTxRequest(IsolationLevel::Snapshot, CcProtocol::OccRead);
         init_tx_reqs[i]->Reset();
         txs[i] = tx_service_->NewTx();
         // REQUIRE(txs[i]->GetStartTs() == 0U);

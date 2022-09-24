@@ -21,21 +21,24 @@ public:
                       const TxKey &key,
                       TxNumber tx_number,
                       int64_t tx_term,
+                      uint16_t command_id,
                       uint64_t ts,
                       bool is_insert,
                       CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
                       uint32_t hd_res_idx,
-                      const CcProtocol proto) override;
+                      CcProtocol proto,
+                      IsolationLevel iso_level) override;
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,
                          NodeGroupId ng_id,
                          TxNumber txn,
                          int64_t tx_term,
+                         uint16_t command_id,
                          bool is_insert,
                          CcHandlerResult<AcquireAllResult> &hres,
                          CcProtocol proto,
-                         LockType lock_type) override;
+                         CcOperation cc_op) override;
 
     void PostWriteAll(const TableName &table_name,
                       const TxKey &key,
@@ -43,6 +46,7 @@ public:
                       NodeGroupId ng_id,
                       uint64_t tx_number,
                       int64_t tx_term,
+                      uint16_t command_id,
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
                       DmlOperation dml_op,
@@ -63,6 +67,7 @@ public:
     /// <param name="is_deleted"></param>
     void PostWrite(uint64_t tx_number,
                    int64_t tx_term,
+                   uint16_t command_id,
                    uint64_t commit_ts,
                    const CcEntryAddr &ccentry_addr,
                    const TxRecord *record,
@@ -82,6 +87,7 @@ public:
     /// <param name=""></param>
     void PostRead(uint64_t tx_number,
                   int64_t tx_term,
+                  uint16_t command_id,
                   uint64_t key_ts,
                   uint64_t gap_ts,
                   uint64_t commit_ts,
@@ -108,13 +114,15 @@ public:
               ReadType read_type,
               uint64_t tx_number,
               int64_t tx_term,
+              uint16_t command_id,
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
               CcProtocol proto = CcProtocol::OCC,
-              LockType lock_type = LockType::ReadLock) override;
+              bool is_for_write = false) override;
 
     void ReadOutside(int64_t tx_term,
+                     uint16_t command_id,
                      TxRecord &rec,
                      bool is_deleted,
                      uint64_t commit_ts,
@@ -128,11 +136,12 @@ public:
                    ReadType read_type,
                    uint64_t tx_number,
                    int64_t tx_term,
+                   uint16_t command_id,
                    const uint64_t ts,
                    CcHandlerResult<ReadKeyResult> &hres,
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
                    CcProtocol proto = CcProtocol::Locking,
-                   LockType lock_type = LockType::ReadLock) override;
+                   bool is_for_write = false) override;
 
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,
@@ -140,12 +149,13 @@ public:
                   bool inclusive,
                   uint64_t tx_number,
                   int64_t tx_term,
+                  uint16_t command_id,
                   uint64_t ts,
                   CcHandlerResult<ScanOpenResult> &hd_res,
                   ScanDirection direction = ScanDirection::Forward,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
-                  LockType lock_type = LockType::ReadLock,
+                  bool is_for_write = false,
                   bool is_ckpt_delta = false) override;
 
     void ScanOpenLocal(const TableName &table_name,
@@ -154,37 +164,30 @@ public:
                        bool inclusive,
                        uint64_t tx_number,
                        int64_t tx_term,
+                       uint16_t command_id,
                        uint64_t ts,
                        CcHandlerResult<ScanOpenResult> &hd_res,
                        ScanDirection direction = ScanDirection::Forward,
                        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                        CcProtocol proto = CcProtocol::OCC,
-                       LockType lock_type = LockType::ReadLock,
+                       bool is_for_write = false,
                        bool is_ckpt_delta = false) override;
 
     void ScanNextBatch(uint64_t tx_number,
                        int64_t tx_term,
+                       uint16_t command_id,
                        uint64_t start_ts,
                        CcScanner &scanner,
-                       CcHandlerResult<ScanNextResult> &hd_res,
-                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-                       CcProtocol proto = CcProtocol::OCC,
-                       LockType lock_type = LockType::ReadLock) override;
+                       CcHandlerResult<ScanNextResult> &hd_res) override;
 
-    void ScanNextBatchLocal(
-        uint64_t tx_number,
-        int64_t tx_term,
-        uint64_t start_ts,
-        CcScanner &scanner,
-        CcHandlerResult<ScanNextResult> &hd_res,
-        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-        CcProtocol proto = CcProtocol::OCC) override;
+    void ScanNextBatchLocal(uint64_t tx_number,
+                            int64_t tx_term,
+                            uint16_t command_id,
+                            uint64_t start_ts,
+                            CcScanner &scanner,
+                            CcHandlerResult<ScanNextResult> &hd_res) override;
 
-    void ScanClose(size_t alias,
-                   const TxKey &end_key,
-                   bool inclusive,
-                   CcProtocol proto = CcProtocol::OCC,
-                   LockType lock_type = LockType::ReadLock) override
+    void ScanClose(size_t alias, const TxKey &end_key, bool inclusive) override
     {
     }
 
@@ -251,6 +254,7 @@ public:
     void FaultInject(const std::string &fault_name,
                      const std::string &fault_paras,
                      int64_t tx_term,
+                     uint16_t command_id,
                      const TxId &txid,
                      std::vector<int> &vct_node_id,
                      CcHandlerResult<bool> &hres) override;
@@ -266,6 +270,7 @@ public:
                              bool flush,
                              uint64_t tx_number,
                              int64_t tx_term,
+                             uint16_t command_id,
                              CcHandlerResult<bool> &hres) override;
 
     void DataStoreFindRangeMedianKey(

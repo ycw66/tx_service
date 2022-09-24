@@ -457,6 +457,8 @@ public:
             Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
+            LOG(INFO) << "ReplayLogCc, node_group(#" << req.NodeGroupId()
+                      << ") term < 0, tx:" << req.Txn();
             req.Result()->SetError(-1);
             return false;
         }
@@ -545,12 +547,20 @@ public:
             // guaranteed to be recovered upon failures. The tx's term is not
             // necessary here to mark whether or not if the coordinating tx has
             // failed or not.
-            bool success =
-                cce->key_lock_.AcquireWriteLock(&req, 0, CcProtocol::Locking);
+            auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->payload_status_,
+                                               &req,
+                                               req.NodeGroupId(),
+                                               ng_term,
+                                               0,
+                                               CcOperation::Write,
+                                               IsolationLevel::RepeatableRead,
+                                               CcProtocol::Locking);
 
             // When a cc node recovers, no one should be holding read locks. So,
             // the acquire operation should always succeed.
-            assert(success);
+            assert(lock_pair.first == LockType::WriteLock &&
+                   lock_pair.second == LockOpStatus::Successful);
         }
 
         if (cce->payload_ == nullptr)

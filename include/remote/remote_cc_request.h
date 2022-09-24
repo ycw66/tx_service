@@ -18,6 +18,8 @@ class TemplateCcMap;
 template <typename SkT, typename PkT>
 class SkCcMap;
 
+class CcMap;
+
 namespace remote
 {
 class CcStreamSender;
@@ -183,7 +185,6 @@ private:
     CcStreamSender *hd_{nullptr};
 
     const std::string *rec_str_{nullptr};
-    // bool is_deleted_{false};
     ::txservice::RecordStatus rec_status_;
 
     uint64_t commit_ts_{0};
@@ -273,9 +274,14 @@ public:
         return tx_term_;
     }
 
-    LockType GetLockType()
+    uint16_t CommandId()
     {
-        return lock_type_;
+        return input_msg_->command_id();
+    }
+
+    bool IsForWrite() const
+    {
+        return is_for_write_;
     }
 
     uint64_t ReadTimestamp() const
@@ -304,14 +310,14 @@ private:
     bool inclusive_{true};
     ScanDirection direct_{ScanDirection::Forward};
     std::vector<std::vector<ScanTuple_msg *>> scan_caches_;
+    // tuple index of every core's scan_cache in {scan_caches_}
+    std::vector<size_t> scan_caches_idxs_;
     bool is_ckpt_delta_{false};
     CcHandlerResult<Void> cc_res_{nullptr};
     std::atomic<uint32_t> unfinish_cnt_{0};
     int64_t tx_term_{0};
-    enum LockType lock_type_
-    {
-        LockType::NoLock
-    };
+    bool is_for_write_{false};
+
     uint64_t snapshot_ts_{0};
 
     // The pointer of the cc entry to which this request is directed. The
@@ -326,6 +332,8 @@ private:
 
     template <typename SkT, typename PkT>
     friend class ::txservice::SkCcMap;
+
+    friend class ::txservice::CcMap;
 };
 
 struct RemoteScanNextBatch
@@ -352,9 +360,9 @@ public:
         return tx_term_;
     }
 
-    LockType GetLockType()
+    bool IsForWrite() const
     {
-        return lock_type_;
+        return is_for_write_;
     }
 
     uint64_t ReadTimestamp() const
@@ -380,14 +388,12 @@ private:
     uint64_t prior_cce_addr_{0};
     ScanDirection direct_{ScanDirection::Forward};
     std::vector<ScanTuple_msg *> scan_cache_;
+    size_t scan_cache_idx_;
     bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
     int64_t tx_term_{0};
-    enum LockType lock_type_
-    {
-        LockType::NoLock
-    };
+    bool is_for_write_{false};
     uint64_t snapshot_ts_{0};
 
     // The pointer of the cc entry to which this request is directed. The
@@ -402,6 +408,8 @@ private:
 
     template <typename SkT, typename PkT>
     friend class ::txservice::SkCcMap;
+
+    friend class ::txservice::CcMap;
 };
 
 struct RemoteFaultInjectCC : public FaultInjectCC

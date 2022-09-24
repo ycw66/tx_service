@@ -74,8 +74,10 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                         read_catalog_tx_req.Set(&txservice::catalog_ccm_name,
                                                 &table_key,
                                                 &catalog_rec,
-                                                LockType::ReadLock,
-                                                true);
+                                                false,
+                                                false,
+                                                true,
+                                                0UL);
                         txm->Execute(&read_catalog_tx_req);
                         read_catalog_tx_req.Wait();
                         if (read_catalog_tx_req.IsError() ||
@@ -133,8 +135,10 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                                 &txservice::catalog_ccm_name,
                                 &table_key,
                                 &catalog_rec,
-                                LockType::ReadLock,
-                                true);
+                                false,
+                                false,
+                                true,
+                                0UL);
                             txm->Execute(&read_catalog_tx_req);
                             read_catalog_tx_req.Wait();
                             if (read_catalog_tx_req.IsError() ||
@@ -157,8 +161,10 @@ DsRangeEvaluateOperationService::DsRangeEvaluateOperationService(
                             read_range_tx_req.Set(&ws.table_name_,
                                                   range_key,
                                                   &range_record,
-                                                  txservice::LockType::ReadLock,
-                                                  true);
+                                                  false,
+                                                  false,
+                                                  true,
+                                                  0UL);
                             txm->Execute(&read_range_tx_req);
                             read_range_tx_req.Wait();
                             if (read_range_tx_req.IsError() ||

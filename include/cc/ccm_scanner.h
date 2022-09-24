@@ -240,6 +240,25 @@ public:
         return index_type_;
     }
 
+    LockType DeduceScanTupleLockType(const ScanTuple *scan_tuple)
+    {
+        if (scan_tuple == nullptr ||
+            scan_tuple->rec_status_ == RecordStatus::Deleted)
+        {
+            return LockType::NoLock;
+        }
+        CcOperation cc_op = CcOperation::Read;
+        if (index_type_ == ScanIndexType::Secondary)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+        }
+        else if (is_for_write_)
+        {
+            cc_op = CcOperation::ReadForWrite;
+        }
+        return LockTypeUtil::DeduceLockType(cc_op, iso_level_, protocol_);
+    }
+
 protected:
     ScanDirection direct_;
     ScanIndexType index_type_;
@@ -248,7 +267,11 @@ protected:
     bool drain_cache_mode_{false};
 
 public:
-    bool is_ckpt_delta_;
+    bool read_local_{false};
+    bool is_ckpt_delta_{false};
+    bool is_for_write_{false};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    CcProtocol protocol_{CcProtocol::OCC};
 };
 
 template <typename KeyT, typename ValueT>

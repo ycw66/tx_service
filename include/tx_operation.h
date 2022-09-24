@@ -80,7 +80,6 @@ public:
     ReadType read_type_{ReadType::Inside};
     CcProtocol protocol_{CcProtocol::OCC};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
-    LockType lock_type_{LockType::ReadLock};
     ReadTxRequest *read_tx_req_{nullptr};
     ReadOutsideTxRequest *read_outside_tx_req_{nullptr};
     CcHandlerResult<ReadKeyResult> hd_result_;
@@ -275,8 +274,9 @@ struct AcquireAllOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     const TxKey *key_{nullptr};
-    LockType lk_type_{LockType::WriteIntent};
-    CcProtocol protocol_{CcProtocol::OCC};
+
+    CcOperation cc_op_{CcOperation::ReadForWrite};
+    CcProtocol protocol_{CcProtocol::OccRead};
 };
 
 struct PostWriteAllOp : public TransactionOperation

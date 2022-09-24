@@ -95,6 +95,7 @@ public:
     void ClearRefCnt()
     {
         ref_cnted_ = false;
+        ref_cnt_.store(0, std::memory_order_release);
     }
 
     uint32_t RefCnt() const

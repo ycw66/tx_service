@@ -712,7 +712,22 @@ template std::string tx_trace_action(
     txservice::AcquireKeyResult *,
     std::function<std::string()>);
 template std::string tx_trace_action(
+    txservice::CcHandlerResult<std::vector<AcquireKeyResult>> *,
+    std::string,
+    std::vector<AcquireKeyResult> *,
+    std::function<std::string()>);
+template std::string tx_trace_action(
+    txservice::CcHandlerResult<txservice::PostProcessResult> *,
+    std::string,
+    txservice::PostProcessResult *,
+    std::function<std::string()>);
+template std::string tx_trace_action(
     txservice::CcHandlerResult<txservice::AcquireKeyResult> *,
+    std::string,
+    int8_t,
+    std::function<std::string()>);
+template std::string tx_trace_action(
+    txservice::CcHandlerResult<txservice::PostProcessResult> *,
     std::string,
     int8_t,
     std::function<std::string()>);
@@ -733,6 +748,11 @@ template std::string tx_trace_action(
     std::function<std::string()>);
 template std::string tx_trace_action(
     txservice::CcHandlerResult<std::vector<txservice::TxId>> *,
+    std::string,
+    int8_t,
+    std::function<std::string()>);
+template std::string tx_trace_action(
+    txservice::CcHandlerResult<std::vector<txservice::AcquireKeyResult>> *,
     std::string,
     int8_t,
     std::function<std::string()>);
@@ -894,7 +914,15 @@ template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
                                      txservice::remote::RemoteScanNextBatch *,
                                      std::function<std::string()>);
+template std::string tx_trace_action(txservice::CcMap *,
+                                     std::string,
+                                     txservice::NonBlockingLock *,
+                                     std::function<std::string()>);
 // CcRequest and LruEntry
+template std::string tx_trace_action(txservice::CcRequestBase *,
+                                     std::string,
+                                     txservice::LruEntry *,
+                                     std::function<std::string()>);
 template std::string tx_trace_action(txservice::AcquireCc *,
                                      std::string,
                                      txservice::LruEntry *,
@@ -928,6 +956,10 @@ template std::string tx_trace_action(txservice::remote::RemoteScanNextBatch *,
 template std::string tx_trace_action(txservice::CcMap *,
                                      std::string,
                                      txservice::LruEntry *,
+                                     std::function<std::string()>);
+template std::string tx_trace_action(txservice::CcMap *,
+                                     std::string,
+                                     txservice::CcRequestBase *,
                                      std::function<std::string()>);
 
 /**
@@ -1310,8 +1342,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcProtocol r)
     case txservice::CcProtocol::OCC:
         proto = "OCC";
         break;
-    case txservice::CcProtocol::MVCC:
-        proto = "MVCC";
+    case txservice::CcProtocol::OccRead:
+        proto = "OccRead";
         break;
     default:
         proto = "[Unknown Cc Protocal]";
@@ -1343,6 +1375,29 @@ std::ostream &operator<<(std::ostream &outs, txservice::LockType r)
         lock_type = "[Unknown Lock Type]";
     };
     outs << lock_type;
+    return outs;
+};
+std::ostream &operator<<(std::ostream &outs, txservice::CcOperation r)
+{
+    std::string cc_op;
+    switch (r)
+    {
+    case txservice::CcOperation::Read:
+        cc_op = "Read";
+        break;
+    case txservice::CcOperation::ReadForWrite:
+        cc_op = "ReadForWrite";
+        break;
+    case txservice::CcOperation::ReadSkIndex:
+        cc_op = "ReadSkIndex";
+        break;
+    case txservice::CcOperation::Write:
+        cc_op = "Write";
+        break;
+    default:
+        cc_op = "[Unknown Cc Operation]";
+    };
+    outs << cc_op;
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::DmlOperation r)
@@ -1526,8 +1581,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllCc *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
-         << r->GetLockType() << "\""
+         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"cc_op_\":\"" << r->CcOp()
+         << "\""
          << "}";
     return outs;
 };
@@ -1547,8 +1602,8 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"lock_type_\":\""
-         << r->GetLockType() << "\""
+         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"cc_op_\":\"" << r->CcOp()
+         << "\""
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
 };
@@ -1688,7 +1743,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReadCc *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
          << ",\"type_\":\"" << r->Type() << "\""
-         << ",\"lock_type_\":\"" << r->GetLockType() << "\""
+         << ",\"is_for_write_\":\"" << r->IsForWrite() << "\""
          << ",\"cce_ptr_\":" << r->CcePtr() << "}";
     return outs;
 };
@@ -1708,7 +1763,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::remote::RemoteRead *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
          << ",\"type_\":\"" << r->Type() << "\""
-         << ",\"lock_type_\":\"" << r->GetLockType() << "\""
+         << ",\"is_for_write_\":\"" << r->IsForWrite() << "\""
          << ",\"cce_ptr_\":" << r->CcePtr()
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
@@ -1743,8 +1798,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenBatchCc *r)
          << r->direct_ << "\""
          << ",\"ts_\":" << r->ts_
          << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
-         << ",\"term_\":" << r->term_ << ",\"lock_type_\":\""
-         << r->GetLockType() << "\""
+         << ",\"term_\":" << r->term_ << ",\"is_for_write_\":\""
+         << r->IsForWrite() << "\""
          << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
          << ",\"is_include_floor_cce_\":" << r->is_include_floor_cce_
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
@@ -1780,8 +1835,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanNextBatchCc *r)
          << ",\"ts_\":" << r->ts_
          << ",\"scan_cache_\":" << FMT_POINTER_TO_UINT64T(r->scan_cache_)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"tx_term_\":" << r->tx_term_ << ",\"lock_type_\":\""
-         << r->GetLockType() << "\""
+         << ",\"tx_term_\":" << r->tx_term_
          << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
          << ",\"cce_ptr_\":" << r->CcePtr() << "}";
     return outs;
@@ -2062,6 +2116,10 @@ template std::string tx_trace_dump(const txservice::remote::CcMessage *,
 template std::string tx_trace_dump(txservice::remote::CcMessage *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::RangeMedianKeyResult *,
+                                   std::function<std::string()>);
+template std::string tx_trace_dump(std::vector<txservice::AcquireKeyResult> *,
+                                   std::function<std::string()>);
+template std::string tx_trace_dump(txservice::PostProcessResult *,
                                    std::function<std::string()>);
 // TxOp
 template std::string tx_trace_dump(txservice::DsCopyRangeDataOp *,

@@ -83,10 +83,10 @@ public:
 
     void ReleaseReadIntent(TxNumber tx_number);
 
-    bool AcquireLock(CcRequestBase *cc_req,
-                     int64_t tx_term,
-                     CcProtocol protocol,
-                     LockType lock_type);
+    LockOpStatus AcquireLock(CcRequestBase *cc_req,
+                             int64_t tx_term,
+                             CcProtocol protocol,
+                             LockType lock_type);
 
     void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
@@ -103,6 +103,8 @@ public:
     bool HasWriteIntent() const;
 
     void ClearTx(TxNumber tx_number, CcShard *ccs);
+
+    LockType LockTypeHeldByTx(TxNumber tx_number);
 
     const std::unordered_set<TxNumber> &ReadLocks() const;
     const std::unordered_set<TxNumber> &ReadIntents() const;

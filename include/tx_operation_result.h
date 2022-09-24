@@ -16,11 +16,11 @@ struct AcquireKeyResult
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
     // Number of remote acquire requests to be acknowledged in the transaction's
-    // upload phase. For OCC/MVCC protocols, an acquire request is non-blocking,
-    // and the request's response is same as acknowledgement. For locking-based
-    // protocols, the request may be blocked. An acknowledgement is a special
-    // response notifying the sender the address and the term of the cc entry on
-    // which the request is blocked.
+    // upload phase. For OCC protocol (optimistic write), an acquire request is
+    // non-blocking, and the request's response is same as acknowledgement. For
+    // OccRead/Locking protocols (pessimistic write), the request may be
+    // blocked. An acknowledgement is a special response notifying the sender
+    // the address and the term of the cc entry on which the request is blocked.
     std::atomic<int32_t> *remote_ack_cnt_{nullptr};
 };
 
@@ -41,10 +41,22 @@ struct AcquireAllResult
 
 struct ReadKeyResult
 {
+    void Reset()
+    {
+        rec_ = nullptr;
+        ts_ = 0U;
+        cce_addr_.SetTerm(-1);
+        rec_status_ = RecordStatus::Unknown;
+        lock_type_ = LockType::NoLock;
+    }
+
     TxRecord *rec_;
     uint64_t ts_;
     CcEntryAddr cce_addr_;
     RecordStatus rec_status_;
+
+    // Acquired key lock type by this read operation.
+    LockType lock_type_{LockType::NoLock};
 };
 
 struct ScanOpenResult

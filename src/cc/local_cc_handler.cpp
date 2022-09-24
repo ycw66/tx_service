@@ -24,11 +24,13 @@ void txservice::LocalCcHandler::AcquireWrite(
     const TxKey &key,
     TxNumber tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t ts,
     bool is_insert,
     CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
     uint32_t hd_res_idx,
-    const CcProtocol proto)
+    CcProtocol proto,
+    IsolationLevel iso_level)
 {
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
     uint32_t ng_id = shard_code >> 10;
@@ -49,7 +51,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                    is_insert,
                    &hres,
                    hd_res_idx,
-                   proto);
+                   proto,
+                   iso_level);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -63,11 +66,13 @@ void txservice::LocalCcHandler::AcquireWrite(
                                 shard_code,
                                 tx_number,
                                 tx_term,
+                                command_id,
                                 ts,
                                 is_insert,
                                 hres,
                                 hd_res_idx,
-                                proto);
+                                proto,
+                                iso_level);
     }
 }
 
@@ -77,10 +82,11 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     NodeGroupId ng_id,
     TxNumber txn,
     int64_t tx_term,
+    uint16_t command_id,
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
-    LockType lock_type)
+    CcOperation cc_op)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -95,7 +101,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                    is_insert,
                    &hres,
                    proto,
-                   lock_type);
+                   cc_op);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         // The request is dispatched to the first core and then passed to
@@ -110,10 +116,11 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                                    ng_id,
                                    txn,
                                    tx_term,
+                                   command_id,
                                    is_insert,
                                    hres,
                                    proto,
-                                   lock_type);
+                                   cc_op);
         hres.Value().remote_ack_cnt_->fetch_add(1);
     }
 }
@@ -125,6 +132,7 @@ void txservice::LocalCcHandler::PostWriteAll(
     NodeGroupId ng_id,
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
     DmlOperation dml_op,
@@ -183,6 +191,7 @@ void txservice::LocalCcHandler::PostWriteAll(
                                 ng_id,
                                 tx_number,
                                 tx_term,
+                                command_id,
                                 commit_ts,
                                 hres,
                                 dml_op,
@@ -193,6 +202,7 @@ void txservice::LocalCcHandler::PostWriteAll(
 void txservice::LocalCcHandler::PostWrite(
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
@@ -235,6 +245,7 @@ void txservice::LocalCcHandler::PostWrite(
         remote_hd_.PostWrite(cc_shards_.node_id_,
                              tx_number,
                              tx_term,
+                             command_id,
                              commit_ts,
                              cce_addr,
                              record,
@@ -247,6 +258,7 @@ void txservice::LocalCcHandler::PostWrite(
 void txservice::LocalCcHandler::PostRead(
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t key_ts,
     uint64_t gap_ts,
     uint64_t commit_ts,
@@ -291,6 +303,7 @@ void txservice::LocalCcHandler::PostRead(
         remote_hd_.PostRead(cc_shards_.node_id_,
                             tx_number,
                             tx_term,
+                            command_id,
                             key_ts,
                             gap_ts,
                             commit_ts,
@@ -307,11 +320,12 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      ReadType read_type,
                                      uint64_t tx_number,
                                      int64_t tx_term,
+                                     uint16_t command_id,
                                      const uint64_t ts,
                                      CcHandlerResult<ReadKeyResult> &hres,
                                      IsolationLevel iso_level,
                                      CcProtocol proto,
-                                     LockType lock_type)
+                                     bool is_for_write)
 {
     hres.Value().rec_ = &record;
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -335,7 +349,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    &hres,
                    iso_level,
                    proto,
-                   lock_type);
+                   is_for_write);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
@@ -350,11 +364,12 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         read_type,
                         tx_number,
                         tx_term,
+                        command_id,
                         ts,
                         hres,
                         iso_level,
                         proto,
-                        lock_type);
+                        is_for_write);
     }
 }
 
@@ -363,6 +378,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
  */
 void txservice::LocalCcHandler::ReadOutside(
     int64_t tx_term,
+    uint16_t command_id,
     TxRecord &rec,
     bool is_deleted,
     uint64_t commit_ts,
@@ -404,7 +420,7 @@ void txservice::LocalCcHandler::ReadOutside(
                    &hres,
                    IsolationLevel::ReadCommitted,
                    CcProtocol::OCC,
-                   LockType::NoLock,
+                   false,
                    archives);
 
         TX_TRACE_ACTION(this, req);
@@ -417,7 +433,8 @@ void txservice::LocalCcHandler::ReadOutside(
     }
     else
     {
-        remote_hd_.ReadOutside(tx_term, rec, is_deleted, commit_ts, cce_addr);
+        remote_hd_.ReadOutside(
+            tx_term, command_id, rec, is_deleted, commit_ts, cce_addr);
         // we don't care whether the remote request succeeds or not,
         // since it's just a fill of cache.
         hres.Value().rec_status_ = RecordStatus::RemoteUnknown;
@@ -431,11 +448,12 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           ReadType read_type,
                                           uint64_t tx_number,
                                           int64_t tx_term,
+                                          uint16_t command_id,
                                           const uint64_t ts,
                                           CcHandlerResult<ReadKeyResult> &hres,
                                           IsolationLevel iso_level,
                                           CcProtocol proto,
-                                          LockType lock_type)
+                                          bool is_for_write)
 {
     ReadKeyResult &read_result = hres.Value();
     read_result.rec_ = &record;
@@ -472,7 +490,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                     &hres,
                     iso_level,
                     proto,
-                    lock_type);
+                    is_for_write);
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
@@ -495,12 +513,13 @@ void txservice::LocalCcHandler::ScanOpen(
     bool inclusive,
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t ts,
     CcHandlerResult<ScanOpenResult> &hd_res,
     ScanDirection direction,
     IsolationLevel iso_level,
     CcProtocol proto,
-    LockType lock_type,
+    bool is_for_write,
     bool is_ckpt_delta)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
@@ -560,6 +579,10 @@ void txservice::LocalCcHandler::ScanOpen(
     ++scan_alias_cnt_;
 
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
+    scanner_ptr->is_for_write_ = is_for_write;
+    scanner_ptr->iso_level_ = iso_level;
+    scanner_ptr->protocol_ = proto;
+    scanner_ptr->read_local_ = false;
 
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
@@ -587,7 +610,6 @@ void txservice::LocalCcHandler::ScanOpen(
             {
                 uint32_t shard_code = (ng_id << 10) + core_id;
                 ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
-
                 ScanOpenBatchCc *req = scan_open_pool.NextRequest();
                 req->Reset(&table_name,
                            index_type,
@@ -602,7 +624,7 @@ void txservice::LocalCcHandler::ScanOpen(
                            &hd_res,
                            iso_level,
                            proto,
-                           lock_type,
+                           is_for_write,
                            scanner_ptr->is_ckpt_delta_);
 
                 TX_TRACE_ACTION(this, req);
@@ -628,12 +650,13 @@ void txservice::LocalCcHandler::ScanOpen(
                                 inclusive,
                                 tx_number,
                                 tx_term,
+                                command_id,
                                 ts,
                                 hd_res,
                                 direction,
                                 iso_level,
                                 proto,
-                                lock_type,
+                                is_for_write,
                                 scanner_ptr->is_ckpt_delta_);
         }
     }
@@ -646,12 +669,13 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     bool inclusive,
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t ts,
     CcHandlerResult<ScanOpenResult> &hd_res,
     ScanDirection direction,
     IsolationLevel iso_level,
     CcProtocol proto,
-    LockType lock_type,
+    bool is_for_write,
     bool is_ckpt_delta)
 {
     // TODO: consolidate these kind term check in some common place
@@ -723,6 +747,11 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     open_result.scan_alias_ = scan_alias_cnt_++;
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
+    scanner_ptr->is_for_write_ = is_for_write;
+    scanner_ptr->iso_level_ = iso_level;
+    scanner_ptr->protocol_ = proto;
+    scanner_ptr->read_local_ = true;
+
     uint32_t ng_id = local_shard.node_id_;
     uint32_t shard_code = (ng_id << 10) + local_shard.core_id_;
     ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
@@ -739,9 +768,9 @@ void txservice::LocalCcHandler::ScanOpenLocal(
                             shard_scan_cache,
                             tx_term,
                             &hd_res,
-                            iso_level,
-                            proto,
-                            LockType::ReadLock,
+                            scanner_ptr->iso_level_,
+                            scanner_ptr->protocol_,
+                            scanner_ptr->is_for_write_,
                             scanner_ptr->is_ckpt_delta_);
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
@@ -762,12 +791,10 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 void txservice::LocalCcHandler::ScanNextBatch(
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t start_ts,
     CcScanner &scanner,
-    CcHandlerResult<ScanNextResult> &hd_res,
-    IsolationLevel iso_level,
-    CcProtocol proto,
-    LockType lock_type)
+    CcHandlerResult<ScanNextResult> &hd_res)
 {
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
@@ -784,9 +811,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    blocked_cache,
                    tx_term,
                    &hd_res,
-                   iso_level,
-                   proto,
-                   lock_type,
+                   scanner.iso_level_,
+                   scanner.protocol_,
+                   scanner.is_for_write_,
                    scanner.is_ckpt_delta_);
 
         TX_TRACE_ACTION(this, req);
@@ -799,12 +826,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             node_group_id,
                             tx_number,
                             tx_term,
+                            command_id,
                             start_ts,
                             blocked_cache,
                             hd_res,
-                            iso_level,
-                            proto,
-                            lock_type,
+                            scanner.iso_level_,
+                            scanner.protocol_,
+                            scanner.is_for_write_,
                             scanner.is_ckpt_delta_);
     }
 }
@@ -812,11 +840,10 @@ void txservice::LocalCcHandler::ScanNextBatch(
 void txservice::LocalCcHandler::ScanNextBatchLocal(
     uint64_t tx_number,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t start_ts,
     CcScanner &scanner,
-    CcHandlerResult<ScanNextResult> &hd_res,
-    IsolationLevel iso_level,
-    CcProtocol proto)
+    CcHandlerResult<ScanNextResult> &hd_res)
 {
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
@@ -831,9 +858,9 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
                blocked_cache,
                tx_term,
                &hd_res,
-               iso_level,
-               proto,
-               LockType::ReadLock,
+               scanner.iso_level_,
+               scanner.protocol_,
+               scanner.is_for_write_,
                scanner.is_ckpt_delta_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
@@ -940,6 +967,7 @@ void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                             const std::string &fault_paras,
                                             int64_t tx_term,
+                                            uint16_t command_id,
                                             const TxId &txid,
                                             std::vector<int> &vct_node_id,
                                             CcHandlerResult<bool> &hres)
@@ -973,6 +1001,7 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                    fault_name,
                                    fault_paras,
                                    tx_term,
+                                   command_id,
                                    txid,
                                    id,
                                    hres);
@@ -995,6 +1024,7 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                                     bool flush,
                                                     uint64_t tx_number,
                                                     int64_t tx_term,
+                                                    uint16_t command_id,
                                                     CcHandlerResult<bool> &hres)
 {
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -1025,6 +1055,7 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                        shard_code,
                                        tx_number,
                                        tx_term,
+                                       command_id,
                                        hres);
     }
 }

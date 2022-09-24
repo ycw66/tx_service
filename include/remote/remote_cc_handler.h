@@ -29,11 +29,13 @@ public:
                       uint32_t key_shard_code,
                       TxNumber txn,
                       int64_t tx_term,
+                      uint16_t command_id,
                       uint64_t ts,
                       bool is_insert,
                       CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
                       uint32_t hd_res_idx,
-                      const CcProtocol proto = CcProtocol::OCC);
+                      CcProtocol proto = CcProtocol::OCC,
+                      IsolationLevel iso_level = IsolationLevel::ReadCommitted);
 
     void AcquireWriteAll(uint32_t src_node_id,
                          const TableName &table_name,
@@ -41,14 +43,16 @@ public:
                          uint32_t node_group_id,
                          TxNumber tx_number,
                          int64_t tx_term,
+                         uint16_t command_id,
                          bool is_insert,
                          CcHandlerResult<AcquireAllResult> &hres,
                          CcProtocol proto,
-                         LockType lk_type);
+                         CcOperation cc_op);
 
     void PostWrite(uint32_t src_node_id,
                    uint64_t tx_number,
                    int64_t tx_term,
+                   uint16_t command_id,
                    uint64_t commit_ts,
                    const CcEntryAddr &cce_addr,
                    const TxRecord *record,
@@ -63,6 +67,7 @@ public:
                       NodeGroupId ng_id,
                       uint64_t tx_number,
                       int64_t tx_term,
+                      uint16_t command_id,
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
                       DmlOperation dml_op,
@@ -71,6 +76,7 @@ public:
     void PostRead(uint32_t src_node_id,
                   uint64_t tx_number,
                   int64_t tx_term,
+                  uint16_t command_id,
                   uint64_t key_ts,
                   uint64_t gap_ts,
                   uint64_t commit_ts,
@@ -87,13 +93,15 @@ public:
               ReadType read_type,
               uint64_t tx_number,
               int64_t tx_term,
+              uint16_t command_id,
               const uint64_t ts,
               CcHandlerResult<ReadKeyResult> &hres,
               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
               CcProtocol proto = CcProtocol::OCC,
-              LockType lock_type = LockType::ReadLock);
+              bool is_for_write = false);
 
     void ReadOutside(int64_t tx_term,
+                     uint16_t command_id,
                      const TxRecord &record,
                      bool is_deleted,
                      uint64_t commit_ts,
@@ -108,24 +116,26 @@ public:
                   bool inclusive,
                   uint64_t tx_number,
                   int64_t tx_term,
+                  uint16_t command_id,
                   uint64_t ts,
                   CcHandlerResult<ScanOpenResult> &hd_res,
                   ScanDirection direction = ScanDirection::Forward,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
-                  LockType lock_type = LockType::ReadLock,
+                  bool is_for_write = false,
                   bool is_ckpt = false);
 
     void ScanNext(uint32_t src_node_id,
                   uint32_t ng_id,
                   uint64_t tx_number,
                   int64_t tx_term,
+                  uint16_t command_id,
                   uint64_t start_ts,
                   ScanCache *scan_cache,
                   CcHandlerResult<ScanNextResult> &hd_res,
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
-                  LockType lock_type = LockType::ReadLock,
+                  bool is_for_write = false,
                   bool is_ckpt = false);
 
     void ScanClose(const TableName &table_name,
@@ -162,6 +172,7 @@ public:
                      const std::string &fault_name,
                      const std::string &fault_paras,
                      int64_t tx_term,
+                     uint16_t command_id,
                      const TxId &txid,
                      int node_id,
                      CcHandlerResult<bool> &hres);
@@ -174,6 +185,7 @@ public:
                              uint32_t key_shard_code,
                              uint64_t tx_number,
                              int64_t tx_term,
+                             uint16_t command_id,
                              CcHandlerResult<bool> &hres);
 
 private:

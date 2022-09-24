@@ -2,12 +2,14 @@
 
 #include <map>
 #include <memory>
+#include <utility>  // std::pair
 
 #include "cc/cc_req_base.h"
+#include "cc_protocol.h"
 #include "ccm_scanner.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
-#include "type.h"
+#include "type.h"  // LockType, LockOpStatus
 
 namespace txservice
 {
@@ -109,26 +111,6 @@ public:
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
 
-    bool ConditionalReadLockCce(LruEntry *cce,
-                                CcRequestBase &req,
-                                LockType lock_type,
-                                int64_t tx_term,
-                                uint32_t cce_node_group_id,
-                                RecordStatus payload_status,
-                                int64_t ng_term,
-                                ScanType scan_type,
-                                bool is_sk = false);
-
-    bool ReadLockCce(LruEntry *cce,
-                     CcRequestBase &req,
-                     int64_t tx_term,
-                     uint32_t cce_node_group_id,
-                     bool gap_lock = false);
-
-    void RecoverReadLocks(LruEntry &cce, uint32_t node_group_id);
-    void RecoverWriteLock(const TxNumber &tx_number, uint32_t node_group_id);
-    void RecoverWriteIntent(LruEntry &cce, uint32_t node_group_id);
-
     uint64_t SchemaTs() const
     {
         return schema_ts_;
@@ -158,13 +140,63 @@ protected:
      */
     void MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id);
 
-    bool AcquireWriteLockOnExistingCcEntry(
-        AcquireCc &req,
-        bool resume,
-        CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res,
-        AcquireKeyResult &acquire_key_result,
+    /**
+     * @brief Acquire key lock of ccentry. If succes, this method will
+     * 'UpsertLockHoldingTx', else, it recover the transaction holding lock.
+     *
+     * @param cce
+     * @param req
+     * @param ng_id
+     * @param ng_term
+     * @param tx_term
+     * @param cc_op
+     * @param iso_level
+     * @param protocol
+     * @param is_resume If true, it means that the request is restored from
+     * lock blocking queue, that is, the request just acquired the lock.
+     * @return std::pair<LockType, LockOpStatus>
+     */
+    std::pair<LockType, LockOpStatus> AcquireCceKeyLock(
+        LruEntry *cce,
+        RecordStatus cce_payload_status,
+        CcRequestBase *req,
+        uint32_t ng_id,
         int64_t ng_term,
-        LruEntry &cc_entry);
+        int64_t tx_term,
+        CcOperation cc_op,
+        IsolationLevel iso_level,
+        CcProtocol protocol);
+
+    LockType LockHandleForResumedRequest(CcRequestBase *req,
+                                         int64_t tx_term,
+                                         LruEntry *cce,
+                                         RecordStatus cce_payload_status);
+
+    void RecoverTxForLockConfilct(NonBlockingLock &lock,
+                                  LockType lock_type,
+                                  uint32_t ng_id,
+                                  int64_t ng_term);
+
+    void DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number);
+
+    /**
+     * @brief ReleaseLock and DeleteLockHoldingTx
+     *
+     * @param cce
+     * @param tx_number
+     * @param lock_type
+     */
+    void ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number);
+    void ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number);
+    /**
+     * @brief The lock type of CcEntry's key_lock that held by some one
+     * transaction.
+     *
+     * @param cce
+     * @param tx_number
+     * @return LockType
+     */
+    LockType CceKeyLockTypeHeldByTx(LruEntry *cce, TxNumber tx_number);
 
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;

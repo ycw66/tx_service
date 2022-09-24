@@ -1,4 +1,8 @@
+
 #include "cc/cc_map.h"
+
+#include <type_traits>  // std::is_same_v
+#include <utility>      // std::pair
 
 #include "cc/local_cc_shards.h"
 #include "cc_entry.h"
@@ -12,277 +16,249 @@ void CcMap::MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id)
         shard_->core_id_, target_core_id, cc_req);
 }
 
-void CcMap::RecoverReadLocks(LruEntry &cce, uint32_t node_group_id)
+std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
+    LruEntry *cce,
+    RecordStatus cce_payload_status,
+    CcRequestBase *req,
+    uint32_t ng_id,
+    int64_t ng_term,
+    int64_t tx_term,
+    CcOperation cc_op,
+    IsolationLevel iso_level,
+    CcProtocol protocol)
 {
-    int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id);
-    const std::unordered_set<TxNumber> &read_locks = cce.key_lock_.ReadLocks();
-    if (read_locks.empty())
-    {
-        return;
-    }
-    for (const auto &read_tx : read_locks)
-    {
-        shard_->CheckRecoverTx(read_tx, node_group_id, ng_term);
-    }
-}
+    // deduce the lock type to acquire
+    LockType lock_type =
+        LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
 
-void CcMap::RecoverWriteLock(const TxNumber &tx_number, uint32_t node_group_id)
-{
-    int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id);
-    shard_->CheckRecoverTx(tx_number, node_group_id, ng_term);
-}
+    TxNumber tx_number = req->Txn();
+    bool is_already_held = false;
+    LockOpStatus lock_op_status = LockOpStatus::Successful;
 
-void CcMap::RecoverWriteIntent(LruEntry &cce, uint32_t node_group_id)
-{
-    int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id);
-    shard_->CheckRecoverTx(
-        cce.key_lock_.WriteIntentTx(), node_group_id, ng_term);
-}
-
-bool CcMap::ConditionalReadLockCce(LruEntry *cce,
-                                   CcRequestBase &req,
-                                   LockType lock_type,
-                                   int64_t tx_term,
-                                   uint32_t cce_node_group_id,
-                                   RecordStatus payload_status,
-                                   int64_t ng_term,
-                                   ScanType scan_type,
-                                   bool is_sk)
-{
-    // cce payload_status is unknown means it is a cache miss read. Hence should
-    // not acquire any lock.
-    // sk also needs read lock, regardless of IsolationLevel.
-    if ((req.Isolation() >= IsolationLevel::RepeatableRead || is_sk) &&
-        payload_status != RecordStatus::Unknown &&
-        req.Protocol() != CcProtocol::MVCC)
+    if (lock_type != LockType::NoLock)
     {
-        /*gap lock has not been implemented, just a place holder*/
-        if (scan_type == ScanType::ScanGap)
+        if (lock_type == LockType::WriteLock ||
+            cce_payload_status != RecordStatus::Deleted)
         {
-            return true;
-        }
-
-        TxNumber tx_number = req.Txn();
-        if (lock_type == LockType::ReadLock)
-        {
-            bool lock_success =
-                ReadLockCce(cce, req, tx_term, cce_node_group_id);
-
-            if (!lock_success)
+            LockType held_lock = cce->key_lock_.LockTypeHeldByTx(tx_number);
+            if (held_lock < lock_type)
             {
-                // TODO(Xiao Ji): Add remote acknowlege when lock fail
-                return false;
+                lock_op_status = cce->key_lock_.AcquireLock(
+                    req, tx_term, protocol, lock_type);
+            }
+            else
+            {
+                is_already_held = true;
             }
         }
         else
         {
-            // ReadIntention prevents ccentry being kicked out from
-            // cache, but will not block write lock.
-            cce->key_lock_.AcquireReadIntent(tx_number);
+            lock_type = LockType::NoLock;
         }
+    }
 
-        shard_->UpsertLockHoldingTx(tx_number, tx_term, cce, false);
+    if (lock_op_status == LockOpStatus::Successful)
+    {
         TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
+            req,
+            "AcquireCcEntryKeyLock.Successful",
             cce,
             (
-                [&req, &ng_term, cce]() -> std::string
+                [&req, &cce]() -> std::string
                 {
-                    return std::string("\"tx_number\":")
-                        .append(std::to_string(req.Txn()))
-                        .append(",\"tx_term\":")
-                        .append(std::to_string(ng_term))
-                        .append(",\"cce_ptr\":")
-                        .append(
-                            std::to_string(reinterpret_cast<uint64_t>(cce)));
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(req->Txn()))
+                        .append(",\"CcEntry\":")
+                        .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"CcEntry.key_lock_\":")
+                        .append(FMT_POINTER_TO_UINT64T(&(cce->key_lock_)));
                 }));
-        return true;
-    }
-    else
-    {
-        // No locking is necessary for ReadCommitted and Snapshot isolation
-        // level.
-        return true;
-    }
-}
 
-bool CcMap::ReadLockCce(LruEntry *cce,
-                        CcRequestBase &req,
-                        int64_t tx_term,
-                        uint32_t cce_node_group_id,
-                        bool gap_lock)
-{
-    /*gap lock has not been implemented, just a place holder*/
-    if (gap_lock)
-    {
-        return true;
-    }
-
-    bool lock_success = false;
-
-    if (!gap_lock)
-    {
-        lock_success = cce->key_lock_.AcquireLock(
-            &req, tx_term, CcProtocol::Locking, LockType::ReadLock);
-        if (!lock_success)
+        if (lock_type != LockType::NoLock && !is_already_held)
         {
-            if (cce->key_lock_.HasWriteLock())
-            {
-                TX_TRACE_DUMP_WITH_CONTEXT(
-                    cce->key_lock_.WriteLockTx(),
-                    [cce]() -> std::string
-                    {
-                        return std::string("\"cce\":")
-                            .append(FMT_POINTER_TO_UINT64T(cce))
-                            .append(",\"associate\":\"key_lock_.write_lock\"");
-                    });
-                RecoverWriteLock(cce->key_lock_.WriteLockTx(),
-                                 cce_node_group_id);
-            }
-            return false;
+            shard_->UpsertLockHoldingTx(
+                tx_number, tx_term, cce, lock_type == LockType::WriteLock);
+        }
+
+        if (cce->key_lock_.HasWriteLock() &&
+            cce->key_lock_.WriteLockTx() != tx_number)
+        {
+            shard_->CheckRecoverTx(
+                cce->key_lock_.WriteLockTx(), ng_id, ng_term);
         }
     }
-    else
+    else if (lock_op_status == LockOpStatus::Failed)
     {
-        lock_success = cce->gap_lock_.AcquireLock(
-            &req, tx_term, CcProtocol::Locking, LockType::ReadLock);
-        if (!lock_success)
-        {
-            if (cce->gap_lock_.HasWriteLock())
-            {
-                TX_TRACE_DUMP_WITH_CONTEXT(
-                    cce->key_lock_.WriteLockTx(),
-                    [cce]() -> std::string
-                    {
-                        return std::string("\"cce\":")
-                            .append(FMT_POINTER_TO_UINT64T(cce))
-                            .append(",\"associate\":\"key_lock_.write_lock\"");
-                    });
-                RecoverWriteLock(cce->gap_lock_.WriteLockTx(),
-                                 cce_node_group_id);
-            }
-            return false;
-        }
-    }
-    return true;
-}
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            req,
+            "AcquireCcEntryKeyLock.Failed",
+            cce,
+            (
+                [&req, &cce]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(req->Txn()))
+                        .append(",\"CcEntry\":")
+                        .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"CcEntry.key_lock_\":")
+                        .append(FMT_POINTER_TO_UINT64T(&(cce->key_lock_)));
+                }));
 
-bool CcMap::AcquireWriteLockOnExistingCcEntry(
-    AcquireCc &req,
-    bool resume,
-    CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res,
-    AcquireKeyResult &acquire_key_result,
-    int64_t ng_term,
-    LruEntry &cc_entry)
-{
-    int64_t tx_term = req.TxTerm();
-
-    // On execution resumption, the write lock has been acquired when
-    // being unblocked.
-    bool lock_success = resume ? true
-                               : cc_entry.key_lock_.AcquireWriteLock(
-                                     &req, tx_term, req.Protocol());
-
-    if (lock_success)
-    {
-        shard_->UpsertLockHoldingTx(req.Txn(), req.TxTerm(), &cc_entry, true);
-        // for mvcc
-        uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
-        cc_entry.wlock_ts_ = lock_ts;
-
-        // Updates last_vali_ts after successfully acquiring the write
-        // lock such that it is no smaller than the current time of
-        // the shard. The net effect is that the tx acquiring the write
-        // lock is forced not to commit at a time earlier than the
-        // clock of this cc node, even if the clock of the tx's
-        // coordinator node drifts and falls behind. Checkpointing
-        // relies on this property to avoid picking a checkpoint ts in
-        // this shard that may overlap with the ongoing tx.
-        acquire_key_result.last_vali_ts_ =
-            std::max(cc_entry.last_read_ts_, lock_ts);
-        acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
-
-        hd_res->SetFinished();
+        // check and recover conflicted transactions.
+        RecoverTxForLockConfilct(cce->key_lock_, lock_type, ng_id, ng_term);
     }
     else
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
-            &req,
-            "AcquireWriteLock.Fail",
-            reinterpret_cast<LruEntry *>(&cc_entry),
-            [&req]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(req.Txn()))
-                    .append(",\"term\":")
-                    .append(std::to_string(req.TxTerm()));
-            });
-        const std::unordered_set<TxNumber> &read_locks =
-            cc_entry.key_lock_.ReadLocks();
-        if (read_locks.size() > 0)
-        {
-            TX_TRACE_DUMP_WITH_CONTEXT(
-                &read_locks,
-                [&cc_entry]() -> std::string
+            req,
+            "AcquireCcEntryKeyLock.Blocked",
+            cce,
+            (
+                [&req, &cce]() -> std::string
                 {
-                    return std::string("\"CcEntry\":")
-                        .append(FMT_POINTER_TO_UINT64T(&cc_entry))
-                        .append(",\"associate\":\"key_lock_.read_locks\"");
-                });
-            // If the request fails to acquire the write lock because of
-            // read locks, checks each read lock and recovers if needed.
-            for (const auto &read_tx : read_locks)
-            {
-                // delete &read_tx;
-                shard_->CheckRecoverTx(read_tx, req.NodeGroupId(), ng_term);
-            }
-        }
-        else
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(req->Txn()))
+                        .append(",\"CcEntry\":")
+                        .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"CcEntry.key_lock_\":")
+                        .append(FMT_POINTER_TO_UINT64T(&(cce->key_lock_)));
+                }));
+
+        // check and recover conflicted transactions.
+        RecoverTxForLockConfilct(cce->key_lock_, lock_type, ng_id, ng_term);
+    }
+
+    return std::pair<LockType, LockOpStatus>(lock_type, lock_op_status);
+}
+
+LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
+                                            int64_t tx_term,
+                                            LruEntry *cce,
+                                            RecordStatus cce_payload_status)
+{
+    TxNumber tx_number = req->Txn();
+    LockType acquired_lock = cce->key_lock_.LockTypeHeldByTx(tx_number);
+    if (cce_payload_status == RecordStatus::Deleted &&
+        acquired_lock != LockType::WriteLock)
+    {
+        cce->key_lock_.ReleaseLock(tx_number, shard_, acquired_lock);
+        acquired_lock = LockType::NoLock;
+    }
+    else
+    {
+        shard_->UpsertLockHoldingTx(
+            tx_number, tx_term, cce, acquired_lock == LockType::WriteLock);
+    }
+
+    return acquired_lock;
+}
+
+void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
+                                     LockType lock_type,
+                                     uint32_t ng_id,
+                                     int64_t ng_term)
+{
+    // check and recover conflicted transactions.
+    switch (lock_type)
+    {
+    case LockType::WriteLock:
+    {
+        if (lock.HasWriteLock())
         {
-            TX_TRACE_DUMP_WITH_CONTEXT(
-                cc_entry.key_lock_.WriteLockTx(),
-                [&cc_entry]() -> std::string
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "RecoverTxForLockConfilct",
+                &lock,
+                [&lock]() -> std::string
                 {
-                    return std::string("\"CcEntry\":")
-                        .append(FMT_POINTER_TO_UINT64T(&cc_entry))
+                    return std::string("\"Lock\":")
+                        .append(FMT_POINTER_TO_UINT64T(&lock))
                         .append(",\"associate\":\"key_lock_.write_lock\"");
                 });
 
-            // The request fails because of write-write conflicts.
-            assert(cc_entry.key_lock_.HasWriteLock());
-            shard_->CheckRecoverTx(
-                cc_entry.key_lock_.WriteLockTx(), req.NodeGroupId(), ng_term);
+            shard_->CheckRecoverTx(lock.WriteLockTx(), ng_id, ng_term);
         }
-
-        if (req.Protocol() == CcProtocol::OCC ||
-            req.Protocol() == CcProtocol::MVCC)
+        else if (lock.HasWriteIntent())
         {
-            // For OCC/MVCC, a conflict causes the tx to abort
-            // immediately.
-            hd_res->SetError(1);
-            return true;
+            shard_->CheckRecoverTx(lock.WriteIntentTx(), ng_id, ng_term);
         }
         else
         {
-            // For 2PL, a conflict blocks the tx by putting it into the
-            // lock's blocking queue.
-
-            uint32_t tx_node = (req.Txn() >> 32L) >> 10;
-            if (tx_node != req.NodeGroupId())
+            const std::unordered_set<TxNumber> &read_locks = lock.ReadLocks();
+            // If the request fails to acquire the write lock
+            // because of read locks, checks each read lock and
+            // recovers if needed.
+            for (const auto &read_tx : read_locks)
             {
-                // If the acquire request comes from a remote node,
-                // sends acknowledgement to the sender when the request
-                // is blocked.
-                remote::RemoteAcquire &remote_req =
-                    static_cast<remote::RemoteAcquire &>(req);
-                remote_req.Acknowledge();
+                shard_->CheckRecoverTx(read_tx, ng_id, ng_term);
             }
+        }
+        break;
+    }
+    case LockType::WriteIntent:
+    {
+        if (lock.HasWriteLock())
+        {
+            shard_->CheckRecoverTx(lock.WriteLockTx(), ng_id, ng_term);
+        }
+        else if (lock.HasWriteIntent())
+        {
+            shard_->CheckRecoverTx(lock.WriteIntentTx(), ng_id, ng_term);
+        }
+        break;
+    }
+    case LockType::ReadLock:
+    {
+        if (lock.HasWriteLock())
+        {
+            shard_->CheckRecoverTx(lock.WriteLockTx(), ng_id, ng_term);
+        }
+        break;
+    }
+    default:
+        break;
+    }  // switch
+}
 
-            return false;
+void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
+{
+    cce->key_lock_.DowngradeWriteLock(tx_number, shard_);
+    shard_->DecTxHeldWriteLockCount(tx_number);
+}
+
+LockType CcMap::CceKeyLockTypeHeldByTx(LruEntry *cce, TxNumber tx_number)
+{
+    return cce->key_lock_.LockTypeHeldByTx(tx_number);
+}
+
+void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
+{
+    if (cce != nullptr)
+    {
+        bool is_write_lock = (!cce->key_lock_.HasWriteLock() &&
+                              cce->key_lock_.WriteLockTx() == tx_number);
+        cce->key_lock_.ClearTx(tx_number, shard_);
+        shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);
+        if (is_write_lock)
+        {
+            cce->wlock_ts_ = 0;
         }
     }
+}
 
-    return true;
+void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number)
+{
+    if (cce != nullptr)
+    {
+        bool is_write_lock = (!cce->gap_lock_.HasWriteLock() &&
+                              cce->gap_lock_.WriteLockTx() == tx_number);
+        cce->gap_lock_.ClearTx(tx_number, shard_);
+        shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);
+        if (is_write_lock)
+        {
+            cce->wlock_ts_ = 0;
+        }
+    }
 }
 
 }  // namespace txservice

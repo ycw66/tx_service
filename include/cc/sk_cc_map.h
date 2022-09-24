@@ -140,12 +140,18 @@ public:
             return true;
         }
 
+        LockType acquired_lock;
+        LockOpStatus lock_op_status;
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.CcePtr());
+
+            acquired_lock = LockHandleForResumedRequest(
+                &req, req.TxTerm(), cce_ptr, cce_ptr->payload_status_);
+            lock_op_status = LockOpStatus::Successful;
         }
         else
         {
@@ -233,8 +239,65 @@ public:
         }
         else
         {
-            return AcquireWriteLockOnExistingCcEntry(
-                req, resume, hd_res, acquire_key_result, ng_term, cc_entry);
+            if (!resume)
+            {
+                tie(acquired_lock, lock_op_status) =
+                    AcquireCceKeyLock(&cc_entry,
+                                      cc_entry.payload_status_,
+                                      &req,
+                                      req.NodeGroupId(),
+                                      ng_term,
+                                      req.TxTerm(),
+                                      CcOperation::Write,
+                                      req.Isolation(),
+                                      req.Protocol());
+            }
+
+            if (lock_op_status == LockOpStatus::Successful)
+            {
+                assert(acquired_lock == LockType::WriteLock);
+                // for mvcc
+                uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
+                cc_entry.wlock_ts_ = lock_ts;
+
+                // Updates last_vali_ts after successfully acquiring the write
+                // lock such that it is no smaller than the current time of
+                // the shard. The net effect is that the tx acquiring the write
+                // lock is forced not to commit at a time earlier than the
+                // clock of this cc node, even if the clock of the tx's
+                // coordinator node drifts and falls behind. Checkpointing
+                // relies on this property to avoid picking a checkpoint ts in
+                // this shard that may overlap with the ongoing tx.
+                acquire_key_result.last_vali_ts_ =
+                    std::max(cc_entry.last_read_ts_, lock_ts);
+                acquire_key_result.commit_ts_ = cc_entry.commit_ts_;
+
+                hd_res->SetFinished();
+            }
+            else if (lock_op_status == LockOpStatus::Failed)
+            {
+                // lock confilct: back off and retry.
+                req.Result()->SetError(1);
+                return true;
+            }
+            else
+            {
+                // For 2PL, a conflict blocks the tx by putting it into the
+                // lock's blocking queue.
+
+                uint32_t tx_node = (req.Txn() >> 32L) >> 10;
+                if (tx_node != req.NodeGroupId())
+                {
+                    // If the acquire request comes from a remote node,
+                    // sends acknowledgement to the sender when the request
+                    // is blocked.
+                    remote::RemoteAcquire &remote_req =
+                        static_cast<remote::RemoteAcquire &>(req);
+                    remote_req.Acknowledge();
+                }
+
+                return false;
+            }
         }
 
         return true;
@@ -292,7 +355,7 @@ public:
             if (commit_ts > 0)
             {
                 // for mvcc
-                if (req.Protocol() == CcProtocol::MVCC)
+                if (shard_->EnableMvcc())
                 {
                     uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce->KickOutArchiveRecords(recycle_ts);
@@ -310,9 +373,7 @@ public:
             }
 
             req.Result()->SetFinished();
-            cce->key_lock_.ReleaseWriteLock(req.Txn(), shard_);
-            cce->wlock_ts_ = 0;
-            shard_->DeleteLockHoldingTx(req.Txn(), cce, true);
+            ReleaseCceKeyLock(cce, req.Txn());
             return true;
         }
     }
@@ -368,11 +429,13 @@ public:
             // under MVCC protocol.(MVCC using history versions to ensure
             // repeatable read.) So, this branch is only reachable for OCC
             // protocol validating version stability.
-            assert(req.Protocol() == CcProtocol::OCC);
+            assert(req.Protocol() == CcProtocol::OCC ||
+                   req.Protocol() == CcProtocol::OccRead);
 
             hd_res->SetError(1);  // broken repeatable read, set error.
         }
-        else if (req.Protocol() == CcProtocol::OCC)
+        else if (req.Protocol() == CcProtocol::OCC ||
+                 req.Protocol() == CcProtocol::OccRead)
         {
             std::vector<TxNumber> &conflicting_txs =
                 hd_res->Value().conflicting_txs_;
@@ -411,8 +474,7 @@ public:
 
             hd_res->SetFinished();
         }
-        else if (req.Protocol() == CcProtocol::Locking ||
-                 req.Protocol() == CcProtocol::MVCC)
+        else if (req.Protocol() == CcProtocol::Locking)
         {
             // For 2PL, read validation is equivalent to releasing the read
             // lock. In contrast to the conventional 2PL where read locks
@@ -444,11 +506,9 @@ public:
             hd_res->SetFinished();
         }
 
-        cce->key_lock_.ClearTx(txn, shard_);
-        cce->gap_lock_.ClearTx(txn, shard_);
-
         // ReadCc in sk_cc_map only acquire read lock(no write intention)
-        shard_->DeleteLockHoldingTx(txn, cce, false);
+        ReleaseCceKeyLock(cce, txn);
+        ReleaseCceGapLock(cce, txn);
 
         return true;
     }
@@ -572,6 +632,46 @@ public:
         return true;
     }
 
+    void AddScanTuple(
+        CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
+        TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *typed_cache,
+        ScanType scan_type,
+        uint32_t ng_id,
+        int64_t ng_term,
+        uint64_t read_ts,
+        bool is_read_snapshot,
+        bool is_ckpt_delta = false)
+    {
+        TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *scan_tuple =
+            typed_cache->AddScanTuple();
+        switch (scan_type)
+        {
+        case ScanType::ScanGap:
+            ScanGap(cce, scan_tuple, ng_id, ng_term);
+            break;
+        case ScanType::ScanBoth:
+            ScanKey(cce,
+                    scan_tuple,
+                    true,
+                    ng_id,
+                    ng_term,
+                    read_ts,
+                    is_read_snapshot);
+            break;
+        case ScanType::ScanKey:
+            ScanKey(cce,
+                    scan_tuple,
+                    false,
+                    ng_id,
+                    ng_term,
+                    read_ts,
+                    is_read_snapshot);
+            break;
+        default:
+            break;
+        }
+    }
+
     bool Execute(ScanOpenBatchCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -587,12 +687,19 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
-        if (term < 0)
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t tx_term = req.TxTerm();
+        if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
+
+        CcOperation cc_op = CcOperation::ReadSkIndex;
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        bool is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
 
         const SecondaryKey<SkT, PkT> *look_key =
             static_cast<const SecondaryKey<SkT, PkT> *>(req.start_key_);
@@ -609,8 +716,36 @@ public:
             cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.CcePtr());
             req.SetCcePtr(nullptr);
-            // Lock has been acquired
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            // Lock has been acquired, UpsertLockHoldingTx
+            LockHandleForResumedRequest(
+                &req, tx_term, cce, cce->payload_status_);
+
+            ScanType scan_type = ScanType::ScanBoth;
+            // if this is the 1st cce in typed_cache
+            if (typed_cache->Size() == 0)
+            {
+                std::pair<Iterator, ScanType> start_pair =
+                    req.direct_ == ScanDirection::Forward
+                        ? ForwardScanStart(*look_key, req.inclusive_)
+                        : BackwardScanStart(*look_key, req.inclusive_);
+
+                scan_ccm_it = start_pair.first;
+                assert(cce == std::get<2>(*scan_ccm_it));
+                scan_type = start_pair.second;
+            }
+            else
+            {
+                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+                scan_type = ScanType::ScanBoth;
+            }
+
+            AddScanTuple(cce,
+                         typed_cache,
+                         scan_type,
+                         ng_id,
+                         ng_term,
+                         req.ReadTimestamp(),
+                         is_read_snapshot);
         }
         else
         {
@@ -621,61 +756,45 @@ public:
 
             scan_ccm_it = start_pair.first;
             cce = std::get<2>(*scan_ccm_it);
+            ScanType scan_type = start_pair.second;
 
-            TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *scan_tuple =
-                nullptr;
-            scan_tuple = typed_cache->AddScanTuple();
-            switch (start_pair.second)
-            {
-            case ScanType::ScanGap:
-                ScanGap(cce, scan_tuple, req.node_group_id_, req.term_);
-                break;
-            case ScanType::ScanBoth:
-                ScanKey(cce,
-                        scan_tuple,
-                        true,
-                        req.node_group_id_,
-                        req.term_,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                break;
-            case ScanType::ScanKey:
-                ScanKey(cce,
-                        scan_tuple,
-                        false,
-                        req.node_group_id_,
-                        req.term_,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                break;
-            default:
-                break;
-            }
             req.SetCcePtr(cce);
-
-            if (!ConditionalReadLockCce(cce,
-                                        req,
-                                        LockType::ReadLock,
-                                        req.TxTerm(),
-                                        req.NodeGroupId(),
-                                        cce->payload_status_,
-                                        term,
-                                        start_pair.second,
-                                        true))
+            if (scan_type != ScanType::ScanGap)
             {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    &req,
-                    "AcquireReadLock.Fail",
-                    reinterpret_cast<LruEntry *>(cce),
-                    [&req]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(req.Txn()))
-                            .append(",\"term\":")
-                            .append(std::to_string(req.TxTerm()));
-                    });
-                return false;
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+                    return false;
+                }
             }
+            else
+            {
+                // TODO(lzx): handler gap lock
+            }
+
+            AddScanTuple(cce,
+                         typed_cache,
+                         scan_type,
+                         ng_id,
+                         ng_term,
+                         req.ReadTimestamp(),
+                         is_read_snapshot);
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -688,40 +807,38 @@ public:
                  ++scan_ccm_it)
             {
                 cce = std::get<2>(*scan_ccm_it);
-                TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
-                    *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce,
-                        scan_tuple,
-                        true,
-                        req.node_group_id_,
-                        req.term_,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                req.SetCcePtr(cce);
 
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                req.SetCcePtr(cce);
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLockOnKey.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
                     return false;
                 }
+
+                AddScanTuple(cce,
+                             typed_cache,
+                             ScanType::ScanBoth,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot,
+                             req.is_ckpt_delta_);
             }
         }
         else
@@ -733,40 +850,37 @@ public:
                  --scan_ccm_it)
             {
                 cce = std::get<2>(*scan_ccm_it);
-                TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
-                    *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce,
-                        scan_tuple,
-                        true,
-                        req.node_group_id_,
-                        req.term_,
-                        req.ReadTimestamp(),
-                        req.Isolation());
                 req.SetCcePtr(cce);
 
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLockOnKey.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
                     return false;
                 }
+                AddScanTuple(cce,
+                             typed_cache,
+                             ScanType::ScanBoth,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot,
+                             req.is_ckpt_delta_);
             }
         }
 
@@ -789,13 +903,21 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
-        if (term < 0)
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t tx_term = req.TxTerm();
+        if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
-        req.Result()->Value().term_ = term;
+        req.Result()->Value().term_ = ng_term;
+
+        CcOperation cc_op =
+            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        bool is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
 
         TemplateScanCache<SecondaryKey<SkT, PkT>, VoidRecord> *typed_cache =
             static_cast<
@@ -810,7 +932,24 @@ public:
             prior_cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.CcePtr());
             req.SetCcePtr(nullptr);
-            // Lock has been acquired
+            // Lock has been acquired, UpsertLockHoldingTx
+            LockHandleForResumedRequest(
+                &req, tx_term, prior_cce, prior_cce->payload_status_);
+
+            ScanType scan_type = ScanType::ScanBoth;
+            if (direction == ScanDirection::Backward && prior_cce == &neg_inf_)
+            {
+                scan_type = ScanType::ScanGap;
+            }
+
+            AddScanTuple(prior_cce,
+                         typed_cache,
+                         scan_type,
+                         ng_id,
+                         ng_term,
+                         req.ReadTimestamp(),
+                         is_read_snapshot,
+                         req.is_ckpt_delta_);
         }
         else
         {
@@ -833,41 +972,37 @@ public:
                     continue;
                 }
 
-                TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
-                    *scan_tuple = typed_cache->AddScanTuple();
-                ScanKey(cce,
-                        scan_tuple,
-                        true,
-                        req.node_group_id_,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
                 req.SetCcePtr(cce);
-
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLock.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
                     return false;
                 }
 
+                AddScanTuple(cce,
+                             typed_cache,
+                             ScanType::ScanBoth,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot,
+                             req.is_ckpt_delta_);
                 cce = cce->map_next_;
             }
         }
@@ -876,72 +1011,52 @@ public:
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_prev_;
             while (cce != nullptr && !typed_cache->Full())
             {
-                TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord>
-                    *scan_tuple = typed_cache->AddScanTuple();
-
                 if (cce == &neg_inf_)
                 {
-                    ScanGap(cce, scan_tuple, req.node_group_id_, term);
                     req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                LockType::ReadLock,
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term,
-                                                ScanType::ScanGap,
-                                                true))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLock.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
+                    // TODO(lzx): handle gap lock
+                    AddScanTuple(cce,
+                                 typed_cache,
+                                 ScanType::ScanGap,
+                                 ng_id,
+                                 ng_term,
+                                 req.ReadTimestamp(),
+                                 is_read_snapshot,
+                                 req.is_ckpt_delta_);
                 }
                 else
                 {
-                    ScanKey(cce,
-                            scan_tuple,
-                            true,
-                            req.node_group_id_,
-                            term,
-                            req.ReadTimestamp(),
-                            req.Isolation());
                     req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                LockType::ReadLock,
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term,
-                                                ScanType::ScanBoth,
-                                                true))
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->payload_status_,
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto);
+                    if (lock_pair.second == LockOpStatus::Failed)
                     {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLock.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(1);
+                        return true;
+                    }
+                    else if (lock_pair.second == LockOpStatus::Blocked)
+                    {
+                        // Lock fail should stop the execution of current
+                        // CC request since it's already in blocking queue.
                         return false;
                     }
+
+                    AddScanTuple(cce,
+                                 typed_cache,
+                                 ScanType::ScanBoth,
+                                 ng_id,
+                                 ng_term,
+                                 req.ReadTimestamp(),
+                                 is_read_snapshot,
+                                 req.is_ckpt_delta_);
                 }
 
                 cce = cce->map_prev_;
@@ -950,6 +1065,35 @@ public:
 
         req.Result()->SetFinished();
         return true;
+    }
+
+    void AddScanTupleMsg(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
+                         std::vector<remote::ScanTuple_msg *> &cache,
+                         size_t &tuple_idx,
+                         ScanType scan_type,
+                         int64_t ng_term,
+                         uint64_t read_ts,
+                         bool is_read_snapshot,
+                         bool is_ckpt_delta)
+    {
+        remote::ScanTuple_msg *tuple = cache.at(tuple_idx++);
+        switch (scan_type)
+        {
+        case ScanType::ScanGap:
+            if (!is_ckpt_delta)
+            {
+                ScanGap(cce, tuple, ng_term);
+            }
+            break;
+        case ScanType::ScanBoth:
+            ScanKey(cce, tuple, true, ng_term, read_ts, is_read_snapshot);
+            break;
+        case ScanType::ScanKey:
+            ScanKey(cce, tuple, false, ng_term, read_ts, is_read_snapshot);
+            break;
+        default:
+            break;
+        }
     }
 
     bool Execute(remote::RemoteScanOpen &req) override
@@ -967,12 +1111,20 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
-        if (term < 0)
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t tx_term = req.TxTerm();
+        if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
+
+        CcOperation cc_op =
+            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        bool is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
 
         const SecondaryKey<SkT, PkT> *look_key;
         SecondaryKey<SkT, PkT> sk_obj;
@@ -995,19 +1147,46 @@ public:
 
         std::vector<remote::ScanTuple_msg *> &cache =
             req.scan_caches_.at(shard_->LocalCoreId());
+        size_t &tuple_idx = req.scan_caches_idxs_.at(shard_->LocalCoreId());
 
         Iterator scan_ccm_it;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = nullptr;
-        remote::ScanTuple_msg *tuple = nullptr;
-        size_t tuple_idx = 0;
 
         if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
             cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.CcePtr(shard_->LocalCoreId()));
             req.SetCcePtr(nullptr, shard_->LocalCoreId());
-            // Lock has been acquired
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            // Lock has been acquired, UpsertLockHoldingTx
+            LockHandleForResumedRequest(
+                &req, tx_term, cce, cce->payload_status_);
+
+            ScanType scan_type = ScanType::ScanBoth;
+            if (tuple_idx == 0)
+            {
+                std::pair<Iterator, ScanType> start_pair =
+                    req.direct_ == ScanDirection::Forward
+                        ? ForwardScanStart(*look_key, req.inclusive_)
+                        : BackwardScanStart(*look_key, req.inclusive_);
+
+                scan_ccm_it = start_pair.first;
+                scan_type = start_pair.second;
+                assert(cce == std::get<2>(*scan_ccm_it));
+            }
+            else
+            {
+                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+                scan_type = ScanType::ScanBoth;
+            }
+
+            AddScanTupleMsg(cce,
+                            cache,
+                            tuple_idx,
+                            scan_type,
+                            ng_term,
+                            req.ReadTimestamp(),
+                            is_read_snapshot,
+                            req.is_ckpt_delta_);
         }
         else
         {
@@ -1017,61 +1196,49 @@ public:
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
+            ScanType scan_type = start_pair.second;
             cce = std::get<2>(*scan_ccm_it);
 
-            remote::ScanTuple_msg *tuple = cache.at(0);
-            switch (start_pair.second)
+            req.SetCcePtr(cce, shard_->LocalCoreId());
+            if (start_pair.second != ScanType::ScanGap)
             {
-            case ScanType::ScanGap:
-                if (!req.is_ckpt_delta_)
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    ScanGap(cce, tuple, term);
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
                 }
-                break;
-            case ScanType::ScanBoth:
-                ScanKey(cce,
-                        tuple,
-                        true,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                break;
-            case ScanType::ScanKey:
-                ScanKey(cce,
-                        tuple,
-                        false,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                break;
-            default:
-                break;
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+
+                    // TODO(lzx): Add remote acknowlege when lock fail
+                    return false;
+                }
+            }
+            else
+            {
+                // TODO(lzx): handler gap lock
             }
 
-            req.SetCcePtr(cce, shard_->LocalCoreId());
-            if (!ConditionalReadLockCce(cce,
-                                        req,
-                                        LockType::ReadLock,
-                                        req.TxTerm(),
-                                        req.NodeGroupId(),
-                                        cce->payload_status_,
-                                        term,
-                                        start_pair.second,
-                                        true))
-            {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    &req,
-                    "AcquireReadLock.Fail",
-                    reinterpret_cast<LruEntry *>(cce),
-                    [&req]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(req.Txn()))
-                            .append(",\"term\":")
-                            .append(std::to_string(req.TxTerm()));
-                    });
-                return false;
-            }
+            AddScanTupleMsg(cce,
+                            cache,
+                            tuple_idx,
+                            scan_type,
+                            ng_term,
+                            req.ReadTimestamp(),
+                            is_read_snapshot,
+                            req.is_ckpt_delta_);
         }
 
         if (req.direct_ == ScanDirection::Forward)
@@ -1090,40 +1257,40 @@ public:
                     ++scan_ccm_it;
                     continue;
                 }
-                tuple = cache.at(tuple_idx);
-                ScanKey(cce,
-                        tuple,
-                        true,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
 
-                ++tuple_idx;
                 req.SetCcePtr(cce, shard_->LocalCoreId());
-
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLockOnKey.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+
+                    // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+
+                AddScanTupleMsg(cce,
+                                cache,
+                                tuple_idx,
+                                ScanType::ScanBoth,
+                                ng_term,
+                                req.ReadTimestamp(),
+                                is_read_snapshot,
+                                req.is_ckpt_delta_);
             }
         }
         else
@@ -1142,40 +1309,40 @@ public:
                     --scan_ccm_it;
                     continue;
                 }
-                tuple = cache.at(tuple_idx);
-                ScanKey(cce,
-                        tuple,
-                        true,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
 
-                ++tuple_idx;
                 req.SetCcePtr(cce, shard_->LocalCoreId());
-
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLockOnKey.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+
+                    // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+
+                AddScanTupleMsg(cce,
+                                cache,
+                                tuple_idx,
+                                ScanType::ScanBoth,
+                                ng_term,
+                                req.ReadTimestamp(),
+                                is_read_snapshot,
+                                req.is_ckpt_delta_);
             }
         }
         cache.resize(tuple_idx);
@@ -1199,18 +1366,46 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        int64_t term = Sharder::Instance().LeaderTerm(req.node_group_id_);
-        if (term < 0)
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t tx_term = req.TxTerm();
+        if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
 
+        CcOperation cc_op =
+            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        bool is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+
+        ScanDirection direction = req.direct_;
         CcEntry<VoidKey, SkRecord<SkT, PkT>> *prior_cce = nullptr;
         if (req.CcePtr() != nullptr)
         {
             prior_cce = static_cast<CcEntry<VoidKey, SkRecord<SkT, PkT>> *>(
                 req.CcePtr());
+            req.SetCcePtr(nullptr);
+            // Lock has been acquired, UpsertLockHoldingTx
+            LockHandleForResumedRequest(
+                &req, tx_term, prior_cce, prior_cce->payload_status_);
+
+            ScanType scan_type = ScanType::ScanBoth;
+            if (direction == ScanDirection::Backward && prior_cce == &neg_inf_)
+            {
+                scan_type = ScanType::ScanGap;
+            }
+
+            AddScanTupleMsg(prior_cce,
+                            req.scan_cache_,
+                            req.scan_cache_idx_,
+                            scan_type,
+                            ng_term,
+                            req.ReadTimestamp(),
+                            is_read_snapshot,
+                            req.is_ckpt_delta_);
         }
         else
         {
@@ -1219,13 +1414,11 @@ public:
                     req.prior_cce_addr_);
         }
 
-        ScanDirection direction = req.direct_;
-
-        size_t idx = 0;
         if (direction == ScanDirection::Forward)
         {
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_next_;
-            while (cce != &pos_inf_ && idx < req.scan_cache_.size())
+            while (cce != &pos_inf_ &&
+                   req.scan_cache_idx_ < req.scan_cache_.size())
             {
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
@@ -1235,39 +1428,39 @@ public:
                     continue;
                 }
 
-                remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
-                ScanKey(cce,
-                        scan_tuple,
-                        true,
-                        term,
-                        req.ReadTimestamp(),
-                        req.Isolation());
-                ++idx;
                 req.SetCcePtr(cce);
-
-                if (!ConditionalReadLockCce(cce,
-                                            req,
-                                            LockType::ReadLock,
-                                            req.TxTerm(),
-                                            req.NodeGroupId(),
-                                            cce->payload_status_,
-                                            term,
-                                            ScanType::ScanBoth,
-                                            true))
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
                 {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        &req,
-                        "AcquireReadLockOnKey.Fail",
-                        reinterpret_cast<LruEntry *>(cce),
-                        [&req]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(req.Txn()))
-                                .append(",\"term\":")
-                                .append(std::to_string(req.TxTerm()));
-                        });
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+
+                    // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+
+                AddScanTupleMsg(cce,
+                                req.scan_cache_,
+                                req.scan_cache_idx_,
+                                ScanType::ScanBoth,
+                                ng_term,
+                                req.ReadTimestamp(),
+                                is_read_snapshot,
+                                req.is_ckpt_delta_);
 
                 cce = cce->map_next_;
             }
@@ -1275,79 +1468,62 @@ public:
         else
         {
             CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce = prior_cce->map_prev_;
-            while (cce != nullptr && idx < req.scan_cache_.size())
+            while (cce != nullptr &&
+                   req.scan_cache_idx_ < req.scan_cache_.size())
             {
-                remote::ScanTuple_msg *scan_tuple = req.scan_cache_.at(idx);
-
                 if (cce == &neg_inf_)
                 {
-                    ScanGap(cce, scan_tuple, term);
                     req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                LockType::ReadLock,
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term,
-                                                ScanType::ScanGap,
-                                                true))
-                    {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnGap.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
-                        return false;
-                    }
+                    // TODO(lzx): handle gap lock
+                    AddScanTupleMsg(cce,
+                                    req.scan_cache_,
+                                    req.scan_cache_idx_,
+                                    ScanType::ScanGap,
+                                    ng_term,
+                                    req.ReadTimestamp(),
+                                    is_read_snapshot,
+                                    req.is_ckpt_delta_);
                 }
                 else
                 {
-                    ScanKey(cce,
-                            scan_tuple,
-                            true,
-                            term,
-                            req.ReadTimestamp(),
-                            req.Isolation());
                     req.SetCcePtr(cce);
-
-                    if (!ConditionalReadLockCce(cce,
-                                                req,
-                                                LockType::ReadLock,
-                                                req.TxTerm(),
-                                                req.NodeGroupId(),
-                                                cce->payload_status_,
-                                                term,
-                                                ScanType::ScanGap,
-                                                true))
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->payload_status_,
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto);
+                    if (lock_pair.second == LockOpStatus::Failed)
                     {
-                        TX_TRACE_ACTION_WITH_CONTEXT(
-                            &req,
-                            "AcquireReadLockOnKey.Fail",
-                            reinterpret_cast<LruEntry *>(cce),
-                            [&req]() -> std::string
-                            {
-                                return std::string(",\"tx_number\":")
-                                    .append(std::to_string(req.Txn()))
-                                    .append(",\"term\":")
-                                    .append(std::to_string(req.TxTerm()));
-                            });
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(1);
+                        return true;
+                    }
+                    else if (lock_pair.second == LockOpStatus::Blocked)
+                    {
+                        // Lock fail should stop the execution of current
+                        // CC request since it's already in blocking queue.
+
+                        // TODO(lzx): Add remote acknowlege when lock fail
                         return false;
                     }
-                }
 
-                ++idx;
+                    AddScanTupleMsg(cce,
+                                    req.scan_cache_,
+                                    req.scan_cache_idx_,
+                                    ScanType::ScanBoth,
+                                    ng_term,
+                                    req.ReadTimestamp(),
+                                    is_read_snapshot,
+                                    req.is_ckpt_delta_);
+                }
                 cce = cce->map_prev_;
             }
         }
-        req.scan_cache_.resize(idx);
+        req.scan_cache_.resize(req.scan_cache_idx_);
 
         req.Result()->SetFinished();
         return true;
@@ -1543,9 +1719,7 @@ public:
                     // recovering message and match it against the lock
                     // holder.
                     TxNumber txn = cce->key_lock_.WriteLockTx();
-                    cce->key_lock_.ReleaseWriteLock(txn, shard_);
-                    shard_->DeleteLockHoldingTx(txn, cce, true);
-                    // cce->key_lock_.ClearTx(txn);
+                    ReleaseCceKeyLock(cce, txn);
                 }
             }
         }
@@ -1770,14 +1944,14 @@ private:
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
                  bool include_gap,
                  uint32_t ng_id,
-                 int64_t term,
+                 int64_t ng_term,
                  uint64_t read_ts,
-                 IsolationLevel iso_level) const
+                 bool is_read_snapshot) const
     {
         SecondaryKey<SkT, PkT> &sk = tuple->Key();
         sk.SKey() = *cce->payload_->sk_;
         sk.PKey() = *cce->payload_->pk_;
-        if (iso_level == IsolationLevel::Snapshot)
+        if (is_read_snapshot)
         {
             VersionResultRecord<SkRecord<SkT, PkT>> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
@@ -1795,15 +1969,16 @@ private:
             tuple->key_ts_ = cce->commit_ts_;
         }
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
-        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
+        tuple->cce_addr_.SetCce(
+            reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
     }
 
     void ScanKey(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  remote::ScanTuple_msg *tuple,
                  bool include_gap,
-                 int64_t term,
+                 int64_t ng_term,
                  uint64_t read_ts,
-                 IsolationLevel iso_level) const
+                 bool is_read_snapshot) const
     {
         tuple->clear_key();
         std::string &key_blob = *tuple->mutable_key();
@@ -1813,7 +1988,7 @@ private:
         // Serializes the primary key
         cce->payload_->pk_->Serialize(key_blob);
 
-        if (iso_level == IsolationLevel::Snapshot)
+        if (is_read_snapshot)
         {
             VersionResultRecord<SkRecord<SkT, PkT>> v_rec;
             bool res = cce->MvccGet(read_ts, v_rec);
@@ -1844,8 +2019,7 @@ private:
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
-        cce_addr->set_term(term);
-
+        cce_addr->set_term(ng_term);
         // For remote scans, the returned cc entries' node group ID is set
         // on the sender side when the sender receives the response.
     }
@@ -1853,23 +2027,24 @@ private:
     void ScanGap(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  TemplateScanTuple<SecondaryKey<SkT, PkT>, VoidRecord> *tuple,
                  uint32_t ng_id,
-                 int64_t term) const
+                 int64_t ng_term) const
     {
         tuple->key_ts_ = 0;
         tuple->gap_ts_ = cce->gap_commit_ts_;
-        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce), term, ng_id);
+        tuple->cce_addr_.SetCce(
+            reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
     }
 
     void ScanGap(CcEntry<VoidKey, SkRecord<SkT, PkT>> *cce,
                  remote::ScanTuple_msg *tuple,
-                 int64_t term) const
+                 int64_t ng_term) const
     {
         tuple->set_key_ts(0);
         tuple->set_gap_ts(cce->gap_commit_ts_);
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
-        cce_addr->set_term(term);
+        cce_addr->set_term(ng_term);
 
         // For remote scans, the returned cc entries' node group ID is set
         // on the sender side when the sender receives the response.

@@ -1061,8 +1061,8 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 {
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.key_ = &table_key_;
-    acquire_all_intent_op_.lk_type_ = LockType::WriteIntent;
-    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OccRead;
 
     post_all_intent_op_.table_name_ = &catalog_ccm_name;
     post_all_intent_op_.key_ = &table_key_;
@@ -1073,7 +1073,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.key_ = &table_key_;
-    acquire_all_lock_op_.lk_type_ = LockType::WriteLock;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
@@ -2001,8 +2001,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         acquire_all_intent_for_update_old_range_op_.table_name_ =
             &range_table_name_;
         acquire_all_intent_for_update_old_range_op_.key_ = range_key_;
-        acquire_all_intent_for_update_old_range_op_.lk_type_ =
-            LockType::WriteIntent;
+        acquire_all_intent_for_update_old_range_op_.cc_op_ =
+            CcOperation::ReadForWrite;
         acquire_all_intent_for_update_old_range_op_.protocol_ =
             CcProtocol::Locking;
         ForwardToSubOperation(txm,
@@ -2051,8 +2051,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             acquire_all_lock_for_update_old_range_op_.table_name_ =
                 &range_table_name_;
             acquire_all_lock_for_update_old_range_op_.key_ = range_key_;
-            acquire_all_lock_for_update_old_range_op_.lk_type_ =
-                LockType::WriteLock;
+            acquire_all_lock_for_update_old_range_op_.cc_op_ =
+                CcOperation::Write;
             acquire_all_lock_for_update_old_range_op_.protocol_ =
                 CcProtocol::Locking;
             ForwardToSubOperation(txm,
@@ -2188,8 +2188,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             acquire_all_lock_for_dirty_old_range_op_.table_name_ =
                 &range_table_name_;
             acquire_all_lock_for_dirty_old_range_op_.key_ = range_key_;
-            acquire_all_lock_for_dirty_old_range_op_.lk_type_ =
-                LockType::WriteLock;
+            acquire_all_lock_for_dirty_old_range_op_.cc_op_ =
+                CcOperation::Write;
             acquire_all_lock_for_dirty_old_range_op_.protocol_ =
                 CcProtocol::Locking;
             ForwardToSubOperation(txm,
