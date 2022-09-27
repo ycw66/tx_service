@@ -19,7 +19,6 @@
 #include "cc_shard.h"
 #include "local_cc_handler.h"
 #include "raft_log.pb.h"
-#include "sk_cc_map.h"
 #include "store/data_store_handler.h"
 #include "table_lock.h"
 #include "template_cc_map.h"

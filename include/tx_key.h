@@ -424,7 +424,7 @@ struct VoidKey : public TxKey
 
     void Deserialize(const char *buf,
                      size_t &offset,
-                     const txservice::Schema *key_schema) override
+                     const Schema *key_schema) override
     {
     }
 

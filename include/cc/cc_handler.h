@@ -296,11 +296,6 @@ public:
                               const CcEntryAddr &ccentry_addr,
                               CcHandlerResult<Void> &) = 0;
 
-    virtual void UploadSecondaryKey(const TableName &table_name,
-                                    const TxKey &sk,
-                                    const TxKey &pk,
-                                    CcHandlerResult<Void> &) = 0;
-
     /// <summary>
     /// Starts a new tx and returns the tx ID.
     /// </summary>

@@ -155,13 +155,6 @@ public:
     {
     }
 
-    void UploadSecondaryKey(const TableName &table_name,
-                            const TxKey &sk,
-                            const TxKey &pk,
-                            CcHandlerResult<Void> &)
-    {
-    }
-
     void UpdateCommitLowerBound(const TxId &txid,
                                 uint64_t commit_ts_lower_bound,
                                 CcHandlerResult<uint64_t> &)

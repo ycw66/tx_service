@@ -199,13 +199,6 @@ public:
     {
     }
 
-    void UploadSecondaryKey(const TableName &table_name,
-                            const TxKey &sk,
-                            const TxKey &pk,
-                            CcHandlerResult<Void> &) override
-    {
-    }
-
     /// <summary>
     /// Starts a new tx and returns the tx ID.
     /// </summary>

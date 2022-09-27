@@ -21,7 +21,6 @@
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "moodycamelqueue.h"
 #include "range_record.h"
-#include "secondary_key.h"
 #include "sharder.h"
 #include "table_lock.h"
 #include "tentry.h"

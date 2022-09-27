@@ -38,11 +38,13 @@ public:
     TemplateCcMap(CcShard *shard,
                   const TableName &table_name,
                   uint64_t schema_ts,
+                  bool is_sk = false,
                   const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false)
         : CcMap(
               shard, table_name, table_schema, schema_ts, ccm_has_full_entries),
           ccm_(),
+          is_sk_(is_sk),
           neg_inf_(this),
           pos_inf_(this)
     {
@@ -215,6 +217,12 @@ public:
 
         if (cce_addr.CcePtr() == 0)
         {
+            if (is_sk_)
+            {
+                // TODO: Sk Insert branch needs rethinking, currently useless.
+                assert(false);
+            }
+
             // This is an insert. The new insert results in an insert entry in
             // the intention set of the preceding key's gap.
 
@@ -329,17 +337,24 @@ public:
         TX_TRACE_DUMP(&req);
 
         CODE_FAULT_INJECTOR("delay_release_write_lock_on_pk", {
-            // throw back to cc_queue
-            shard_->Enqueue(shard_->LocalCoreId(), &req);
-            return false;
+            if (!is_sk_)
+            {
+                // throw back to cc_queue
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
         });
 
         const CcEntryAddr &cce_addr = *req.CceAddr();
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_PostWriteCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_PostWriteCc";
-            req.Result()->SetError(-1);
-            return true;
+            if (!is_sk_)
+            {
+                LOG(INFO)
+                    << "FaultInject  term_TemplateCcMap_Execute_PostWriteCc";
+                req.Result()->SetError(-1);
+                return true;
+            }
         });
 
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
@@ -357,6 +372,13 @@ public:
 
         if (cce_addr.InsertPtr() != 0)
         {
+            if (is_sk_)
+            {
+                // TODO: Sk Insert branch needs rethinking, currently useless.
+                assert(false);
+                return true;
+            }
+
             // insert branch.
             assert(is_del == false);
 
@@ -510,6 +532,12 @@ public:
                     .append(std::to_string(req.TxTerm()));
             });
         TX_TRACE_DUMP(&req);
+
+        if (is_sk_)
+        {
+            assert(false);
+            return false;
+        }
 
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
         AcquireAllResult &acquire_all_result = hd_res->Value();
@@ -774,6 +802,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        if (is_sk_)
+        {
+            assert(false);
+            return false;
+        }
+
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -988,7 +1022,8 @@ public:
         auto hd_res = req.Result();
         CODE_FAULT_INJECTOR(
             "term_TemplateCcMap_Execute_PostReadCc", {
-                if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
+                if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr &&
+                    !is_sk_)
                 {
                     LOG(INFO)
                         << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
@@ -1145,6 +1180,24 @@ public:
             return true;
         }
 
+        int64_t tx_term = req.TxTerm();
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        bool is_read_snapshot;
+        CcOperation cc_op;
+        if (is_sk_)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
+
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 
@@ -1206,11 +1259,6 @@ public:
                                 req.NodeGroupId());
 
                 // Try to acquire lock
-                int64_t tx_term = req.TxTerm();
-                IsolationLevel iso_lvl = req.Isolation();
-                CcProtocol cc_proto = req.Protocol();
-                CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
-                                                     : CcOperation::Read;
                 tie(acquired_lock, lock_op_status) =
                     AcquireCceKeyLock(cce,
                                       cce->payload_status_,
@@ -1307,7 +1355,7 @@ public:
         }
 
         // If 'req.IsForWrite()' is true, should read latest version;
-        if (req.Isolation() == IsolationLevel::Snapshot && !req.IsForWrite())
+        if (is_read_snapshot)
         {
             assert(req.Type() == ReadType::Inside);
 
@@ -1400,6 +1448,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        if (is_sk_)
+        {
+            assert(false);
+            return true;
+        }
+
         const CcEntryAddr &cce_addr = req.cce_addr_;
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
@@ -1480,7 +1534,7 @@ public:
                     ng_term,
                     read_ts,
                     is_read_snapshot,
-                    is_ckpt_delta);
+                    !is_sk_ && is_ckpt_delta);
             break;
         case ScanType::ScanKey:
             ScanKey(cce,
@@ -1490,7 +1544,7 @@ public:
                     ng_term,
                     read_ts,
                     is_read_snapshot,
-                    is_ckpt_delta);
+                    !is_sk_ && is_ckpt_delta);
             break;
         default:
             break;
@@ -1539,13 +1593,22 @@ public:
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
 
         Iterator scan_ccm_it;
-
-        CcOperation cc_op =
-            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
-        bool is_read_snapshot =
-            (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        CcOperation cc_op;
+        bool is_read_snapshot;
+        if (is_sk_)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
 
         CcEntry<KeyT, ValueT> *cce = nullptr;
         if (req.CcePtr() != nullptr)
@@ -1564,7 +1627,7 @@ public:
                     req.direct_ == ScanDirection::Forward
                         ? ForwardScanStart(*look_key,
                                            req.inclusive_,
-                                           req.is_include_floor_cce_)
+                                           !is_sk_ && req.is_include_floor_cce_)
                         : BackwardScanStart(*look_key, req.inclusive_);
 
                 scan_ccm_it = start_pair.first;
@@ -1589,8 +1652,9 @@ public:
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? ForwardScanStart(
-                          *look_key, req.inclusive_, req.is_include_floor_cce_)
+                    ? ForwardScanStart(*look_key,
+                                       req.inclusive_,
+                                       !is_sk_ && req.is_include_floor_cce_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
@@ -1752,12 +1816,22 @@ public:
         }
         req.Result()->Value().term_ = ng_term;
 
-        CcOperation cc_op =
-            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
-        bool is_read_snapshot =
-            (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        CcOperation cc_op;
+        bool is_read_snapshot;
+        if (is_sk_)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
 
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
@@ -1929,7 +2003,7 @@ public:
                     ng_term,
                     read_ts,
                     is_read_snapshot,
-                    is_ckpt_delta);
+                    !is_sk_ && is_ckpt_delta);
             break;
         case ScanType::ScanKey:
             ScanKey(cce,
@@ -1938,7 +2012,7 @@ public:
                     ng_term,
                     read_ts,
                     is_read_snapshot,
-                    is_ckpt_delta);
+                    !is_sk_ && is_ckpt_delta);
             break;
         default:
             break;
@@ -1976,12 +2050,22 @@ public:
             return true;
         }
 
-        CcOperation cc_op =
-            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
-        bool is_read_snapshot =
-            (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        CcOperation cc_op;
+        bool is_read_snapshot;
+        if (is_sk_)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
 
         const KeyT *look_key;
         KeyT key_obj;
@@ -2135,7 +2219,6 @@ public:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
-
                     // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
@@ -2187,7 +2270,6 @@ public:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
-
                     // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
@@ -2232,12 +2314,22 @@ public:
             return true;
         }
 
-        CcOperation cc_op =
-            req.IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
-        bool is_read_snapshot =
-            (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        CcOperation cc_op;
+        bool is_read_snapshot;
+        if (is_sk_)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
 
         ScanDirection direction = req.direct_;
         CcEntry<KeyT, ValueT> *prior_cce = nullptr;
@@ -2716,7 +2808,9 @@ public:
         ScanDirection direction) const override
     {
         return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
-            direction, ScanIndexType::Primary, KeySchema());
+            direction,
+            is_sk_ ? ScanIndexType::Secondary : ScanIndexType::Primary,
+            KeySchema());
     }
 
     /**
@@ -2779,7 +2873,7 @@ public:
 
     TableType Type() const override
     {
-        return TableType::Primary;
+        return is_sk_ ? TableType::Secondary : TableType::Primary;
     }
 
     void TryInsertCkptList(LruEntry *entry) override
@@ -2796,12 +2890,27 @@ public:
 
     const Schema *KeySchema() const override
     {
-        return table_schema_ ? table_schema_->KeySchema() : nullptr;
+        if (table_schema_ != nullptr)
+        {
+            if (is_sk_)
+            {
+                return table_schema_->IndexKeySchema(table_name_);
+            }
+            else
+            {
+                return table_schema_->KeySchema();
+            }
+        }
+        return nullptr;
     }
 
     const Schema *RecordSchema() const override
     {
-        return table_schema_ ? table_schema_->RecordSchema() : nullptr;
+        if (!is_sk_ && table_schema_ != nullptr)
+        {
+            return table_schema_->RecordSchema();
+        }
+        return nullptr;
     }
 
 protected:
@@ -2837,7 +2946,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key, KeySchema()), this);
+        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key), this);
         new_cce_ptr = &em_it->second;
         new_cce_ptr->key_ = &em_it->first;
 
@@ -2886,7 +2995,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.try_emplace(KeyT(key, KeySchema()), this);
+        auto em_it = ccm_.try_emplace(KeyT(key), this);
         new_cce_ptr = &em_it.first->second;
 
         if (em_it.second)
@@ -3516,6 +3625,7 @@ protected:
     }
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
+    bool is_sk_{false};
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
 };
 }  // namespace txservice

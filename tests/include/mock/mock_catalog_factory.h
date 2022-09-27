@@ -152,7 +152,12 @@ public:
     {
         return std::make_unique<
             txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
-            shard, table_name, schema_ts, table_schema, ccm_has_full_entries);
+            shard,
+            table_name,
+            schema_ts,
+            false,
+            table_schema,
+            ccm_has_full_entries);
     }
 
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,

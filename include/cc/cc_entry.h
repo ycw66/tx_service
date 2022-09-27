@@ -496,29 +496,6 @@ public:
         return mem_usage;
     }
 
-    size_t AddSkArchiveRecord(RecordStatus payload_status, uint64_t commit_ts)
-    {
-        auto it = archives_.begin();
-        for (; it != archives_.end(); it++)
-        {
-            if (it->commit_ts_ <= commit_ts)
-            {
-                break;
-            }
-        }
-        size_t mem_usage = 0U;
-        if (it->commit_ts_ < commit_ts)
-        {
-            it = archives_.emplace(it);
-            it->commit_ts_ = commit_ts;
-            it->payload_status_ = payload_status;
-            it->payload_ = nullptr;
-            mem_usage = it->MemUsage();
-        }
-
-        return mem_usage;
-    }
-
     /**
      *
      * @brief Kick out historical versions that won't be used according to

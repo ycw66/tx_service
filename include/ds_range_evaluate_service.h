@@ -28,7 +28,8 @@ public:
           ranges_(std::move(ranges)){};
 
     DsEvaluateRangeSizeWorkSettings(DsEvaluateRangeSizeWorkSettings &&ws)
-        : table_name_(std::move(ws.table_name_)),
+        : table_name_(ws.table_name_.StringView(),
+                      txservice::TableType::RangePartition),
           ranges_(std::move(ws.ranges_)){};
 
     const txservice::TableName
