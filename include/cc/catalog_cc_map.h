@@ -418,11 +418,22 @@ public:
                     }
 
                     req.SetReadType(ReadType::OutsideNormal);
+                    // the catalog ccentry's commit ts should equals to
+                    // catalog_entry version. since we convert read type from
+                    // ReadInside to OutsideNormal, the old ReadInside
+                    // ReadTimestamp is transaction start_ts, which cannot be
+                    // used as ccentry commit_ts.
+                    req.SetReadTimestamp(catalog_entry->Version());
                     read_result.rec_status_ = RecordStatus::Normal;
                 }
                 else
                 {
                     req.SetReadType(ReadType::OutsideDeleted);
+                    // when we convert read type from ReadInside to
+                    // OutsideDeleted, we also need to use the catalog_entry
+                    // version (the timestamp when it is deleted) to replace
+                    // transaction start_ts.
+                    req.SetReadTimestamp(catalog_entry->Version());
                     read_result.rec_status_ = RecordStatus::Deleted;
                 }
 

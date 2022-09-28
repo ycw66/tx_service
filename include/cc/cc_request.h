@@ -1051,6 +1051,11 @@ public:
         return ts_;
     }
 
+    void SetReadTimestamp(uint64_t ts)
+    {
+        ts_ = ts;
+    }
+
     ReadType Type() const
     {
         return type_;
