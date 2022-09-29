@@ -251,7 +251,7 @@ void Checkpointer::Ckpt()
                     if (!ckpt_ret)
                     {
                         LOG(INFO)
-                            << "checkpointer PutAll flush to cassandra failed";
+                            << "checkpointer PutAll flush to kv storage failed";
                     }
                 }
                 else
@@ -263,8 +263,9 @@ void Checkpointer::Ckpt()
                                                    node_group);
                     if (!ckpt_ret)
                     {
-                        LOG(INFO) << "checkpointer PutSkAll flush to cassandra "
-                                     "failed";
+                        LOG(INFO)
+                            << "checkpointer PutSkAll flush to kv storage "
+                               "failed";
                     }
                 }
 
@@ -288,7 +289,7 @@ void Checkpointer::Ckpt()
                         // safe to truncate the redo log.
                         flushed = false;
                         LOG(INFO) << "checkpointer PutArchivesAll flush to "
-                                     "cassandra failed";
+                                     "kv storage failed";
                     }
                 }
 

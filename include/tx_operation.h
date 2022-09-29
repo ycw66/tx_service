@@ -600,7 +600,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      */
     PostWriteAllOp post_write_all_for_dirty_old_range_op_;
     /**
-     * @brief Flush all updated range entries into Cassandra
+     * @brief Flush all updated range entries into KV storage
      */
     DsUpsertRangeOp ds_upsert_new_range_op_;
     /**
