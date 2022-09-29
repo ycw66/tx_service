@@ -315,7 +315,6 @@ void Checkpointer::Ckpt()
             commit_req.Reset();
             ckpt_txm->Execute(&commit_req);
             commit_req.Wait();
-            assert(commit_req.Result() == true);
         }
 
         // finish checkpoint on this node group, unpin its data and clear its

@@ -299,21 +299,10 @@ txservice::remote::RemoteRead::RemoteRead()
 
         if (!res->IsError())
         {
-            switch (read_result.rec_status_)
-            {
-            case RecordStatus::Normal:
-                resp->set_rec_status(RecordStatusType::NORMAL);
-                break;
-            case RecordStatus::Deleted:
-                resp->set_rec_status(RecordStatusType::DELETED);
-                break;
-            case RecordStatus::Unknown:
-                resp->set_rec_status(RecordStatusType::UNDEFINED);
-                break;
-            default:
-                break;
-            }
-
+            resp->set_rec_status(
+                ToRemoteType::ConvertRecordStatus(read_result.rec_status_));
+            resp->set_lock_type(
+                ToRemoteType::ConvertLockType(read_result.lock_type_));
             resp->set_ts(read_result.ts_);
 
             CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
