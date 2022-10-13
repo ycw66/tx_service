@@ -299,6 +299,16 @@ public:
         return cce_ptr_[core_id];
     }
 
+    ScanType CcePtrScanType(int core_id)
+    {
+        return cce_ptr_scan_type_[core_id];
+    }
+
+    void SetCcePtrScanType(ScanType scan_type, int core_id)
+    {
+        cce_ptr_scan_type_[core_id] = scan_type;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -326,6 +336,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     std::vector<LruEntry *> cce_ptr_;
+    // scan type for above cce_ptr_
+    std::vector<ScanType> cce_ptr_scan_type_;
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
@@ -380,6 +392,16 @@ public:
         return cce_ptr_;
     }
 
+    ScanType CcePtrScanType()
+    {
+        return cce_ptr_scan_type_;
+    }
+
+    void SetCcePtrScanType(ScanType scan_type)
+    {
+        cce_ptr_scan_type_ = scan_type;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -402,6 +424,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+    // scan type for above cce_ptr_
+    ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;

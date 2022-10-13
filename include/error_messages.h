@@ -39,6 +39,10 @@ enum struct TxErrorCode
     UPSERT_TABLE_PREPARE_FAIL,
     TRANSACTION_NODE_NOT_LEADER,
     UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
+    SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL,
+    SPLIT_RANGE_ACQUIRE_WRITE_LOCK_FAIL,
+    SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL,
+
     // Under MVCC protocol, if write transaction has acquired the write
     // lock, then it will generate its commit_ts without knowing the later
     // read. Hence the writer's commit_ts may be smaller than the reader's

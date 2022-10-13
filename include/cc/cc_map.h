@@ -41,7 +41,8 @@ enum struct ScanType
 {
     ScanKey = 0,
     ScanGap,
-    ScanBoth
+    ScanBoth,
+    ScanUnknow
 };
 
 class CcShard;

@@ -354,30 +354,6 @@ public:
                                       uint64_t commit_ts,
                                       CcHandlerResult<Void> &hres) = 0;
 
-    virtual void DataStoreFindRangeMedianKey(
-        int32_t partition,
-        const TableSchema *table_schema,
-        CcHandlerResult<RangeMedianKeyResult> &hd_res) = 0;
-
-    virtual void DataStoreCopyRangeData(int32_t old_partition_id,
-                                        int32_t new_partition_id,
-                                        const TxKey *start_key,
-                                        uint64_t tx_ts,
-                                        const TableSchema *table_schema,
-                                        CcHandlerResult<Void> &hd_res) = 0;
-
-    virtual void DataStoreUpsertRange(const TableSchema *table_schema,
-                                      txservice::TxKey *key,
-                                      int32_t partition_id,
-                                      int64_t ts,
-                                      CcHandlerResult<Void> &hd_res) = 0;
-
-    virtual void DataStoreDeleteOutOfRangeData(
-        int32_t partition_id,
-        const TxKey *start_key,
-        const TableSchema *table_schema,
-        CcHandlerResult<Void> &hd_res) = 0;
-
     virtual uint32_t GetNodeId() const = 0;
 
     virtual void CleanCcEntryForTest(const TableName &table_name,

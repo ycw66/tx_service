@@ -81,6 +81,7 @@ public:
      * Unpin data of this node group so that ccmaps and catalogs can be cleared
      * if ccnode is no longer leader.
      * Must be called in pair with PinData().
+     * waitToFinish: true - Wait until the UnpinData to finish
      */
     void UnpinData();
 

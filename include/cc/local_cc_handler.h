@@ -266,28 +266,6 @@ public:
                              uint16_t command_id,
                              CcHandlerResult<bool> &hres) override;
 
-    void DataStoreFindRangeMedianKey(
-        int32_t partition,
-        const TableSchema *table_schema,
-        CcHandlerResult<RangeMedianKeyResult> &hd_res) override;
-
-    void DataStoreCopyRangeData(int32_t old_partition_id,
-                                int32_t new_partition_id,
-                                const TxKey *start_key,
-                                uint64_t tx_ts,
-                                const TableSchema *table_schema,
-                                CcHandlerResult<Void> &hd_res) override;
-
-    void DataStoreUpsertRange(const TableSchema *table_schema,
-                              txservice::TxKey *key,
-                              int32_t partition_id,
-                              int64_t ts,
-                              CcHandlerResult<Void> &hd_res) override;
-
-    void DataStoreDeleteOutOfRangeData(int32_t partition_id,
-                                       const TxKey *start_key,
-                                       const TableSchema *table_schema,
-                                       CcHandlerResult<Void> &hd_res) override;
     /*
      * Get the node id which runs the current transaction.
      */

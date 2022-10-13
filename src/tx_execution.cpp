@@ -182,6 +182,96 @@ void TransactionExecution::RecoverSchemaTx(
     }
 }
 
+void TransactionExecution::RecoverSplitRangeTx(
+    const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
+    const TableSchema *table_schema,
+    const TxKey *range_key,
+    std::unique_ptr<RangeRecord> splitting_range_record,
+    uint32_t partition_id,
+    std::unique_ptr<TxKey> new_range_key,
+    uint32_t new_partition_id,
+    uint64_t txn,
+    int64_t tx_term,
+    uint64_t commit_ts)
+{
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    tx_number_.store(txn, std::memory_order_relaxed);
+    tx_term_ = tx_term;
+    commit_ts_ = commit_ts;
+
+    const TableName range_table_name = TableName{
+        ds_split_range_op_msg.table_name(), TableType::RangePartition};
+    const TableName base_table_name =
+        TableName{range_table_name.StringView(), TableType::Primary};
+
+    std::unique_ptr<DsSplitRangeOp> split_range_op =
+        std::make_unique<DsSplitRangeOp>(base_table_name,
+                                         table_schema,
+                                         range_key,
+                                         std::move(splitting_range_record),
+                                         this);
+
+    const ::txlog::SplitRangeOpMessage::Stage stage =
+        ds_split_range_op_msg.stage();
+
+    if (stage != ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
+        stage != ::txlog::SplitRangeOpMessage::CopingOldRangeData &&
+        stage != ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange &&
+        stage != ::txlog::SplitRangeOpMessage::DeletingOldRangeData &&
+        stage != ::txlog::SplitRangeOpMessage::CleanLog)
+    {
+        tx_status_.store(TxnStatus::Finished);
+        return;
+    }
+
+    split_range_op->new_range_key_ = std::move(new_range_key);
+    split_range_op->new_partition_id_ = new_partition_id;
+
+    if (stage >= ::txlog::SplitRangeOpMessage::CopingOldRangeData)
+    {
+        split_range_op->upload_range_entry_->new_key_ =
+            split_range_op->new_range_key_->Clone();
+        split_range_op->upload_range_entry_->new_partition_id_ =
+            split_range_op->new_partition_id_;
+        split_range_op->upload_range_record_->range_entry_ =
+            split_range_op->upload_range_entry_.get();
+    }
+
+    switch (stage)
+    {
+    case ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange:
+        split_range_op->prepare_log_for_update_old_range_op_.hd_result_
+            .SetFinished();
+        split_range_op->op_ =
+            &split_range_op->prepare_log_for_update_old_range_op_;
+        break;
+    case ::txlog::SplitRangeOpMessage::CopingOldRangeData:
+        split_range_op->ds_copy_old_range_data_finished_log_op_.hd_result_
+            .SetFinished();
+        split_range_op->op_ =
+            &split_range_op->ds_copy_old_range_data_finished_log_op_;
+        break;
+    case ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange:
+        split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
+            .SetFinished();
+        split_range_op->op_ =
+            &split_range_op->commit_log_for_dirty_old_range_op_;
+        break;
+    case ::txlog::SplitRangeOpMessage::DeletingOldRangeData:
+        split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
+            .SetFinished();
+        split_range_op->op_ =
+            &split_range_op->delete_out_of_old_range_data_log_op_;
+        break;
+    case ::txlog::SplitRangeOpMessage::CleanLog:
+    default:
+        break;
+    }
+
+    ds_split_range_op_ = std::move(split_range_op);
+    state_stack_.push_back(ds_split_range_op_.get());
+}
+
 void TransactionExecution::EnlistToExecute(bool remote_response,
                                            bool skip_remote_cnt)
 {
@@ -359,7 +449,7 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_))
                 .append("\"table_name:\":")
-                .append(*scan_open_req.tab_name_);
+                .append(scan_open_req.tab_name_->String());
         });
 
     uint64_resp_ = &scan_open_req.tx_result_;
@@ -421,7 +511,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_))
                 .append("\"table_name:\":")
-                .append(*upsert_req.tab_name_);
+                .append(upsert_req.tab_name_->String());
         });
     void_resp_ = &upsert_req.tx_result_;
     void_resp_->Reset();
@@ -481,7 +571,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_))
                 .append("\"table_name\":")
-                .append(*req.table_name_);
+                .append(req.table_name_->String());
         });
     bool_resp_ = &req.tx_result_;
 
@@ -532,11 +622,18 @@ void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
     bool_resp_ = &req.tx_result_;
     bool_resp_->Reset();
 
-    ds_split_range_op_ = std::make_unique<DsSplitRangeOp>(req.range_table_name_,
-                                                          req.table_schema_,
-                                                          req.range_key_,
-                                                          req.range_record_,
-                                                          this);
+    DLOG(INFO) << "SplitRangeTxRequest table_name_: "
+               << req.table_name_.String();
+    ds_split_range_op_ =
+        std::make_unique<DsSplitRangeOp>(req.table_name_,
+                                         req.table_schema_,
+                                         req.range_key_,
+                                         std::move(req.range_record_),
+                                         this);
+    // Fire and forget the SplitRangeTxRequest
+    bool_resp_->Finish(true);
+    bool_resp_ = nullptr;
+
     PushOperation(ds_split_range_op_.get());
     Forward();
 }
@@ -2032,7 +2129,12 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // For tx's that are in unknown result, or have finished validation but
         // do not upload anything, skips post-processing.
 
-        if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
+        if (bool_resp_ == nullptr)
+        {
+            // Do not notify mysql because the tx is initiated by range split
+        }
+        else if (tx_status_.load(std::memory_order_relaxed) ==
+                 TxnStatus::Committed)
         {
             bool_resp_->Finish(true);
         }
@@ -2445,12 +2547,12 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
     Forward();
 }
 
-void TransactionExecution::Process(
-    DsFindRangeMedianKeyOp &ds_find_range_median_key_op)
+template <typename ResultType>
+void TransactionExecution::Process(DsOp<ResultType> &ds_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &ds_find_range_median_key_op,
+        &ds_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -2458,61 +2560,24 @@ void TransactionExecution::Process(
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    ds_find_range_median_key_op.hd_result_.Reset();
-    ds_find_range_median_key_op.is_running_ = true;
+    ds_op.hd_result_.Reset();
+    ds_op.is_running_ = true;
 
-    handler->DataStoreFindRangeMedianKey(
-        ds_find_range_median_key_op.partition_id_,
-        ds_find_range_median_key_op.table_schema_,
-        ds_find_range_median_key_op.hd_result_);
+    if (ds_op.op_func_ != nullptr)
+    {
+        ds_op.op_func_();
+    }
 }
 
-void TransactionExecution::PostProcess(
-    DsFindRangeMedianKeyOp &ds_find_range_median_key_op)
+template void TransactionExecution::Process(DsOp<RangeMedianKeyResult> &ds_op);
+template void TransactionExecution::Process(DsOp<Void> &ds_op);
+
+template <typename ResultType>
+void TransactionExecution::PostProcess(DsOp<ResultType> &ds_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &ds_find_range_median_key_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    Forward();
-}
-
-void TransactionExecution::Process(DsCopyRangeDataOp &ds_copy_range_data_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_copy_range_data_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    TX_TRACE_DUMP(&ds_copy_range_data_op);
-    ds_copy_range_data_op.hd_result_.Reset();
-    ds_copy_range_data_op.is_running_ = true;
-
-    handler->DataStoreCopyRangeData(ds_copy_range_data_op.old_partition_id_,
-                                    ds_copy_range_data_op.new_partition_id_,
-                                    ds_copy_range_data_op.middle_key_,
-                                    ds_copy_range_data_op.filter_ts_,
-                                    ds_copy_range_data_op.table_schema_,
-                                    ds_copy_range_data_op.hd_result_);
-}
-
-void TransactionExecution::PostProcess(DsCopyRangeDataOp &ds_copy_range_data_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_copy_range_data_op,
+        &ds_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -2524,81 +2589,9 @@ void TransactionExecution::PostProcess(DsCopyRangeDataOp &ds_copy_range_data_op)
     Forward();
 }
 
-void TransactionExecution::Process(
-    DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_delete_out_of_range_data_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    ds_delete_out_of_range_data_op.hd_result_.Reset();
-    ds_delete_out_of_range_data_op.is_running_ = true;
-    handler->DataStoreDeleteOutOfRangeData(
-        ds_delete_out_of_range_data_op.partition_id_,
-        ds_delete_out_of_range_data_op.middle_key_,
-        ds_delete_out_of_range_data_op.table_schema_,
-        ds_delete_out_of_range_data_op.hd_result_);
-}
-
-void TransactionExecution::PostProcess(
-    DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_delete_out_of_range_data_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    Forward();
-}
-
-void TransactionExecution::Process(DsUpsertRangeOp &ds_upsert_range_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_upsert_range_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    ds_upsert_range_op.Reset();
-    ds_upsert_range_op.is_running_ = true;
-    handler->DataStoreUpsertRange(ds_upsert_range_op.table_schema_,
-                                  ds_upsert_range_op.key_,
-                                  ds_upsert_range_op.partition_id_,
-                                  ds_upsert_range_op.ts_,
-                                  ds_upsert_range_op.hd_result_);
-}
-
-void TransactionExecution::PostProcess(DsUpsertRangeOp &ds_upsert_range_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &ds_upsert_range_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    Forward();
-}
+template void TransactionExecution::PostProcess(
+    DsOp<RangeMedianKeyResult> &ds_op);
+template void TransactionExecution::PostProcess(DsOp<Void> &ds_op);
 
 void TransactionExecution::Process(NoOp &no_op)
 {

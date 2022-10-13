@@ -18,9 +18,8 @@
 #define FMT_POINTER_TO_UINT64T(pointer) \
     fmt_hex(reinterpret_cast<uint64_t>(pointer))
 
-#define GET_TABLE_NAME(req)                     \
-    (req->GetTableName() == nullptr ? "nullptr" \
-                                    : req->GetTableName()->StringView())
+#define GET_TABLE_NAME(req) \
+    (req->GetTableName() == nullptr ? "nullptr" : req->GetTableName()->Trace())
 
 #define GET_MACRO3(_1, _2, _3, NAME, ...) NAME
 #define GET_MACRO4(_1, _2, _3, _4, NAME, ...) NAME
@@ -94,6 +93,8 @@
 
 namespace txservice
 {
+#ifndef TX_TRACE_DISABLED
+
 struct Void;
 
 template <typename... Args>
@@ -127,4 +128,5 @@ std::string tx_trace_dump(txservice::Void *result,
                           std::function<std::string()> context_func);
 std::string tx_trace_dump(txservice::TxNumber tx_number,
                           std::function<std::string()> context_func);
+#endif
 }  // namespace txservice

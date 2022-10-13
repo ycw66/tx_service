@@ -220,7 +220,6 @@ public:
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
-#endif
                 if (old_schema != nullptr)
                 {
                     std::vector<TableName> index_names =
@@ -237,6 +236,7 @@ public:
 #endif
                     }
                 }
+#endif
             }
             else if (old_schema == nullptr)
             {
@@ -274,12 +274,12 @@ public:
         {
             // If this is a drop table req, drop the range table also
             // Drop table range before drop catalog
+#ifdef RANGE_PARTITION_ENABLED
             if (new_schema == nullptr)
             {
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
                 shard_->CleanTableRange(range_table_name, req.NodeGroupId());
-
                 if (old_schema != nullptr)
                 {
                     std::vector<TableName> index_names =
@@ -294,7 +294,7 @@ public:
                     }
                 }
             }
-
+#endif
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
 

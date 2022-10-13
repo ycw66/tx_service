@@ -6,13 +6,12 @@
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
-#include "ds_range_evaluate_service.h"
-#include "ds_range_split_service.h"
 #include "fault/cc_node.h"
 #include "fault/log_replay_service.h"
 #include "remote/cc_node_service.h"
 #include "remote/cc_stream_receiver.h"
 #include "remote/cc_stream_sender.h"
+#include "tx_worker_pool.h"
 #include "txlog.h"
 
 namespace txservice
@@ -240,6 +239,11 @@ public:
         return log_agent_->GetLogGroupId(cc_ng_id);
     }
 
+    LocalCcShards *GetLocalCcShards()
+    {
+        return &local_shards_;
+    }
+
     void CleanCcTable(const TableName &tabname);
 
     void NotifyCheckPointer();
@@ -263,14 +267,9 @@ public:
      */
     void UnpinNodeGroupData(uint32_t cc_ng_id);
 
-    DsRangeSplitOperationService *GetDsRangeSplitOperationService()
+    TxWorkerPool *GetTxWorkerPool()
     {
-        return ds_range_split_operation_service_.get();
-    }
-
-    DsRangeEvaluateOperationService *GetDsRangeEvaluateOperationService()
-    {
-        return ds_range_evaluate_operation_service_.get();
+        return tx_worker_pool_.get();
     }
 
 private:
@@ -342,11 +341,8 @@ private:
     // log groups.
     std::unique_ptr<fault::ReplayService> log_replay_service_;
 
-    // Two services for range split
-    std::unique_ptr<DsRangeEvaluateOperationService>
-        ds_range_evaluate_operation_service_;
-    std::unique_ptr<DsRangeSplitOperationService>
-        ds_range_split_operation_service_;
+    // Worker pool for doing various aync works
+    std::unique_ptr<TxWorkerPool> tx_worker_pool_;
 
     LocalCcShards &local_shards_;
     std::unique_ptr<TxLog> log_agent_;

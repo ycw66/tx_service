@@ -42,6 +42,7 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::Emplace;
     using TemplateCcMap<KeyT, RangeRecord>::AcquireCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
+    using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
     using TemplateCcMap<KeyT, RangeRecord>::ccm_;
@@ -60,7 +61,10 @@ public:
                uint64_t schema_ts,
                CcShard *shard)
         : TemplateCcMap<KeyT, RangeRecord>(
-              shard, range_table_name, schema_ts, table_schema)
+              shard, range_table_name, schema_ts, table_schema, false),
+          range_table_name_(range_table_name.StringView().data(),
+                            range_table_name.StringView().size(),
+                            range_table_name.Type())
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
             CcMap::shard_->GetAllTableRangesForATable(range_table_name);
@@ -223,6 +227,7 @@ public:
             return false;
         }
         }  //-- end: switch
+
         return true;
     }
 
@@ -237,44 +242,11 @@ public:
             req.Result()->SetError(-1);
         }
 
-        // Prepare range key
-        const KeyT *range_key = nullptr;
-        if (req.Key() != nullptr)
-        {
-            range_key = static_cast<const KeyT *>(req.Key());
-        }
-        else
-        {
-            assert(req.KeyStr() != nullptr);
-            std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
-            size_t offset = 0;
-            decoded_key->Deserialize(
-                req.KeyStr()->data(),
-                offset,
-                TemplateCcMap<KeyT, RangeRecord>::KeySchema());
-            range_key = decoded_key.get();
-            req.SetDecodedKey(std::move(decoded_key));
-        }
-
         // When the commit ts is 0, the request commits nothing and only
         // removes the write intents/locks acquired earlier.
         if (req.CommitTs() == 0)
         {
             return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
-        }
-
-        // Get the range record in this range cc map
-        RangeRecord *cc_map_range_rec = nullptr;
-        if (range_key == TemplateCcMap<KeyT, RangeRecord>::neg_inf_.key_)
-        {
-            cc_map_range_rec =
-                TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_.get();
-        }
-        else
-        {
-            auto cc_map_range_it = ccm_.find(*range_key);
-            assert(cc_map_range_it != ccm_.end());
-            cc_map_range_rec = cc_map_range_it->second.payload_.get();
         }
 
         // Prepare RangeRecord
@@ -295,9 +267,10 @@ public:
             upload_range_rec = decoded_rec.get();
             req.SetDecodedPayload(std::move(decoded_rec));
         }
-        int32_t partition_id = upload_range_rec->RangeEntry()->partition_id_;
-        int32_t new_partition_id =
-            upload_range_rec->RangeEntry()->new_partition_id_;
+
+        const TableRangeEntry *range_entry = upload_range_rec->RangeEntry();
+        int32_t partition_id = range_entry->partition_id_;
+        int32_t new_partition_id = range_entry->new_partition_id_;
 
         if (req.CommitType() == PostWriteType::PrepareCommit)
         {
@@ -318,18 +291,16 @@ public:
 
                 // point the range rec to the dirty range_entry_shade for range
                 // cc map rec
-                cc_map_range_rec->range_entry_ =
+                upload_range_rec->range_entry_ =
                     range_entry_shade->shade_.get();
             }
             else
             {
-                // simplely reset the binary_value_ to the local shards dirty
+                // simply reset the binary_value_ to the local shards dirty
                 // table range, and update the cc map
-                const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->GetTableRangeWithShade(this->table_name_,
-                                                   partition_id);
-                cc_map_range_rec->range_entry_ =
-                    range_entry_shade->shade_.get();
+                upload_range_rec->range_entry_ =
+                    shard_->GetTableEffectiveRangeEntry(this->table_name_,
+                                                        partition_id);
             }
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
@@ -348,15 +319,15 @@ public:
             else
             {
                 // switch old range rec pointer from shade_ to shader_
-                const TableRangeEntryWithShade *old_partition_shader =
-                    shard_->GetTableRangeWithShade(this->table_name_,
-                                                   partition_id);
-                old_range_entry = old_partition_shader->shader_.get();
+                old_range_entry = shard_->GetTableEffectiveRangeEntry(
+                    this->table_name_, partition_id);
                 // get the new range entry added by shard 0
-                const TableRangeEntryWithShade *new_partition_shader =
-                    shard_->GetTableRangeWithShade(this->table_name_,
-                                                   new_partition_id);
-                new_range_entry = new_partition_shader->shader_.get();
+
+                // TODO(XiaoJi):
+                // upload_range_rec->RangeEntry()->new_partition_id_ has been
+                // reset to -1 when shard#0 CommitDirtyTableRange
+                new_range_entry = shard_->GetTableEffectiveRangeEntry(
+                    this->table_name_, new_partition_id);
                 assert(new_range_entry != nullptr);
             }
 
@@ -387,5 +358,211 @@ public:
 
         return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
     }
+
+    bool Execute(ReplayLogCc &req) override
+    {
+        uint32_t group_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(-1);
+            return false;
+        }
+
+        // restore the SplitRangeOpMessage
+        const std::string_view &content = req.LogContentView();
+        ::txlog::SplitRangeOpMessage ds_split_range_op_msg;
+        ds_split_range_op_msg.ParseFromArray(content.data(), content.length());
+
+        const TableSchema *table_schema = req.GetTableSchema();
+
+        // Restore new_range_key, which can't be neg or pos inf
+        size_t offset = 0;
+        std::unique_ptr<KeyT> new_range_key = std::make_unique<KeyT>();
+        new_range_key->Deserialize(
+            const_cast<char *>(ds_split_range_op_msg.new_range_key().c_str()),
+            offset,
+            this->KeySchema());
+
+        offset = 0;
+        std::unique_ptr<KeyT> new_range_key_for_recovery =
+            std::make_unique<KeyT>();
+        new_range_key_for_recovery->Deserialize(
+            const_cast<char *>(ds_split_range_op_msg.new_range_key().c_str()),
+            offset,
+            this->KeySchema());
+
+        // Restore partition partition id
+        int32_t partition_id = ds_split_range_op_msg.partition_id();
+        int32_t new_partition_id = ds_split_range_op_msg.new_partition_id();
+
+        // Restore stage
+        ::txlog::SplitRangeOpMessage_Stage stage =
+            ds_split_range_op_msg.stage();
+
+        uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+        int64_t tx_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+
+        // Restore local_cc_shards state at core 0
+        TableRangeEntry *old_table_range_entry = nullptr;
+        TableRangeEntry *new_table_range_entry = nullptr;
+        if (shard_->core_id_ == 0)
+        {
+            if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
+            {
+                const TableRangeEntryWithShade *range_entry_shade =
+                    shard_->GetTableRangeWithShade(range_table_name_,
+                                                   partition_id);
+                old_table_range_entry = range_entry_shade->shader_.get();
+            }
+
+            if (stage > ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
+                stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
+            {
+                // upload the dirty range attributes to local cc shards
+                const TableRangeEntryWithShade *range_entry_shade =
+                    shard_->CreateDirtyTableRange(range_table_name_,
+                                                  partition_id,
+                                                  std::move(new_range_key),
+                                                  new_partition_id,
+                                                  req.CommitTs());
+                old_table_range_entry = range_entry_shade->shade_.get();
+            }
+
+            if (stage >= ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange &&
+                stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
+            {
+                // commit dirty range, old_range_entry switch back to shader
+                std::pair<TableRangeEntry *, TableRangeEntry *> entries =
+                    shard_->CommitDirtyTableRange(
+                        range_table_name_, partition_id, req.CommitTs());
+                old_table_range_entry = entries.first;
+                new_table_range_entry = entries.second;
+            }
+        }
+        else
+        {
+            if (stage >= ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
+                stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
+            {
+                const TableRangeEntryWithShade *table_range_entry_with_shard =
+                    shard_->GetTableRangeWithShade(range_table_name_,
+                                                   partition_id);
+                old_table_range_entry =
+                    table_range_entry_with_shard->shade_.get();
+            }
+            else if (stage ==
+                     ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
+            {
+                const TableRangeEntryWithShade
+                    *old_table_range_entry_with_shard =
+                        shard_->GetTableRangeWithShade(range_table_name_,
+                                                       partition_id);
+                old_table_range_entry =
+                    old_table_range_entry_with_shard->shader_.get();
+                const TableRangeEntryWithShade
+                    *new_table_range_entry_with_shard =
+                        shard_->GetTableRangeWithShade(range_table_name_,
+                                                       new_partition_id);
+                new_table_range_entry =
+                    new_table_range_entry_with_shard->shader_.get();
+            }
+        }
+
+        // Restore range cc map state
+        CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
+        CcEntry<KeyT, RangeRecord> *new_range_cce = nullptr;
+
+        if (ds_split_range_op_msg.range_key_neg_inf() == true)
+        {
+            old_range_cce = &neg_inf_;
+        }
+        else if (ds_split_range_op_msg.range_key_pos_inf() == true)
+        {
+            old_range_cce = &pos_inf_;
+        }
+        else
+        {
+            std::unique_ptr<KeyT> range_tx_key = std::make_unique<KeyT>();
+            range_tx_key->Deserialize(
+                const_cast<char *>(
+                    ds_split_range_op_msg.range_key_value().c_str()),
+                offset,
+                this->KeySchema());
+            auto it = ccm_.find(*range_tx_key.get());
+            assert(it != ccm_.end());
+            old_range_cce = &it->second;
+        }
+
+        // Restore old range
+        if (stage <= ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
+        {
+            old_range_cce->payload_->range_entry_ = old_table_range_entry;
+        }
+
+        // Restore new range
+        if (stage == ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
+        {
+            // add new range entry to range cc map
+            const KeyT *start_key = static_cast<const KeyT *>(
+                new_table_range_entry->start_key_.get());
+            new_range_cce = TemplateCcMap<KeyT, RangeRecord>::FindEmplace(
+                *start_key, new_table_range_entry->version_ts_);
+        }
+
+        // Recover locks on range cce
+        if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange ||
+            stage == ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
+        {
+            // Add write lock on old range cce
+            bool success = old_range_cce->key_lock_.AcquireWriteLock(
+                &req, 0, CcProtocol::Locking);
+            assert(success);
+        }
+        else if (stage == ::txlog::SplitRangeOpMessage::CopingOldRangeData)
+        {
+            // Add write intention on old range cce
+            bool success = old_range_cce->key_lock_.AcquireWriteIntent(
+                &req, 0, CcProtocol::Locking);
+            assert(success);
+        }
+
+        // Move to next core
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            std::unique_ptr<RangeRecord> old_range_record =
+                std::make_unique<RangeRecord>(*old_range_cce->payload_.get());
+            // Restore transaction and catalog read lock at last core if this is
+            // the recovering node group is the tx coordinator
+            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
+            {
+                shard_->local_shards_.CreateSplitRangeRecoveryTx(
+                    ds_split_range_op_msg,
+                    table_schema,
+                    old_range_cce->key_,
+                    std::move(old_range_record),
+                    partition_id,
+                    std::move(new_range_key_for_recovery),
+                    new_partition_id,
+                    tx_node_id,
+                    req.Txn(),
+                    tx_candidate_term,
+                    req.CommitTs());
+            }
+
+            req.SetFinish();
+        }
+
+        return true;
+    }
+
+private:
+    TableName range_table_name_;
 };
 }  // namespace txservice

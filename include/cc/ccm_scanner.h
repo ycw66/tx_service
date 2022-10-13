@@ -130,6 +130,8 @@ public:
 
     TemplateScanCache(const TemplateScanCache &rhs) = delete;
 
+    ~TemplateScanCache() = default;
+
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
     {
         assert(size_ < cache_.size());
@@ -289,6 +291,8 @@ public:
           key_schema_(schema)
     {
     }
+
+    ~TemplateCcScanner() = default;
 
     CcScanner::Uptr Clone() const override
     {

@@ -22,7 +22,7 @@ struct TableSchema
     using uptr = std::unique_ptr<TableSchema>;
 
     virtual ~TableSchema() = default;
-    virtual const TableName &GetTableName() const = 0;
+    virtual const TableName &GetBaseTableName() const = 0;
     virtual const Schema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
@@ -58,10 +58,10 @@ public:
                                       uint64_t schema_ts,
                                       CcShard *shard) = 0;
 
-    virtual CcMap::uptr CreatePkRangeMap(const TableName &range_pk_table_name,
-                                         const TableSchema *table_schema,
-                                         uint64_t schema_ts,
-                                         CcShard *shard) = 0;
+    virtual CcMap::uptr CreateRangeMap(const TableName &range_table_name,
+                                       const TableSchema *table_schema,
+                                       uint64_t schema_ts,
+                                       CcShard *shard) = 0;
 
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const Schema *key_schema) = 0;
@@ -69,7 +69,9 @@ public:
     virtual std::unique_ptr<CcScanner> CreateSkCcmScanner(
         ScanDirection direction, const Schema *compound_key_schema) = 0;
 
-    virtual std::unique_ptr<CcScanner> CreatePkRangeCcmScanner(
-        ScanDirection direction, const Schema *key_schema) = 0;
+    virtual std::unique_ptr<CcScanner> CreateRangeCcmScanner(
+        ScanDirection direction,
+        const Schema *key_schema,
+        const TableName &range_table_name) = 0;
 };
 }  // namespace txservice

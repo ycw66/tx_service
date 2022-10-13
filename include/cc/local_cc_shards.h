@@ -238,12 +238,26 @@ public:
     const CatalogEntry *GetCatalog(const TableName &table_name,
                                    NodeGroupId cc_ng_id);
 
-    std::unordered_set<TableName> CatalogTableNames(NodeGroupId cc_ng_id);
+    std::unordered_set<TableName> GetCatalogTableNamesForCkpt(
+        NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);
+
+    void CreateSplitRangeRecoveryTx(
+        const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
+        const TableSchema *table_schema,
+        const TxKey *range_key,
+        std::unique_ptr<RangeRecord> splitting_range_record,
+        uint32_t partition_id,
+        std::unique_ptr<TxKey> new_range_key,
+        uint32_t new_partition_id,
+        uint32_t node_group_id,
+        uint64_t txn,
+        int64_t tx_term,
+        uint64_t commit_ts);
 
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges);
@@ -278,8 +292,8 @@ public:
      */
     void CleanTableRange(const TableName &table_name, uint32_t ng_id);
 
-    const TableRangeEntry *GetTableEffectiveRange(const TableName &table_name,
-                                                  int32_t partition_id);
+    const TableRangeEntry *GetTableEffectiveRangeEntry(
+        const TableName &table_name, int32_t partition_id);
 
     const TableRangeEntryWithShade *GetTableRangeWithShade(
         const TableName &table_name, int32_t partition_id);
@@ -340,6 +354,7 @@ private:
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
         table_catalogs_;  // string owner
+
     std::unordered_map<TableName, std::map<int32_t, TableRangeEntryWithShade>>
         table_ranges_;  // string owner
     std::shared_mutex catalog_mux_;
@@ -351,7 +366,5 @@ private:
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
-    friend class DsRangeSplitOperationService;
-    friend class DsRangeEvaluateOperationService;
 };
 }  // namespace txservice

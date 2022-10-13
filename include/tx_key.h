@@ -238,6 +238,8 @@ public:
     {
     }
 
+    ~CompositeKey() = default;
+
     void Reset(Types &&...vals)
     {
         TupleResetHelper(fields_, std::index_sequence_for<Types...>{}, vals...);
@@ -394,6 +396,8 @@ struct VoidKey : public TxKey
     VoidKey()
     {
     }
+
+    ~VoidKey() = default;
 
     bool operator==(const TxKey &rhs) const override
     {

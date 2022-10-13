@@ -53,11 +53,9 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         this,
         &msg,
         (
-            [&node_group_id, &dest_node_id]() -> std::string
+            [&dest_node_id]() -> std::string
             {
-                return std::string("{\"node_group_id\":")
-                    .append(std::to_string(node_group_id))
-                    .append(",\"dest_node_id\":")
+                return std::string("{\"dest_node_id\":")
                     .append(std::to_string(dest_node_id))
                     .append("}");
             }));

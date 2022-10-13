@@ -1,6 +1,8 @@
 #pragma once
 
+#include <memory>
 #include <tuple>
+#include <utility>
 
 #include "catalog_key_record.h"
 #include "scan.h"
@@ -290,23 +292,21 @@ struct UpsertTableTxRequest
 
 struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
 {
-    SplitRangeTxRequest(const TableName &range_table_name,
+    SplitRangeTxRequest(const TableName table_name,
                         const TableSchema *table_schema,
                         const TxKey *range_key,
-                        RangeRecord *range_record)
-        : range_table_name_(range_table_name.StringView(),
-                            range_table_name.Type()),
+                        std::unique_ptr<RangeRecord> range_record)
+        : table_name_(std::move(table_name)),
           table_schema_(table_schema),
           range_key_(range_key),
-          range_record_(range_record)
+          range_record_(std::move(range_record))
     {
     }
 
-    const TableName
-        range_table_name_;  // not string owner, sv -> MysqlTableSchema
+    const TableName table_name_;
     const TableSchema *table_schema_{nullptr};
-    const TxKey *range_key_;
-    RangeRecord *range_record_{nullptr};
+    const TxKey *range_key_{nullptr};
+    std::unique_ptr<RangeRecord> range_record_{nullptr};
 };
 
 struct FaultInjectTxRequest

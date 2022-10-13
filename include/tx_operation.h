@@ -63,6 +63,9 @@ struct CompositeTransactionOperation : TransactionOperation
     template <typename Op>
     void RetrySubOperation(TransactionExecution *txm, Op *next_op);
 
+    bool CheckLeaderTerm(uint32_t ng_id,
+                         int64_t term,
+                         TxnStatus txn_status) const;
     /**
      * @brief The current stage of this multi-stage schema operation
      */
@@ -443,66 +446,17 @@ public:
     CcHandlerResult<bool> hd_result_;
 };
 
-struct DsFindRangeMedianKeyOp : public TransactionOperation
+template <typename ResultType>
+struct DsOp : public TransactionOperation
 {
-    DsFindRangeMedianKeyOp() = delete;
-
-    DsFindRangeMedianKeyOp(TransactionExecution *txm);
+    DsOp() = delete;
+    DsOp(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    int32_t partition_id_;
-    const TableSchema *table_schema_;
-    CcHandlerResult<RangeMedianKeyResult> hd_result_;
-};
-
-struct DsCopyRangeDataOp : public TransactionOperation
-{
-    DsCopyRangeDataOp() = delete;
-
-    DsCopyRangeDataOp(TransactionExecution *txm);
-
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    TxKey *middle_key_;
-    int32_t old_partition_id_;
-    int32_t new_partition_id_;
-    const TableSchema *table_schema_;
-    // additional filtering condition beside middle key
-    // which guarantte a definite data set for copying
-    uint64_t filter_ts_;
-    CcHandlerResult<Void> hd_result_;
-};
-
-struct DsUpsertRangeOp : TransactionOperation
-{
-    DsUpsertRangeOp() = delete;
-    DsUpsertRangeOp(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    const TableSchema *table_schema_;
-    TxKey *key_;
-    int32_t partition_id_;
-    int64_t ts_;
-    CcHandlerResult<Void> hd_result_;
-};
-
-struct DsDeleteOutOfRangeDataOp : public TransactionOperation
-{
-    DsDeleteOutOfRangeDataOp() = delete;
-
-    DsDeleteOutOfRangeDataOp(TransactionExecution *txm);
-
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    int32_t partition_id_;
-    TxKey *middle_key_{nullptr};
-    const TableSchema *table_schema_;
-    CcHandlerResult<Void> hd_result_;
+    std::function<void()> op_func_;
+    CcHandlerResult<ResultType> hd_result_;
 };
 
 struct NoOp : public TransactionOperation
@@ -519,22 +473,24 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     DsSplitRangeOp(const TableName &table_name,
                    const TableSchema *table_schema,
                    const TxKey *range_key,
-                   RangeRecord *splitting_range_record,
+                   std::unique_ptr<RangeRecord> splitting_range_record,
                    TransactionExecution *txm);
 
-    void FillTxLogForUpdateOldRange(TransactionExecution *txm);
-    void FillTxLogForCopyOldRangeData(TransactionExecution *txm);
-    void FillTxLogForDirtyOldRangeData(TransactionExecution *txm);
-    void FillTxLogForDeleteOutOfOldRangeData(TransactionExecution *txm);
+    void FillTxLog(TransactionExecution *txm,
+                   WriteToLogOp &log_op,
+                   TxLogType log_type,
+                   ::txlog::SplitRangeOpMessage::Stage stage);
     void FillTxLogForCleanLog(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
+    TableName table_name_{empty_sv, TableType::Primary};
     TableName range_table_name_{empty_sv, TableType::RangePartition};
+
     const TableSchema *table_schema_{nullptr};
     int32_t partition_id_{-1};
     const TxKey *range_key_{nullptr};
-    RangeRecord *old_range_record_{nullptr};
+    std::unique_ptr<RangeRecord> old_range_record_{nullptr};
     std::unique_ptr<TxKey> new_range_key_{nullptr};
     std::unique_ptr<TableRangeEntry> upload_range_entry_{nullptr};
     std::unique_ptr<RangeRecord> upload_range_record_{nullptr};
@@ -548,7 +504,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     /**
      * @brief Find the median key value of the old range
      */
-    DsFindRangeMedianKeyOp ds_find_median_key_for_old_range_op_;
+    DsOp<RangeMedianKeyResult> ds_find_median_key_for_old_range_op_;
     /**
      * @brief Upgrades the write intents to write locks. This is to wait for
      * existing queries reading or writing the range to finish and to block new
@@ -560,8 +516,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      * of the old range and new range information, after this it is guaranted to
      * succeed after this
      */
-    // WriteToLogOp prepare_log_for_update_old_range_op_;
-    NoOp prepare_log_for_update_old_range_op_;
+    WriteToLogOp prepare_log_for_update_old_range_op_;
     /**
      * @brief
      * 1. Upload the new key, ne_partition_id to the
@@ -575,12 +530,12 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      * new ranges 2.The working thread updates the running status to the
      * ds_copy_old_range_data_op_
      */
-    DsCopyRangeDataOp ds_copy_old_range_data_op_;
+    DsOp<Void> ds_copy_old_range_data_op_;
     /**
      * @brief Write log to mark the range split is finished
      */
     // WriteToLogOp ds_copy_old_range_data_finished_log_op_;
-    NoOp ds_copy_old_range_data_finished_log_op_;
+    WriteToLogOp ds_copy_old_range_data_finished_log_op_;
     /**
      * @brief
      * 1. Upgrade the write intent on old range entry to write lock on all nodes
@@ -591,7 +546,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      * @brief Write commit log to mark the split range transaction is succeed
      */
     // WriteToLogOp commit_log_for_dirty_old_range_op_;
-    NoOp commit_log_for_dirty_old_range_op_;
+    WriteToLogOp commit_log_for_dirty_old_range_op_;
     /**
      * @brief
      * 1. Update the dirty old range, clean new key and new partition id
@@ -602,20 +557,20 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     /**
      * @brief Flush all updated range entries into KV storage
      */
-    DsUpsertRangeOp ds_upsert_new_range_op_;
+    DsOp<Void> ds_upsert_new_range_op_;
     /**
      * @brief Write log to mark removing out of data from old range
      */
     // WriteToLogOp delete_out_of_old_range_data_log_op_;
-    NoOp delete_out_of_old_range_data_log_op_;
+    WriteToLogOp delete_out_of_old_range_data_log_op_;
     /**
      * @brief Delete out of range data from the Cassandra partition
      */
-    DsDeleteOutOfRangeDataOp delete_out_of_old_range_data_op_;
+    DsOp<Void> delete_out_of_old_range_data_op_;
     /**
      * @brief Remove split range log from the log state machine
      */
     // WriteToLogOp clean_log_op_;
-    NoOp clean_log_op_;
+    WriteToLogOp clean_log_op_;
 };
 }  // namespace txservice

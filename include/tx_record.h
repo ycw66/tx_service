@@ -97,6 +97,8 @@ public:
     {
     }
 
+    ~CompositeRecord() = default;
+
     void Reset(Types &&...vals)
     {
         // fields_(val...);
@@ -202,6 +204,8 @@ public:
     VoidRecord(VoidRecord &&rhs)
     {
     }
+
+    ~VoidRecord() = default;
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {

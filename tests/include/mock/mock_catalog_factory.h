@@ -61,7 +61,7 @@ public:
     {
     }
 
-    const TableName &GetTableName() const override
+    const TableName &GetBaseTableName() const override
     {
         return table_name_;
     }
@@ -152,12 +152,7 @@ public:
     {
         return std::make_unique<
             txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
-            shard,
-            table_name,
-            schema_ts,
-            false,
-            table_schema,
-            ccm_has_full_entries);
+            shard, table_name, schema_ts, table_schema, ccm_has_full_entries);
     }
 
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,
@@ -169,18 +164,19 @@ public:
         return nullptr;
     }
 
-    CcMap::uptr CreatePkRangeMap(const txservice::TableName &base_table,
-                                 const txservice::TableSchema *table_schema,
-                                 uint64_t schema_ts,
-                                 txservice::CcShard *shard) override
+    CcMap::uptr CreateRangeMap(const txservice::TableName &range_table_name,
+                               const txservice::TableSchema *table_schema,
+                               uint64_t schema_ts,
+                               txservice::CcShard *shard) override
     {
         assert(false);
         return nullptr;
     }
 
-    std::unique_ptr<txservice::CcScanner> CreatePkRangeCcmScanner(
+    std::unique_ptr<txservice::CcScanner> CreateRangeCcmScanner(
         txservice::ScanDirection direction,
-        const txservice::Schema *key_schema) override
+        const txservice::Schema *key_schema,
+        const TableName &range_table_name) override
     {
         assert(false);
         return nullptr;

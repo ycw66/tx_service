@@ -27,9 +27,7 @@ public:
     bool PutAll(std::vector<FlushRecord> &batch,
                 const txservice::TableSchema *table_schema,
                 uint64_t schema_ts,
-                uint32_t node_group,
-                DsRangeEvaluateOperationService
-                    *ds_range_evaluate_operation_service) override
+                uint32_t node_group) override
     {
         for (const auto &ref : batch)
         {
@@ -83,8 +81,7 @@ public:
     {
     }
 
-    void FetchTableRanges(const TableName &range_table_name,
-                          const txservice::KVCatalogInfo *kv_info,
+    void FetchTableRanges(const txservice::KVCatalogInfo *kv_info,
                           void *fetch_req) override
     {
     }
@@ -159,14 +156,16 @@ public:
         return nullptr;
     }
 
-    bool GetRangeSize(const TableSchema *table_schema,
+    bool GetRangeSize(const txservice::TableName &table_name,
+                      const TableSchema *table_schema,
                       int32_t partition_id,
                       int64_t *size) override
     {
         return true;
     }
 
-    bool FindRangeMedianKey(int32_t partition_id,
+    bool FindRangeMedianKey(const txservice::TableName &table_name,
+                            int32_t partition_id,
                             const txservice::TableSchema *table_schema,
                             txservice::CcHandlerResult<RangeMedianKeyResult>
                                 *out_median_key_result) override
@@ -174,7 +173,8 @@ public:
         return true;
     }
 
-    bool CopyRangeData(int32_t old_partition_id,
+    bool CopyRangeData(const txservice::TableName &table_name,
+                       int32_t old_partition_id,
                        int32_t new_partition_id,
                        const txservice::TxKey *start_key,
                        uint64_t tx_ts,
@@ -184,6 +184,7 @@ public:
     }
 
     bool DeleteOutOfRangeData(
+        const txservice::TableName &table_name,
         int32_t partition_id,
         const TxKey *start_key,
         const txservice::TableSchema *table_schema) override
@@ -198,7 +199,8 @@ public:
         return true;
     }
 
-    bool UpsertRange(const TableSchema *table_schema,
+    bool UpsertRange(const txservice::TableName &range_table_name,
+                     const TableSchema *table_schema,
                      TxKey *key,
                      int32_t partition_id,
                      int64_t ts) override

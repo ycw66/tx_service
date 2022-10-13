@@ -17,7 +17,7 @@ Sharder::Sharder(uint32_t node_id,
       cc_stream_receiver_(nullptr),
       cc_node_service_(nullptr),
       log_replay_service_(nullptr),
-      ds_range_split_operation_service_(nullptr),
+      tx_worker_pool_(nullptr),
       local_shards_(local_shards),
       log_agent_(std::move(log_agent))
 {
@@ -82,11 +82,8 @@ void Sharder::Shutdown()
     // CcNodes are stopped.
     log_replay_service_ = nullptr;
 
-    ds_range_split_operation_service_->Shutdown();
-    ds_range_split_operation_service_ = nullptr;
-
-    ds_range_evaluate_operation_service_->Shutdown();
-    ds_range_evaluate_operation_service_ = nullptr;
+    tx_worker_pool_->Shutdown();
+    tx_worker_pool_ = nullptr;
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
 }
@@ -251,11 +248,7 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    ds_range_evaluate_operation_service_ =
-        std::make_unique<DsRangeEvaluateOperationService>(local_shards_);
-
-    ds_range_split_operation_service_ =
-        std::make_unique<DsRangeSplitOperationService>(local_shards_);
+    tx_worker_pool_ = std::make_unique<TxWorkerPool>();
 
     return 0;
 }

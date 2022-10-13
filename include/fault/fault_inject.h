@@ -2,10 +2,13 @@
 
 #include <csignal>
 #include <cstdint>
+#include <iostream>
+#include <string>
 #include <unordered_map>
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
+#include "butil/logging.h"
 #include "fault/cc_node.h"
 #include "txlog.h"
 
@@ -219,8 +222,11 @@ private:
         if (entry != nullptr)                              \
             code;                                          \
     }
+#define FAULT_INJECTOR_CONDITION_WRAP(FaultName, code) \
+    (FaultInject::Entry(FaultName) ? true : false) || (code)
 #else
 #define ACTION_FAULT_INJECTOR(FaultName)
 #define CODE_FAULT_INJECTOR(FaultName, code)
+#define FAULT_INJECTOR_CONDITION_WRAP(FaultName, code) (code)
 #endif
 }  // namespace txservice

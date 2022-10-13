@@ -86,6 +86,7 @@ enum class TableType : uint8_t
 
 struct TableName
 {
+    TableName() = delete;
     TableName &operator=(const TableName &) = delete;
 
     explicit TableName(std::string_view name_view, TableType type)
@@ -198,6 +199,32 @@ struct TableName
         }
     }
 
+    std::string Trace() const
+    {
+        if (own_string_)
+        {
+            if (type_ == TableType::RangePartition)
+            {
+                return name_str_ + "_ranges";
+            }
+            else
+            {
+                return name_str_;
+            }
+        }
+        else
+        {
+            if (type_ == TableType::RangePartition)
+            {
+                return std::string(name_view_) + "_ranges";
+            }
+            else
+            {
+                return std::string(name_view_);
+            }
+        }
+    }
+
     void CopyFrom(const TableName &other)
     {
         if (other.own_string_)
@@ -225,18 +252,23 @@ struct TableName
         own_string_ = other.own_string_;
     }
 
-    const std::string_view GetBaseTableName() const
+    const std::string_view GetBaseTableNameSV() const
     {
-        if (type_ == TableType::Secondary)
+        if (type_ == TableType::Secondary || type_ == TableType::RangePartition)
         {
             size_t pos = this->StringView().find(INDEX_NAME_PREFIX);
-            assert(pos != std::string_view::npos);
             std::string_view base_table_name =
                 this->StringView().substr(0, pos);
 
             return base_table_name;
         }
         return this->StringView();
+    }
+
+    bool IsBase() const
+    {
+        size_t pos = this->StringView().find(INDEX_NAME_PREFIX);
+        return (pos == std::string_view::npos) ? true : false;
     }
 
     bool IsStringOwner() const
@@ -289,10 +321,8 @@ enum class PostWriteType
     PostCommit
 };
 
-using namespace std::string_view_literals;
-
-inline static std::string_view empty_sv = "__empty"sv;
-inline static std::string_view catalog_ccm_name_sv = "__catalog"sv;
+inline static std::string_view empty_sv{"__empty"};
+inline static std::string_view catalog_ccm_name_sv{"__catalog"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};

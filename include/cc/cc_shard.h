@@ -361,8 +361,8 @@ public:
     const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
         const TableName &table_name, int32_t partition_id, uint64_t commit_ts);
 
-    const TableRangeEntry *GetTableEffectiveRange(const TableName &table_name,
-                                                  int32_t partition_id);
+    const TableRangeEntry *GetTableEffectiveRangeEntry(
+        const TableName &table_name, int32_t partition_id);
 
     const TableRangeEntryWithShade *GetTableRangeWithShade(
         const TableName &table_name, int32_t partition_id);
@@ -458,10 +458,6 @@ private:
         failover_ccms_;
 
     std::unordered_map<TableName, std::unique_ptr<FetchCc>> fetch_reqs_;
-
-    std::unordered_map<TableName, CcMap::uptr> native_range_maps_;
-    std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
-        failover_range_maps_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;

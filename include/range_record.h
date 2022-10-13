@@ -72,6 +72,16 @@ struct TableRangeEntry
         return (new_key_ != nullptr) && (new_partition_id_ != 0);
     }
 
+    void Serialize(std::string &str)
+    {
+    }
+
+    void Deserialize(const char *buf, size_t &offset)
+    {
+    }
+
+    // TODO(Xiao Ji): Replace unique_ptr with shared_ptr, so we can make sure
+    // the TxKey pointer is still valid even when the range entry is is deleted
     std::unique_ptr<TxKey> start_key_;
     uint64_t version_ts_{1};
     int32_t partition_id_{0};
@@ -177,6 +187,6 @@ public:
         return range_entry_;
     }
 
-    const TableRangeEntry *range_entry_;
+    const TableRangeEntry *range_entry_{nullptr};
 };
 }  // namespace txservice

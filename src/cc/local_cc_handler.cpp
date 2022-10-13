@@ -2,12 +2,12 @@
 
 #include <string>
 
-#include "ds_range_split_service.h"
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
 #include "tx_record.h"
 #include "tx_trace.h"
+#include "tx_worker_pool.h"
 #include "type.h"
 
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
@@ -527,7 +527,7 @@ void txservice::LocalCcHandler::ScanOpen(
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::Secondary)
     {
-        const TableName base_table_name{table_name.GetBaseTableName(),
+        const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                         TableType::Primary};
         const CatalogEntry *catalog_entry =
             local_shard.GetCatalog(base_table_name, local_shard.node_id_);
@@ -704,8 +704,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
             schema = catalog_entry->schema_.get()->KeySchema();
         }
 
-        ccm_scanner = local_shard.catalog_factory_->CreatePkRangeCcmScanner(
-            direction, schema);
+        ccm_scanner = local_shard.catalog_factory_->CreateRangeCcmScanner(
+            direction, schema, table_name);
     }
     else if (table_name.Type() == TableType::Secondary)
     {
@@ -1075,58 +1075,4 @@ uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
     return ccs.Now();
-}
-
-void txservice::LocalCcHandler::DataStoreFindRangeMedianKey(
-    int32_t partition,
-    const TableSchema *table_schema,
-    CcHandlerResult<RangeMedianKeyResult> &hd_res)
-{
-    DsRangeSplitOperationService *ds_range_split_operation_service =
-        Sharder::Instance().GetDsRangeSplitOperationService();
-    ds_range_split_operation_service->SubmitFindRangeMedianKeyWork(
-        partition, table_schema, &hd_res);
-}
-
-void txservice::LocalCcHandler::DataStoreCopyRangeData(
-    int32_t old_partition_id,
-    int32_t new_partition_id,
-    const TxKey *start_key,
-    uint64_t tx_ts,
-    const TableSchema *table_schema,
-    CcHandlerResult<Void> &hd_res)
-{
-    DsRangeSplitOperationService *ds_range_split_operation_service =
-        Sharder::Instance().GetDsRangeSplitOperationService();
-    ds_range_split_operation_service->SubmitCopyRangeDataWork(old_partition_id,
-                                                              new_partition_id,
-                                                              start_key,
-                                                              tx_ts,
-                                                              table_schema,
-                                                              &hd_res);
-}
-
-void txservice::LocalCcHandler::DataStoreUpsertRange(
-    const TableSchema *table_schema,
-    txservice::TxKey *key,
-    int32_t partition_id,
-    int64_t ts,
-    CcHandlerResult<Void> &hd_res)
-{
-    DsRangeSplitOperationService *ds_range_split_operation_service =
-        Sharder::Instance().GetDsRangeSplitOperationService();
-    ds_range_split_operation_service->SubmitUpsertRangeWork(
-        table_schema, key, partition_id, ts, &hd_res);
-}
-
-void txservice::LocalCcHandler::DataStoreDeleteOutOfRangeData(
-    int32_t partition_id,
-    const TxKey *start_key,
-    const TableSchema *table_schema,
-    CcHandlerResult<Void> &hd_res)
-{
-    DsRangeSplitOperationService *ds_range_split_operation_service =
-        Sharder::Instance().GetDsRangeSplitOperationService();
-    ds_range_split_operation_service->SubmitDeleteOutOfRangeDataWork(
-        partition_id, start_key, table_schema, &hd_res);
 }

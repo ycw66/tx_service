@@ -24,6 +24,15 @@ public:
     {
     }
 
+    // used in range cc_map
+    // SecondaryKey(const SecondaryKey &rhs, const Schema *shema)
+    // {
+    //     sk_ = rhs.sk_;
+    //     pk_ = rhs.pk_;
+    // }
+
+    ~SecondaryKey() = default;
+
     bool operator==(const TxKey &rhs) const override
     {
         if (const SecondaryKey *rhs_ptr =

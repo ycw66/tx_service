@@ -63,6 +63,8 @@ public:
     {
     }
 
+    ~TemplateScanTuple() = default;
+
     const TxKey *Key() const override
     {
         return &key_obj_;

@@ -490,6 +490,48 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
         }
 
+        cc_req_vec.clear();
+        recovery_error = false;
+
+        // process range split ops
+        for (const ::txlog::ReplaySplitRangeMsg &split_range_msg :
+             msg.split_range_op_msgs())
+        {
+            const std::string &split_range_op_blob =
+                split_range_msg.split_range_op_blob();
+            DLOG(INFO) << "split_range_op_blob length: "
+                       << split_range_op_blob.length();
+            size_t blob_offset = 0;
+            uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
+                split_range_op_blob.data() + blob_offset);
+            blob_offset += sizeof(uint8_t);
+
+            // Table name string
+            std::string_view table_name_view(
+                split_range_op_blob.data() + blob_offset, table_name_len);
+            blob_offset += table_name_len;
+            std::unique_ptr<ReplayLogCc> &cc_req =
+                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+                    cc_ng_id,
+                    table_name_view,
+                    TableType::RangePartition,
+                    std::string_view(
+                        split_range_op_blob.data() + blob_offset,
+                        split_range_op_blob.length() - blob_offset),
+                    split_range_msg.commit_ts(),
+                    split_range_msg.txn(),
+                    mux,
+                    cv,
+                    finish_log_cnt,
+                    recovery_error));
+
+            local_shards_.EnqueueCcRequest(0, cc_req.get());
+            // wait for this schema operation to be recovered at all shards
+            // before processing next
+            WaitAndClearRequests(
+                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+        }
+
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
         size_t offset = 0;

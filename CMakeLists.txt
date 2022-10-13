@@ -141,8 +141,7 @@ SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/log_replay_service.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/cc_node.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/ds_range_evaluate_service.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/ds_range_split_service.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})

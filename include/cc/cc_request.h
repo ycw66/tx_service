@@ -61,17 +61,23 @@ public:
 
         if (parallel_req_ || ccm_ == nullptr)
         {
-            assert(table_name_ != nullptr &&
-                   table_name_->StringView() != empty_sv);
+            // assert(table_name_ != nullptr);
+            assert(table_name_->StringView() != empty_sv);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
             if (ccm == nullptr)
             {
                 if (table_name_->Type() == TableType::RangePartition)
                 {
+                    DLOG(INFO)
+                        << "ccrequest table_name: " << table_name_->String()
+                        << " Type: " << (int16_t) table_name_->Type();
                     // Get original table name for the range table name
                     const TableName base_table_name{
-                        table_name_->GetBaseTableName(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                    DLOG(INFO)
+                        << " base_table_name: " << base_table_name.String()
+                        << " ng_id: " << node_group_id_;
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     // When a tx sends a request toward a table's range
@@ -88,7 +94,8 @@ public:
 
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
-                    auto ranges = ccs.GetAllTableRangesForATable(*table_name_);
+                    std::map<int32_t, TableRangeEntryWithShade> *ranges =
+                        ccs.GetAllTableRangesForATable(*table_name_);
                     if (ranges != nullptr)
                     {
                         ccs.CreateRangeCcMap(*table_name_,
@@ -118,8 +125,10 @@ public:
                     // Fecth/Get Catalog is based on base table name, but Get
                     // ccmap is based on the real table name, for example, index
                     // should get the correspond sk_ccmap.
+                    assert(table_name_->Type() == TableType::Primary ||
+                           table_name_->Type() == TableType::Secondary);
                     const TableName base_table_name{
-                        table_name_->GetBaseTableName(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(), TableType::Primary};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
 
@@ -233,7 +242,7 @@ protected:
      */
     const CatalogEntry *InitCcm(CcShard &ccs)
     {
-        const TableName base_table_name{table_name_->GetBaseTableName(),
+        const TableName base_table_name{table_name_->GetBaseTableNameSV(),
                                         TableType::Primary};
 
         const CatalogEntry *catalog_entry =
@@ -771,6 +780,11 @@ public:
         return dml_op_;
     }
 
+    void SetTxKey(const TxKey *key)
+    {
+        key_ = key;
+    }
+
     const TxKey *Key() const
     {
         return key_;
@@ -1154,6 +1168,7 @@ public:
         is_ckpt_delta_ = is_delta;
         is_include_floor_cce_ = is_include_floor_cce;
         cce_ptr_ = nullptr;
+        cce_ptr_scan_type_ = ScanType::ScanUnknow;
     }
 
     int64_t TxTerm()
@@ -1181,6 +1196,16 @@ public:
         return cce_ptr_;
     }
 
+    ScanType CcePtrScanType()
+    {
+        return cce_ptr_scan_type_;
+    }
+
+    void SetCcePtrScanType(ScanType scan_type)
+    {
+        cce_ptr_scan_type_ = scan_type;
+    }
+
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
     const TxKey *start_key_{nullptr};
@@ -1193,6 +1218,8 @@ private:
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
+    // Record the scan type of the blocked cce
+    ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -1242,6 +1269,7 @@ public:
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         cce_ptr_ = nullptr;
+        cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
         const ScanTuple *last_tuple = cache->LastTuple();
         const LruEntry *lru_entry =
@@ -1274,6 +1302,16 @@ public:
         return cce_ptr_;
     }
 
+    ScanType CcePtrScanType()
+    {
+        return cce_ptr_scan_type_;
+    }
+
+    void SetCcePtrScanType(ScanType scan_type)
+    {
+        cce_ptr_scan_type_ = scan_type;
+    }
+
 private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
@@ -1281,6 +1319,8 @@ private:
 
     bool is_for_write_{false};
     bool is_ckpt_delta_{false};
+    // Record the scan type of the blocked cce
+    ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -1734,44 +1774,110 @@ public:
 
             if (ccm_ == nullptr)
             {
-                const CatalogEntry *catalog_entry = InitCcm(ccs);
-
-                if (catalog_entry != nullptr)
+                if (table_name_->Type() == TableType::RangePartition)
                 {
-                    if (catalog_entry->Version() == 0)
+                    // Try to load the base table/index ccm
+                    const txservice::TableName base_table_name{
+                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                    CcMap *base_table_ccm =
+                        ccs.GetCcm(base_table_name, node_group_id_);
+
+                    const CatalogEntry *catalog_entry = nullptr;
+                    // Makse sure base table catalog and ccm already exists
+                    if (base_table_ccm == nullptr)
                     {
-                        // The schema view is initialized but the current schema
-                        // is unset (version_ts is 0). This means that there is
-                        // an error when reading the catalog from the data
-                        // store. Returns the request with an error.
+                        catalog_entry = InitCcm(ccs);
+
+                        // Wait for FetchCatalogCc to finish
+                        if (catalog_entry == nullptr)
+                        {
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        catalog_entry =
+                            ccs.GetCatalog(base_table_name, node_group_id_);
+                    }
+
+                    if (catalog_entry == nullptr ||
+                        catalog_entry->schema_ == nullptr)
+                    {
+                        // table has been dropped
+                        SetFinish();
+                        return false;
+                    }
+                    else if (catalog_entry->Version() == 0)
+                    {
                         SetRecoveryError();
                         return false;
                     }
-                    else if (catalog_entry->schema_ != nullptr)
-                    {
-                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 
-                        // Replaying records from a dropped table.
-                        if (ccm_ == nullptr)
+                    table_schema_ = catalog_entry->schema_.get();
+
+                    // The request is toward a special cc map that contains a
+                    // tabmode's ranges.
+                    auto ranges = ccs.GetAllTableRangesForATable(*table_name_);
+                    if (ranges != nullptr)
+                    {
+                        ccs.CreateRangeCcMap(*table_name_,
+                                             table_schema_,
+                                             node_group_id_,
+                                             table_schema_->Version());
+                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                    }
+                    else
+                    {
+                        // The local node does not contain the table's ranges.
+                        // The FetchTableRanges() method will send an async
+                        // request toward the data store to fetch the table's
+                        // ranges and initializes the table's range cc map.
+                        // After fetching is finished, this cc request is
+                        // re-enqueued for re-execution.
+                        ccs.FetchTableRanges(*table_name_,
+                                             table_schema_->KeySchema(),
+                                             table_schema_->GetKVCatalogInfo(),
+                                             this);
+                        return false;
+                    }
+                }
+                else
+                {
+                    const CatalogEntry *catalog_entry = InitCcm(ccs);
+
+                    if (catalog_entry != nullptr)
+                    {
+                        if (catalog_entry->Version() == 0)
                         {
+                            // The schema view is initialized but the current
+                            // schema is unset (version_ts is 0). This means
+                            // that there is an error when reading the catalog
+                            // from the data store. Returns the request with an
+                            // error.
+                            SetRecoveryError();
+                            return false;
+                        }
+                        else if (catalog_entry->schema_ != nullptr)
+                        {
+                            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                            assert(ccm_ != nullptr);
+                        }
+                        else
+                        {
+                            // The table is dropped. Skips replaying the log for
+                            // this cc map.
                             SetFinish();
                             return false;
                         }
                     }
                     else
                     {
-                        // The table is dropped. Skips replaying the log for
-                        // this cc map.
-                        SetFinish();
+                        // The table's schema is not available yet. Cannot
+                        // initialize the cc map. The request will be
+                        // re-executed after the schema is fetched from the data
+                        // store.
                         return false;
                     }
-                }
-                else
-                {
-                    // The table's schema is not available yet. Cannot
-                    // initialize the cc map. The request will be re-executed
-                    // after the schema is fetched from the data store.
-                    return false;
                 }
             }
         }
@@ -1819,6 +1925,11 @@ public:
         ccm_ = nullptr;
     }
 
+    const TableSchema *GetTableSchema()
+    {
+        return table_schema_;
+    }
+
 private:
     TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
@@ -1828,6 +1939,7 @@ private:
     std::condition_variable &external_cv_;
     uint32_t &finish_cnt_;
     bool &recovery_error_;
+    const struct TableSchema *table_schema_{nullptr};
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);

@@ -536,8 +536,7 @@ void CcShard::FetchTableRanges(const TableName &range_table_name,
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchTableRanges(
-            range_table_name, kv_info, fetch_req);
+        local_shards_.store_hd_->FetchTableRanges(kv_info, fetch_req);
     }
 }
 
@@ -575,10 +574,10 @@ void CcShard::CleanTableRange(const TableName &table_name, uint32_t ng_id)
     local_shards_.CleanTableRange(table_name, ng_id);
 }
 
-const TableRangeEntry *CcShard::GetTableEffectiveRange(
+const TableRangeEntry *CcShard::GetTableEffectiveRangeEntry(
     const TableName &table_name, int32_t partition_id)
 {
-    return local_shards_.GetTableEffectiveRange(table_name, partition_id);
+    return local_shards_.GetTableEffectiveRangeEntry(table_name, partition_id);
 }
 
 const TableRangeEntryWithShade *CcShard::GetTableRangeWithShade(
@@ -747,7 +746,7 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
     {
         native_ccms_.try_emplace(
             range_table_name,
-            catalog_factory_->CreatePkRangeMap(
+            catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this));
     }
     else
@@ -757,7 +756,7 @@ void CcShard::CreateRangeCcMap(const TableName &range_table_name,
             fail_range_it->second;
         range_maps.try_emplace(
             ng_id,
-            catalog_factory_->CreatePkRangeMap(
+            catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this));
     }
 }

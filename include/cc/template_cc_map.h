@@ -38,13 +38,11 @@ public:
     TemplateCcMap(CcShard *shard,
                   const TableName &table_name,
                   uint64_t schema_ts,
-                  bool is_sk = false,
                   const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false)
         : CcMap(
               shard, table_name, table_schema, schema_ts, ccm_has_full_entries),
           ccm_(),
-          is_sk_(is_sk),
           neg_inf_(this),
           pos_inf_(this)
     {
@@ -217,7 +215,7 @@ public:
 
         if (cce_addr.CcePtr() == 0)
         {
-            if (is_sk_)
+            if (table_name_.Type() == TableType::Secondary)
             {
                 // TODO: Sk Insert branch needs rethinking, currently useless.
                 assert(false);
@@ -337,7 +335,7 @@ public:
         TX_TRACE_DUMP(&req);
 
         CODE_FAULT_INJECTOR("delay_release_write_lock_on_pk", {
-            if (!is_sk_)
+            if (table_name_.Type() == TableType::Primary)
             {
                 // throw back to cc_queue
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
@@ -348,10 +346,10 @@ public:
         const CcEntryAddr &cce_addr = *req.CceAddr();
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_PostWriteCc", {
-            if (!is_sk_)
+            if (table_name_.Type() == TableType::Primary)
             {
-                LOG(INFO)
-                    << "FaultInject  term_TemplateCcMap_Execute_PostWriteCc";
+                LOG(INFO) << "FaultInject  "
+                             "term_TemplateCcMap_Execute_PostWriteCc";
                 req.Result()->SetError(-1);
                 return true;
             }
@@ -372,7 +370,7 @@ public:
 
         if (cce_addr.InsertPtr() != 0)
         {
-            if (is_sk_)
+            if (table_name_.Type() == TableType::Secondary)
             {
                 // TODO: Sk Insert branch needs rethinking, currently useless.
                 assert(false);
@@ -533,7 +531,7 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             assert(false);
             return false;
@@ -802,7 +800,7 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             assert(false);
             return false;
@@ -1023,7 +1021,7 @@ public:
         CODE_FAULT_INJECTOR(
             "term_TemplateCcMap_Execute_PostReadCc", {
                 if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr &&
-                    !is_sk_)
+                    table_name_.Type() == TableType::Primary)
                 {
                     LOG(INFO)
                         << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
@@ -1185,7 +1183,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         bool is_read_snapshot;
         CcOperation cc_op;
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -1448,7 +1446,7 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             assert(false);
             return true;
@@ -1519,32 +1517,37 @@ public:
                       bool is_read_snapshot,
                       bool is_ckpt_delta = false)
     {
+        assert(scan_type != ScanType::ScanUnknow);
+
         TemplateScanTuple<KeyT, ValueT> *scan_tuple =
             typed_cache->AddScanTuple();
+
         switch (scan_type)
         {
         case ScanType::ScanGap:
             ScanGap(cce, scan_tuple, ng_id, ng_term);
             break;
         case ScanType::ScanBoth:
-            ScanKey(cce,
-                    scan_tuple,
-                    true,
-                    ng_id,
-                    ng_term,
-                    read_ts,
-                    is_read_snapshot,
-                    !is_sk_ && is_ckpt_delta);
+            ScanKey(
+                cce,
+                scan_tuple,
+                true,
+                ng_id,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
             break;
         case ScanType::ScanKey:
-            ScanKey(cce,
-                    scan_tuple,
-                    false,
-                    ng_id,
-                    ng_term,
-                    read_ts,
-                    is_read_snapshot,
-                    !is_sk_ && is_ckpt_delta);
+            ScanKey(
+                cce,
+                scan_tuple,
+                false,
+                ng_id,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
             break;
         default:
             break;
@@ -1597,7 +1600,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -1611,34 +1614,20 @@ public:
         }
 
         CcEntry<KeyT, ValueT> *cce = nullptr;
+
         if (req.CcePtr() != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            DLOG(INFO) << "This is for debug, Reacquire lock for cce: " << cce;
+            const KeyT *continue_look_key = cce->key_;
+            ScanType scan_type = req.CcePtrScanType();
+
             req.SetCcePtr(nullptr);
+            req.SetCcePtrScanType(ScanType::ScanUnknow);
+
             // Lock has been acquired, UpsertLockHoldingTx
             LockHandleForResumedRequest(
                 &req, tx_term, cce, cce->payload_status_);
-
-            ScanType scan_type = ScanType::ScanBoth;
-            // if this is the 1st cce in typed_cache
-            if (typed_cache->Size() == 0)
-            {
-                std::pair<Iterator, ScanType> start_pair =
-                    req.direct_ == ScanDirection::Forward
-                        ? ForwardScanStart(*look_key,
-                                           req.inclusive_,
-                                           !is_sk_ && req.is_include_floor_cce_)
-                        : BackwardScanStart(*look_key, req.inclusive_);
-
-                scan_ccm_it = start_pair.first;
-                assert(cce == scan_ccm_it->second);
-                scan_type = start_pair.second;
-            }
-            else
-            {
-                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
-                scan_type = ScanType::ScanBoth;
-            }
 
             AddScanTuple(cce,
                          typed_cache,
@@ -1647,21 +1636,35 @@ public:
                          ng_term,
                          req.ReadTimestamp(),
                          is_read_snapshot);
+
+            std::pair<Iterator, ScanType> start_pair =
+                req.direct_ == ScanDirection::Forward
+                    ? ForwardScanStart(
+                          *continue_look_key,
+                          req.inclusive_,
+                          (table_name_.Type() != TableType::Secondary) &&
+                              req.is_include_floor_cce_)
+                    : BackwardScanStart(*continue_look_key, req.inclusive_);
+            scan_ccm_it = start_pair.first;
         }
         else
         {
             std::pair<Iterator, ScanType> start_pair =
                 req.direct_ == ScanDirection::Forward
-                    ? ForwardScanStart(*look_key,
-                                       req.inclusive_,
-                                       !is_sk_ && req.is_include_floor_cce_)
+                    ? ForwardScanStart(
+                          *look_key,
+                          req.inclusive_,
+                          (table_name_.Type() != TableType::Secondary) &&
+                              req.is_include_floor_cce_)
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
-            cce = scan_ccm_it->second;
             ScanType scan_type = start_pair.second;
+            cce = scan_ccm_it->second;
 
             req.SetCcePtr(cce);
+            req.SetCcePtrScanType(scan_type);
+
             if (scan_type != ScanType::ScanGap)
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
@@ -1710,6 +1713,7 @@ public:
             {
                 cce = scan_ccm_it->second;
                 req.SetCcePtr(cce);
+                req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
@@ -1753,6 +1757,7 @@ public:
             {
                 cce = scan_ccm_it->second;
                 req.SetCcePtr(cce);
+                req.SetCcePtrScanType(ScanType::ScanBoth);
 
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
@@ -1820,7 +1825,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -1842,16 +1847,15 @@ public:
         if (req.CcePtr() != nullptr)
         {
             prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            ScanType scan_type = req.CcePtrScanType();
+
             req.SetCcePtr(nullptr);
+            req.SetCcePtrScanType(ScanType::ScanUnknow);
+
             // Lock has been acquired, UpsertLockHoldingTx
             LockHandleForResumedRequest(
                 &req, tx_term, prior_cce, prior_cce->payload_status_);
 
-            ScanType scan_type = ScanType::ScanBoth;
-            if (direction == ScanDirection::Backward && prior_cce == &neg_inf_)
-            {
-                scan_type = ScanType::ScanGap;
-            }
             AddScanTuple(prior_cce,
                          typed_cache,
                          scan_type,
@@ -1884,6 +1888,8 @@ public:
                 }
 
                 req.SetCcePtr(cce);
+                req.SetCcePtrScanType(ScanType::ScanBoth);
+
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
                                                    &req,
@@ -1925,6 +1931,8 @@ public:
                 if (cce == &neg_inf_)
                 {
                     req.SetCcePtr(cce);
+                    req.SetCcePtrScanType(ScanType::ScanGap);
+
                     // TODO(lzx): handle gap lock
                     AddScanTuple(cce,
                                  typed_cache,
@@ -1938,6 +1946,8 @@ public:
                 else
                 {
                     req.SetCcePtr(cce);
+                    req.SetCcePtrScanType(ScanType::ScanBoth);
+
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
@@ -1987,6 +1997,8 @@ public:
                          bool is_read_snapshot,
                          bool is_ckpt_delta)
     {
+        assert(scan_type != ScanType::ScanUnknow);
+
         remote::ScanTuple_msg *tuple = cache.at(tuple_idx++);
         switch (scan_type)
         {
@@ -1997,22 +2009,24 @@ public:
             }
             break;
         case ScanType::ScanBoth:
-            ScanKey(cce,
-                    tuple,
-                    true,
-                    ng_term,
-                    read_ts,
-                    is_read_snapshot,
-                    !is_sk_ && is_ckpt_delta);
+            ScanKey(
+                cce,
+                tuple,
+                true,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
             break;
         case ScanType::ScanKey:
-            ScanKey(cce,
-                    tuple,
-                    false,
-                    ng_term,
-                    read_ts,
-                    is_read_snapshot,
-                    !is_sk_ && is_ckpt_delta);
+            ScanKey(
+                cce,
+                tuple,
+                false,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
             break;
         default:
             break;
@@ -2054,7 +2068,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -2097,28 +2111,14 @@ public:
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(
                 req.CcePtr(shard_->LocalCoreId()));
+            ScanType scan_type = req.CcePtrScanType(shard_->LocalCoreId());
+
             req.SetCcePtr(nullptr, shard_->LocalCoreId());
+            req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
+
             // Lock has been acquired, UpsertLockHoldingTx
             LockHandleForResumedRequest(
                 &req, tx_term, cce, cce->payload_status_);
-
-            ScanType scan_type = ScanType::ScanBoth;
-            if (tuple_idx == 0)
-            {
-                std::pair<Iterator, ScanType> start_pair =
-                    req.direct_ == ScanDirection::Forward
-                        ? ForwardScanStart(*look_key, req.inclusive_)
-                        : BackwardScanStart(*look_key, req.inclusive_);
-
-                scan_ccm_it = start_pair.first;
-                scan_type = start_pair.second;
-                assert(cce == scan_ccm_it->second);
-            }
-            else
-            {
-                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
-                scan_type = ScanType::ScanBoth;
-            }
 
             AddScanTupleMsg(cce,
                             cache,
@@ -2141,6 +2141,8 @@ public:
             cce = scan_ccm_it->second;
 
             req.SetCcePtr(cce, shard_->LocalCoreId());
+            req.SetCcePtrScanType(scan_type, shard_->LocalCoreId());
+
             if (scan_type != ScanType::ScanGap)
             {
                 auto lock_pair = AcquireCceKeyLock(cce,
@@ -2200,6 +2202,9 @@ public:
                 }
 
                 req.SetCcePtr(cce, shard_->LocalCoreId());
+                req.SetCcePtrScanType(ScanType::ScanBoth,
+                                      shard_->LocalCoreId());
+
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
                                                    &req,
@@ -2251,6 +2256,9 @@ public:
                 }
 
                 req.SetCcePtr(cce, shard_->LocalCoreId());
+                req.SetCcePtrScanType(ScanType::ScanBoth,
+                                      shard_->LocalCoreId());
+
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
                                                    &req,
@@ -2318,7 +2326,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (is_sk_)
+        if (table_name_.Type() == TableType::Secondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -2337,16 +2345,14 @@ public:
         if (req.CcePtr() != nullptr)
         {
             prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            ScanType scan_type = req.CcePtrScanType();
+
             req.SetCcePtr(nullptr);
+            req.SetCcePtrScanType(ScanType::ScanUnknow);
+
             // Lock has been acquired, UpsertLockHoldingTx
             LockHandleForResumedRequest(
                 &req, tx_term, prior_cce, prior_cce->payload_status_);
-
-            ScanType scan_type = ScanType::ScanBoth;
-            if (direction == ScanDirection::Backward && prior_cce == &neg_inf_)
-            {
-                scan_type = ScanType::ScanGap;
-            }
 
             AddScanTupleMsg(prior_cce,
                             req.scan_cache_,
@@ -2378,6 +2384,8 @@ public:
                 }
 
                 req.SetCcePtr(cce);
+                req.SetCcePtrScanType(ScanType::ScanBoth);
+
                 auto lock_pair = AcquireCceKeyLock(cce,
                                                    cce->payload_status_,
                                                    &req,
@@ -2421,6 +2429,8 @@ public:
                 if (cce == &neg_inf_)
                 {
                     req.SetCcePtr(cce);
+                    req.SetCcePtrScanType(ScanType::ScanGap);
+
                     // TODO(lzx): handle gap lock
                     AddScanTupleMsg(cce,
                                     req.scan_cache_,
@@ -2434,6 +2444,8 @@ public:
                 else
                 {
                     req.SetCcePtr(cce);
+                    req.SetCcePtrScanType(ScanType::ScanBoth);
+
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
@@ -2809,7 +2821,9 @@ public:
     {
         return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
             direction,
-            is_sk_ ? ScanIndexType::Secondary : ScanIndexType::Primary,
+            table_name_.Type() == TableType::Secondary
+                ? ScanIndexType::Secondary
+                : ScanIndexType::Primary,
             KeySchema());
     }
 
@@ -2873,7 +2887,7 @@ public:
 
     TableType Type() const override
     {
-        return is_sk_ ? TableType::Secondary : TableType::Primary;
+        return table_name_.Type();
     }
 
     void TryInsertCkptList(LruEntry *entry) override
@@ -2892,7 +2906,7 @@ public:
     {
         if (table_schema_ != nullptr)
         {
-            if (is_sk_)
+            if (table_name_.Type() == TableType::Secondary)
             {
                 return table_schema_->IndexKeySchema(table_name_);
             }
@@ -2906,7 +2920,8 @@ public:
 
     const Schema *RecordSchema() const override
     {
-        if (!is_sk_ && table_schema_ != nullptr)
+        if ((table_name_.Type() != TableType::Secondary) &&
+            (table_schema_ != nullptr))
         {
             return table_schema_->RecordSchema();
         }
@@ -3321,6 +3336,34 @@ protected:
         return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
     }
 
+    ScanType GetScanType(bool is_include_floor_cce)
+    {
+        if (is_include_floor_cce)
+        {
+            return ScanType::ScanBoth;
+        }
+        else
+        {
+            return ScanType::ScanGap;
+        }
+    }
+
+    /**
+     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map scan.
+     * For template_cc_map, start from it's gap;
+     * for range_cc_map, start from it's key and gap.
+     * @param it
+     * @param is_include_floor_cce
+     * @return
+     */
+    std::pair<Iterator, ScanType> MakeForwardScanPair(Iterator it,
+                                                      bool is_include_floor_cce)
+    {
+        ScanType scan_type = GetScanType(is_include_floor_cce);
+
+        return std::make_pair(it, scan_type);
+    }
+
     /**
      * @brief Searches the start cc entry of a forward scan.
      *
@@ -3392,27 +3435,6 @@ protected:
                 return std::make_pair(Iterator(ub_it, &neg_inf_),
                                       ScanType::ScanGap);
             }
-        }
-    }
-
-    /**
-     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map scan.
-     * For template_cc_map, start from it's gap;
-     * for range_cc_map, start from it's key and gap.
-     * @param it
-     * @param is_include_floor_cce
-     * @return
-     */
-    std::pair<Iterator, ScanType> MakeForwardScanPair(Iterator it,
-                                                      bool is_include_floor_cce)
-    {
-        if (is_include_floor_cce)  // range_cc_map scan, ScanBoth
-        {
-            return std::make_pair(it, ScanType::ScanBoth);
-        }
-        else  // template_cc_map scan, ScanGap
-        {
-            return std::make_pair(it, ScanType::ScanGap);
         }
     }
 
@@ -3625,7 +3647,6 @@ protected:
     }
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
-    bool is_sk_{false};
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
 };
 }  // namespace txservice

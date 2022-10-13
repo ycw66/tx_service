@@ -64,10 +64,9 @@ void Checkpointer::Ckpt()
     size_t shard_cnt = local_shards_.Count();
     CkptTsCc ckpt_req(shard_cnt);
 
-    // Find minimum ckpt_ts from all the ccshard in parallel. ckpt_ts is the
-    // minimum timestamp minus 1 among all the active transactions,
-    // thus it's safe to flush all the entries smaller or equal to
-    // this timestamp.
+    // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is the
+    // minimum timestamp minus 1 among all the active transactions, thus it's
+    // safe to flush all the entries smaller than or equal to ckpt_ts.
     for (auto &ccs : local_shards_.cc_shards_)
     {
         ccs->Enqueue(&ckpt_req);
@@ -124,9 +123,10 @@ void Checkpointer::Ckpt()
         }
         bool flushed = true;
 
-        // get table names this node group contains
+        // Get table names in this node group, checkpointer should be TableName
+        // string owner.
         std::unordered_set<TableName> tables =
-            local_shards_.CatalogTableNames(node_group);
+            local_shards_.GetCatalogTableNamesForCkpt(node_group);
 
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
@@ -145,14 +145,13 @@ void Checkpointer::Ckpt()
                 continue;
             }
 
-            // Only issue tx_request using base table name
-            const TableName base_table_name_{table_name.GetBaseTableName(),
+            // Issue read catalog tx_request to acquire read lock on catalog
+            // cc_entry using base table name, and acquire read lock in one
+            // shard is good enough to block schema change.
+            const TableName base_table_name_{table_name.GetBaseTableNameSV(),
                                              TableType::Primary};
 
-            // Init a tx_request to acquire read lock on catalog cc_entry in one
-            // shard, which is good enough to block schema change.
             TransactionExecution *ckpt_txm = tx_service_->NewTx();
-
             InitTxRequest init_req;
             // Set isolation level to RepeatableRead to ensure the readlock will
             // be set during the execution of the following ReadTxRequest.
@@ -197,6 +196,7 @@ void Checkpointer::Ckpt()
                 LOG(INFO) << "checkpointer add read lock on table failed, "
                              "table name: "
                           << table_key.Name().StringView();
+
                 flushed = false;
                 continue;
             }
@@ -228,6 +228,11 @@ void Checkpointer::Ckpt()
                 auto iter = shard.native_ccms_.find(table_name);
                 if (iter == shard.native_ccms_.end())
                 {
+                    // ccm.table_schema_ and ccm.schema_ts_ should be the same
+                    // if table_name exists in native_ccms_ as well as
+                    // failover_ccms_. Or refactor this part to use
+                    // LeaderTerm(node_group) to differentiate findings in
+                    // different places.
                     auto it = shard.failover_ccms_.find(table_name);
                     assert(it != shard.failover_ccms_.end());
                     ccm = it->second.begin()->second.get();
@@ -241,13 +246,10 @@ void Checkpointer::Ckpt()
                 {
                     // todo: stop flush process if this node is no longer node
                     //  group leader
-                    ckpt_ret = store_hd_->PutAll(
-                        ckpt_vec,
-                        ccm->GetTableSchema(),
-                        ccm->SchemaTs(),
-                        node_group,
-                        Sharder::Instance()
-                            .GetDsRangeEvaluateOperationService());
+                    ckpt_ret = store_hd_->PutAll(ckpt_vec,
+                                                 ccm->GetTableSchema(),
+                                                 ccm->SchemaTs(),
+                                                 node_group);
                     if (!ckpt_ret)
                     {
                         LOG(INFO)
@@ -421,11 +423,7 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
     if (ccm->Type() == TableType::Primary)
     {
         ckpt_ret = store_hd_->PutAll(
-            ckpt_vec,
-            ccm->GetTableSchema(),
-            ccm->SchemaTs(),
-            ng,
-            Sharder::Instance().GetDsRangeEvaluateOperationService());
+            ckpt_vec, ccm->GetTableSchema(), ccm->SchemaTs(), ng);
     }
     else
     {

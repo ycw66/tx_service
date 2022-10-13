@@ -137,6 +137,18 @@ public:
                          int64_t tx_term,
                          uint64_t commit_ts);
 
+    void RecoverSplitRangeTx(
+        const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
+        const TableSchema *table_schema,
+        const TxKey *range_key,
+        std::unique_ptr<RangeRecord> splitting_range_record,
+        uint32_t partition_id,
+        std::unique_ptr<TxKey> new_range_key,
+        uint32_t new_partition_id,
+        uint64_t txn,
+        int64_t tx_term,
+        uint64_t commit_ts);
+
     std::string GetErrorMessage() const;
 
     void SetErrorMessage(const std::string &err_msg);
@@ -268,20 +280,13 @@ private:
     void Process(DsSplitRangeOp &ds_split_range_op);
     void PostProcess(DsSplitRangeOp &ds_split_range_op);
 
-    void Process(DsCopyRangeDataOp &ds_copy_range_data_op);
-    void PostProcess(DsCopyRangeDataOp &ds_copy_range_data_op);
-
-    void Process(DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op);
-    void PostProcess(DsDeleteOutOfRangeDataOp &ds_delete_out_of_range_data_op);
-
-    void Process(DsFindRangeMedianKeyOp &ds_find_range_median_key_op);
-    void PostProcess(DsFindRangeMedianKeyOp &ds_find_range_median_key_op);
-
-    void Process(DsUpsertRangeOp &ds_upsert_range_op);
-    void PostProcess(DsUpsertRangeOp &ds_upsert_range_op);
-
     void Process(NoOp &no_op);
     void PostProcess(NoOp &no_op);
+
+    template <typename ResultType>
+    void Process(DsOp<ResultType> &ds_op);
+    template <typename ResultType>
+    void PostProcess(DsOp<ResultType> &ds_op);
 
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
@@ -460,6 +465,8 @@ private:
     friend struct DsDeleteOutOfRangeDataOp;
     friend struct DsUpsertRangeOp;
     friend struct NoOp;
+    template <typename ResultType>
+    friend struct DsOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

@@ -15,16 +15,16 @@ CatalogKey::CatalogKey(const TableName &name)
                                   name.Type()}
                       : TableName{name.StringView(), name.Type()})
 {
+    assert(table_name_.Type() == TableType::Primary);
 }
 
 CatalogKey::CatalogKey(const CatalogKey &rhs, const Schema *)
-    : table_name_(
-          rhs.table_name_.IsStringOwner()
-              ? TableName{rhs.table_name_.StringView().data(),
-                          rhs.table_name_.StringView().size(),
-                          rhs.table_name_.Type()}
-              : TableName{rhs.table_name_.StringView(), rhs.table_name_.Type()})
+    : table_name_(TableName{rhs.table_name_.StringView().data(),
+                            rhs.table_name_.StringView().size(),
+                            rhs.table_name_.Type()})
 {
+    assert(table_name_.Type() == TableType::Primary);
+    assert(table_name_.IsStringOwner());
 }
 
 bool CatalogKey::operator==(const TxKey &rhs) const
