@@ -220,6 +220,7 @@ public:
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
+#endif
                 if (old_schema != nullptr)
                 {
                     std::vector<TableName> index_names =
@@ -236,7 +237,6 @@ public:
 #endif
                     }
                 }
-#endif
             }
             else if (old_schema == nullptr)
             {
