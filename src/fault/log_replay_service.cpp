@@ -483,14 +483,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     recovery_error));
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());
-
-            // wait for this schema operation to be recovered at all shards
-            // before processing next
-            WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
         }
+        // wait for this schema operation to be recovered at all shards
+        // before processing next
+        WaitAndClearRequests(
+            stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
 
         cc_req_vec.clear();
+        finish_log_cnt = 0;
         recovery_error = false;
 
         // process range split ops
@@ -526,11 +526,14 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     recovery_error));
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());
-            // wait for this schema operation to be recovered at all shards
-            // before processing next
-            WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
         }
+        // wait for this schema operation to be recovered at all shards
+        // before processing next
+        WaitAndClearRequests(
+            stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+        cc_req_vec.clear();
+        finish_log_cnt = 0;
+        recovery_error = false;
 
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();
@@ -733,6 +736,9 @@ void ReplayService::WaitAndClearRequests(
     cv.wait(lk,
             [&finish_log_cnt, &cc_req_vec]
             { return (finish_log_cnt == cc_req_vec.size()); });
+
+    DLOG(INFO) << "WaitAndClearRequests finish_log_cnt: " << finish_log_cnt
+               << " cc_req_vec.size(): " << cc_req_vec.size();
     if (finish_log_cnt == cc_req_vec.size())
     {
         cc_req_vec.clear();
