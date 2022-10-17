@@ -146,7 +146,7 @@ public:
         const txservice::TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
-        const std::string &search_cond,
+        const std::vector<DataStoreSearchCond> &search_cond,
         const txservice::Schema *key_schema,
         const txservice::Schema *rec_schema,
         const txservice::KVCatalogInfo *kv_info,

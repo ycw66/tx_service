@@ -3389,16 +3389,7 @@ protected:
                                                 // search for lower_bound(key)
         {
             auto lb_it = ccm_.lower_bound(key);
-            // The search key may match more than one cc entry. Even though
-            // each cc map's key is unique, this is possible when the search
-            // key is a prefix of a compound key. For example, the cc map's
-            // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-            // (30,'d'), and the search condition is 20: WHERE pk >= 20 or WHERE
-            // pk > 20. The search key is considered equal to both (20, 'b') and
-            // (20, 'c'). In this "WHERE pk >= 20" case, the gap of (10, 'a')
-            // also needs to be returned.
-            if (lb_it == ccm_.end() || !(lb_it->first == key) ||
-                key.IsPrefixOf(lb_it->first))
+            if (lb_it == ccm_.end() || !(lb_it->first == key))
             {
                 // for template_cc_map, start from previous entry's gap;
                 // for range_cc_map, start from previous entry's key and gap
@@ -3472,17 +3463,9 @@ protected:
                 ub_it--;
                 // now, ub_it is the greatest entry equal to or less than key
 
-                // The search key may match more than one cc entry. Even though
-                // each cc map's key is unique, this is possible when the search
-                // key is a prefix of a compound key. For example, the cc map's
-                // keys are two-field keys (10, 'a'), (20, 'b'), (20, 'c'),
-                // (30,'d'), and the search condition is 20: WEHRE pk <= 20 or
-                // WHERE pk < 20. The search key is considered equal to both
-                // (20, 'b') and (20, 'c'). In "WHERE pk <= 20" case, the
-                // gap of (20, c) needs to be included.
-                if (!(ub_it->first == key) || key.IsPrefixOf(ub_it->first))
+                if (!(ub_it->first == key))
                 {
-                    // key not equal or only prefix equal, should include the
+                    // key not equal should include the
                     // gap
                     return std::make_pair(Iterator(ub_it, &neg_inf_),
                                           ScanType::ScanBoth);

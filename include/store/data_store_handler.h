@@ -16,6 +16,25 @@ class TxService;
 
 namespace store
 {
+struct DataStoreSearchCond
+{
+    DataStoreSearchCond(std::string field_name,
+                        std::string op,
+                        std::string val_str,
+                        bool is_numeric)
+        : field_name_(field_name),
+          op_(op),
+          val_str_(val_str),
+          is_numeric_(is_numeric)
+    {
+    }
+
+    std::string field_name_;
+    std::string op_;
+    std::string val_str_;
+    bool is_numeric_;
+};
+
 class DataStoreHandler
 {
 public:
@@ -96,7 +115,7 @@ public:
         const TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
-        const std::string &search_cond,
+        const std::vector<DataStoreSearchCond> &search_cond,
         const Schema *key_schema,
         const Schema *rec_schema,
         const KVCatalogInfo *kv_info,
