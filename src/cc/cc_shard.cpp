@@ -20,6 +20,8 @@ CcShard::CcShard(uint16_t core_id,
     : node_id_(node_id),
       core_id_(core_id),
       core_cnt_(core_cnt),
+      metric_common_labels_({{"node_id", std::to_string(node_id)},
+                             {"core_id", std::to_string(core_id)}}),
       local_shards_(local_shards),
       native_ccms_(),
       failover_ccms_(),
@@ -852,4 +854,20 @@ uint64_t CcShard::GlobalMinSiTxStartTs()
     return TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
 }
 
+std::unique_ptr<metrics::Meter> CcShard::GetMeterByMetricsNaming(
+    metrics::MetricsNaming &&naming, metrics::MetricsLabels &&labels)
+{
+    if (local_shards_.metrics_registry_ == nullptr)
+    {
+        return nullptr;
+    }
+    auto metrics_registry = local_shards_.metrics_registry_;
+    metrics::MetricsLabels complete_labels(std::move(labels));
+    complete_labels.insert(complete_labels.end(),
+                           metric_common_labels_.begin(),
+                           metric_common_labels_.end());
+
+    return metrics_registry->Register(std::move(naming),
+                                      std::move(complete_labels));
+}
 }  // namespace txservice

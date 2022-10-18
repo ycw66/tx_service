@@ -297,6 +297,7 @@ paket-files/
 
 # JetBrains Rider
 .idea/
+.clion.source.upload.marker
 *.sln.iml
 
 # CodeRush personal settings

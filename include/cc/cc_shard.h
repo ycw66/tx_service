@@ -19,6 +19,7 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
+#include "metrics/metrics.h"
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "sharder.h"
@@ -425,9 +426,13 @@ public:
 
     void DecrementMemory(size_t mem_size);
 
+    std::unique_ptr<metrics::Meter> GetMeterByMetricsNaming(
+        metrics::MetricsNaming &&naming, metrics::MetricsLabels &&labels);
+
     const uint32_t node_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
+    const metrics::MetricsLabels metric_common_labels_;
     LocalCcShards &local_shards_;
 
     // Memory usage of this CcShard.

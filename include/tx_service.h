@@ -2,10 +2,13 @@
 
 #include <chrono>
 #include <list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catalog.h"
@@ -448,6 +451,7 @@ public:
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
+              metrics::MetricsRegistry *metrics_registry = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr,
               bool enable_mvcc = true)
         : local_cc_shards_(node_id,
@@ -456,6 +460,7 @@ public:
                            conf.find("node_log_limit_mb")->second,
                            catalog_factory,
                            store_hd,
+                           metrics_registry,
                            this,
                            enable_mvcc),
           ckpt_(local_cc_shards_,
@@ -477,6 +482,28 @@ public:
         }
 
         Sharder::Instance().Init(local_path);
+    }
+
+    TxService(const std::string &local_path,
+              CatalogFactory *catalog_factory,
+              const std::map<std::string, uint32_t> &conf,
+              uint32_t node_id = 0,
+              std::vector<std::string> *ips = nullptr,
+              std::vector<uint16_t> *ports = nullptr,
+              store::DataStoreHandler *store_hd = nullptr,
+              std::unique_ptr<TxLog> log_hd = nullptr,
+              bool enable_mvcc = true)
+        : TxService(local_path,
+                    catalog_factory,
+                    conf,
+                    node_id,
+                    ips,
+                    ports,
+                    store_hd,
+                    nullptr,
+                    std::move(log_hd),
+                    enable_mvcc)
+    {
     }
 
     void Start()

@@ -14,9 +14,11 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint32_t log_limit_mb,
                              CatalogFactory *catalog_factory,
                              store::DataStoreHandler *store_hd,
+                             metrics::MetricsRegistry *metrics_registry,
                              TxService *tx_service,
                              bool enable_mvcc)
     : store_hd_(store_hd),
+      metrics_registry_(metrics_registry),
       node_id_(node_id),
       timer_terminate_(false),
       catalog_factory_(catalog_factory),
@@ -40,6 +42,26 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                                                           *this,
                                                           catalog_factory_));
     }
+}
+
+LocalCcShards::LocalCcShards(uint32_t node_id,
+                             uint16_t core_cnt,
+                             uint32_t memory_limit_mb,
+                             uint32_t log_limit_mb,
+                             CatalogFactory *catalog_factory,
+                             store::DataStoreHandler *store_hd,
+                             TxService *tx_service,
+                             bool enable_mvcc)
+    : LocalCcShards(node_id,
+                    core_cnt,
+                    memory_limit_mb,
+                    log_limit_mb,
+                    catalog_factory,
+                    store_hd,
+                    nullptr,
+                    tx_service,
+                    enable_mvcc)
+{
 }
 
 LocalCcShards::~LocalCcShards()

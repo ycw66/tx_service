@@ -18,6 +18,7 @@
 #include "catalog_key_record.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
+#include "metrics/metrics.h"
 #include "raft_log.pb.h"
 #include "store/data_store_handler.h"
 #include "table_lock.h"
@@ -36,6 +37,16 @@ class TxService;
 class LocalCcShards
 {
 public:
+    LocalCcShards(uint32_t node_id = 0,
+                  uint16_t core_cnt = 1,
+                  uint32_t memory_limit_mb = 1000,
+                  uint32_t log_limit_mb = 1000,
+                  CatalogFactory *catalog_factory = nullptr,
+                  store::DataStoreHandler *store_hd = nullptr,
+                  metrics::MetricsRegistry *metrics_registry = nullptr,
+                  TxService *tx_service = nullptr,
+                  bool enable_mvcc = true);
+
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
                   uint32_t memory_limit_mb = 1000,
@@ -333,6 +344,7 @@ public:
         const TableName &table_name, NodeGroupId ng_id);
 
     store::DataStoreHandler *const store_hd_;
+    metrics::MetricsRegistry *const metrics_registry_;
 
 private:
     void TimerRun();

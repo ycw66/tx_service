@@ -87,6 +87,7 @@ set(INCLUDE_DIR
    ${TX_SERVICE_SOURCE_DIR}/include/cc
    ${TX_SERVICE_SOURCE_DIR}/include/remote
    ${TX_SERVICE_SOURCE_DIR}/include/fault
+   ${TX_SERVICE_SOURCE_DIR}/include/metrics
    ${TX_SERVICE_SOURCE_DIR}/include/store
    ${TX_SERVICE_SOURCE_DIR}/log_service/proto
    ${TX_SERVICE_SOURCE_DIR}/log_service/include
