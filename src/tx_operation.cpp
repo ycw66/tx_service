@@ -13,6 +13,7 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_trace.h"
+#include "tx_worker_pool.h"
 #include "util.h"
 
 namespace txservice

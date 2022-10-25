@@ -6,12 +6,8 @@
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
-#include "fault/cc_node.h"
-#include "fault/log_replay_service.h"
-#include "remote/cc_node_service.h"
-#include "remote/cc_stream_receiver.h"
-#include "remote/cc_stream_sender.h"
-#include "tx_worker_pool.h"
+#include "moodycamelqueue.h"
+#include "proto/cc_request.pb.h"
 #include "txlog.h"
 
 namespace txservice
@@ -20,6 +16,22 @@ namespace txservice
 #define GET_LOG_REPLAY_RPC_PORT(port) port + 3
 
 class LocalCcShards;
+class TxLog;
+class TxWorkerPool;
+struct TableName;
+
+namespace fault
+{
+class CcNode;
+class ReplayService;
+}  // namespace fault
+
+namespace remote
+{
+class CcNodeService;
+class CcStreamSender;
+class CcStreamReceiver;
+}  // namespace remote
 
 /**
  * Sharder is the collection of services supplied by TxService, which includes:
@@ -143,6 +155,16 @@ public:
     void UpdateLogGroupLeader(uint32_t lg_id, uint32_t node_id)
     {
         log_agent_->UpdateLeaderCache(lg_id, node_id);
+    }
+
+    /**
+     * Whether this node is preferred node group's leader. If not, should
+     * request leader transfer.
+     * @return
+     */
+    bool IsPreferredGroupLeader()
+    {
+        return CandidateLeaderTerm(node_id_) > 0 || LeaderTerm(node_id_) > 0;
     }
 
     /**
@@ -279,7 +301,7 @@ private:
             LocalCcShards &local_shards,
             std::unique_ptr<TxLog> log_agent);
 
-    ~Sharder() = default;
+    ~Sharder();
 
     void SetCommandLineOptions();
 

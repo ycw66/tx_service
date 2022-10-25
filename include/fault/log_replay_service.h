@@ -27,11 +27,11 @@ namespace fault
 {
 class CcNode;
 
-struct ReplayLogInfo
+struct ReplayLogTask
 {
-    ReplayLogInfo() = default;
+    ReplayLogTask() = default;
 
-    ReplayLogInfo(uint32_t cc_ng_id,
+    ReplayLogTask(uint32_t cc_ng_id,
                   int64_t cc_ng_term,
                   int log_group,
                   uint64_t queued_clock)
@@ -50,11 +50,11 @@ struct ReplayLogInfo
     uint64_t queued_clock_;
 };
 
-struct RecoverTxInfo
+struct RecoverTxTask
 {
-    RecoverTxInfo() = default;
+    RecoverTxTask() = default;
 
-    RecoverTxInfo(uint64_t tx_number,
+    RecoverTxTask(uint64_t tx_number,
                   int64_t tx_term,
                   uint32_t cc_ng_id,
                   int64_t cc_ng_term,
@@ -112,19 +112,13 @@ public:
                    int log_group = -1,
                    bool delayed_request = false);
 
-    /**
-     * @brief ReplayNow() check whether the replay request can be processed
-     * immediately. When replay error happens, we will put the replay request
-     * into replay queue again, but with a delay (defalut 10 seconds).
-     *
-     */
-    bool ReplayNow(ReplayLogInfo &info);
-
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
                    uint32_t cc_ng_id,
                    int64_t cc_ng_term,
                    int32_t write_lock_count);
+
+    void NotifyLeaderTransfer();
 
     int on_received_messages(brpc::StreamId stream_id,
                              butil::IOBuf *const messages[],
@@ -135,6 +129,21 @@ public:
     void on_closed(brpc::StreamId id) override;
 
 private:
+    /**
+     * @brief ReplayNow() check whether the replay request can be processed
+     * immediately. When replay error happens, we will put the replay request
+     * into replay queue again, but with a delay (default 10 seconds).
+     */
+    bool ReplayNow(ReplayLogTask &task);
+
+    void ProcessReplayLogTask(ReplayLogTask &task);
+
+    int ProcessDelayedReplayLogTask();
+
+    void ProcessRecoverTxTask(RecoverTxTask &task);
+
+    void RequestLeaderTransfer();
+
     struct ConnectionInfo
     {
         ConnectionInfo() = default;
@@ -177,8 +186,9 @@ private:
     TxLog *log_agent_;
 
     std::thread notify_thread_;
-    std::deque<ReplayLogInfo> replay_log_queue_;
-    std::deque<RecoverTxInfo> recover_tx_queue_;
+    std::deque<ReplayLogTask> replay_log_queue_;
+    std::deque<ReplayLogTask> delayed_replay_queue_;
+    std::deque<RecoverTxTask> recover_tx_queue_;
     std::mutex queue_mux_;
     std::condition_variable queue_cv_;
     std::atomic<bool> finish_;

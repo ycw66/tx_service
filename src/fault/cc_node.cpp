@@ -348,44 +348,7 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
     LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng#"
               << ng_id_ << ", term: " << ctx.term();
 
-    // when preferred leader is actually a follower, e.g. caused by a
-    // failover, it will send the TransferRequest to the current leader
-    // through ccmap service.
-    if (node_idx_ == 0)
-    {
-        // The transfer RPC is on the same port as cc node groups.
-        braft::PeerId leader_peer = ctx.leader_id();
-
-        brpc::Channel channel;
-        if (channel.Init(leader_peer.addr, nullptr) != 0)
-        {
-            LOG(ERROR) << "Fail to init the channel to the leader of ng#"
-                       << ng_id_ << " for leadership transfer.";
-            return;
-        }
-
-        remote::CcRpcService_Stub stub(&channel);
-
-        remote::TransferRequest req;
-        req.set_ng_id(ng_id_);
-        remote::TransferResponse res;
-        res.set_error(false);
-
-        brpc::Controller cntl;
-        cntl.set_timeout_ms(3000);
-        stub.Transfer(&cntl, &req, &res, nullptr);
-
-        if (cntl.Failed())
-        {
-            LOG(ERROR) << "Fail the transfer RPC of ng#" << ng_id_
-                       << ". Error code: " << cntl.ErrorCode()
-                       << ". Msg: " << cntl.ErrorText();
-        }
-        else if (res.error())
-        {
-            // TODO: consider retry logic.
-            LOG(ERROR) << "Fail to transfer the leader of ng#" << ng_id_;
-        }
-    }
+    // notify replay service to request leader transfer immediately
+    replay_service_->NotifyLeaderTransfer();
 }
 }  // namespace txservice::fault

@@ -1,7 +1,16 @@
 #include "sharder.h"
 
+#include "braft/route_table.h"
+#include "brpc/server.h"
+#include "fault/cc_node.h"
+#include "fault/log_replay_service.h"
 #include "proto/cc_request.pb.h"
+#include "remote/cc_node_service.h"
+#include "remote/cc_stream_receiver.h"
+#include "remote/cc_stream_sender.h"
 #include "tx_service.h"
+#include "tx_worker_pool.h"
+#include "txlog.h"
 
 namespace txservice
 {
@@ -43,6 +52,8 @@ Sharder::Sharder(uint32_t node_id,
         log_agent_->Init(ips_, ports_);
     }
 }
+
+Sharder::~Sharder() = default;
 
 void Sharder::Shutdown()
 {

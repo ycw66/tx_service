@@ -9,9 +9,10 @@
 #include "type.h"
 
 /**
- * LogReplayService serves two purposes:
+ * LogReplayService serves three purposes:
  * replay log after a ccnode becomes leader; recover orphan lock's belonging
- * txn.
+ * txn; check whether this node is preferred node group's leader periodically
+ * and request leader transfer if not.
  *
  * Here is a brief replay protocol description:
  * 1. ccnode becomes a raft leader and begins to send ReplayLogRequest to all
@@ -52,7 +53,6 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
         [this]
         {
             // LOG(INFO) << "replay service notify thread started";
-            brpc::Channel channel;
             while (!finish_.load(std::memory_order_acquire))
             {
                 std::unique_lock<std::mutex> lk(queue_mux_);
@@ -65,217 +65,55 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                                !recover_tx_queue_.empty() ||
                                finish_.load(std::memory_order_acquire);
                     });
-                // LOG(INFO) << "replay service notify thread wakes up "
-                //           << !replay_log_queue_.empty() << " "
-                //           << !recover_tx_queue_.empty() << " "
-                //           << finish_.load(std::memory_order_acquire);
                 if (finish_.load(std::memory_order_acquire))
                 {
+                    LOG(INFO) << "replay service notify thread quits";
                     break;
                 }
                 if (!replay_log_queue_.empty())
                 {
-                    ReplayLogInfo info = replay_log_queue_.front();
-                    if (ReplayNow(info))
+                    ReplayLogTask task = replay_log_queue_.front();
+                    replay_log_queue_.pop_front();
+                    lk.unlock();
+                    LOG(INFO) << "replay service processes a ReplayLog task";
+                    ProcessReplayLogTask(task);
+                    continue;
+                }
+                if (!delayed_replay_queue_.empty())
+                {
+                    int ready_cnt = ProcessDelayedReplayLogTask();
+                    if (ready_cnt > 0)
                     {
-                        replay_log_queue_.pop_front();
-
-                        if (Sharder::Instance().LeaderTerm(info.cc_ng_id_) > 0)
-                        {
-                            // node group has become the tx leader, skip replay.
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        // delayed replay request will be scheduled later.
+                        // ReplayLog task is of the highest priority, continue
+                        // to next round and process the ready ReplayTask
                         continue;
                     }
-                    lk.unlock();
-                    // call log agent replay log api
-                    log_agent_->ReplayLog(info.cc_ng_id_,
-                                          info.cc_ng_term_,
-                                          ip_,
-                                          port_,
-                                          info.log_group_,
-                                          finish_);
                 }
-                else if (!recover_tx_queue_.empty())
+                if (!recover_tx_queue_.empty())
                 {
-                    RecoverTxInfo recover_tx_info = recover_tx_queue_.front();
+                    RecoverTxTask task = recover_tx_queue_.front();
                     recover_tx_queue_.pop_front();
                     lk.unlock();
-                    // process RecoverTx request
-
-                    // Recovering a tx's lock consists of two parts: (1)
-                    // inquires the tx status in the cc node in which the tx
-                    // resides, and (2) if the tx's status is committed or the
-                    // tx is not found, checks the tx status in the log group.
-
-                    // The tx node ID is represented by the higher 4 bytes, in
-                    // which the lower 10 bits represents the local core ID.
-                    uint32_t tx_ng = (recover_tx_info.tx_number_ >> 32L) >> 10;
-                    uint32_t tx_leader =
-                        Sharder::Instance().LeaderNodeId(tx_ng);
-                    remote::CheckTxStatusResponse_TxStatus tx_status;
-
-                    if (tx_leader == Sharder::Instance().NodeId())
-                    {
-                        CheckTxStatusCc check_tx_cc(recover_tx_info.tx_number_);
-                        local_shards_.EnqueueCcRequest(
-                            recover_tx_info.tx_number_ >> 32L, &check_tx_cc);
-                        check_tx_cc.Wait();
-
-                        if (check_tx_cc.Exists())
-                        {
-                            switch (check_tx_cc.TxStatus())
-                            {
-                            case TxnStatus::Committed:
-                                tx_status = remote::
-                                    CheckTxStatusResponse_TxStatus_COMMITTED;
-                                break;
-                            case TxnStatus::Unknown:
-                                tx_status = remote::
-                                    CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN;
-                                break;
-                            case TxnStatus::Aborted:
-                                tx_status = remote::
-                                    CheckTxStatusResponse_TxStatus_ABORTED;
-                                break;
-                            default:
-                                tx_status = remote::
-                                    CheckTxStatusResponse_TxStatus_ONGOING;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            tx_status = remote::
-                                CheckTxStatusResponse_TxStatus_NOT_FOUND;
-                        }
-                    }
-                    else
-                    {
-                        std::string tx_ip;
-                        uint16_t tx_port;
-                        Sharder::Instance().GetNodeAddress(
-                            tx_leader, tx_ip, tx_port);
-
-                        if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) !=
-                            0)
-                        {
-                            // Fails to establish the channel to the tx node.
-                            // Silently returns. The tx will be recovered again
-                            // by next conflicting tx.
-                            LOG(ERROR) << "Fail to init the channel to the "
-                                          "leader of ng#"
-                                       << tx_ng << " for tx lock recovery.";
-                            continue;
-                        }
-
-                        remote::CcRpcService_Stub stub(&channel);
-
-                        remote::CheckTxStatusRequest req;
-                        req.set_tx_number(recover_tx_info.tx_number_);
-                        req.set_tx_term(recover_tx_info.tx_term_);
-                        remote::CheckTxStatusResponse res;
-
-                        brpc::Controller cntl;
-                        stub.CheckTxStatus(&cntl, &req, &res, nullptr);
-
-                        if (cntl.Failed())
-                        {
-                            LOG(ERROR)
-                                << "Fail to check the tx status in ng#" << tx_ng
-                                << ". Error code: " << cntl.ErrorCode()
-                                << ". Msg: " << cntl.ErrorText();
-                            continue;
-                        }
-
-                        tx_status = res.tx_status();
-                    }
-
-                    if (tx_status ==
-                        remote::CheckTxStatusResponse_TxStatus_ONGOING)
-                    {
-                        // LOG(INFO) << "The tx " << recover_tx_info.tx_number_
-                        //           << " is ongoing. Does nothing for
-                        //           recovery.";
-                        continue;
-                    }
-                    else if (recover_tx_info.key_write_lock_count_ == 0 ||
-                             tx_status ==
-                                 remote::CheckTxStatusResponse_TxStatus_ABORTED)
-                    {
-                        LOG(INFO) << "The tx" << recover_tx_info.tx_number_
-                                  << " has aborted. Clears the tx's lock.";
-                        ClearTx(recover_tx_info.tx_number_);
-                    }
-                    else
-                    {
-                        // The tx is either committed or result unknown or not
-                        // found in the tx's cc node, either because the tx node
-                        // fails or because the tx didn't finish post-processing
-                        // but decided to move on. In either case, asks the log
-                        // group: if the tx has committed, the log group ships
-                        // the tx's log record to the cc node to recover the
-                        // committed record. Or, the tx must have aborted.
-
-                        RecoverTxStatus status =
-                            log_agent_->RecoverTx(recover_tx_info.tx_number_,
-                                                  recover_tx_info.tx_term_,
-                                                  recover_tx_info.cc_ng_id_,
-                                                  recover_tx_info.cc_ng_term_,
-                                                  ip_,
-                                                  port_);
-
-                        if (status == RecoverTxStatus::NotCommitted ||
-                            status == RecoverTxStatus::Alive)
-                        {
-                            LOG(INFO) << "The tx " << recover_tx_info.tx_number_
-                                      << " is to be cleared, after asking "
-                                         "the log group.";
-
-                            // If the tx is not committed, sends a cc request to
-                            // local cc shards to clear write intentions left by
-                            // the tx. If the tx node is still alive according
-                            // to the log group, and yet no log record is found,
-                            // given that the prior inquiry of the tx status is
-                            // inconclusive, the tx must have aborted
-                            // proactively. Clears the tx's locks.
-                            ClearTx(recover_tx_info.tx_number_);
-                        }
-                        else if (status == RecoverTxStatus::RecoverError)
-                        {
-                            LOG(INFO)
-                                << "There is a tx recovery error when asking "
-                                   "the log group. Tx number "
-                                << recover_tx_info.tx_number_;
-                        }
-                        else
-                        {
-                            LOG(INFO) << "The tx " << recover_tx_info.tx_number_
-                                      << " to be recovered has committed.";
-                            // For DML transactions, if the tx has committed,
-                            // the log group will ship the tx's committed
-                            // records to the cc node. If there is an error,
-                            // does nothing. The next conflicting tx will try a
-                            // new recovery.
-                            // For multi-stage transactions, the tx has written
-                            // log and is guaranteed to succeed and release the
-                            // lock, do nothing and the lock will be released by
-                            // the coordinator.
-                        }
-                    }
+                    LOG(INFO) << "replay service processes a RecoverTx task";
+                    ProcessRecoverTxTask(task);
+                    continue;
+                }
+                if (!Sharder::Instance().IsPreferredGroupLeader())
+                {
+                    lk.unlock();
+                    LOG(INFO)
+                        << "this node is not preferred node group's leader, "
+                           "request leader transfer";
+                    RequestLeaderTransfer();
                 }
             }
         });
 }
 
-bool ReplayService::ReplayNow(ReplayLogInfo &info)
+bool ReplayService::ReplayNow(ReplayLogTask &task)
 {
     // queued_clock_ == 0 means it's not a delayed request.
-    if (info.queued_clock_ == 0)
+    if (task.queued_clock_ == 0)
     {
         return true;
     }
@@ -286,7 +124,7 @@ bool ReplayService::ReplayNow(ReplayLogInfo &info)
     uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::seconds(30))
                             .count();
-    if (now_ts - info.queued_clock_ > duration)
+    if (now_ts - task.queued_clock_ > duration)
     {
         return true;
     }
@@ -419,13 +257,16 @@ void ReplayService::ReplayLog(uint32_t cc_ng_id,
                               bool delayed_request)
 {
     std::unique_lock lk(queue_mux_);
-    uint64_t queued_clock = 0;
     if (delayed_request)
     {
-        queued_clock = LocalCcShards::ClockTs();
+        uint64_t queued_clock = LocalCcShards::ClockTs();
+        delayed_replay_queue_.emplace_back(
+            cc_ng_id, cc_ng_term, log_group, queued_clock);
     }
-    replay_log_queue_.emplace_back(
-        cc_ng_id, cc_ng_term, log_group, queued_clock);
+    else
+    {
+        replay_log_queue_.emplace_back(cc_ng_id, cc_ng_term, log_group, 0);
+    }
     queue_cv_.notify_one();
 }
 
@@ -438,6 +279,11 @@ void ReplayService::RecoverTx(uint64_t tx_number,
     std::unique_lock lk(queue_mux_);
     recover_tx_queue_.emplace_back(
         tx_number, tx_term, cc_ng_id, cc_ng_term, write_lock_count);
+    queue_cv_.notify_one();
+}
+
+void ReplayService::NotifyLeaderTransfer()
+{
     queue_cv_.notify_one();
 }
 
@@ -778,6 +624,246 @@ void ReplayService::ClearTx(uint64_t tx_number)
     }
 
     req.Wait();
+}
+
+void ReplayService::ProcessReplayLogTask(ReplayLogTask &task)
+{
+    if (Sharder::Instance().CandidateLeaderTerm(task.cc_ng_id_) < 0)
+    {
+        // node group is not recovering, skip replay.
+        return;
+    }
+    // call log agent replay log api
+    log_agent_->ReplayLog(
+        task.cc_ng_id_, task.cc_ng_term_, ip_, port_, task.log_group_, finish_);
+}
+
+int ReplayService::ProcessDelayedReplayLogTask()
+{
+    // move the delayed replay requests whose timer is fired to
+    // replay_log_queue_
+    int ready_cnt = 0;
+    for (auto it = delayed_replay_queue_.begin();
+         it != delayed_replay_queue_.end();)
+    {
+        if (ReplayNow(*it))
+        {
+            replay_log_queue_.emplace_back(*it);
+            it = delayed_replay_queue_.erase(it);
+            ready_cnt++;
+        }
+        else
+        {
+            it++;
+        }
+    }
+    return ready_cnt;
+}
+
+void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
+{
+    // process RecoverTx request
+
+    // Recovering a tx's lock consists of two parts: (1)
+    // inquires the tx status in the cc node in which the tx
+    // resides, and (2) if the tx's status is committed or the
+    // tx is not found, checks the tx status in the log group.
+
+    // The tx node ID is represented by the higher 4 bytes, in
+    // which the lower 10 bits represents the local core ID.
+    uint32_t tx_ng = (task.tx_number_ >> 32L) >> 10;
+    uint32_t tx_leader = Sharder::Instance().LeaderNodeId(tx_ng);
+    remote::CheckTxStatusResponse_TxStatus tx_status;
+
+    if (tx_leader == Sharder::Instance().NodeId())
+    {
+        CheckTxStatusCc check_tx_cc(task.tx_number_);
+        local_shards_.EnqueueCcRequest(task.tx_number_ >> 32L, &check_tx_cc);
+        check_tx_cc.Wait();
+
+        if (check_tx_cc.Exists())
+        {
+            switch (check_tx_cc.TxStatus())
+            {
+            case TxnStatus::Committed:
+                tx_status = remote::CheckTxStatusResponse_TxStatus_COMMITTED;
+                break;
+            case TxnStatus::Unknown:
+                tx_status =
+                    remote::CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN;
+                break;
+            case TxnStatus::Aborted:
+                tx_status = remote::CheckTxStatusResponse_TxStatus_ABORTED;
+                break;
+            default:
+                tx_status = remote::CheckTxStatusResponse_TxStatus_ONGOING;
+                break;
+            }
+        }
+        else
+        {
+            tx_status = remote::CheckTxStatusResponse_TxStatus_NOT_FOUND;
+        }
+    }
+    else
+    {
+        std::string tx_ip;
+        uint16_t tx_port;
+        Sharder::Instance().GetNodeAddress(tx_leader, tx_ip, tx_port);
+
+        brpc::Channel channel;
+        if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+        {
+            // Fails to establish the channel to the tx node.
+            // Silently returns. The tx will be recovered again
+            // by next conflicting tx.
+            LOG(ERROR) << "Fail to init the channel to the "
+                          "leader of ng#"
+                       << tx_ng << " for tx lock recovery.";
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+
+        remote::CheckTxStatusRequest req;
+        req.set_tx_number(task.tx_number_);
+        req.set_tx_term(task.tx_term_);
+        remote::CheckTxStatusResponse res;
+
+        brpc::Controller cntl;
+        stub.CheckTxStatus(&cntl, &req, &res, nullptr);
+
+        if (cntl.Failed())
+        {
+            LOG(ERROR) << "Fail to check the tx status in ng#" << tx_ng
+                       << ". Error code: " << cntl.ErrorCode()
+                       << ". Msg: " << cntl.ErrorText();
+            return;
+        }
+
+        tx_status = res.tx_status();
+    }
+
+    if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
+    {
+        LOG(INFO) << "The tx " << task.tx_number_
+                  << " is ongoing. Does nothing for recovery.";
+        return;
+    }
+    else if (task.key_write_lock_count_ == 0 ||
+             tx_status == remote::CheckTxStatusResponse_TxStatus_ABORTED)
+    {
+        LOG(INFO) << "The tx" << task.tx_number_
+                  << " has aborted. Clears the tx's lock.";
+        ClearTx(task.tx_number_);
+    }
+    else
+    {
+        // The tx is either committed or result unknown or not
+        // found in the tx's cc node, either because the tx node
+        // fails or because the tx didn't finish post-processing
+        // but decided to move on. In either case, asks the log
+        // group: if the tx has committed, the log group ships
+        // the tx's log record to the cc node to recover the
+        // committed record. Or, the tx must have aborted.
+
+        RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
+                                                       task.tx_term_,
+                                                       task.cc_ng_id_,
+                                                       task.cc_ng_term_,
+                                                       ip_,
+                                                       port_);
+
+        if (status == RecoverTxStatus::NotCommitted ||
+            status == RecoverTxStatus::Alive)
+        {
+            LOG(INFO) << "The tx " << task.tx_number_
+                      << " is to be cleared, after asking "
+                         "the log group.";
+
+            // If the tx is not committed, sends a cc request to
+            // local cc shards to clear write intentions left by
+            // the tx. If the tx node is still alive according
+            // to the log group, and yet no log record is found,
+            // given that the prior inquiry of the tx status is
+            // inconclusive, the tx must have aborted
+            // proactively. Clears the tx's locks.
+            ClearTx(task.tx_number_);
+        }
+        else if (status == RecoverTxStatus::RecoverError)
+        {
+            LOG(INFO) << "There is a tx recovery error when asking "
+                         "the log group. Tx number "
+                      << task.tx_number_;
+        }
+        else
+        {
+            LOG(INFO) << "The tx " << task.tx_number_
+                      << " to be recovered has committed.";
+            // For DML transactions, if the tx has committed,
+            // the log group will ship the tx's committed
+            // records to the cc node. If there is an error,
+            // does nothing. The next conflicting tx will try a
+            // new recovery.
+            // For multi-stage transactions, the tx has written
+            // log and is guaranteed to succeed and release the
+            // lock, do nothing and the lock will be released by
+            // the coordinator.
+        }
+    }
+}
+
+void ReplayService::RequestLeaderTransfer()
+{
+    uint32_t node_id = Sharder::Instance().NodeId();
+    Sharder::Instance().UpdateLeader(node_id);
+    uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(node_id);
+    if (leader_node_id != node_id)
+    {
+        std::string leader_ip;
+        uint16_t leader_port;
+        Sharder::Instance().GetNodeAddress(
+            leader_node_id, leader_ip, leader_port);
+        brpc::Channel channel;
+        if (channel.Init(leader_ip.c_str(), leader_port + 1, nullptr) != 0)
+        {
+            // Fails to establish the channel to the leader. Silently returns.
+            // LeaderTransfer will be retried if this node is still not
+            // preferred group leader.
+            LOG(ERROR) << "Fail to init the channel to the "
+                          "leader of ng#"
+                       << node_id << " for leader transfer.";
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+
+        remote::TransferRequest req;
+        req.set_ng_id(node_id);
+        remote::TransferResponse res;
+        res.set_error(false);
+
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(3000);
+        stub.Transfer(&cntl, &req, &res, nullptr);
+
+        if (cntl.Failed())
+        {
+            LOG(ERROR) << "Fail the Transfer RPC of ng#" << node_id
+                       << ". Error code: " << cntl.ErrorCode()
+                       << ". Msg: " << cntl.ErrorText();
+        }
+        else if (res.error())
+        {
+            LOG(ERROR) << "Fail to transfer the leader of ng#" << node_id
+                       << " to this node";
+        }
+        else
+        {
+            LOG(INFO) << "Transfer rpc succeeds, this node should reclaim ng#"
+                      << node_id << " leadership later";
+        }
+    }
 }
 }  // namespace fault
 }  // namespace txservice
