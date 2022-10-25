@@ -100,6 +100,20 @@ public:
         return false;
     }
 
+    bool ReadSk(const txservice::TableName &index_name,
+                const txservice::TxKey &key,
+                txservice::TxRecord &rec,
+                bool &found,
+                uint64_t &version_ts,
+                const txservice::Schema *key_schema,
+                const txservice::Schema *rec_schema,
+                const txservice::KVCatalogInfo *kv_info,
+                uint64_t table_schema_ts) override
+    {
+        assert(false);
+        return false;
+    }
+
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
                     bool &found,
@@ -215,6 +229,19 @@ public:
     bool PutArchivesAll(uint32_t node_group,
                         const txservice::TableName &table_name,
                         std::vector<txservice::FlushRecord> &batch) override
+    {
+        assert(false);
+        return true;
+    }
+    /**
+     * @brief Copy record from base/sk table to mvcc_archives.
+     */
+    bool CopyBaseToArchive(std::vector<LruEntry *> &batch,
+                           uint32_t node_group,
+                           const txservice::TableName &table_name,
+                           const txservice::TableSchema *table_schema,
+                           uint64_t schema_ts,
+                           bool is_sk) override
     {
         assert(false);
         return true;

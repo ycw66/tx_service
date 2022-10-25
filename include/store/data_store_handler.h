@@ -93,6 +93,16 @@ public:
                       const KVCatalogInfo *kv_info,
                       uint64_t table_schema_ts) = 0;
 
+    virtual bool ReadSk(const TableName &table_name,
+                        const TxKey &key,
+                        TxRecord &rec,
+                        bool &found,
+                        uint64_t &version_ts,
+                        const Schema *key_schema,
+                        const Schema *rec_schema,
+                        const KVCatalogInfo *kv_info,
+                        uint64_t table_schema_ts) = 0;
+
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
@@ -127,6 +137,15 @@ public:
     virtual bool PutArchivesAll(uint32_t node_group,
                                 const txservice::TableName &table_name,
                                 std::vector<txservice::FlushRecord> &batch) = 0;
+    /**
+     * @brief Copy record from base/sk table to mvcc_archives.
+     */
+    virtual bool CopyBaseToArchive(std::vector<LruEntry *> &batch,
+                                   uint32_t node_group,
+                                   const txservice::TableName &table_name,
+                                   const txservice::TableSchema *table_schema,
+                                   uint64_t schema_ts,
+                                   bool is_sk) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical

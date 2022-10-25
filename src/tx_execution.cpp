@@ -829,7 +829,6 @@ void TransactionExecution::Process(ReadOperation &read)
 
         rw_set_.UpdateRead(cache_miss_read_cce_addr_,
                            read.read_outside_tx_req_->commit_ts_);
-
         handler->ReadOutside(tx_term_,
                              command_id_.load(std::memory_order_relaxed),
                              record,
@@ -881,11 +880,24 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
             if (lock_type != LockType::NoLock)
             {
-                bool add_res = rw_set_.AddRead(read_res.cce_addr_,
-                                               read_res.ts_,
-                                               read_.protocol_,
-                                               read_res.lock_type_,
-                                               table_name);
+                bool add_res;
+                if (read_res.rec_status_ == RecordStatus::Unknown)
+                {
+                    // Only used to release lock.
+                    add_res = rw_set_.AddRead(read_res.cce_addr_,
+                                              0,
+                                              read_.protocol_,
+                                              read_res.lock_type_,
+                                              table_name);
+                }
+                else
+                {
+                    add_res = rw_set_.AddRead(read_res.cce_addr_,
+                                              read_res.ts_,
+                                              read_.protocol_,
+                                              read_res.lock_type_,
+                                              table_name);
+                }
                 if (!add_res)
                 {
                     rec_resp_->FinishError(
@@ -1153,11 +1165,24 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         if (scan_tuple_lock_type != LockType::NoLock &&
             cc_scan_tuple->key_ts_ != 0)
         {
-            bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                           cc_scan_tuple->key_ts_,
-                                           scan_next.scanner_->protocol_,
-                                           scan_tuple_lock_type,
-                                           &table_name);
+            bool add_res;
+            if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+            {
+                // Only used to release lock.
+                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                          0,
+                                          scan_next.scanner_->protocol_,
+                                          scan_tuple_lock_type,
+                                          &table_name);
+            }
+            else
+            {
+                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                          cc_scan_tuple->key_ts_,
+                                          scan_next.scanner_->protocol_,
+                                          scan_tuple_lock_type,
+                                          &table_name);
+            }
             if (!add_res)
             {
                 kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
@@ -1210,11 +1235,24 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
                 }));
 
-        bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                       cc_scan_tuple->key_ts_,
-                                       scan_next.scanner_->protocol_,
-                                       scan_tuple_lock_type,
-                                       &table_name);
+        bool add_res;
+        if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+        {
+            // Only used to release lock.
+            add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                      0,
+                                      scan_next.scanner_->protocol_,
+                                      scan_tuple_lock_type,
+                                      &table_name);
+        }
+        else
+        {
+            add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                      cc_scan_tuple->key_ts_,
+                                      scan_next.scanner_->protocol_,
+                                      scan_tuple_lock_type,
+                                      &table_name);
+        }
         if (!add_res)
         {
             kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
@@ -1512,11 +1550,24 @@ void TransactionExecution::DrainOutScanCache(const TableName &table_name,
         if (scan_tuple_lock_type != LockType::NoLock &&
             cc_scan_tuple->key_ts_ != 0)
         {
-            bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                           cc_scan_tuple->key_ts_,
-                                           scanner.protocol_,
-                                           scan_tuple_lock_type,
-                                           &table_name);
+            bool add_res;
+            if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+            {
+                // Only used to release lock.
+                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                          0,
+                                          scanner.protocol_,
+                                          scan_tuple_lock_type,
+                                          &table_name);
+            }
+            else
+            {
+                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
+                                          cc_scan_tuple->key_ts_,
+                                          scanner.protocol_,
+                                          scan_tuple_lock_type,
+                                          &table_name);
+            }
             if (!add_res)
             {
                 continue;

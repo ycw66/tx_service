@@ -235,7 +235,7 @@ void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
 {
     if (cce != nullptr)
     {
-        bool is_write_lock = (!cce->key_lock_.HasWriteLock() &&
+        bool is_write_lock = (cce->key_lock_.HasWriteLock() &&
                               cce->key_lock_.WriteLockTx() == tx_number);
         cce->key_lock_.ClearTx(tx_number, shard_);
         shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);
@@ -250,7 +250,7 @@ void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number)
 {
     if (cce != nullptr)
     {
-        bool is_write_lock = (!cce->gap_lock_.HasWriteLock() &&
+        bool is_write_lock = (cce->gap_lock_.HasWriteLock() &&
                               cce->gap_lock_.WriteLockTx() == tx_number);
         cce->gap_lock_.ClearTx(tx_number, shard_);
         shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);

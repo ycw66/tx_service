@@ -94,11 +94,12 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
 
-    if (cce_addr.Term() < 0 && txm->IsTimeOut())
+    if (cce_addr.Term() < 0 && txm->IsTimeOut() ||
+        !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(), txm->TxTerm()))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
-            "Forward.Term<0.IsTimeout",
+            "Forward.Term<0,IsTimeout || TxNodeFail",
             txm,
             (
                 [txm]() -> std::string
@@ -115,6 +116,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
         // set, the tx has not received any response or acknowledgement from the
         // key's cc node group. The read request is forced to be errored upon
         // timeout.
+        // FIXME(lzx): Is it more appropriate to retry?
+        // If the tx node fails, also force the tx to abort instantly.
         bool force_success = hd_result_.ForceError();
         if (force_success)
         {
@@ -250,8 +253,12 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
         txm->PostProcess(*this);
     }
     else if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 &&
-             txm->IsTimeOut())
+                 txm->IsTimeOut() ||
+             !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                  txm->TxTerm()))
     {
+        // FIXME(lzx): Is it more appropriate to retry if remote_ack_cnt_>0 ?
+        // If the tx node fails, force the tx to abort instantly.
         // TODO: for 2PL, the tx may be blocked arbitrarily long, even after all
         // acquire requests are acknowledged. We still need to periodically
         // check liveness of the remote node.

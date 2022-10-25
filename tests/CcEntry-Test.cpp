@@ -28,27 +28,27 @@ TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
     entry.payload_ = std::make_unique<CompositeRecord<int>>(1);
     entry.payload_status_ = RecordStatus::Unknown;
 
-    entry.ArchiveBeforeUpdate();
+    entry.ArchiveBeforeUpdate(TableType::Primary);
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 
     entry.commit_ts_ = 2U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(2);
     entry.payload_status_ = RecordStatus::Normal;
-    entry.ArchiveBeforeUpdate();
+    entry.ArchiveBeforeUpdate(TableType::Primary);
 
     entry.commit_ts_ = 3U;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(3);
     entry.payload_status_ = RecordStatus::Normal;
-    entry.ArchiveBeforeUpdate();
+    entry.ArchiveBeforeUpdate(TableType::Primary);
     REQUIRE(entry.ArchiveRecordsCount() == 2);
 
-    REQUIRE(entry.archives_[0].commit_ts_ == 3);
-    REQUIRE(std::get<0>(entry.archives_[0].payload_->Tuple()) == 3);
-    REQUIRE(entry.archives_[0].payload_status_ == RecordStatus::Normal);
+    REQUIRE(entry.archives_.front().commit_ts_ == 3);
+    REQUIRE(std::get<0>(entry.archives_.front().payload_->Tuple()) == 3);
+    REQUIRE(entry.archives_.front().payload_status_ == RecordStatus::Normal);
 
-    REQUIRE(entry.archives_[0].commit_ts_ == 3);
-    REQUIRE(std::get<0>(entry.archives_[0].payload_->Tuple()) == 3);
-    REQUIRE(entry.archives_[0].payload_status_ == RecordStatus::Normal);
+    REQUIRE(entry.archives_.front().commit_ts_ == 3);
+    REQUIRE(std::get<0>(entry.archives_.front().payload_->Tuple()) == 3);
+    REQUIRE(entry.archives_.front().payload_status_ == RecordStatus::Normal);
 }
 
 TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
@@ -70,12 +70,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
     entry.AddArchiveRecords(records);
     REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+    auto entry_it = entry.archives_.cbegin();
     for (size_t i = 0; i < nums.size(); i++)
     {
-        REQUIRE(entry.archives_[i].commit_ts_ ==
-                static_cast<uint64_t>(nums[i]));
-        REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) == nums[i]);
-        REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+        assert(entry_it != entry.archives_.cend());
+        REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+        REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+        REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+        entry_it++;
     }
 
     // [8]->...=>[8,6,5,3]
@@ -90,13 +92,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         entry.AddArchiveRecords(records);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -112,13 +115,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         entry.AddArchiveRecords(records);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -138,13 +142,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         entry.AddArchiveRecords(records);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -164,13 +169,14 @@ TEST_CASE("CcEntry AddArchiveRecords", "[cc-entry]")
         entry.AddArchiveRecords(records);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 }
@@ -202,13 +208,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -220,13 +227,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -238,13 +246,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -256,13 +265,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -274,13 +284,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 
@@ -292,13 +303,14 @@ TEST_CASE("CcEntry KickOutArchiveRecords", "[cc-entry]")
         entry.KickOutArchiveRecords(oldest_active_tx_ts);
         REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
+        auto entry_it = entry.archives_.cbegin();
         for (size_t i = 0; i < nums.size(); i++)
         {
-            REQUIRE(entry.archives_[i].commit_ts_ ==
-                    static_cast<uint64_t>(nums[i]));
-            REQUIRE(std::get<0>(entry.archives_[i].payload_->Tuple()) ==
-                    nums[i]);
-            REQUIRE(entry.archives_[i].payload_status_ == RecordStatus::Normal);
+            assert(entry_it != entry.archives_.cend());
+            REQUIRE(entry_it->commit_ts_ == static_cast<uint64_t>(nums[i]));
+            REQUIRE(std::get<0>(entry_it->payload_->Tuple()) == nums[i]);
+            REQUIRE(entry_it->payload_status_ == RecordStatus::Normal);
+            entry_it++;
         }
     }
 }
@@ -313,7 +325,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
@@ -323,12 +335,23 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
-    // (read_ts: 5)->... => VersionUnknown
+    // (read_ts: 5, ckpt_ts:1)->... => Unknown
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
+        REQUIRE(res);
+        REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
+    }
+
+    // (read_ts: 5, ckpt_ts>1)->... => VersionUnknown
+    entry.ckpt_ts_ = 3;
+    {
+        uint64_t ts = 5;
+        VersionResultRecord<CompositeRecord<int>> rec;
+
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
@@ -339,7 +362,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
@@ -365,7 +388,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 1;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
@@ -377,7 +400,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 2;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
@@ -391,7 +414,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 6;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
@@ -405,7 +428,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
@@ -460,7 +483,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
         uint64_t target = 9;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
@@ -474,7 +497,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE(res);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
@@ -486,7 +509,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
         uint64_t ts = 15;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec);
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
         REQUIRE_FALSE(res);
     }
 

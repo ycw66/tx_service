@@ -16,6 +16,7 @@
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "type.h"  // TableType
 
 namespace txservice
 {
@@ -156,7 +157,8 @@ public:
     virtual size_t ArchiveRecordsCount() const = 0;
     virtual size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) = 0;
     virtual size_t ExportArchives(std::vector<FlushRecord> &akvs,
-                                  uint64_t to_ts) const = 0;
+                                  uint64_t to_ts,
+                                  TableType tbl_type) const = 0;
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
@@ -392,7 +394,7 @@ public:
     CcEntry<KeyT, ValueT> *map_prev_;
     CcEntry<KeyT, ValueT> *map_next_;
 
-    // save versions exclude the current version.(descending order)
+    // save versions exclude the current version.(descending order,eg.[4,3,2,1])
     std::deque<VersionRecord<ValueT>> archives_;
     // The time when a write tx acquires the write lock/intent on this cc entry.
     uint64_t wlock_ts_;
@@ -401,14 +403,14 @@ public:
      * @brief Move(not copy) the current version (payload, payload_status,
      * commit_ts) to the archives_.
      *
-     * @param copy_payload true - move "payload", "payload_status" and
+     * @param move_payload true - move "payload", "payload_status" and
      * "commit_ts" of CcEntry to "archives_"; false - not move the payload ,
      * just copy "payload_status" and "commit_ts". For "PkIndex", we should set
      * it to "true", for "SkIndex", we should set it to "false".
      *
      * @return New memory usage caused by archive
      */
-    size_t ArchiveBeforeUpdate(bool copy_payload = true)
+    size_t ArchiveBeforeUpdate(TableType tbl_type)
     {
         if (payload_status_ == RecordStatus::Unknown)
         {
@@ -417,16 +419,17 @@ public:
 
         if (archives_.size() > 0)
         {
-            assert(commit_ts_ > archives_[0].commit_ts_);
+            assert(commit_ts_ > archives_.front().commit_ts_);
         }
 
-        if (copy_payload)
+        if (tbl_type != TableType::Secondary)
         {
             archives_.emplace_front(
                 std::move(payload_), commit_ts_, payload_status_);
         }
         else
         {
+            // For SkIndex, all versions' payload is not changed.
             archives_.emplace_front(nullptr, commit_ts_, payload_status_);
         }
 
@@ -557,7 +560,9 @@ public:
      *
      * @return true : if find the record; false: not found or has write_lock
      */
-    bool MvccGet(uint64_t ts, VersionResultRecord<ValueT> &rec)
+    bool MvccGet(uint64_t ts,
+                 VersionResultRecord<ValueT> &rec,
+                 TableType tbl_type)
     {
         if (payload_status_ == RecordStatus::Unknown)
         {
@@ -602,7 +607,14 @@ public:
             {
                 if (it->payload_status_ == RecordStatus::Normal)
                 {
-                    rec.payload_ptr_ = it->payload_.get();
+                    if (tbl_type == TableType::Secondary)
+                    {
+                        rec.payload_ptr_ = payload_.get();
+                    }
+                    else
+                    {
+                        rec.payload_ptr_ = it->payload_.get();
+                    }
                 }
                 rec.commit_ts_ = it->commit_ts_;
                 rec.payload_status_ = it->payload_status_;
@@ -610,9 +622,30 @@ public:
             }
         }
 
-        rec.commit_ts_ = 1;
-        rec.payload_status_ = RecordStatus::VersionUnknown;
+        rec.commit_ts_ = 1U;
+        if (ckpt_ts_ == 1U)
+        {
+            // need fetch base table
+            rec.payload_status_ = RecordStatus::Unknown;
+        }
+        else
+        {
+            rec.payload_status_ = RecordStatus::VersionUnknown;
+        }
         return true;
+    }
+
+    bool HasVisibleVersion(uint64_t ts)
+    {
+        if (commit_ts_ <= ts)
+        {
+            return true;
+        }
+        if (!archives_.empty() && archives_.back().commit_ts_ <= ts)
+        {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -623,23 +656,10 @@ public:
      * @return count of records exported
      */
     size_t ExportArchives(std::vector<FlushRecord> &akvs,
-                          uint64_t to_ts) const override
+                          uint64_t to_ts,
+                          TableType tbl_type) const override
     {
-        // Here, flushing current version is to promise all archives can be
-        // fetched from "archives table" even if the node group is crashed.
-        // TODO(lzx): It may be a big waste, should improve it.
         size_t count = 0;
-        if (commit_ts_ <= to_ts)
-        {
-            auto &ref = akvs.emplace_back();
-            ref.cce_ =
-                const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
-            ref.SetPayload(payload_.get());
-            ref.payload_status_ = payload_status_;
-            ref.commit_ts_ = commit_ts_;
-            count++;
-        }
-
         if (archives_.size() > 0)
         {
             for (const VersionRecord<ValueT> &rec : archives_)
@@ -649,7 +669,7 @@ public:
                     auto &ref = akvs.emplace_back();
                     ref.cce_ = const_cast<LruEntry *>(
                         static_cast<const LruEntry *>(this));
-                    if (rec.payload_ != nullptr)
+                    if (tbl_type != TableType::Secondary)
                     {
                         ref.SetPayload(rec.payload_.get());  // pk
                     }

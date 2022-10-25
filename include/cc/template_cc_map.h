@@ -481,7 +481,7 @@ public:
                 {
                     uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
                     cce.KickOutArchiveRecords(recycle_ts);
-                    size_t added_mem_usage = cce.ArchiveBeforeUpdate();
+                    size_t added_mem_usage = cce.ArchiveBeforeUpdate(Type());
                     shard_->mem_usage_ += added_mem_usage;
                 }
 
@@ -1034,6 +1034,9 @@ public:
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
+            LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
+                      << ") term < 0, tx:" << req.Txn() << " ,cce: "
+                      << reinterpret_cast<void *>(cce_addr.CcePtr());
             hd_res->SetError(-1);
             return true;
         }
@@ -1049,15 +1052,15 @@ public:
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
         // fix is that we don't validate for "Unkown" status results.
-        if ((key_ts > 1 && key_ts != cc_entry.commit_ts_) ||
-            (gap_ts > 1 && gap_ts != cc_entry.gap_commit_ts_))
+        if (cc_entry.payload_status_ != RecordStatus::Unknown &&
+            ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
+             (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_)))
         {
             // 2PL is a blocking protocol. Once a read lock is acquired, no one
             // can possibly change the key. So, this branch is only reachable
             // for OCC/OccRead protocol validating version stability.
             assert(req.Protocol() == CcProtocol::OCC ||
                    req.Protocol() == CcProtocol::OccRead);
-
             hd_res->SetError(1);  // broken repeatable read, set error.
         }
         else if (req.Protocol() == CcProtocol::OCC ||
@@ -1247,8 +1250,9 @@ public:
                     cce->payload_status_ == RecordStatus::Unknown)
                 {
                     cce->payload_status_ = RecordStatus::Deleted;
-                    cce->commit_ts_ = 2U;
-                    cce->gap_commit_ts_ = 2U;
+                    cce->commit_ts_ = 1U;
+                    cce->gap_commit_ts_ = 1U;
+                    cce->ckpt_ts_.store(2U);
                 }
 
                 req.SetCcePtr(cce);
@@ -1341,6 +1345,47 @@ public:
                 cce->payload_status_ = RecordStatus::Deleted;
                 cce->commit_ts_ = req.ReadTimestamp();
             }
+
+            // set "ckpt_ts_" to identify the entry is backfilled
+            uint64_t tmp_ts = 1U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.ReadTimestamp());
+        }
+        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
+                 cce->commit_ts_ > req.ReadTimestamp())
+        {
+            // Trying to insert the record to backfill into archives is needed,
+            // because the entry may be created when executing "ReplayLogCc".
+            std::unique_ptr<ValueT> tmp_payload = std::make_unique<ValueT>();
+            RecordStatus tmp_payload_status;
+            if (req.Type() == ReadType::OutsideNormal)
+            {
+                if (req.Record() != nullptr)
+                {
+                    ValueT *typed_rec = static_cast<ValueT *>(req.Record());
+                    tmp_payload = std::make_unique<ValueT>(*typed_rec);
+                }
+                else
+                {
+                    assert(req.RecordBlob() != nullptr);
+
+                    size_t offset = 0;
+                    tmp_payload = std::make_unique<ValueT>();
+                    tmp_payload->Deserialize(req.RecordBlob()->data(), offset);
+                }
+                tmp_payload_status = RecordStatus::Normal;
+            }
+            // set tomb ccentry to prevent access data store again.
+            else if (req.Type() == ReadType::OutsideDeleted)
+            {
+                tmp_payload_status = RecordStatus::Deleted;
+            }
+            cce->AddArchiveRecord(std::move(tmp_payload),
+                                  tmp_payload_status,
+                                  req.ReadTimestamp());
+
+            // set "ckpt_ts_" to identify the entry is refilled
+            uint64_t tmp_ts = 1U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.ReadTimestamp());
         }
 
         // Refill mvcc archives
@@ -1358,7 +1403,7 @@ public:
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(req.ReadTimestamp(), v_rec);
+            bool res = cce->MvccGet(req.ReadTimestamp(), v_rec, Type());
             if (res)  // Finds a visible version.
             {
                 if (v_rec.payload_status_ == RecordStatus::Normal)
@@ -1456,6 +1501,11 @@ public:
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
+            LOG(INFO) << "RemoteReadOutside, node_group(#"
+                      << cce_addr.NodeGroupId()
+                      << ") term < 0, tx:" << req.Txn() << " ,cce: "
+                      << reinterpret_cast<void *>(cce_addr.CcePtr());
+            req.Finish();
             return true;
         }
 
@@ -1473,6 +1523,28 @@ public:
             }
             cce->commit_ts_ = req.CommitTs();
             cce->payload_status_ = req.RecordStatus();
+
+            // set "ckpt_ts_" to identify the entry is refilled
+            uint64_t tmp_ts = 1U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
+        }
+        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
+                 cce->commit_ts_ > req.CommitTs())
+        {
+            // Trying to insert the record to backfill into archives is needed,
+            // because the entry may be created when executing "ReplayLogCc".
+            std::unique_ptr<ValueT> tmp_payload = std::make_unique<ValueT>();
+            if (req.RecordStatus() == RecordStatus::Normal)
+            {
+                size_t offset = 0;
+                tmp_payload->Deserialize(req.rec_str_->data(), offset);
+            }
+            cce->AddArchiveRecord(
+                std::move(tmp_payload), req.RecordStatus(), req.CommitTs());
+
+            // set "ckpt_ts_" to identify the entry is refilled
+            uint64_t tmp_ts = 1U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
         }
         // Refill mvcc archives.
         if (shard_->EnableMvcc())
@@ -2532,9 +2604,15 @@ public:
                 if (cce->commit_ts_ > req.ckpt_ts_)
                 {
                     // Don't do checkpoint but flush undo
-                    if (cce->ExportArchives(req.archive_vec_, req.ckpt_ts_) > 0)
+                    if (cce->ExportArchives(
+                            req.archive_vec_, req.ckpt_ts_, Type()) > 0)
                     {
                         req.extra_vec_.push_back(cce);
+                        if (cce->ckpt_ts_ == 1U &&
+                            !cce->HasVisibleVersion(recycle_ts))
+                        {
+                            req.mv_base_vec_.push_back(cce);
+                        }
                     }
                 }
             }
@@ -2561,7 +2639,12 @@ public:
                 if (shard_->EnableMvcc())
                 {
                     // Also flush undo before truncating redo log.
-                    cce->ExportArchives(req.archive_vec_, req.ckpt_ts_);
+                    cce->ExportArchives(req.archive_vec_, req.ckpt_ts_, Type());
+                    if (cce->ckpt_ts_ == 1U &&
+                        !cce->HasVisibleVersion(recycle_ts))
+                    {
+                        req.mv_base_vec_.push_back(cce);
+                    }
                 }
 
                 cce->parent_map_->shard_->estimate_ccshard_log_size_ -=
@@ -2707,7 +2790,7 @@ public:
             {
                 if (shard_->EnableMvcc())
                 {
-                    cce->ArchiveBeforeUpdate();
+                    cce->ArchiveBeforeUpdate(Type());
                 }
                 if (delete_flag == 0)
                 {
@@ -2790,7 +2873,7 @@ public:
                     }
 
                     std::vector<FlushRecord> tmp_akvs;
-                    cce->ExportArchives(tmp_akvs, cce->commit_ts_ - 1);
+                    cce->ExportArchives(tmp_akvs, cce->commit_ts_ - 1, Type());
                     bool res = shard_->FlushEntryForTest(
                         cce, tmp_ckpt_vec, tmp_akvs, only_archives);
                     assert(res == true);
@@ -3511,7 +3594,7 @@ protected:
         if (is_read_snapshot)
         {
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(read_ts, v_rec);
+            bool res = cce->MvccGet(read_ts, v_rec, Type());
             if (!res)
             {
                 // TODO(lzx): to handle this error.
@@ -3557,7 +3640,7 @@ protected:
         if (is_read_snapshot)
         {
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(read_ts, v_rec);
+            bool res = cce->MvccGet(read_ts, v_rec, Type());
             if (!res)
             {
                 // return error.
