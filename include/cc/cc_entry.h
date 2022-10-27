@@ -85,7 +85,24 @@ struct FlushRecord
 
     FlushRecord(const FlushRecord &rhs) = delete;
     FlushRecord &operator=(const FlushRecord &rhs) = delete;
-    FlushRecord &operator=(FlushRecord &&rhs) = delete;
+    FlushRecord &operator=(FlushRecord &&rhs)
+    {
+        if (rhs.is_rec_owner_)
+        {
+            SetPayload(std::move(rhs.payload_.uptr_));
+            is_rec_owner_ = rhs.is_rec_owner_;
+            rhs.is_rec_owner_ = false;
+        }
+        else
+        {
+            SetPayload(rhs.payload_.ptr_);
+            is_rec_owner_ = false;
+        }
+        payload_status_ = rhs.payload_status_;
+        commit_ts_ = rhs.commit_ts_;
+        cce_ = rhs.cce_;
+        return *this;
+    }
 
     FlushRecord(FlushRecord &&rhs)
     {

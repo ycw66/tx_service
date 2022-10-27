@@ -472,7 +472,6 @@ public:
 
         // Restore range cc map state
         CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
-        CcEntry<KeyT, RangeRecord> *new_range_cce = nullptr;
 
         if (ds_split_range_op_msg.range_key_neg_inf() == true)
         {
@@ -499,16 +498,6 @@ public:
         if (stage <= ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
         {
             old_range_cce->payload_->range_entry_ = old_table_range_entry;
-        }
-
-        // Restore new range
-        if (stage == ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
-        {
-            // add new range entry to range cc map
-            const KeyT *start_key = static_cast<const KeyT *>(
-                new_table_range_entry->start_key_.get());
-            new_range_cce = TemplateCcMap<KeyT, RangeRecord>::FindEmplace(
-                *start_key, new_table_range_entry->version_ts_);
         }
 
         // Recover locks on range cce

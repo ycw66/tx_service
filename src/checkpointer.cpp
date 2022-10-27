@@ -264,8 +264,6 @@ void Checkpointer::Ckpt()
                             << "checkpointer CopyBaseToArchive flush to kv "
                                "storage failed";
                     }
-                    DLOG(INFO)
-                        << "ckpt, mv_base_vec.size(): " << mv_base_vec.size();
                 }
 
                 if (mv_base_ret)
