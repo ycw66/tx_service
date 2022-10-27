@@ -90,31 +90,31 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         {
             size_t pos1 = 0;
             size_t pos2 = para.find(';');
-            if (pos2 == string::npos)
+            if (pos2 == std::string::npos)
                 pos2 = para.size();
             std::string fault_name = para.substr(0, pos2);
 
             std::string fault_paras;
-            vector<int> vctId;
+            std::vector<int> vctId;
             pos1 = pos2 + 1;
 
             while (pos1 < para.size())
             {
                 pos2 = para.find(';', pos1);
-                if (pos2 == string::npos)
+                if (pos2 == std::string::npos)
                     pos2 = para.size();
 
-                string sbs = para.substr(pos1, pos2 - pos1);
+                std::string sbs = para.substr(pos1, pos2 - pos1);
                 size_t pos3 = sbs.find('=');
-                if (pos3 == string::npos)
+                if (pos3 == std::string::npos)
                 {
                     LOG(ERROR) << "Error action parameters: name="
                                << entry->fault_name_ << ", action=" << str;
                     abort();
                 }
 
-                string key = sbs.substr(0, pos3);
-                string val = sbs.substr(pos3 + 1);
+                std::string key = sbs.substr(0, pos3);
+                std::string val = sbs.substr(pos3 + 1);
 
                 if (key.compare("node_id") == 0)
                 {
@@ -122,7 +122,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
                     while (nos1 < val.size())
                     {
                         size_t nos2 = val.find('#', nos1);
-                        if (nos2 == string::npos)
+                        if (nos2 == std::string::npos)
                             nos2 = val.size();
 
                         int id = stoi(val.substr(nos1, nos2 - nos1));
@@ -194,7 +194,7 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         case FaultAction::LOG_TRANSFER:
         {
             size_t pos = para.find('-');
-            if (pos == string::npos)
+            if (pos == std::string::npos)
             {
                 LOG(ERROR)
                     << "Error LOG_TRANSFER parameters: The right style should "

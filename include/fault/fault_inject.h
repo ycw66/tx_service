@@ -12,8 +12,6 @@
 #include "fault/cc_node.h"
 #include "txlog.h"
 
-using namespace std;
-
 namespace txservice
 {
 enum struct FaultAction
@@ -56,36 +54,37 @@ static std::unordered_map<std::string, FaultAction> action_name_to_enum_map{
 class FaultEntry
 {
 public:
-    FaultEntry(std::string fault_name, string paras) : fault_name_(fault_name)
+    FaultEntry(std::string fault_name, std::string paras)
+        : fault_name_(fault_name)
     {
         // Parse parameters
         size_t pos1 = 0;
         while (pos1 < paras.size())
         {
             size_t pos2 = paras.find(';', pos1);
-            if (pos2 == string::npos)
+            if (pos2 == std::string::npos)
                 pos2 = paras.size();
             else if (paras.find('<', pos1) < pos2)
             {
                 // To parse remote action and ensure to get entire key value
                 pos2 = paras.find('>', pos1);
-                if (pos2 == string::npos)
+                if (pos2 == std::string::npos)
                 {
                     LOG(ERROR) << "Error parameters for fault inject: name="
                                << fault_name << ", parameters=" << paras;
                     abort();
                 }
                 pos2 = paras.find(';', pos2);
-                if (pos2 == string::npos)
+                if (pos2 == std::string::npos)
                     pos2 = paras.size();
             }
 
             // Split key and value
-            string sbs = paras.substr(pos1, pos2 - pos1);
+            std::string sbs = paras.substr(pos1, pos2 - pos1);
             size_t pos3 = sbs.find('=');
-            assert(pos3 != string::npos);
-            string key = sbs.substr(0, pos3);
-            string val = sbs.substr(pos3 + 1);
+            assert(pos3 != std::string::npos);
+            std::string key = sbs.substr(0, pos3);
+            std::string val = sbs.substr(pos3 + 1);
 
             if (key.compare("db_name") == 0)
             {

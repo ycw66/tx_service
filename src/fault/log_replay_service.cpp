@@ -58,7 +58,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                 std::unique_lock<std::mutex> lk(queue_mux_);
                 queue_cv_.wait_for(
                     lk,
-                    chrono::seconds(10),
+                    std::chrono::seconds(10),
                     [this]
                     {
                         return !replay_log_queue_.empty() ||

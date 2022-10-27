@@ -521,7 +521,7 @@ void Sharder::NotifyCheckPointer()
     return local_shards_.NotifyCheckPointer();
 }
 
-vector<uint32_t> Sharder::LocalNodeGroups()
+std::vector<uint32_t> Sharder::LocalNodeGroups()
 {
     std::vector<uint32_t> ngs;
     for (auto &pair : cc_nodes_)

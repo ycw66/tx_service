@@ -186,7 +186,7 @@ public:
             CcProtocol cc_proto = req.Protocol();
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
-            tie(acquired_lock, lock_op_status) =
+            std::tie(acquired_lock, lock_op_status) =
                 AcquireCceKeyLock(floor_cce,
                                   floor_cce->payload_status_,
                                   &req,

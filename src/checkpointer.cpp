@@ -102,7 +102,7 @@ void Checkpointer::Ckpt()
 
     const CcShard &shard = *local_shards_.cc_shards_[0];
 
-    vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
+    std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)
     {
         assert(ckpt_ts >= last_ckpt_ts_[node_group]);
@@ -373,7 +373,7 @@ void Checkpointer::Run()
         {
             cv_.wait_for(
                 lk,
-                chrono::seconds(checkpoint_interval_),
+                std::chrono::seconds(checkpoint_interval_),
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 

@@ -257,7 +257,7 @@ public:
         {
             if (!resume)
             {
-                tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, lock_op_status) =
                     AcquireCceKeyLock(&cc_entry,
                                       cc_entry.payload_status_,
                                       &req,
@@ -698,7 +698,7 @@ public:
             // being unblocked.
             if (!resume)
             {
-                tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, lock_op_status) =
                     AcquireCceKeyLock(&cc_entry,
                                       cc_entry.payload_status_,
                                       &req,
@@ -1261,7 +1261,7 @@ public:
                                 req.NodeGroupId());
 
                 // Try to acquire lock
-                tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, lock_op_status) =
                     AcquireCceKeyLock(cce,
                                       cce->payload_status_,
                                       &req,

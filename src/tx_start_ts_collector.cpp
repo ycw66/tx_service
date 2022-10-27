@@ -12,7 +12,7 @@ TxStartTsCollector::TxStartTsCollector(LocalCcShards *shards,
                                        uint32_t delay_seconds)
     : active_(false), min_start_ts_(1UL), local_shards_(shards)
 {
-    delay_seconds_ = max(1U, delay_seconds);
+    delay_seconds_ = std::max(1U, delay_seconds);
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
@@ -119,7 +119,7 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
 
     for (auto it : min_start_ts_map_)
     {
-        min_start_ts = min(min_start_ts, it.second);
+        min_start_ts = std::min(min_start_ts, it.second);
     }
     // LOG(INFO) << "collect min start ts of all active tx :" << min_start_ts;
     return min_start_ts;
