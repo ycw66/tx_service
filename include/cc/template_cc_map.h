@@ -508,6 +508,10 @@ public:
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 TryInsertCkptList(&cce);
+
+                DLOG_IF(INFO, TRACE_OCC_ERR)
+                    << "PostWriteCc, txn:" << txn << " ,cce: " << &cce
+                    << " ,commit_ts: " << commit_ts;
             }
 
             req.Result()->SetFinished();
@@ -1062,6 +1066,14 @@ public:
             assert(req.Protocol() == CcProtocol::OCC ||
                    req.Protocol() == CcProtocol::OccRead);
             hd_res->SetError(1);  // broken repeatable read, set error.
+            DLOG_IF(INFO, TRACE_OCC_ERR)
+                << "PostReadCc, occ_err, txn:" << txn << " ,cce: " << &cc_entry
+                << " ,payload_status: "
+                << static_cast<int>(cc_entry.payload_status_)
+                << " ,key_ts: " << key_ts
+                << " ,cc_entry.commit_ts_: " << cc_entry.commit_ts_
+                << " ,gap_ts: " << gap_ts
+                << " ,cc_entry.gap_commit_ts_: " << cc_entry.gap_commit_ts_;
         }
         else if (req.Protocol() == CcProtocol::OCC ||
                  req.Protocol() == CcProtocol::OccRead)
@@ -1078,6 +1090,11 @@ public:
                      ++it)
                 {
                     conflicting_txs.AddConflictingTx(it->second->txn_);
+
+                    DLOG_IF(INFO, TRACE_OCC_ERR)
+                        << "PostReadCc, occ_err, txn:" << txn
+                        << " ,cce: " << &cc_entry
+                        << " ,gap conflict tx: " << it->second->txn_;
                 }
             }
 
@@ -1094,9 +1111,13 @@ public:
                     shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
                                            req.NodeGroupId(),
                                            ng_term);
-
                     conflicting_txs.AddConflictingTx(
                         cc_entry.key_lock_.WriteLockTx());
+
+                    DLOG_IF(INFO, TRACE_OCC_ERR)
+                        << "PostReadCc, occ_err, txn:" << txn
+                        << " ,cce: " << &cc_entry << " ,key conflict tx: "
+                        << cc_entry.key_lock_.WriteLockTx();
                 }
             }
 
@@ -1318,47 +1339,13 @@ public:
         // The request brings in the record to the cc entry for caching if
         // cce->payload_status_ is Unknown which means it doesn't override by
         // another transaction yet.
-        if (cce->payload_status_ == RecordStatus::Unknown)
+        if (req.Type() != ReadType::Inside)
         {
-            if (req.Type() == ReadType::OutsideNormal)
-            {
-                if (req.Record() != nullptr)
-                {
-                    ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                    cce->payload_ = std::make_unique<ValueT>(*typed_rec);
-                }
-                else
-                {
-                    assert(req.RecordBlob() != nullptr);
-
-                    size_t offset = 0;
-                    cce->payload_ = std::make_unique<ValueT>();
-                    cce->payload_->Deserialize(req.RecordBlob()->data(),
-                                               offset);
-                }
-                cce->payload_status_ = RecordStatus::Normal;
-                cce->commit_ts_ = req.ReadTimestamp();
-            }
-            // set tomb ccentry to prevent access data store again.
-            else if (req.Type() == ReadType::OutsideDeleted)
-            {
-                cce->payload_status_ = RecordStatus::Deleted;
-                cce->commit_ts_ = req.ReadTimestamp();
-            }
-
-            // set "ckpt_ts_" to identify the entry is backfilled
-            uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.ReadTimestamp());
-        }
-        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
-                 cce->commit_ts_ > req.ReadTimestamp())
-        {
-            // Trying to insert the record to backfill into archives is needed,
-            // because the entry may be created when executing "ReplayLogCc".
+            RecordStatus tmp_payload_status = RecordStatus::Normal;
             std::unique_ptr<ValueT> tmp_payload = std::make_unique<ValueT>();
-            RecordStatus tmp_payload_status;
             if (req.Type() == ReadType::OutsideNormal)
             {
+                tmp_payload_status = RecordStatus::Normal;
                 if (req.Record() != nullptr)
                 {
                     ValueT *typed_rec = static_cast<ValueT *>(req.Record());
@@ -1367,34 +1354,50 @@ public:
                 else
                 {
                     assert(req.RecordBlob() != nullptr);
-
                     size_t offset = 0;
                     tmp_payload = std::make_unique<ValueT>();
                     tmp_payload->Deserialize(req.RecordBlob()->data(), offset);
                 }
-                tmp_payload_status = RecordStatus::Normal;
             }
-            // set tomb ccentry to prevent access data store again.
-            else if (req.Type() == ReadType::OutsideDeleted)
+            else
             {
+                // set tomb ccentry to prevent access data store again.
                 tmp_payload_status = RecordStatus::Deleted;
             }
-            cce->AddArchiveRecord(std::move(tmp_payload),
-                                  tmp_payload_status,
-                                  req.ReadTimestamp());
 
-            // set "ckpt_ts_" to identify the entry is refilled
-            uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.ReadTimestamp());
-        }
+            if (cce->payload_status_ == RecordStatus::Unknown)
+            {
+                cce->payload_ = std::move(tmp_payload);
+                cce->payload_status_ = tmp_payload_status;
+                cce->commit_ts_ = req.ReadTimestamp();
+                // set "ckpt_ts_" to identify the entry is refilled
+                uint64_t tmp_ts = 1U;
+                cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
+                                                      req.ReadTimestamp() - 1);
+            }
+            else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
+                     cce->commit_ts_ > req.ReadTimestamp())
+            {
+                // Trying to insert the record to backfill into archives is
+                // needed, because the entry may be created when executing
+                // "ReplayLogCc".
+                cce->AddArchiveRecord(std::move(tmp_payload),
+                                      tmp_payload_status,
+                                      req.ReadTimestamp());
+                // set "ckpt_ts_" to identify the entry is refilled
+                uint64_t tmp_ts = 1U;
+                cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
+                                                      req.ReadTimestamp() - 1);
+            }
 
-        // Refill mvcc archives
-        if (shard_->EnableMvcc() &&
-            (req.Type() == ReadType::OutsideNormal ||
-             req.Type() == ReadType::OutsideDeleted) &&
-            req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
-        {
-            cce->AddArchiveRecords(*req.ArchivesPtr());
+            // Refill mvcc archives
+            if (shard_->EnableMvcc() &&
+                (req.Type() == ReadType::OutsideNormal ||
+                 req.Type() == ReadType::OutsideDeleted) &&
+                req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
+            {
+                cce->AddArchiveRecords(*req.ArchivesPtr());
+            }
         }
 
         // If 'req.IsForWrite()' is true, should read latest version;
@@ -1526,7 +1529,7 @@ public:
 
             // set "ckpt_ts_" to identify the entry is refilled
             uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs() - 1);
         }
         else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
                  cce->commit_ts_ > req.CommitTs())
@@ -1544,7 +1547,7 @@ public:
 
             // set "ckpt_ts_" to identify the entry is refilled
             uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs() - 1);
         }
         // Refill mvcc archives.
         if (shard_->EnableMvcc())

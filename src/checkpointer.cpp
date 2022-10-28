@@ -224,7 +224,8 @@ void Checkpointer::Ckpt()
 
             // flush to data store if this node group leader term does not
             // change
-            if (!ckpt_vec.empty() &&
+            if (!(ckpt_vec.empty() && archive_vec.empty() &&
+                  mv_base_vec.empty()) &&
                 Sharder::Instance().LeaderTerm(node_group) == leader_term)
             {
                 // Flushes to the data store

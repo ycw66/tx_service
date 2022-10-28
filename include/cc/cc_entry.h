@@ -450,6 +450,13 @@ public:
             archives_.emplace_front(nullptr, commit_ts_, payload_status_);
         }
 
+        if (ckpt_ts_ >= commit_ts_ && commit_ts_ != 1U)
+        {
+            // This version has not been flushed to archive table, adjust
+            // 'ckpt_ts_' to let this version can be flushed at next checkpoint.
+            ckpt_ts_.store(commit_ts_ - 1);
+        }
+
         return sizeof(commit_ts_) + sizeof(payload_status_);
     }
 
@@ -504,7 +511,7 @@ public:
             }
         }
         size_t mem_usage = 0U;
-        if (it->commit_ts_ < commit_ts)
+        if (it == archives_.end() || it->commit_ts_ < commit_ts)
         {
             it = archives_.emplace(it);
             it->commit_ts_ = commit_ts;

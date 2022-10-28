@@ -837,6 +837,11 @@ void TransactionExecution::Process(ReadOperation &read)
                              cache_miss_read_cce_addr_,
                              read.hd_result_);
 
+        DLOG(INFO) << "ReadOutside ,txn: " << tx_number_ << " ,cce:" << std::hex
+                   << cache_miss_read_cce_addr_.CcePtr() << " ,ts: " << std::dec
+                   << read.read_outside_tx_req_->commit_ts_
+                   << " ,is_deleted: " << static_cast<int>(is_deleted);
+
         return;
     }
 }
@@ -880,6 +885,13 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
             if (lock_type != LockType::NoLock)
             {
+                DLOG_IF(INFO, TRACE_OCC_ERR)
+                    << "Before AddRead, txn: " << tx_number_
+                    << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
+                    << " ,ts: " << std::dec << read_res.ts_ << " ,rec_status: "
+                    << static_cast<int>(read_res.rec_status_)
+                    << " ,lock: " << static_cast<int>(read_res.lock_type_)
+                    << " ,table: " << table_name->String();
                 bool add_res;
                 if (read_res.rec_status_ == RecordStatus::Unknown)
                 {
@@ -900,6 +912,13 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 }
                 if (!add_res)
                 {
+                    DLOG_IF(INFO, TRACE_OCC_ERR)
+                        << "AddRead, occ_err: " << tx_number_
+                        << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
+                        << " ,ts: " << read_res.ts_ << " ,rec_status: "
+                        << static_cast<int>(read_res.rec_status_)
+                        << " ,lock: " << static_cast<int>(read_res.lock_type_)
+                        << " ,table: " << table_name->String();
                     rec_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                     return;
@@ -1165,6 +1184,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         if (scan_tuple_lock_type != LockType::NoLock &&
             cc_scan_tuple->key_ts_ != 0)
         {
+            DLOG_IF(INFO, TRACE_OCC_ERR)
+                << "Before AddRead, txn: " << tx_number_ << " ,cce:" << std::hex
+                << cc_scan_tuple->cce_addr_.CcePtr() << " ,ts: " << std::dec
+                << cc_scan_tuple->key_ts_ << " ,rec_status: "
+                << static_cast<int>(cc_scan_tuple->rec_status_)
+                << " ,lock: " << static_cast<int>(scan_tuple_lock_type)
+                << " ,table: " << table_name.String();
+
             bool add_res;
             if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
             {
@@ -1185,6 +1212,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             }
             if (!add_res)
             {
+                DLOG_IF(INFO, TRACE_OCC_ERR)
+                    << "AddRead, occ_err ,txn: " << tx_number_
+                    << " ,cce:" << std::hex << cc_scan_tuple->cce_addr_.CcePtr()
+                    << " ,ts: " << std::dec << cc_scan_tuple->key_ts_
+                    << " ,rec_status: "
+                    << static_cast<int>(cc_scan_tuple->rec_status_)
+                    << " ,lock: " << static_cast<int>(scan_tuple_lock_type)
+                    << " ,table: " << table_name.String();
                 kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                 return;
             }
@@ -1235,6 +1270,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
                 }));
 
+        DLOG_IF(INFO, TRACE_OCC_ERR)
+            << "Before AddRead ,txn: " << tx_number_ << " ,cce:" << std::hex
+            << cc_scan_tuple->cce_addr_.CcePtr() << " ,ts: " << std::dec
+            << cc_scan_tuple->key_ts_
+            << " ,rec_status: " << static_cast<int>(cc_scan_tuple->rec_status_)
+            << " ,lock: " << static_cast<int>(scan_tuple_lock_type)
+            << " ,table: " << table_name.String();
+
         bool add_res;
         if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
         {
@@ -1255,6 +1298,14 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         }
         if (!add_res)
         {
+            DLOG_IF(INFO, TRACE_OCC_ERR)
+                << "AddRead, occ_err ,txn: " << tx_number_
+                << " ,cce:" << std::hex << cc_scan_tuple->cce_addr_.CcePtr()
+                << " ,ts: " << std::dec << cc_scan_tuple->key_ts_
+                << " ,rec_status: "
+                << static_cast<int>(cc_scan_tuple->rec_status_)
+                << " ,lock: " << static_cast<int>(scan_tuple_lock_type)
+                << " ,table: " << table_name.String();
             kvp_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
             return;
         }
@@ -1857,6 +1908,11 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
 
     if (validate.IsError())
     {
+        DLOG_IF(INFO, TRACE_OCC_ERR)
+            << "Validate, occ_err, txn: " << tx_number_
+            << " ,hd_result_.IsError():"
+            << static_cast<int>(validate.hd_result_.ErrorCode())
+            << " ,conflict_tx size:" << validate.hd_result_.Value().Size();
         bool_resp_->SetErrorCode(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
         Abort();
     }
