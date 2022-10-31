@@ -206,7 +206,7 @@ void txservice::LocalCcHandler::PostWrite(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
-    bool is_deleted,
+    DmlOperation dml_operation,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -229,7 +229,7 @@ void txservice::LocalCcHandler::PostWrite(
                    tx_number,
                    commit_ts,
                    record,
-                   is_deleted,
+                   dml_operation,
                    &hres,
                    protocol);
         TX_TRACE_ACTION(this, req);
@@ -249,7 +249,7 @@ void txservice::LocalCcHandler::PostWrite(
                              commit_ts,
                              cce_addr,
                              record,
-                             is_deleted,
+                             dml_operation,
                              hres,
                              protocol);
     }

@@ -482,7 +482,7 @@ void txservice::remote::RemotePostWrite::Reset(
                        input_msg->tx_number(),
                        commit_ts,
                        rec_str,
-                       post_commit.is_deleted(),
+                       static_cast<DmlOperation>(post_commit.dml_operation()),
                        &cc_res_,
                        proto_);
 

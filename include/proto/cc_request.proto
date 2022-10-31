@@ -242,7 +242,7 @@ message PostCommitRequest {
 	CceAddr_msg cce_addr = 3;
 	uint64 commit_ts = 4;
 	bytes record = 5;
-	bool is_deleted = 6;
+	uint32 dml_operation = 6;
 	CcProtocolType protocol = 7;
 }
 

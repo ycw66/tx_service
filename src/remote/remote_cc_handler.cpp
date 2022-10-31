@@ -112,7 +112,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
-    bool is_deleted,
+    DmlOperation dml_operation,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -141,7 +141,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     }
 
     post_commit->clear_record();
-    if (commit_ts > 0 && !is_deleted)
+    if (commit_ts > 0 && dml_operation != DmlOperation::Delete)
     {
         // The commit ts is 0, if the post-write request is used to clear the
         // write lock when the tx aborts.
@@ -152,7 +152,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     }
 
     post_commit->set_commit_ts(commit_ts);
-    post_commit->set_is_deleted(is_deleted);
+    post_commit->set_dml_operation(static_cast<uint32_t>(dml_operation));
     post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     hres.Txm()->EnlistToWait();

@@ -170,26 +170,29 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     UpsertTxRequest(const TableName *tab_name,
                     TxKey *key,
                     TxRecord *rec,
-                    bool is_del = false)
-        : tab_name_(tab_name), key_(key), rec_(rec), is_delete_(is_del)
+                    DmlOperation dml_operation)
+        : tab_name_(tab_name),
+          key_(key),
+          rec_(rec),
+          dml_operation_(dml_operation)
     {
     }
 
     UpsertTxRequest(const TableName *tab_name,
                     TxKey::Uptr key,
                     TxRecord::Uptr rec,
-                    bool is_del = false)
+                    DmlOperation dml_operation)
         : tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
-          is_delete_(is_del)
+          dml_operation_(dml_operation)
     {
     }
 
     const TableName *tab_name_;
     TxKey::Uptr key_;
     TxRecord::Uptr rec_;
-    bool is_delete_;
+    DmlOperation dml_operation_;
 };
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>

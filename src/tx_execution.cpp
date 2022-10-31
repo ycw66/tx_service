@@ -518,7 +518,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
     Upsert(*upsert_req.tab_name_,
            std::move(upsert_req.key_),
            std::move(upsert_req.rec_),
-           upsert_req.is_delete_ ? DmlOperation::Delete : DmlOperation::Upsert);
+           upsert_req.dml_operation_);
 }
 
 void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
@@ -1715,13 +1715,15 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         for (auto &[key_ptr, write_entry] : table_write_set)
         {
             acquire_write.acquire_write_entries_[idx] = &write_entry;
+
+            // TODO: enable is_insert after Serializable Isolation is supported.
             handler->AcquireWrite(table_name,
                                   *write_entry.key_,
                                   TxNumber(),
                                   tx_term_,
                                   command_id_.load(std::memory_order_relaxed),
                                   current_ts,
-                                  write_entry.op_ == DmlOperation::Insert,
+                                  false,
                                   acquire_write.hd_result_,
                                   idx,
                                   protocol_,
@@ -2294,7 +2296,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    commit_ts_,
                                    write_entry.cce_addr_,
                                    write_entry.rec_.get(),
-                                   write_entry.op_ == DmlOperation::Delete,
+                                   write_entry.op_,
                                    post_process.hd_result_,
                                    protocol_);
                 ++idx;
@@ -2325,13 +2327,15 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 }
                 assert(!write_entry.cce_addr_.Empty());
 
+                // Abort doesn't care the DmlOperation, since PostWrite is just
+                // used to release the lock.
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
                                    command_id_.load(std::memory_order_relaxed),
                                    0,
                                    write_entry.cce_addr_,
                                    nullptr,
-                                   false,
+                                   write_entry.op_,
                                    post_process.hd_result_,
                                    protocol_);
 

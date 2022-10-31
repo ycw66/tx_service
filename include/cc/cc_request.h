@@ -571,8 +571,7 @@ public:
         : cce_addr_(nullptr),
           commit_ts_(0),
           payload_(nullptr),
-          payload_str_(nullptr),
-          is_deleted_(false)
+          payload_str_(nullptr)
     {
     }
 
@@ -583,7 +582,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                const TxRecord *rec,
-               bool is_deleted,
+               DmlOperation dml_operation,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -594,7 +593,7 @@ public:
         commit_ts_ = ts;
         payload_ = rec;
         payload_str_ = nullptr;
-        is_deleted_ = is_deleted;
+        dml_operation_ = dml_operation;
 
         if (addr->InsertPtr() != 0)
         {
@@ -614,7 +613,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                const std::string *rec,
-               bool is_deleted,
+               DmlOperation dml_operation,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -625,7 +624,7 @@ public:
         commit_ts_ = ts;
         payload_ = nullptr;
         payload_str_ = rec;
-        is_deleted_ = is_deleted;
+        dml_operation_ = dml_operation;
 
         if (addr->InsertPtr() != 0)
         {
@@ -661,9 +660,9 @@ public:
         return payload_str_;
     }
 
-    bool IsDeleted() const
+    DmlOperation GetDmlOperation() const
     {
-        return is_deleted_;
+        return dml_operation_;
     }
 
 private:
@@ -671,7 +670,7 @@ private:
     uint64_t commit_ts_;
     const TxRecord *payload_;
     const std::string *payload_str_;
-    bool is_deleted_;
+    DmlOperation dml_operation_;
 };
 
 struct PostWriteAllCc

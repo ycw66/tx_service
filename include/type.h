@@ -22,9 +22,12 @@ constexpr Void void_ = Void();
 
 #define void_return return void_;
 
+// @brief DmlOperation is not strictly equivalent to SQL DML.
+// One line of SQL update statement may be implemented by multple
+// UpsertTxRequest.
 enum class DmlOperation
 {
-    Update,
+    Update = 1,
     Delete,
     Insert,
     Upsert

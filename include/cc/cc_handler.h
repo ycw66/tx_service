@@ -116,7 +116,7 @@ public:
                            uint64_t commit_ts,
                            const CcEntryAddr &ccentry_addr,
                            const TxRecord *record,
-                           bool is_deleted,
+                           DmlOperation dml_operation,
                            CcHandlerResult<PostProcessResult> &hres,
                            CcProtocol protocol) = 0;
 

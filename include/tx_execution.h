@@ -306,7 +306,7 @@ private:
     void Upsert(const TableName &table_name,
                 TxKey::Uptr key,
                 TxRecord::Uptr rec,
-                DmlOperation op = DmlOperation::Upsert);
+                DmlOperation op);
 
     void Insert(const TableName &table_name,
                 TxKey::Uptr key,

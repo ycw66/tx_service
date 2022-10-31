@@ -366,7 +366,7 @@ public:
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
         const std::string *payload_str = req.PayloadStr();
-        bool is_del = req.IsDeleted();
+        bool is_del = req.GetDmlOperation() == DmlOperation::Delete;
 
         if (cce_addr.InsertPtr() != 0)
         {
