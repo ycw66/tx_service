@@ -1,10 +1,9 @@
 #include "tx_execution.h"
 
-#include <stdint.h>
-
 #include <bitset>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <string>
 
@@ -2401,6 +2400,12 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+
+#ifdef METRICS_COLLECTOR_ENABLE
+    tx_processor_->MetricCollect(metrics::Value::IncDecValue::Increment,
+                                 post_process_total,
+                                 std::nullopt);
+#endif
     Reset();
 }
 
@@ -2735,5 +2740,4 @@ void TransactionExecution::PostProcess(NoOp &no_op)
     state_stack_.pop_back();
     Forward();
 }
-
 }  // namespace txservice

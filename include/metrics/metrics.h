@@ -10,7 +10,31 @@
 
 namespace txservice::metrics
 {
+// FIXME: The code duplicates the value type in mono_metrics
+struct Value
+{
+    enum IncDecValue
+    {
+        Increment,
+        Decrement,
+        None,
+    };
+    IncDecValue inc_dec;
+    double value;
+
+    Value() = delete;
+
+    explicit Value(IncDecValue inc_dec_) : inc_dec{inc_dec_}, value{0}
+    {
+    }
+
+    explicit Value(double value_) : inc_dec{None}, value{value_}
+    {
+    }
+};
+
 using Meter = std::function<void(double)>;
+using MeterV2 = std::function<void(Value)>;
 using MetricsLabels = std::vector<std::pair<std::string, std::string>>;
 
 struct MetricsNaming
@@ -23,6 +47,11 @@ struct MetricsNaming
     };
     std::string name;
     Type type;
+
+    bool operator==(const MetricsNaming &naming) const
+    {
+        return name == naming.name && type == naming.type;
+    }
 };
 
 enum class MetricsErrors
@@ -48,6 +77,8 @@ public:
     virtual std::unique_ptr<Meter> Register(MetricsNaming &&,
                                             MetricsLabels &&) = 0;
 
+    virtual std::unique_ptr<MeterV2> RegisterV2(MetricsNaming &&,
+                                                MetricsLabels &&) = 0;
     virtual ~MetricsRegistry() = default;
 };
 }  // namespace txservice::metrics

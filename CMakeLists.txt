@@ -118,7 +118,12 @@ if(RANGE_PARTITION_ENABLED)
   add_compile_definitions(RANGE_PARTITION_ENABLED)
 endif()
 
-SET (TxService_SOURCES
+if (METRICS_COLLECTOR_ENABLE)
+    add_compile_definitions(METRICS_COLLECTOR_ENABLE)
+endif ()
+
+
+SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/tx_execution.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_operation.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/checkpointer.cpp
@@ -143,6 +148,7 @@ SET (TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/cc_node.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/metrics/tx_meter.cpp
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})

@@ -14,6 +14,8 @@
 #include "cc/ccm_scanner.h"
 #include "cc_protocol.h"
 #include "log_closure.h"
+#include "metrics/metrics.h"
+#include "metrics/tx_meter.h"
 #include "read_write_set.h"
 #include "tx_operation.h"
 #include "tx_req_result.h"
@@ -437,6 +439,13 @@ private:
 
     // clean archives
     CleanCcEntryForTestOp clean_entry_op_;
+
+#ifdef METRICS_COLLECTOR_ENABLE
+    metrics::MetricsNaming post_process_total = {
+        "tx_post_process_total",
+        metrics::MetricsNaming::MetricsNaming::Type::Counter,
+    };
+#endif
 
     friend struct TransactionOperation;
     friend struct CompositeTransactionOperation;

@@ -16,6 +16,8 @@
 #include "checkpointer.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
+#include "metrics/metrics.h"
+#include "metrics/tx_meter.h"
 #include "moodycamelqueue.h"
 #include "tx_execution.h"
 #include "tx_request.h"
@@ -46,12 +48,27 @@ public:
     static const int64_t t1sec = 1000000L;
     static const int64_t t2sec = 4000000L;
 
-    TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
+    TxProcessor(metrics::MetricsRegistry *metrics_registry,
+                size_t thd_id,
+                LocalCcShards &shards,
+                TxLog *txlog_hd)
         : thd_id_(thd_id),
           terminated_(false),
           local_cc_shards_(shards),
           free_tx_list_(),
           txlog_hd_(txlog_hd)
+#ifdef METRICS_COLLECTOR_ENABLE
+          ,
+          tx_meter_ptr_(metrics_registry == nullptr
+                            ? nullptr
+                            : std::make_unique<metrics::TxMeter>(
+                                  metrics_registry, thd_id, shards.NodeId()))
+#endif
+    {
+    }
+
+    TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
+        : TxProcessor(nullptr, thd_id, shards, txlog_hd)
     {
     }
 
@@ -391,6 +408,20 @@ public:
         return local_cc_shards_.ShardClockTs(thd_id_);
     }
 
+#ifdef METRICS_COLLECTOR_ENABLE
+    void MetricCollect(const metrics::Value metric_value,
+                       metrics::MetricsNaming &naming_,
+                       std::optional<metrics::MetricsLabels> label_)
+    {
+        if (!tx_meter_ptr_)
+        {
+            return;
+        }
+        auto meter =
+            tx_meter_ptr_->GetMeter(std::move(naming_), std::move(label_));
+        (*meter)(metric_value);
+    }
+#endif
     size_t thd_id_;
     std::atomic<bool> terminated_;
 
@@ -439,6 +470,11 @@ public:
     TxLog *txlog_hd_;
 
     friend class TxService;
+
+private:
+#ifdef METRICS_COLLECTOR_ENABLE
+    std::unique_ptr<metrics::TxMeter> tx_meter_ptr_;
+#endif
 };
 
 class TxService
@@ -477,8 +513,16 @@ public:
             node_id, ips, ports, &local_cc_shards_, std::move(log_hd));
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
+#if defined(METRICS_COLLECTOR_ENABLE)
+            pool_.emplace_back(std::make_unique<TxProcessor>(
+                metrics_registry,
+                thd_idx,
+                local_cc_shards_,
+                Sharder::Instance().GetLogAgent()));
+#else
             pool_.emplace_back(std::make_unique<TxProcessor>(
                 thd_idx, local_cc_shards_, Sharder::Instance().GetLogAgent()));
+#endif
         }
 
         Sharder::Instance().Init(local_path);
@@ -601,4 +645,5 @@ public:
     // workloads between TxProcessors.
     std::atomic<uint32_t> tx_runs_{0};
 };
+
 }  // namespace txservice
