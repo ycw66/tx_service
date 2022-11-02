@@ -442,6 +442,8 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
     entry.commit_ts_ = 12U;
     entry.payload_status_ = RecordStatus::Deleted;
     entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
+    std::unique_ptr<NonBlockingLock> lock = std::make_unique<NonBlockingLock>();
+    entry.key_lock_ptr_ = lock.get();
 
     // [10,9,8,6,3,2]
     std::vector<VersionTxRecord> records;  // desc order
@@ -474,7 +476,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
               0,
               CcProtocol::Locking,
               IsolationLevel::Snapshot);
-    entry.key_lock_.AcquireWriteLock(&req, 1, CcProtocol::Locking);
+    entry.key_lock_ptr_->AcquireWriteLock(&req, CcProtocol::Locking);
     entry.wlock_ts_ = 13;
 
     // (read_ts: 9)->... => 9
@@ -513,7 +515,6 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
         REQUIRE_FALSE(res);
     }
 
-    entry.key_lock_.ReleaseWriteLock(req.Txn(), nullptr);
+    entry.key_lock_ptr_->ReleaseWriteLock(req.Txn(), nullptr);
 }
-
 }  // namespace txservice

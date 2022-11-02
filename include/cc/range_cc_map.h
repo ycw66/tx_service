@@ -505,15 +505,15 @@ public:
             stage == ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
         {
             // Add write lock on old range cce
-            bool success = old_range_cce->key_lock_.AcquireWriteLock(
-                &req, 0, CcProtocol::Locking);
+            bool success = old_range_cce->GetKeyLock().AcquireWriteLock(
+                &req, CcProtocol::Locking);
             assert(success);
         }
         else if (stage == ::txlog::SplitRangeOpMessage::CopingOldRangeData)
         {
             // Add write intention on old range cce
-            bool success = old_range_cce->key_lock_.AcquireWriteIntent(
-                &req, 0, CcProtocol::Locking);
+            bool success = old_range_cce->GetKeyLock().AcquireWriteIntent(
+                &req, CcProtocol::Locking);
             assert(success);
         }
 

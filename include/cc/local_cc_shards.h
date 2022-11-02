@@ -21,7 +21,6 @@
 #include "metrics/metrics.h"
 #include "raft_log.pb.h"
 #include "store/data_store_handler.h"
-#include "table_lock.h"
 #include "template_cc_map.h"
 #include "type.h"
 

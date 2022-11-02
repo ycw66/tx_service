@@ -14,6 +14,7 @@
 #include "catalog.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
+#include "cc/non_blocking_lock.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_req_base.h"
@@ -23,7 +24,6 @@
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "sharder.h"
-#include "table_lock.h"
 #include "tentry.h"
 
 namespace txservice
@@ -32,6 +32,10 @@ class SingleShardScanner;
 class CcMapScanner;
 class Checkpointer;
 class LocalCcShards;
+
+#define LOCK_VECTOR_SHRINK_THRESHOLD 4
+#define RESIZE_LOCK_LIMIT 3
+#define LOCK_ARRAY_INIT_SIZE 8192
 
 // store table catalog information in ccshard
 class TableCatalog
@@ -151,6 +155,12 @@ public:
      *
      */
     TEntry &NewTx();
+
+    /**
+     * @brief Find an available NonBlockingLock in lock array and initialize it.
+     *
+     */
+    NonBlockingLock *NewLock();
 
     TEntry *LocateTx(const TxId &tx_id);
 
@@ -321,8 +331,16 @@ public:
             }
         }
 
+        TryResizeLockArray();
+
         return min_ts;
     }
+
+    /**
+     * Try to reduce the size of lock array if it becomes sparse.
+     *
+     */
+    void TryResizeLockArray();
 
     const CatalogEntry *CreateCatalog(const TableName &table_name,
                                       NodeGroupId cc_ng_id,
@@ -426,6 +444,8 @@ public:
 
     void DecrementMemory(size_t mem_size);
 
+    void DecreaseLockCount();
+
     const uint32_t node_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
@@ -470,6 +490,14 @@ private:
     std::vector<TEntry> tx_vec_;
     // pointer to the next slot in tx array.
     uint32_t next_tx_idx_;
+
+    // all the lock acquire/release on this ccshard. It used to reduce the cost
+    // of allocation/dellocation of memory.
+    std::vector<NonBlockingLock::Uptr> lock_vec_;
+    // pointer to the next slot in lock array.
+    uint32_t next_lock_idx_;
+    uint32_t used_lock_count_;
+
     // tx identifier inside a CPU core. It's a uint32 value and will become 0
     // after wraparound. Global tx_number is 64 bits: higher 32 bits are
     // global_core_id, while lower 32 bits are tx_ident.
@@ -513,6 +541,9 @@ private:
     std::atomic<uint64_t> min_si_tx_start_ts_{1U};
     // last timestamp of updating "min_si_tx_start_ts_"
     uint64_t last_scan_txs_ts_{0U};
+    // track the lock sparse number and reduce lock array size if threshold
+    // reached.
+    uint8_t lock_sparse_num_{0};
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

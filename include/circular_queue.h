@@ -12,7 +12,66 @@ public:
         vec_ = std::make_unique<T[]>(capacity);
     }
 
+    CircularQueue(CircularQueue &&rhs)
+    {
+        head_ = rhs.head_;
+        cnt_ = rhs.cnt_;
+        capacity_ = rhs.capacity_;
+        vec_ = std::move(rhs.vec_);
+    }
+
+    CircularQueue &operator=(CircularQueue &&rhs)
+    {
+        if (this != &rhs)
+        {
+            head_ = rhs.head_;
+            cnt_ = rhs.cnt_;
+            capacity_ = rhs.capacity_;
+            vec_ = std::move(rhs.vec_);
+        }
+        return *this;
+    }
+
+    CircularQueue(const CircularQueue &rhs)
+    {
+        head_ = rhs.head_;
+        cnt_ = rhs.cnt_;
+        capacity_ = rhs.capacity_;
+        vec_ = std::make_unique<T[]>(capacity_);
+        for (size_t i = 0; i < capacity_; i++)
+        {
+            vec_[i] = rhs.vec_[i];
+        }
+    }
+
+    CircularQueue &operator=(const CircularQueue &rhs)
+    {
+        if (this != &rhs)
+        {
+            head_ = rhs.head_;
+            cnt_ = rhs.cnt_;
+            capacity_ = rhs.capacity_;
+            vec_ = std::make_unique<T[]>(capacity_);
+            for (size_t i = 0; i < capacity_; i++)
+            {
+                vec_[i] = rhs.vec_[i];
+            }
+        }
+        return *this;
+    }
+
     ~CircularQueue() = default;
+
+    void Reset()
+    {
+        head_ = 0;
+        cnt_ = 0;
+        if (capacity_ > 8)
+        {
+            capacity_ = 8;
+            vec_ = std::make_unique<T[]>(capacity_);
+        }
+    }
 
     void Enqueue(const T &item)
     {

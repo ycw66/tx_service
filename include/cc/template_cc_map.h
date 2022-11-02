@@ -469,8 +469,9 @@ public:
             CcEntry<KeyT, ValueT> &cce =
                 *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
-            if (cce.key_lock_.HasWriteLock() &&
-                cce.key_lock_.WriteLockTx() != txn)
+            if (cce.key_lock_ptr_ != nullptr &&
+                cce.GetKeyLock().HasWriteLock() &&
+                cce.GetKeyLock().WriteLockTx() != txn)
             {
                 req.Result()->SetFinished();
                 return true;
@@ -1105,21 +1106,22 @@ public:
                 cc_entry.last_read_ts_ =
                     std::max(cc_entry.last_read_ts_, commit_ts);
 
-                if (cc_entry.key_lock_.HasWriteLock() &&
-                    txn != cc_entry.key_lock_.HasWriteLock())
+                if (cc_entry.key_lock_ptr_ != nullptr &&
+                    cc_entry.GetKeyLock().HasWriteLock() &&
+                    txn != cc_entry.GetKeyLock().HasWriteLock())
                 {
                     int64_t ng_term =
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
-                    shard_->CheckRecoverTx(cc_entry.key_lock_.WriteLockTx(),
+                    shard_->CheckRecoverTx(cc_entry.GetKeyLock().WriteLockTx(),
                                            req.NodeGroupId(),
                                            ng_term);
                     conflicting_txs.AddConflictingTx(
-                        cc_entry.key_lock_.WriteLockTx());
+                        cc_entry.GetKeyLock().WriteLockTx());
 
                     DLOG_IF(INFO, TRACE_OCC_ERR)
                         << "PostReadCc, occ_err, txn:" << txn
                         << " ,cce: " << &cc_entry << " ,key conflict tx: "
-                        << cc_entry.key_lock_.WriteLockTx();
+                        << cc_entry.GetKeyLock().WriteLockTx();
                 }
             }
 
@@ -1451,7 +1453,7 @@ public:
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
                 cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp())
             {
-                cce->key_lock_.InsertBlockingQueue(&req, req.TxTerm());
+                cce->GetKeyLock().InsertBlockingQueue(&req);
 
                 // After inserting to blocking queue, the execution of current
                 // ReadCc request should stop.
@@ -2811,7 +2813,8 @@ public:
 
                 TryInsertCkptList(cce);
 
-                if (cce->key_lock_.HasWriteLock())
+                if (cce->key_lock_ptr_ != nullptr &&
+                    cce->GetKeyLock().HasWriteLock())
                 {
                     // If the record in the log has a commit ts greater than
                     // that of the cc entry and the cc entry has a write
@@ -2819,7 +2822,7 @@ public:
                     // the log record.
                     // TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
-                    TxNumber txn = cce->key_lock_.WriteLockTx();
+                    TxNumber txn = cce->GetKeyLock().WriteLockTx();
                     ReleaseCceKeyLock(cce, txn);
                 }
             }
@@ -3051,7 +3054,7 @@ protected:
         }
 
         CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.emplace_hint(lb_it, KeyT(key), this);
+        auto em_it = ccm_.emplace_hint(lb_it, std::move(key), this);
         new_cce_ptr = &em_it->second;
         new_cce_ptr->key_ = &em_it->first;
 

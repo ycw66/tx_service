@@ -3,6 +3,7 @@
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
+#include "cc/non_blocking_lock.h"  // lock_vec_
 #include "checkpointer.h"
 #include "sharder.h"  // Sharder
 #include "tx_start_ts_collector.h"
@@ -27,6 +28,9 @@ CcShard::CcShard(uint16_t core_id,
       req_buf_(),
       tx_vec_(),
       next_tx_idx_(0),
+      lock_vec_(),
+      next_lock_idx_(0),
+      used_lock_count_(0),
       next_tx_ident_(0),
       ts_base_(base_ts),
       head_cce_(nullptr),
@@ -46,6 +50,12 @@ CcShard::CcShard(uint16_t core_id,
     for (int idx = 0; idx < 128; ++idx)
     {
         tx_vec_.emplace_back(idx);
+    }
+
+    lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
+    for (int idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
+    {
+        lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
     }
 
     head_cce_.lru_prev_ = nullptr;
@@ -176,6 +186,54 @@ TEntry &CcShard::NewTx()
     ++next_tx_idx_;
     next_tx_idx_ = next_tx_idx_ == tx_vec_.size() ? 0 : next_tx_idx_;
     return tentry;
+}
+
+NonBlockingLock *CcShard::NewLock()
+{
+    // Cicurlar iteration to find an available lock.
+    size_t cnt = 0;
+    while (cnt < lock_vec_.size())
+    {
+        NonBlockingLock *lentry = lock_vec_[next_lock_idx_].get();
+
+        if (lentry->GetUsedStatus() == false)
+        {
+            break;
+        }
+        ++next_lock_idx_;
+        if (next_lock_idx_ >= lock_vec_.size())
+        {
+            next_lock_idx_ = 0;
+        }
+
+        ++cnt;
+    }
+
+    if (cnt == lock_vec_.size())
+    {
+        uint32_t old_size = (uint32_t) lock_vec_.size();
+        // Increases the capacity of the lock vector.
+        uint32_t new_size = (uint32_t) (lock_vec_.size() * 2);
+        lock_vec_.reserve(new_size);
+
+        DLOG(INFO) << "the size of lock array increased to: " << new_size;
+
+        for (uint32_t idx = old_size; idx < new_size; ++idx)
+        {
+            lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
+        }
+
+        // position old_size must be an available slot.
+        next_lock_idx_ = old_size;
+    }
+
+    NonBlockingLock *lentry = lock_vec_.at(next_lock_idx_).get();
+    lentry->Reset();
+    lentry->SetUsedStatus(true);
+    used_lock_count_++;
+    ++next_lock_idx_;
+    next_lock_idx_ = next_lock_idx_ == lock_vec_.size() ? 0 : next_lock_idx_;
+    return lentry;
 }
 
 TEntry *CcShard::LocateTx(const TxId &tx_id)
@@ -379,7 +437,8 @@ void CcShard::ClearTx(TxNumber txn)
     TxLockInfo &lk_info = tx_it->second;
     for (auto &lru_ptr : lk_info.cce_list_)
     {
-        lru_ptr->key_lock_.ClearTx(txn, this);
+        lru_ptr->GetKeyLock().ClearTx(txn, this);
+        lru_ptr->RecycleKeyLock();
     }
     lock_holding_txs_.erase(tx_it);
 }
@@ -850,5 +909,56 @@ uint64_t CcShard::LocalMinSiTxStartTs()
 uint64_t CcShard::GlobalMinSiTxStartTs()
 {
     return TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+}
+
+void CcShard::DecreaseLockCount()
+{
+    used_lock_count_--;
+}
+
+void CcShard::TryResizeLockArray()
+{
+    // shrink the lock vector when it becomes sparse.
+    if (lock_vec_.size() > LOCK_ARRAY_INIT_SIZE &&
+        used_lock_count_ < (lock_vec_.size() >> LOCK_VECTOR_SHRINK_THRESHOLD))
+    {
+        // shrink lock array size if and only if the lock used count is low
+        // for a period of time.
+        if (lock_sparse_num_ < RESIZE_LOCK_LIMIT)
+        {
+            // mark lock array is sparse, but not to shrink the array now.
+            lock_sparse_num_++;
+            return;
+        }
+        lock_sparse_num_ = 0;
+
+        uint32_t high_idx = 0;
+        uint32_t low_idx = 0;
+
+        // shrink the capacity of the lock vector.
+        uint32_t old_size = (uint32_t) lock_vec_.size();
+        uint32_t new_size =
+            (uint32_t) (lock_vec_.size() >> (LOCK_VECTOR_SHRINK_THRESHOLD - 1));
+
+        // move the used slot whose position is larger than new_size to the
+        // front of lock array.
+        for (high_idx = new_size; high_idx < old_size; high_idx++)
+        {
+            if (lock_vec_[high_idx]->GetUsedStatus())
+            {
+                // find an unused slot
+                while (lock_vec_[low_idx]->GetUsedStatus())
+                {
+                    low_idx++;
+                }
+                lock_vec_[low_idx++] = std::move(lock_vec_[high_idx]);
+            }
+        }
+        lock_vec_.resize(new_size);
+        lock_vec_.shrink_to_fit();
+        next_lock_idx_ = next_lock_idx_ >= new_size ? 0 : next_lock_idx_;
+
+        DLOG(INFO) << "the size of lock array decreased to: " << new_size;
+    }
 }
 }  // namespace txservice

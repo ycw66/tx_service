@@ -130,7 +130,6 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
 }
 
 LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
-                                          int64_t tx_term,
                                           CcProtocol cc_protocol,
                                           LockType lock_type)
 {
@@ -152,7 +151,7 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     }
     case LockType::ReadLock:
     {
-        bool success = AcquireReadLock(cc_req, tx_term);
+        bool success = AcquireReadLock(cc_req);
         lock_status =
             success ? LockOpStatus::Successful : LockOpStatus::Blocked;
         break;
@@ -161,13 +160,13 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     {
         if (cc_protocol == CcProtocol::OccRead)
         {
-            bool success = AcquireWriteIntent(cc_req, tx_term, cc_protocol);
+            bool success = AcquireWriteIntent(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Failed;
         }
         else if (cc_protocol == CcProtocol::Locking)
         {
-            bool success = AcquireWriteIntent(cc_req, tx_term, cc_protocol);
+            bool success = AcquireWriteIntent(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Blocked;
         }
@@ -177,13 +176,13 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     {
         if (cc_protocol == CcProtocol::OCC)
         {
-            bool success = AcquireWriteLock(cc_req, tx_term, cc_protocol);
+            bool success = AcquireWriteLock(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Failed;
         }
         else
         {
-            bool success = AcquireWriteLock(cc_req, tx_term, cc_protocol);
+            bool success = AcquireWriteLock(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Blocked;
         }
@@ -226,13 +225,11 @@ void NonBlockingLock::ReleaseLock(TxNumber tx_number,
  * 3. put the request into blocking queue under LOCKING/OccRead protocol.
  *
  * @param cc_req: lock request.
- * @param tx_term: term of ccnode group where the transaction resides.
  * @param protocol: OCC, OccRead, LOCKING.
  * @return true: lock succeeds.
  * @return false: lock failed.
  */
 bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
-                                       int64_t tx_term,
                                        CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
@@ -257,7 +254,7 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
         {
             // block the request by putting it into the blocking queue.
             blocking_queue_.Enqueue(
-                LockQueueEntry(cc_req, LockType::WriteLock, tx_term));
+                LockQueueEntry(cc_req, LockType::WriteLock));
         }
         // OCC doesn't enqueue request.
         return false;
@@ -274,11 +271,10 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
  * 3. put the request into blocking queue if lock fails.
  *
  * @param cc_req: lock request.
- * @param tx_term: term of ccnode group where the transaction resides.
  * @return true: lock succeeds.
  * @return false: lock failed, push request into blocking.
  */
-bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req, int64_t tx_term)
+bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req)
 {
     TxNumber tx_number = cc_req->Txn();
     // fast path for lock is already held.
@@ -305,8 +301,7 @@ bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req, int64_t tx_term)
     {
         // protocol must be LOCKING, since tx under OCC never acquires read
         // locks.
-        blocking_queue_.Enqueue(
-            LockQueueEntry(cc_req, LockType::ReadLock, tx_term));
+        blocking_queue_.Enqueue(LockQueueEntry(cc_req, LockType::ReadLock));
         return false;
     }
 }
@@ -369,14 +364,12 @@ void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
  * LOCKING protocol, put the request into blocking queue.
  *
  * @param cc_req: lock request.
- * @param tx_term: term of ccnode group where the transaction resides.
  * @param protocol: OccRead or LOCKING.
  * @return true: lock succeeds.
  * @return false: lock failed, push request into blocking for LOCKING
  * protocol. return directly for OCC protocol.
  */
 bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
-                                         int64_t tx_term,
                                          CcProtocol protocol)
 {
     TxNumber tx_number = cc_req->Txn();
@@ -404,7 +397,7 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
         {
             // block the request by putting it into the blocking queue.
             blocking_queue_.Enqueue(
-                LockQueueEntry(cc_req, LockType::WriteIntent, tx_term));
+                LockQueueEntry(cc_req, LockType::WriteIntent));
         }
         // OccRead doesn't enqueue request.
         return false;
@@ -463,17 +456,16 @@ void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
     }
 }
 
-void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
-                                          int64_t tx_term)
+void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req)
 {
-    blocking_queue_.EnqueueAsFirst(
-        LockQueueEntry(cc_req, LockType::NoLock, tx_term));
+    blocking_queue_.EnqueueAsFirst(LockQueueEntry(cc_req, LockType::NoLock));
 }
 
 bool NonBlockingLock::IsEmpty() const
 {
     return read_intentions_.empty() && read_locks_.empty() &&
-           is_write_lock_empty_ && blocking_queue_.Size() == 0;
+           is_write_intent_empty_ && is_write_lock_empty_ &&
+           blocking_queue_.Size() == 0;
 }
 
 TxNumber NonBlockingLock::WriteLockTx() const

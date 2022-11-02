@@ -178,13 +178,34 @@ public:
                                   TableType tbl_type) const = 0;
 
     /**
+     * @brief Get key lock from lock array if it is null.
+     *
+     */
+    NonBlockingLock &GetKeyLock();
+
+    /**
+     * @brief Get gap lock from lock array if it is null.
+     *
+     */
+    NonBlockingLock &GetGapLock();
+
+    /**
+     * @brief When release a lock, ccentry should call TryResetKeyLock to try to
+     * recycle the lock ptr to lock array if lock set is empty.
+     *
+     */
+    void RecycleKeyLock();
+
+    void RecycleGapLock();
+
+    /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
      * lock, no gap lock and not 'dirty' entry (entry which has been
      * checkpointed since the last change).
      *
      * @return true: entry can be kicked out.
      */
-    bool IsFree() const;
+    bool IsFree();
 
     // Lru link which records the age of entries, when ccmap is full, kickout
     // the entries by the order of lru.
@@ -196,8 +217,8 @@ public:
     LruEntry *ckpt_next_{nullptr};
     CcMap *const parent_map_;
 
-    NonBlockingLock key_lock_;
-    NonBlockingLock gap_lock_;
+    NonBlockingLock *key_lock_ptr_{nullptr};
+    NonBlockingLock *gap_lock_ptr_{nullptr};
 
     uint64_t commit_ts_{1};
     // "last_read_ts_" is updated in tow cases:
@@ -357,11 +378,12 @@ public:
         // LruEntry field members:
         // size of lru_prev_, lru_next_, ckpt_prev_, ckpt_next_, parent_map_
         mem_usage_ += 5 * ptr_size;
-        // two NonBlockingLocks
-        mem_usage_ += key_lock_.MemUsage() + gap_lock_.MemUsage();
         // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_
         // and ckpt_ts_
         mem_usage_ += 5 * sizeof(uint64_t);
+
+        // size of key_lock_ptr_ and gap_lock_ptr_
+        mem_usage_ += 2 * sizeof(uint64_t);
 
         // CcEntry field members:
         // size of pointer and KeyT
@@ -596,7 +618,8 @@ public:
         }
         if (commit_ts_ <= ts)
         {
-            if (key_lock_.HasWriteLock() && wlock_ts_ < ts)
+            if (key_lock_ptr_ != nullptr && GetKeyLock().HasWriteLock() &&
+                wlock_ts_ < ts)
             {
                 // Having write lock means the ccentry will be updated soon.
                 // If wlock_ts_ < ts, the future 'commit_ts' is may also less

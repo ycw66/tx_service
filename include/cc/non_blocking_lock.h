@@ -1,6 +1,9 @@
 #pragma once
 
+#include <butil/logging.h>
+
 #include <unordered_set>
+#include <utility>
 
 #include "cc_protocol.h"
 #include "cc_req_base.h"
@@ -20,8 +23,67 @@ struct CcEntry;
 class NonBlockingLock
 {
 public:
-    NonBlockingLock() = default;
-    NonBlockingLock(const NonBlockingLock &rhs) = delete;
+    using Uptr = std::unique_ptr<NonBlockingLock>;
+
+    NonBlockingLock()
+    {
+    }
+
+    ~NonBlockingLock()
+    {
+    }
+
+    NonBlockingLock(const NonBlockingLock &rhs) = default;
+
+    NonBlockingLock(const NonBlockingLock &&rhs)
+    {
+        read_intentions_ = std::move(rhs.read_intentions_);
+        read_locks_ = std::move(rhs.read_locks_);
+        write_lock_tx_ = rhs.write_lock_tx_;
+        is_write_lock_empty_ = rhs.is_write_lock_empty_;
+        write_intent_tx_ = rhs.write_intent_tx_;
+        is_write_intent_empty_ = rhs.is_write_intent_empty_;
+        blocking_queue_ = std::move(rhs.blocking_queue_);
+        is_used_ = rhs.is_used_;
+    }
+
+    NonBlockingLock &operator=(NonBlockingLock &&rhs)
+    {
+        if (this != &rhs)
+        {
+            read_intentions_ = std::move(rhs.read_intentions_);
+            read_locks_ = std::move(rhs.read_locks_);
+            write_lock_tx_ = rhs.write_lock_tx_;
+            is_write_lock_empty_ = rhs.is_write_lock_empty_;
+            write_intent_tx_ = rhs.write_intent_tx_;
+            is_write_intent_empty_ = rhs.is_write_intent_empty_;
+            blocking_queue_ = std::move(rhs.blocking_queue_);
+            is_used_ = rhs.is_used_;
+        }
+        return *this;
+    }
+
+    void Reset()
+    {
+        read_intentions_.clear();
+        read_locks_.clear();
+        write_lock_tx_ = 0;
+        is_write_lock_empty_ = true;
+        write_intent_tx_ = 0;
+        is_write_intent_empty_ = true;
+        is_used_ = false;
+        blocking_queue_.Reset();
+    }
+
+    void SetUsedStatus(bool is_used)
+    {
+        is_used_ = is_used;
+    }
+
+    bool GetUsedStatus()
+    {
+        return is_used_;
+    }
 
     /**
      * @brief Tries to acqurie the write lock. The operation succeeds, if no one
@@ -32,14 +94,11 @@ public:
      * request returns without blocking.
      *
      * @param cc_req The cc request that tries to acquire the write lock.
-     * @param tx_term The term of the cc node from which the tx comes.
      * @param protocol The cc protocol control the tx uses.
      * @return true, if the request acquires the write lock successfully; false,
      * if the request is blocked and put into the waiting queue.
      */
-    bool AcquireWriteLock(CcRequestBase *cc_req,
-                          int64_t tx_term,
-                          CcProtocol protocol);
+    bool AcquireWriteLock(CcRequestBase *cc_req, CcProtocol protocol);
 
     void ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
 
@@ -49,9 +108,7 @@ public:
      */
     void DowngradeWriteLock(TxNumber tx_number, CcShard *ccs);
 
-    bool AcquireWriteIntent(CcRequestBase *cc_req,
-                            int64_t tx_term,
-                            CcProtocol protocol);
+    bool AcquireWriteIntent(CcRequestBase *cc_req, CcProtocol protocol);
 
     void ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs);
 
@@ -63,11 +120,10 @@ public:
      * blocked and waiting for the write lock.
      *
      * @param cc_req The cc request that tries to acquire the write lock.
-     * @param tx_term The term of the cc node from which the tx comes.
      * @return true, if the request acquires the read lock successfully; false,
      * if the request is blocked and put into the blocking queue.
      */
-    bool AcquireReadLock(CcRequestBase *cc_req, int64_t tx_term);
+    bool AcquireReadLock(CcRequestBase *cc_req);
 
     void ReleaseReadLock(TxNumber tx_number, CcShard *ccs);
 
@@ -84,13 +140,12 @@ public:
     void ReleaseReadIntent(TxNumber tx_number);
 
     LockOpStatus AcquireLock(CcRequestBase *cc_req,
-                             int64_t tx_term,
                              CcProtocol protocol,
                              LockType lock_type);
 
     void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
-    void InsertBlockingQueue(CcRequestBase *cc_req, int64_t tx_term);
+    void InsertBlockingQueue(CcRequestBase *cc_req);
 
     bool IsEmpty() const;
 
@@ -132,14 +187,47 @@ private:
     {
         LockQueueEntry() = default;
 
-        LockQueueEntry(CcRequestBase *req, LockType type, int64_t tx_term)
-            : req_(req), lk_type_(type), tx_term_(tx_term)
+        LockQueueEntry(CcRequestBase *req, LockType type)
+            : req_(req), lk_type_(type)
         {
+        }
+
+        LockQueueEntry(const LockQueueEntry &rhs)
+        {
+            req_ = rhs.req_;
+            lk_type_ = rhs.lk_type_;
+        }
+
+        LockQueueEntry(LockQueueEntry &&rhs)
+        {
+            req_ = rhs.req_;
+            lk_type_ = rhs.lk_type_;
+        }
+
+        LockQueueEntry &operator=(const LockQueueEntry &rhs)
+        {
+            if (this != &rhs)
+            {
+                req_ = rhs.req_;
+                lk_type_ = rhs.lk_type_;
+            }
+
+            return *this;
+        }
+
+        LockQueueEntry &operator=(LockQueueEntry &&rhs)
+        {
+            if (this != &rhs)
+            {
+                req_ = rhs.req_;
+                lk_type_ = rhs.lk_type_;
+            }
+
+            return *this;
         }
 
         CcRequestBase *req_{nullptr};
         LockType lk_type_{LockType::ReadLock};
-        int64_t tx_term_;
     };
 
     void ExecuteQueuedRequest(const LockQueueEntry &queue_head, CcShard *ccs);
@@ -173,6 +261,8 @@ private:
     bool is_write_lock_empty_{true};
     TxNumber write_intent_tx_{0};
     bool is_write_intent_empty_{true};
+    bool is_used_{false};
+
     // blocking_queue_ stores the requests that 1) want to acquire lock/intent
     // but failed due to conflict, or 2) want to read a pk record whose commit
     // ts is less than the commit ts of the corresponding secondary index the
