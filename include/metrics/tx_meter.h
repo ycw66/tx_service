@@ -3,6 +3,7 @@
 //
 #pragma once
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
