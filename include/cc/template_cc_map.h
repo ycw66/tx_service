@@ -39,12 +39,14 @@ public:
                   const TableName &table_name,
                   uint64_t schema_ts,
                   const TableSchema *table_schema = nullptr,
-                  bool ccm_has_full_entries = false)
+                  bool ccm_has_full_entries = false,
+                  bool is_catalog_cc_map = false)
         : CcMap(
               shard, table_name, table_schema, schema_ts, ccm_has_full_entries),
           ccm_(),
           neg_inf_(this),
-          pos_inf_(this)
+          pos_inf_(this),
+          is_catalog_cc_map_(is_catalog_cc_map)
     {
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
@@ -3033,7 +3035,9 @@ protected:
             return &lb_it->second;
         }
 
-        if (shard_->Full())
+        // catalog ccmap bypass shard memory limit. since checkpointer may
+        // emplace ccentry into ccmap.
+        if (shard_->Full() && !is_catalog_cc_map_)
         {
             // The shard has reached the maximal capacity. Tries to clean cc
             // entries that have been checkpointed but are not being
@@ -3079,11 +3083,11 @@ protected:
         return new_cce_ptr;
     }
 
-    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key,
-                                   uint64_t ts,
-                                   bool force_to_emplace = false)
+    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key, uint64_t ts)
     {
-        if (shard_->Full() && !force_to_emplace)
+        // catalog ccmap bypass shard memory limit. since checkpointer may
+        // emplace ccentry into ccmap.
+        if (shard_->Full() && !is_catalog_cc_map_)
         {
             // The shard has reached the maximal capacity. Try cleaning cc
             // entries that has been checkpointed and is not accessed by
@@ -3128,11 +3132,8 @@ protected:
             next_cce->map_prev_ = new_cce_ptr;
         }
 
-        if (!force_to_emplace)
-        {
-            shard_->UpdateLruList(new_cce_ptr);
-            shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
-        }
+        shard_->UpdateLruList(new_cce_ptr);
+        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
 
         return new_cce_ptr;
     }
@@ -3717,5 +3718,6 @@ protected:
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
+    bool is_catalog_cc_map_;
 };
 }  // namespace txservice

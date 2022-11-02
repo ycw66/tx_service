@@ -30,7 +30,8 @@ public:
      * @param shard
      */
     CatalogCcMap(CcShard *shard, const TableName &table_name)
-        : TemplateCcMap<CatalogKey, CatalogRecord>(shard, table_name, 1)
+        : TemplateCcMap<CatalogKey, CatalogRecord>(
+              shard, table_name, 1, nullptr, false, true)
     {
     }
 
