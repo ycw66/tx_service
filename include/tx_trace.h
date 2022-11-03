@@ -15,7 +15,7 @@
 #include "tx_id.h"
 #define TX_TRACE_DISABLED
 
-#define TRACE_OCC_ERR true
+#define TRACE_OCC_ERR false
 
 #define FMT_POINTER_TO_UINT64T(pointer) \
     fmt_hex(reinterpret_cast<uint64_t>(pointer))

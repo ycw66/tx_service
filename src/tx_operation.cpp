@@ -2065,6 +2065,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                                              &hd_res);
                             if (!succ)
                             {
+                                DLOG(INFO) << "FindRangeMedianKey failed: "
+                                           << table_name.String() << " "
+                                           << partition_id;
                                 hd_res.SetError(-1);
                             }
                             else
@@ -2472,45 +2475,67 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             {
                 ACTION_FAULT_INJECTOR("af_ds_upsert_new_range");
 
-                // prepare ds_upsert_new_range_op_
-                ds_upsert_new_range_op_.op_func_ =
-                    [&range_table_name = range_table_name_,
-                     table_schema = table_schema_,
-                     key = new_range_key_.get(),
-                     partition_id = new_partition_id_,
-                     ts = txm->commit_ts_,
-                     &hd_res = ds_upsert_new_range_op_.hd_result_]
+                if (txm->commit_ts_ == 0)
                 {
-                    TxWorkerPool *tx_worker_pool =
-                        Sharder::Instance().GetTxWorkerPool();
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    tx_worker_pool->SubmitWork(
-                        [range_table_name,
-                         table_schema,
-                         key,
-                         partition_id,
-                         ts,
-                         &hd_res,
-                         store_hd]
-                        {
-                            bool succ = store_hd->UpsertRange(range_table_name,
-                                                              table_schema,
-                                                              key,
-                                                              partition_id,
-                                                              ts);
-                            if (succ)
-                            {
-                                hd_res.SetFinished();
-                            }
-                            else
-                            {
-                                hd_res.SetError(-1);
-                            }
-                        });
-                };
+                    // The split op failed without prepare log, bypass any retry
+                    DLOG(ERROR)
+                        << "DsSplitRangeOp is aborted without prepare log";
+                    txm->state_stack_.pop_back();
+                    assert(txm->state_stack_.empty());
+                    txm->ds_split_range_op_ = nullptr;
 
-                ForwardToSubOperation(txm, &ds_upsert_new_range_op_);
+                    if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                            txm->tx_term_))
+                    {
+                        txm->Abort();
+                    }
+
+                    uint32_t node_group_id = txm->TxCcNodeId();
+                    Sharder::Instance().UnpinNodeGroupData(node_group_id);
+                }
+                else
+                {
+                    // prepare ds_upsert_new_range_op_
+                    ds_upsert_new_range_op_.op_func_ =
+                        [&range_table_name = range_table_name_,
+                         table_schema = table_schema_,
+                         key = new_range_key_.get(),
+                         partition_id = new_partition_id_,
+                         ts = txm->commit_ts_,
+                         &hd_res = ds_upsert_new_range_op_.hd_result_]
+                    {
+                        TxWorkerPool *tx_worker_pool =
+                            Sharder::Instance().GetTxWorkerPool();
+                        store::DataStoreHandler *const store_hd =
+                            Sharder::Instance().GetLocalCcShards()->store_hd_;
+                        tx_worker_pool->SubmitWork(
+                            [range_table_name,
+                             table_schema,
+                             key,
+                             partition_id,
+                             ts,
+                             &hd_res,
+                             store_hd]
+                            {
+                                bool succ =
+                                    store_hd->UpsertRange(range_table_name,
+                                                          table_schema,
+                                                          key,
+                                                          partition_id,
+                                                          ts);
+                                if (succ)
+                                {
+                                    hd_res.SetFinished();
+                                }
+                                else
+                                {
+                                    hd_res.SetError(-1);
+                                }
+                            });
+                    };
+
+                    ForwardToSubOperation(txm, &ds_upsert_new_range_op_);
+                }
             }
         }
     }

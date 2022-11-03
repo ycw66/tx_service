@@ -111,7 +111,19 @@ struct TableRangeEntryWithShade
 
 struct InitRangeEntry
 {
-    InitRangeEntry(const InitRangeEntry &rhs) = delete;
+    InitRangeEntry() : key_(nullptr), partition_id_(-1), version_ts_(-1)
+    {
+    }
+
+    InitRangeEntry(const InitRangeEntry &rhs)
+        : key_(nullptr),
+          partition_id_(rhs.partition_id_),
+          version_ts_(rhs.version_ts_)
+    {
+        std::unique_ptr<TxKey> key =
+            rhs.key_ == nullptr ? nullptr : rhs.key_->Clone();
+        key_ = std::move(key);
+    }
 
     InitRangeEntry(std::unique_ptr<TxKey> start_key,
                    int32_t partition_id,
@@ -127,6 +139,21 @@ struct InitRangeEntry
           partition_id_(rhs.partition_id_),
           version_ts_(rhs.version_ts_)
     {
+    }
+
+    InitRangeEntry &operator=(const InitRangeEntry &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+        std::unique_ptr<TxKey> key =
+            rhs.key_ == nullptr ? nullptr : rhs.key_->Clone();
+        key_ = std::move(key);
+        partition_id_ = rhs.partition_id_;
+        version_ts_ = rhs.version_ts_;
+
+        return *this;
     }
 
     std::unique_ptr<TxKey> key_{nullptr};

@@ -76,7 +76,12 @@ public:
             auto table_range = table_range_with_shade.shade_.get() != nullptr
                                    ? table_range_with_shade.shade_.get()
                                    : table_range_with_shade.shader_.get();
-            if (partition_id == 0)
+
+            const KeyT *start_key =
+                static_cast<const KeyT *>(table_range->start_key_.get());
+
+            // start_key_ nullptr stands for neg_inf
+            if (start_key == nullptr)
             {
                 RangeRecord *neg_inf_rec =
                     TemplateCcMap<KeyT, RangeRecord>::neg_inf_.payload_.get();
@@ -86,9 +91,6 @@ public:
                 TemplateCcMap<KeyT, RangeRecord>::neg_inf_.commit_ts_ = 1;
                 continue;
             }
-
-            const KeyT *start_key =
-                static_cast<const KeyT *>(table_range->start_key_.get());
 
             CcEntry<KeyT, RangeRecord> *cce =
                 TemplateCcMap<KeyT, RangeRecord>::FindEmplace(

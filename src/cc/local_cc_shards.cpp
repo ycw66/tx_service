@@ -334,33 +334,25 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     std::map<int32_t, TableRangeEntryWithShade> &ranges =
         table_it.first->second;
 
-    if (init_ranges.empty())
+    assert(init_ranges.size() > 0);
+    for (size_t pidx = 0; pidx < init_ranges.size() - 1; ++pidx)
     {
-        ranges.try_emplace(0, nullptr, 1, 0, INT32_MAX);
+        InitRangeEntry &range_entry = init_ranges[pidx];
+        InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
+
+        ranges.try_emplace(range_entry.partition_id_,
+                           std::move(range_entry.key_),
+                           range_entry.version_ts_,
+                           range_entry.partition_id_,
+                           next_range_entry.partition_id_);
     }
-    else
-    {
-        ranges.try_emplace(0, nullptr, 1, 0, init_ranges[0].partition_id_);
 
-        for (size_t pidx = 0; pidx < init_ranges.size() - 1; ++pidx)
-        {
-            InitRangeEntry &range_entry = init_ranges[pidx];
-            InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
-
-            ranges.try_emplace(range_entry.partition_id_,
-                               std::move(range_entry.key_),
-                               range_entry.version_ts_,
-                               range_entry.partition_id_,
-                               next_range_entry.partition_id_);
-        }
-
-        InitRangeEntry &last_range_entry = init_ranges.back();
-        ranges.try_emplace(last_range_entry.partition_id_,
-                           std::move(last_range_entry.key_),
-                           last_range_entry.version_ts_,
-                           last_range_entry.partition_id_,
-                           INT32_MAX);
-    }
+    InitRangeEntry &last_range_entry = init_ranges.back();
+    ranges.try_emplace(last_range_entry.partition_id_,
+                       std::move(last_range_entry.key_),
+                       last_range_entry.version_ts_,
+                       last_range_entry.partition_id_,
+                       INT32_MAX);
 }
 
 std::map<int32_t, TableRangeEntryWithShade> *

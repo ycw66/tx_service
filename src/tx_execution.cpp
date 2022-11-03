@@ -2391,11 +2391,17 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
 
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
-        bool_resp_->Finish(true);
+        if (bool_resp_ != nullptr)
+        {
+            bool_resp_->Finish(true);
+        }
     }
     else if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Aborted)
     {
-        bool_resp_->Finish(false);
+        if (bool_resp_ != nullptr)
+        {
+            bool_resp_->Finish(false);
+        }
     }
 
     // transaction can be recycled and put into free list.
