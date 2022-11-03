@@ -326,7 +326,7 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          bool is_key_write_lock)
 {
     auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
-    em_it.first->second.cce_list_.emplace(cce_ptr);
+    em_it.first->second.lock_list_.emplace(cce_ptr->key_lock_ptr_);
     if (is_key_write_lock)
     {
         // write lock should update ts if the txn exists, or the CkptTsCc
@@ -351,13 +351,13 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
     }
 
     TxLockInfo &lk_info = tx_it->second;
-    lk_info.cce_list_.erase(cce_ptr);
+    lk_info.lock_list_.erase(cce_ptr->key_lock_ptr_);
     if (is_key_write_lock)
     {
         lk_info.key_write_lock_count_--;
     }
 
-    if (lk_info.cce_list_.empty())
+    if (lk_info.lock_list_.empty())
     {
         lock_holding_txs_.erase(tx_it);
     }
@@ -435,10 +435,13 @@ void CcShard::ClearTx(TxNumber txn)
     }
 
     TxLockInfo &lk_info = tx_it->second;
-    for (auto &lru_ptr : lk_info.cce_list_)
+    for (auto &key_lock_ptr_ : lk_info.lock_list_)
     {
-        lru_ptr->GetKeyLock().ClearTx(txn, this);
-        lru_ptr->RecycleKeyLock();
+        key_lock_ptr_->ClearTx(txn, this);
+        if (key_lock_ptr_->IsEmpty())
+        {
+            key_lock_ptr_->SetUsedStatus(false);
+        }
     }
     lock_holding_txs_.erase(tx_it);
 }

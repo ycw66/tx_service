@@ -58,7 +58,7 @@ struct TxLockInfo
         : tx_coord_term_(tx_coord_term),
           ts_(ts),
           last_recover_ts_(0),
-          cce_list_(),
+          lock_list_(),
           key_write_lock_count_(0)
     {
     }
@@ -74,8 +74,8 @@ struct TxLockInfo
     uint64_t ts_;
     // The last time when the tx is recovered.
     uint64_t last_recover_ts_;
-    // A list of cc entries on which the tx has acquired write/read locks.
-    std::unordered_set<LruEntry *> cce_list_;
+    // A list of locks which the tx has acquired write/read.
+    std::unordered_set<NonBlockingLock *> lock_list_;
     // How many write locks in this tx for current shard
     int32_t key_write_lock_count_;
 };
