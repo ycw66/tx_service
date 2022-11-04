@@ -33,9 +33,9 @@ class CcMapScanner;
 class Checkpointer;
 class LocalCcShards;
 
-#define LOCK_VECTOR_SHRINK_THRESHOLD 4
-#define RESIZE_LOCK_LIMIT 3
-#define LOCK_ARRAY_INIT_SIZE 8192
+#define LOCK_VECTOR_SHRINK_THRESHOLD 4u
+#define RESIZE_LOCK_LIMIT 3u
+#define LOCK_ARRAY_INIT_SIZE 8192u
 
 // store table catalog information in ccshard
 class TableCatalog

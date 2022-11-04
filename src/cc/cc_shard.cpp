@@ -941,7 +941,7 @@ void CcShard::TryResizeLockArray()
         // shrink the capacity of the lock vector.
         uint32_t old_size = (uint32_t) lock_vec_.size();
         uint32_t new_size =
-            (uint32_t) (lock_vec_.size() >> (LOCK_VECTOR_SHRINK_THRESHOLD - 1));
+            (uint32_t) (old_size >> (LOCK_VECTOR_SHRINK_THRESHOLD - 1u));
 
         // move the used slot whose position is larger than new_size to the
         // front of lock array.
