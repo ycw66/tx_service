@@ -136,6 +136,7 @@ public:
      */
     virtual bool PutArchivesAll(uint32_t node_group,
                                 const txservice::TableName &table_name,
+                                const txservice::KVCatalogInfo *kv_info,
                                 std::vector<txservice::FlushRecord> &batch) = 0;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
@@ -152,6 +153,7 @@ public:
      * version.
      */
     virtual bool FetchVisibleArchive(const TableName &table_name,
+                                     const txservice::KVCatalogInfo *kv_info,
                                      const TxKey &key,
                                      const uint64_t upper_bound_ts,
                                      TxRecord &rec,
@@ -163,6 +165,7 @@ public:
      */
     virtual bool FetchArchives(
         const txservice::TableName &table_name,
+        const txservice::KVCatalogInfo *kv_info,
         const txservice::TxKey &key,
         std::vector<txservice::VersionTxRecord> &archives,
         uint64_t from_ts) = 0;

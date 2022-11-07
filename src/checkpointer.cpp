@@ -303,7 +303,10 @@ void Checkpointer::Ckpt()
                 if (ckpt_ret && local_shards_.EnableMvcc())
                 {
                     bool flush_undo_ret = store_hd_->PutArchivesAll(
-                        node_group, ccm->table_name_, archive_vec);
+                        node_group,
+                        ccm->table_name_,
+                        ccm->GetTableSchema()->GetKVCatalogInfo(),
+                        archive_vec);
 
                     if (flush_undo_ret)
                     {
@@ -469,7 +472,11 @@ bool Checkpointer::FlushArchiveForTest(LruEntry *entry,
     bool ckpt_ret = false;
     CcMap *ccm = entry->parent_map_;
     uint32_t ng = Sharder::Instance().NodeId();
-    ckpt_ret = store_hd_->PutArchivesAll(ng, ccm->table_name_, archives);
+    ckpt_ret =
+        store_hd_->PutArchivesAll(ng,
+                                  ccm->table_name_,
+                                  ccm->GetTableSchema()->GetKVCatalogInfo(),
+                                  archives);
     return ckpt_ret;
 }
 

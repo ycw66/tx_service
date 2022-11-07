@@ -144,8 +144,11 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
         cce->GetKeyLock().ReleaseLock(tx_number, shard_, acquired_lock);
         cce->RecycleKeyLock();
         acquired_lock = LockType::NoLock;
+        // Here "DeleteLockHoldingTx" is required. For, this may be a retried
+        // request and the prior blocked request may has upsert tx's lock info.
+        shard_->DeleteLockHoldingTx(tx_number, cce, false);
     }
-    else
+    else if (acquired_lock != LockType::NoLock)
     {
         shard_->UpsertLockHoldingTx(
             tx_number, tx_term, cce, acquired_lock == LockType::WriteLock);

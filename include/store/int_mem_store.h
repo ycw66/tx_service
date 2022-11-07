@@ -228,6 +228,7 @@ public:
      */
     bool PutArchivesAll(uint32_t node_group,
                         const txservice::TableName &table_name,
+                        const txservice::KVCatalogInfo *kv_info,
                         std::vector<txservice::FlushRecord> &batch) override
     {
         assert(false);
@@ -252,6 +253,7 @@ public:
      * version.
      */
     bool FetchVisibleArchive(const txservice::TableName &table_name,
+                             const txservice::KVCatalogInfo *kv_info,
                              const txservice::TxKey &key,
                              const uint64_t upper_bound_ts,
                              txservice::TxRecord &rec,
@@ -280,6 +282,7 @@ public:
      * @brief  Fetch all archives whose commit_ts >= from_ts.
      */
     bool FetchArchives(const txservice::TableName &table_name,
+                       const txservice::KVCatalogInfo *kv_info,
                        const txservice::TxKey &key,
                        std::vector<txservice::VersionTxRecord> &archives,
                        uint64_t from_ts) override
