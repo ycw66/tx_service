@@ -1239,8 +1239,12 @@ public:
                 // have been acquired.
                 cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-                acquired_lock = LockHandleForResumedRequest(
-                    &req, req.TxTerm(), cce, cce->payload_status_);
+                acquired_lock =
+                    LockHandleForResumedRequest(&req,
+                                                req.TxTerm(),
+                                                cce,
+                                                cce->payload_status_,
+                                                req.IsWaitForPostWrite());
                 lock_op_status = LockOpStatus::Successful;
             }
             else
@@ -1453,7 +1457,8 @@ public:
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
                 cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp())
             {
-                cce->GetKeyLock().InsertBlockingQueue(&req);
+                req.SetIsWaitForPostWrite(true);
+                WaitForPostWriteDone(&req, cce);
 
                 // After inserting to blocking queue, the execution of current
                 // ReadCc request should stop.

@@ -171,7 +171,11 @@ protected:
     LockType LockHandleForResumedRequest(CcRequestBase *req,
                                          int64_t tx_term,
                                          LruEntry *cce,
-                                         RecordStatus cce_payload_status);
+                                         RecordStatus cce_payload_status,
+                                         bool is_wait_for_postwrite = false);
+
+    // Insert the request into key_lock's blocking queue.
+    void WaitForPostWriteDone(CcRequestBase *req, LruEntry *cce);
 
     void RecoverTxForLockConfilct(NonBlockingLock &lock,
                                   LockType lock_type,

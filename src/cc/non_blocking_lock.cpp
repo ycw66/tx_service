@@ -456,9 +456,10 @@ void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
     }
 }
 
-void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req)
+void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
+                                          LockType lock_type)
 {
-    blocking_queue_.EnqueueAsFirst(LockQueueEntry(cc_req, LockType::NoLock));
+    blocking_queue_.EnqueueAsFirst(LockQueueEntry(cc_req, lock_type));
 }
 
 bool NonBlockingLock::IsEmpty() const

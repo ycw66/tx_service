@@ -134,12 +134,19 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
 LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
                                             int64_t tx_term,
                                             LruEntry *cce,
-                                            RecordStatus cce_payload_status)
+                                            RecordStatus cce_payload_status,
+                                            bool is_wait_for_postwrite)
 {
     TxNumber tx_number = req->Txn();
     LockType acquired_lock = cce->GetKeyLock().LockTypeHeldByTx(tx_number);
-    if (cce_payload_status == RecordStatus::Deleted &&
-        acquired_lock != LockType::WriteLock)
+    if (is_wait_for_postwrite)
+    {
+        assert(acquired_lock == LockType::ReadLock);
+        cce->GetKeyLock().ReleaseLock(tx_number, shard_, LockType::ReadLock);
+        acquired_lock = LockType::NoLock;
+    }
+    else if (cce_payload_status == RecordStatus::Deleted &&
+             acquired_lock != LockType::WriteLock)
     {
         cce->GetKeyLock().ReleaseLock(tx_number, shard_, acquired_lock);
         cce->RecycleKeyLock();
@@ -148,13 +155,20 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
         // request and the prior blocked request may has upsert tx's lock info.
         shard_->DeleteLockHoldingTx(tx_number, cce, false);
     }
-    else if (acquired_lock != LockType::NoLock)
+    else
     {
+        assert(acquired_lock != LockType::NoLock);
         shard_->UpsertLockHoldingTx(
             tx_number, tx_term, cce, acquired_lock == LockType::WriteLock);
     }
 
     return acquired_lock;
+}
+
+void CcMap::WaitForPostWriteDone(CcRequestBase *req, LruEntry *cce)
+{
+    assert(cce->GetKeyLock().HasWriteLock());
+    cce->GetKeyLock().InsertBlockingQueue(req, LockType::ReadLock);
 }
 
 void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,

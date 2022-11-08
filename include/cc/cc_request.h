@@ -968,6 +968,7 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
+        is_wait_for_post_write_ = false;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -1013,6 +1014,7 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = false;
+        is_wait_for_post_write_ = false;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -1109,6 +1111,16 @@ public:
         return is_local_;
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
@@ -1126,6 +1138,10 @@ private:
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
+    // If CcEntry's CommitTs is less than read_ts when do
+    // "PkReadCorrespondingSk" or "SnapshotRead", there must be a PostWriteCc
+    // request has not done, then, this read should wait until it is completed.
+    bool is_wait_for_post_write_{false};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };

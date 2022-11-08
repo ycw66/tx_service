@@ -145,7 +145,7 @@ public:
 
     void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
-    void InsertBlockingQueue(CcRequestBase *cc_req);
+    void InsertBlockingQueue(CcRequestBase *cc_req, LockType lock_type);
 
     bool IsEmpty() const;
 
