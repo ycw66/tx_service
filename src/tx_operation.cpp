@@ -71,8 +71,6 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     // put sleep operation on top of the stack.
     txm->PushOperation(&txm->sleep_op_);
     txm->StartTiming();
-
-    txm->EnlistToWait();
 }
 
 ReadOperation::ReadOperation(TransactionExecution *txm) : hd_result_(txm)
@@ -122,7 +120,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
         bool force_success = hd_result_.ForceError();
         if (force_success)
         {
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
         // If forcing error fails, it means that the remote response returns
@@ -267,7 +264,6 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
         if (success)
         {
             AggregateAcquiredKeys(txm);
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
         // Else, all acquire-write requests finish normally. The tx must have
@@ -358,7 +354,6 @@ void ValidateOperation::Forward(TransactionExecution *txm)
         bool success = hd_result_.ForceError();
         if (success)
         {
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
         // Else, all post-read requests finish normally, meaning the tx has
@@ -528,7 +523,6 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
     }
@@ -622,7 +616,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 
         if (retry_num_ > 0)
         {
-            txm->ForceToForward();
             ReRunOp(txm);
             return;
         }
@@ -631,7 +624,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             bool force_success = hd_result_.ForceError();
             if (force_success)
             {
-                txm->ForceToForward();
                 txm->PostProcess(*this);
             }
         }
@@ -697,7 +689,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         bool force_success = hd_result_.ForceError();
         if (force_success)
         {
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
     }
@@ -854,7 +845,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         }
                         else if (retry_num_ > 0)
                         {
-                            txm->ForceToForward();
                             ReRunOp(txm);
                             return;
                         }
@@ -864,7 +854,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
             if (force_error_cnt > 0)
             {
-                txm->ForceToForward();
                 txm->PostProcess(*this);
             }
             // Else, all remote requests finish normally, meaning the tx has
@@ -999,7 +988,6 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
-            txm->ForceToForward();
             txm->PostProcess(*this);
         }
     }

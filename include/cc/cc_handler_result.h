@@ -32,8 +32,8 @@ class CcHandlerResultBase
 {
 public:
     virtual ~CcHandlerResultBase() = default;
-    virtual void SetError(int8_t err_code, bool remote_response = false) = 0;
-    virtual void SetFinished(bool remote_response = false) = 0;
+    virtual void SetError(int8_t err_code) = 0;
+    virtual void SetFinished() = 0;
     virtual bool IsFinished() const = 0;
     virtual bool ForceError() = 0;
     virtual bool IsError() const = 0;
@@ -123,8 +123,8 @@ public:
         return result_;
     }
 
-    void SetFinished(bool remote_response = false) override;
-    void SetError(int8_t err_code, bool remote_response = false) override;
+    void SetFinished() override;
+    void SetError(int8_t err_code) override;
     /**
      * @brief Forces the handler result to an error state.
      *

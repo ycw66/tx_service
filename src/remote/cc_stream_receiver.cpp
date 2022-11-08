@@ -199,7 +199,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            hd_res->SetError(cc_res.error_code(), true);
+            hd_res->SetError(cc_res.error_code());
         }
         else
         {
@@ -237,7 +237,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
-                hd_res->SetFinished(true);
+                hd_res->SetFinished();
             }
         }
 
@@ -287,7 +287,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code(), true);
+            hd_res->SetError(cc_res.error_code());
         }
         else
         {
@@ -309,7 +309,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_all_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_all_res.commit_ts_ = cc_res.commit_ts();
-                hd_res->SetFinished(true);
+                hd_res->SetFinished();
             }
         }
 
@@ -384,18 +384,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code(), true);
+            hd_res->SetError(cc_res.error_code());
         }
         else
         {
             if (cc_res.txs_size() == 0)
             {
-                hd_res->SetFinished(true);
+                hd_res->SetFinished();
             }
             else
             {
                 // Does not perform tx negotiations so far.
-                hd_res->SetError(1, true);
+                hd_res->SetError(1);
             }
         }
         msg_pool_.enqueue(std::move(msg));
@@ -435,11 +435,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code(), true);
+            hd_res->SetError(cc_res.error_code());
         }
         else
         {
-            hd_res->SetFinished(true);
+            hd_res->SetFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -507,7 +507,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (read_res.error_code() != 0)
         {
-            hd_res->SetError(read_res.error_code(), true);
+            hd_res->SetError(read_res.error_code());
         }
         else
         {
@@ -558,7 +558,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 read_result.ts_ = read_res.ts();
                 read_result.lock_type_ =
                     ToLocalType::ConvertLockType(read_res.lock_type());
-                hd_res->SetFinished(true);
+                hd_res->SetFinished();
             }
         }
         msg_pool_.enqueue(std::move(msg));
@@ -705,11 +705,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_open_res.error_code() != 0)
         {
-            hd_res->SetError(scan_open_res.error_code(), true);
+            hd_res->SetError(scan_open_res.error_code());
         }
         else
         {
-            hd_res->SetFinished(true);
+            hd_res->SetFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -793,11 +793,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_next_res.error_code() != 0)
         {
-            hd_res->SetError(scan_next_res.error_code(), true);
+            hd_res->SetError(scan_next_res.error_code());
         }
         else
         {
-            hd_res->SetFinished(true);
+            hd_res->SetFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -833,11 +833,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (fi_res.error_code() != 0)
         {
-            hd_res->SetError(fi_res.error_code(), true);
+            hd_res->SetError(fi_res.error_code());
         }
         else
         {
-            hd_res->SetFinished(true);
+            hd_res->SetFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -876,11 +876,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (clean_res.error_code() != 0)
         {
-            hd_res->SetError(clean_res.error_code(), true);
+            hd_res->SetError(clean_res.error_code());
         }
         else
         {
-            hd_res->SetFinished(true);
+            hd_res->SetFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));

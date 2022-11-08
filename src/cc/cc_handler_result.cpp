@@ -16,7 +16,7 @@
 namespace txservice
 {
 template <typename T>
-void CcHandlerResult<T>::SetFinished(bool remote_response)
+void CcHandlerResult<T>::SetFinished()
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -50,16 +50,8 @@ void CcHandlerResult<T>::SetFinished(bool remote_response)
             }
 
             bool expect = false;
-            bool success = is_finished_.compare_exchange_strong(
+            is_finished_.compare_exchange_strong(
                 expect, true, std::memory_order_acq_rel);
-
-            // Remote cc requests at remote nodes do not reference any tx
-            // machines. The sending tx will be enlisted for execution when it
-            // receives the response of remote cc requests.
-            if (success && txm_ != nullptr)
-            {
-                txm_->EnlistToExecute(remote_response, true);
-            }
         }
     }
     else
@@ -70,21 +62,13 @@ void CcHandlerResult<T>::SetFinished(bool remote_response)
         }
 
         bool expect = false;
-        bool success = is_finished_.compare_exchange_strong(
+        is_finished_.compare_exchange_strong(
             expect, true, std::memory_order_acq_rel);
-
-        // Remote cc requests at remote nodes do not reference any tx machines.
-        // The sending tx will be enlisted for execution when it receives the
-        // response of remote cc requests.
-        if (success && txm_ != nullptr)
-        {
-            txm_->EnlistToExecute(remote_response, false);
-        }
     }
 };
 
 template <typename T>
-void CcHandlerResult<T>::SetError(int8_t err_code, bool remote_response)
+void CcHandlerResult<T>::SetError(int8_t err_code)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,

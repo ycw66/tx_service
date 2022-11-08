@@ -49,6 +49,7 @@ public:
     // The number of read/write/scan keys when the tx is considered to be
     // "large"
     static const uint32_t LargeTxKeySize = 1000;
+    static const uint32_t LoopCnt = 10000;
 
     TransactionExecution(CcHandler *handler,
                          TxLog *tx_log,
@@ -179,32 +180,6 @@ public:
     {
         start_ts_ = ts;
     }
-
-    /**
-     * @brief A tx enlists itself in the binding tx processor for execution,
-     * when (1) one of its local/remote cc requests returns a response, or (2)
-     * it receives a tx request from the external user.
-     *
-     * @param remote_response Whether or not enlisting is the result of a remote
-     * response.
-     */
-    void EnlistToExecute(bool remote_response, bool skip_remote_cnt);
-
-    /**
-     * @brief Before a tx sends a remote cc request, enlists itself into the
-     * waiting queue of the binding tx processor. The tx processor periodically
-     * checks the tx's in the waiting queue and forces them to retry or abort,
-     * if remote requests time out because of remote failures.
-     *
-     */
-    void EnlistToWait();
-
-    /**
-     * @brief The tx has timed out and is about to move foward to retry or
-     * abort. Removes itself from the waiting queue of the binding tx processor.
-     *
-     */
-    void ForceToForward();
 
 private:
     /**
@@ -357,6 +332,9 @@ private:
     // The {command_id_} increases when TxExectuion handle a new TxRequest or
     // send remote cc requests.
     std::atomic<uint16_t> command_id_;
+
+    // The number of calls to Forward() at a given state.
+    uint32_t state_forward_cnt_;
 
     // The local time when the tx machine first moves to its current state.
     uint64_t state_clock_;

@@ -522,11 +522,6 @@ void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
     }
 }
 
-void LocalCcShards::WakeUpTxProcessor(uint16_t core_id)
-{
-    tx_service_->WakeUpTxProcessor(core_id);
-}
-
 std::shared_ptr<TableSchema> LocalCcShards::GetSharedTableSchema(
     const TableName &table_name, NodeGroupId ng_id)
 {

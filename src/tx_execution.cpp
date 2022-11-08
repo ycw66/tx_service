@@ -271,37 +271,14 @@ void TransactionExecution::RecoverSplitRangeTx(
     state_stack_.push_back(ds_split_range_op_.get());
 }
 
-void TransactionExecution::EnlistToExecute(bool remote_response,
-                                           bool skip_remote_cnt)
-{
-    tx_processor_->EnlistExecutingTx(this, remote_response, skip_remote_cnt);
-}
-
-void TransactionExecution::EnlistToWait()
-{
-    tx_processor_->EnlistWaitingTx(this);
-}
-
-void TransactionExecution::ForceToForward()
-{
-    tx_processor_->RemoveWaitingTx(this);
-}
-
 void TransactionExecution::Forward()
 {
     if (state_stack_.empty())
     {
-        TxRequest *req = next_req_.exchange(nullptr);
-        if (req != nullptr)
-        {
-            req->Process(this);
-        }
+        return;
     }
-    else
-    {
-        prev_op_ = state_stack_.back();
-        prev_op_->Forward(this);
-    }
+    prev_op_ = state_stack_.back();
+    prev_op_->Forward(this);
 }
 
 void TransactionExecution::ForwardTs(uint64_t candidate_ts)
@@ -326,7 +303,6 @@ int TransactionExecution::Execute(TxRequest *tx_req)
     {
         assert(next_req_.load(std::memory_order_acquire) == nullptr);
         next_req_.store(tx_req, std::memory_order_release);
-        EnlistToExecute(false, true);
         return 0;
     }
     else
@@ -339,27 +315,33 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 
 bool TransactionExecution::IsTimeOut(int wait_secs)
 {
-    uint64_t now_ts = LocalCcShards::ClockTs();
-    using namespace std::chrono_literals;
-    // TODO remove this hard code 10 seconds
-    uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::seconds(wait_secs))
-                            .count();
-    if (now_ts - state_clock_ > duration)
+    ++state_forward_cnt_;
+    if (state_forward_cnt_ == LoopCnt)
     {
-        // The local clock is advanced in roughly 2 seconds. So, if the
-        // current time is greater than the prior one by at least 4
-        // seconds(local clock advances at least two times), then we can
-        // confirm the tx machine has been stuck in this state for at least
-        // 2 seconds.
-        //
-        // local clock(s):      0          2          4
-        //                |----------|----------|----------|
-        //                          ^            ^
-        // current time:          prior         now
-        //
-        state_clock_ = now_ts;
-        return true;
+        state_forward_cnt_ = 0;
+        uint64_t now_ts = LocalCcShards::ClockTs();
+        using namespace std::chrono_literals;
+        // TODO remove this hard code 10 seconds
+        uint64_t duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::seconds(wait_secs))
+                .count();
+        if (now_ts - state_clock_ > duration)
+        {
+            // The local clock is advanced in roughly 2 seconds. So, if the
+            // current time is greater than the prior one by at least 4
+            // seconds(local clock advances at least two times), then we can
+            // confirm the tx machine has been stuck in this state for at least
+            // 2 seconds.
+            //
+            // local clock(s):      0          2          4
+            //                |----------|----------|----------|
+            //                          ^            ^
+            // current time:          prior         now
+            //
+            state_clock_ = now_ts;
+            return true;
+        }
     }
 
     return false;
@@ -367,6 +349,7 @@ bool TransactionExecution::IsTimeOut(int wait_secs)
 
 void TransactionExecution::StartTiming()
 {
+    state_forward_cnt_ = 0;
     state_clock_ = LocalCcShards::ClockTs();
 }
 
