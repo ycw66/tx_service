@@ -325,13 +325,11 @@ public:
 
     size_t MemUsage() const
     {
-        size_t mem_usage_ = 0;
+        size_t mem_usage_ = sizeof(*this);
         if (payload_ != nullptr)
         {
             mem_usage_ += payload_->MemUsage();
         }
-        mem_usage_ += sizeof(uint64_t);
-        mem_usage_ += sizeof(RecordStatus);
         return mem_usage_;
     }
 };
@@ -378,9 +376,9 @@ public:
         // LruEntry field members:
         // size of lru_prev_, lru_next_, ckpt_prev_, ckpt_next_, parent_map_
         mem_usage_ += 5 * ptr_size;
-        // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_
-        // and ckpt_ts_
-        mem_usage_ += 5 * sizeof(uint64_t);
+        // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_,
+        // ckpt_ts_ and wlock_ts_
+        mem_usage_ += 6 * sizeof(uint64_t);
 
         // size of key_lock_ptr_ and gap_lock_ptr_
         mem_usage_ += 2 * sizeof(uint64_t);
@@ -403,7 +401,8 @@ public:
         // size of map_prev_, map_next_
         mem_usage_ += 2 * ptr_size;
 
-        // for mvcc
+        // size of archives_ and its content
+        mem_usage_ += ptr_size;
         mem_usage_ += GetArchiveMemUsage();
 
         return mem_usage_;
@@ -434,7 +433,7 @@ public:
     CcEntry<KeyT, ValueT> *map_next_;
 
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
-    std::deque<VersionRecord<ValueT>> archives_;
+    std::unique_ptr<std::deque<VersionRecord<ValueT>>> archives_;
     // The time when a write tx acquires the write lock/intent on this cc entry.
     uint64_t wlock_ts_;
 
@@ -456,21 +455,29 @@ public:
             return 0;
         }
 
-        if (archives_.size() > 0)
+        size_t mem_usage = 0;
+        if (archives_ == nullptr)
         {
-            assert(commit_ts_ > archives_.front().commit_ts_);
+            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            mem_usage += sizeof(*archives_);
+        }
+
+        if (archives_->size() > 0)
+        {
+            assert(commit_ts_ > archives_->front().commit_ts_);
         }
 
         if (tbl_type != TableType::Secondary)
         {
-            archives_.emplace_front(
+            archives_->emplace_front(
                 std::move(payload_), commit_ts_, payload_status_);
         }
         else
         {
             // For SkIndex, all versions' payload is not changed.
-            archives_.emplace_front(nullptr, commit_ts_, payload_status_);
+            archives_->emplace_front(nullptr, commit_ts_, payload_status_);
         }
+        mem_usage += sizeof(VersionResultRecord<ValueT>);
 
         if (ckpt_ts_ >= commit_ts_ && commit_ts_ != 1U)
         {
@@ -479,7 +486,7 @@ public:
             ckpt_ts_.store(commit_ts_ - 1);
         }
 
-        return sizeof(commit_ts_) + sizeof(payload_status_);
+        return mem_usage;
     }
 
     /**
@@ -494,20 +501,26 @@ public:
             return 0;
         }
 
-        auto it = archives_.begin();
-        for (; it != archives_.end(); it++)
+        size_t mem_usage = 0U;
+        if (archives_ == nullptr)
+        {
+            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            mem_usage += sizeof(*archives_);
+        }
+
+        auto it = archives_->begin();
+        for (; it != archives_->end(); it++)
         {
             if (it->commit_ts_ <= v_recs[0].commit_ts_)
             {
                 break;
             }
         }
-        size_t mem_usage = 0U;
         for (auto &vrec : v_recs)
         {
-            if (it == archives_.end() || it->commit_ts_ != vrec.commit_ts_)
+            if (it == archives_->end() || it->commit_ts_ != vrec.commit_ts_)
             {
-                it = archives_.emplace(it);
+                it = archives_->emplace(it);
                 it->commit_ts_ = vrec.commit_ts_;
                 it->payload_status_ = vrec.record_status_;
                 it->payload_.reset(
@@ -524,22 +537,28 @@ public:
                             RecordStatus payload_status,
                             uint64_t commit_ts)
     {
-        auto it = archives_.begin();
-        for (; it != archives_.end(); it++)
+        size_t mem_usage = 0U;
+        if (archives_ == nullptr)
+        {
+            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            mem_usage += sizeof(*archives_);
+        }
+
+        auto it = archives_->begin();
+        for (; it != archives_->end(); it++)
         {
             if (it->commit_ts_ <= commit_ts)
             {
                 break;
             }
         }
-        size_t mem_usage = 0U;
-        if (it == archives_.end() || it->commit_ts_ < commit_ts)
+        if (it == archives_->end() || it->commit_ts_ < commit_ts)
         {
-            it = archives_.emplace(it);
+            it = archives_->emplace(it);
             it->commit_ts_ = commit_ts;
             it->payload_status_ = payload_status;
             it->payload_ = std::move(payload_ptr);
-            mem_usage = it->MemUsage();
+            mem_usage += it->MemUsage();
         }
 
         return mem_usage;
@@ -556,45 +575,55 @@ public:
      */
     size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) override
     {
-        if (commit_ts_ <= oldest_active_tx_ts)
-        {
-            size_t mem_usage = GetArchiveMemUsage();
-            archives_.clear();
-            return mem_usage;
-        }
-
-        if (archives_.size() <= 1)
+        if (archives_ == nullptr)
         {
             return 0;
         }
 
-        auto it = archives_.begin();
-        for (; it != archives_.end(); it++)
+        if (commit_ts_ <= oldest_active_tx_ts)
+        {
+            size_t mem_usage = GetArchiveMemUsage();
+            // archives_->clear();
+            archives_.reset(nullptr);
+            return mem_usage;
+        }
+
+        if (archives_->size() <= 1)
+        {
+            return 0;
+        }
+
+        auto it = archives_->begin();
+        for (; it != archives_->end(); it++)
         {
             if (it->commit_ts_ <= oldest_active_tx_ts)
             {
                 break;
             }
         }
-        if (it == archives_.end())
+        if (it == archives_->end())
         {
             return 0;
         }
         it++;
         size_t mem_usage = 0U;
-        for (auto it1 = it; it1 != archives_.end(); it1++)
+        for (auto it1 = it; it1 != archives_->end(); it1++)
         {
             mem_usage += it1->MemUsage();
         }
-        archives_.erase(it, archives_.end());
+        archives_->erase(it, archives_->end());
 
         return mem_usage;
     }
 
     size_t GetArchiveMemUsage() const
     {
-        size_t mem_usage = 0;
-        for (auto it = archives_.begin(); it != archives_.end(); ++it)
+        if (archives_ == nullptr)
+        {
+            return 0;
+        }
+        size_t mem_usage = sizeof(*archives_);
+        for (auto it = archives_->begin(); it != archives_->end(); ++it)
         {
             mem_usage += it->MemUsage();
         }
@@ -647,25 +676,28 @@ public:
             return true;
         }
 
-        // if commit_ts_ > ts, find from archives_
-        for (auto it = archives_.cbegin(); it != archives_.cend(); it++)
+        if (archives_ != nullptr)
         {
-            if (it->commit_ts_ <= ts)
+            // if commit_ts_ > ts, find from archives_
+            for (auto it = archives_->cbegin(); it != archives_->cend(); it++)
             {
-                if (it->payload_status_ == RecordStatus::Normal)
+                if (it->commit_ts_ <= ts)
                 {
-                    if (tbl_type == TableType::Secondary)
+                    if (it->payload_status_ == RecordStatus::Normal)
                     {
-                        rec.payload_ptr_ = payload_.get();
+                        if (tbl_type == TableType::Secondary)
+                        {
+                            rec.payload_ptr_ = payload_.get();
+                        }
+                        else
+                        {
+                            rec.payload_ptr_ = it->payload_.get();
+                        }
                     }
-                    else
-                    {
-                        rec.payload_ptr_ = it->payload_.get();
-                    }
+                    rec.commit_ts_ = it->commit_ts_;
+                    rec.payload_status_ = it->payload_status_;
+                    return true;
                 }
-                rec.commit_ts_ = it->commit_ts_;
-                rec.payload_status_ = it->payload_status_;
-                return true;
             }
         }
 
@@ -688,7 +720,8 @@ public:
         {
             return true;
         }
-        if (!archives_.empty() && archives_.back().commit_ts_ <= ts)
+        if (archives_ != nullptr && !archives_->empty() &&
+            archives_->back().commit_ts_ <= ts)
         {
             return true;
         }
@@ -706,10 +739,14 @@ public:
                           uint64_t to_ts,
                           TableType tbl_type) const override
     {
-        size_t count = 0;
-        if (archives_.size() > 0)
+        if (archives_ == nullptr)
         {
-            for (const VersionRecord<ValueT> &rec : archives_)
+            return 0;
+        }
+        size_t count = 0;
+        if (archives_->size() > 0)
+        {
+            for (const VersionRecord<ValueT> &rec : *archives_)
             {
                 if (rec.commit_ts_ > ckpt_ts_ && rec.commit_ts_ <= to_ts)
                 {
@@ -735,7 +772,19 @@ public:
 
     size_t ArchiveRecordsCount() const override
     {
-        return archives_.size();
+        if (archives_ == nullptr)
+        {
+            return 0;
+        }
+        return archives_->size();
+    }
+
+    void ClearArchives()
+    {
+        if (archives_ != nullptr)
+        {
+            archives_.reset(nullptr);
+        }
     }
 };
 

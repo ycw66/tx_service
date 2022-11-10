@@ -483,7 +483,8 @@ public:
                 if (shard_->EnableMvcc())
                 {
                     uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
-                    cce.KickOutArchiveRecords(recycle_ts);
+                    shard_->DecrementMemory(
+                        cce.KickOutArchiveRecords(recycle_ts));
                     size_t added_mem_usage = cce.ArchiveBeforeUpdate(Type());
                     shard_->mem_usage_ += added_mem_usage;
                 }
@@ -1389,9 +1390,10 @@ public:
                 // Trying to insert the record to backfill into archives is
                 // needed, because the entry may be created when executing
                 // "ReplayLogCc".
-                cce->AddArchiveRecord(std::move(tmp_payload),
-                                      tmp_payload_status,
-                                      req.ReadTimestamp());
+                shard_->mem_usage_ +=
+                    cce->AddArchiveRecord(std::move(tmp_payload),
+                                          tmp_payload_status,
+                                          req.ReadTimestamp());
                 // set "ckpt_ts_" to identify the entry is refilled
                 uint64_t tmp_ts = 1U;
                 cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
@@ -1404,7 +1406,8 @@ public:
                  req.Type() == ReadType::OutsideDeleted) &&
                 req.ArchivesPtr() != nullptr && req.ArchivesPtr()->size() > 0)
             {
-                cce->AddArchiveRecords(*req.ArchivesPtr());
+                shard_->mem_usage_ +=
+                    cce->AddArchiveRecords(*req.ArchivesPtr());
             }
         }
 
@@ -1551,7 +1554,7 @@ public:
                 size_t offset = 0;
                 tmp_payload->Deserialize(req.rec_str_->data(), offset);
             }
-            cce->AddArchiveRecord(
+            shard_->mem_usage_ += cce->AddArchiveRecord(
                 std::move(tmp_payload), req.RecordStatus(), req.CommitTs());
 
             // set "ckpt_ts_" to identify the entry is refilled
@@ -1579,7 +1582,7 @@ public:
                     v_rec.record_->Deserialize(vrec_msg.record().data(),
                                                offset);
                 }
-                cce->AddArchiveRecords(archives);
+                shard_->mem_usage_ += cce->AddArchiveRecords(archives);
             }
         }
 
@@ -2612,7 +2615,7 @@ public:
         {
             if (shard_->EnableMvcc())
             {
-                cce->KickOutArchiveRecords(recycle_ts);
+                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
                 if (cce->commit_ts_ > req.ckpt_ts_)
                 {
                     // Don't do checkpoint but flush undo
@@ -2790,7 +2793,7 @@ public:
                     {
                         rec_status = RecordStatus::Deleted;
                     }
-                    cce->AddArchiveRecord(
+                    shard_->mem_usage_ += cce->AddArchiveRecord(
                         std::move(rec_ptr), rec_status, req.CommitTs());
                 }
                 else if (delete_flag == 0)
@@ -2802,7 +2805,7 @@ public:
             {
                 if (shard_->EnableMvcc())
                 {
-                    cce->ArchiveBeforeUpdate(Type());
+                    shard_->mem_usage_ += cce->ArchiveBeforeUpdate(Type());
                 }
                 if (delete_flag == 0)
                 {
@@ -2893,7 +2896,7 @@ public:
                 }
                 if (only_archives)
                 {
-                    cce->archives_.clear();
+                    cce->ClearArchives();
                 }
                 else
                 {
