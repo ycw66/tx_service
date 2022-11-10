@@ -53,13 +53,13 @@ public:
                 LocalCcShards &shards,
                 TxLog *txlog_hd)
         : thd_id_(thd_id),
-          active_tx_cnt_(0),
-          in_sleep_(false),
           terminated_(false),
+          in_sleep_(false),
           local_cc_shards_(shards),
-          free_tx_list_(),
+          active_tx_cnt_(0),
           active_tx_list_(),
           active_tx_mutex_(),
+          free_tx_list_(),
           waiting_mux_(shards.ShardMutex(thd_id)),
           waiting_cv_(shards.ShardCv(thd_id)),
           txlog_hd_(txlog_hd)

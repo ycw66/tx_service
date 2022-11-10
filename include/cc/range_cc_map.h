@@ -408,7 +408,6 @@ public:
 
         // Restore local_cc_shards state at core 0
         TableRangeEntry *old_table_range_entry = nullptr;
-        TableRangeEntry *new_table_range_entry = nullptr;
         if (shard_->core_id_ == 0)
         {
             if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
@@ -440,7 +439,6 @@ public:
                     shard_->CommitDirtyTableRange(
                         range_table_name_, partition_id, req.CommitTs());
                 old_table_range_entry = entries.first;
-                new_table_range_entry = entries.second;
             }
         }
         else
@@ -463,12 +461,6 @@ public:
                                                        partition_id);
                 old_table_range_entry =
                     old_table_range_entry_with_shard->shader_.get();
-                const TableRangeEntryWithShade
-                    *new_table_range_entry_with_shard =
-                        shard_->GetTableRangeWithShade(range_table_name_,
-                                                       new_partition_id);
-                new_table_range_entry =
-                    new_table_range_entry_with_shard->shader_.get();
             }
         }
 
