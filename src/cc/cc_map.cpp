@@ -251,7 +251,7 @@ LockType CcMap::CceKeyLockTypeHeldByTx(LruEntry *cce, TxNumber tx_number)
 
 void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
 {
-    if (cce != nullptr)
+    if (cce != nullptr && cce->key_lock_ptr_ != nullptr)
     {
         bool is_write_lock = (cce->GetKeyLock().HasWriteLock() &&
                               cce->GetKeyLock().WriteLockTx() == tx_number);
@@ -267,7 +267,7 @@ void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
 
 void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number)
 {
-    if (cce != nullptr)
+    if (cce != nullptr && cce->gap_lock_ptr_ != nullptr)
     {
         bool is_write_lock = (cce->GetGapLock().HasWriteLock() &&
                               cce->GetGapLock().WriteLockTx() == tx_number);

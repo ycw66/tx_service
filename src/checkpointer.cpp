@@ -267,7 +267,7 @@ void Checkpointer::Ckpt()
                     }
                 }
 
-                if (mv_base_ret)
+                if (mv_base_ret && !ckpt_vec.empty())
                 {
                     if (ccm->Type() == TableType::Primary)
                     {
