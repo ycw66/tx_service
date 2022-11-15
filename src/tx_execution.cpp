@@ -819,10 +819,11 @@ void TransactionExecution::Process(ReadOperation &read)
                              cache_miss_read_cce_addr_,
                              read.hd_result_);
 
-        DLOG(INFO) << "ReadOutside ,txn: " << tx_number_ << " ,cce:" << std::hex
-                   << cache_miss_read_cce_addr_.CcePtr() << " ,ts: " << std::dec
-                   << read.read_outside_tx_req_->commit_ts_
-                   << " ,is_deleted: " << static_cast<int>(is_deleted);
+        DLOG_IF(INFO, TRACE_OCC_ERR)
+            << "ReadOutside ,txn: " << tx_number_ << " ,cce:" << std::hex
+            << cache_miss_read_cce_addr_.CcePtr() << " ,ts: " << std::dec
+            << read.read_outside_tx_req_->commit_ts_
+            << " ,is_deleted: " << static_cast<int>(is_deleted);
 
         return;
     }
@@ -2263,7 +2264,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         // read-set keys have been cleared after validation. Post-processing
         // only clears the write locks of the write-set keys.
 
-        post_process.Reset(0, rw_set_.WriteSetSize());
+        post_process.Reset(rw_set_.WriteSetSize(), 0);
 
         size_t idx = 0;
         const std::unordered_map<TableName, TableWriteSet> &wset =

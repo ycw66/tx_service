@@ -1240,12 +1240,17 @@ public:
                 // have been acquired.
                 cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-                acquired_lock =
-                    LockHandleForResumedRequest(&req,
-                                                req.TxTerm(),
-                                                cce,
-                                                cce->payload_status_,
-                                                req.IsWaitForPostWrite());
+                if (req.IsWaitForPostWrite())
+                {
+                    acquired_lock = LockHandleForResumedRequest(
+                        &req, req.TxTerm(), cce, cce->payload_status_, true);
+                    req.SetIsWaitForPostWrite(false);
+                }
+                else
+                {
+                    acquired_lock = LockHandleForResumedRequest(
+                        &req, req.TxTerm(), cce, cce->payload_status_, false);
+                }
                 lock_op_status = LockOpStatus::Successful;
             }
             else

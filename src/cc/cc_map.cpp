@@ -167,7 +167,8 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
 
 void CcMap::WaitForPostWriteDone(CcRequestBase *req, LruEntry *cce)
 {
-    assert(cce->GetKeyLock().HasWriteLock());
+    assert(cce->GetKeyLock().HasWriteLock() &&
+           cce->GetKeyLock().WriteLockTx() != req->Txn());
     cce->GetKeyLock().InsertBlockingQueue(req, LockType::ReadLock);
 }
 

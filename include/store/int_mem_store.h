@@ -24,9 +24,19 @@ public:
         return true;
     }
 
-    bool PutAll(std::vector<FlushRecord> &batch,
+    /**
+     * @brief flush entries in \@param batch to base table or skindex table in
+     * data store, stop and return false if node_group is not longer leader.
+     * @param batch
+     * @param table_name base table name or sk index name
+     * @param table_schema
+     * @param schema_ts
+     * @param node_group
+     * @return whether all entries are written to data store successfully
+     */
+    bool PutAll(std::vector<txservice::FlushRecord> &batch,
+                const txservice::TableName &table_name,
                 const txservice::TableSchema *table_schema,
-                uint64_t schema_ts,
                 uint32_t node_group) override
     {
         for (const auto &ref : batch)
@@ -58,16 +68,6 @@ public:
         return true;
     }
 
-    bool PutSkAll(const TableName &index_name,
-                  std::vector<FlushRecord> &batch,
-                  const txservice::TableSchema *table_schema,
-                  uint64_t schema_ts,
-                  uint32_t node_group) override
-    {
-        assert(false);
-        return false;
-    }
-
     void UpsertTable(
         const txservice::TableSchema *table_schema,
         bool is_deleted,
@@ -91,24 +91,7 @@ public:
               txservice::TxRecord &rec,
               bool &found,
               uint64_t &version_ts,
-              const txservice::Schema *key_schema,
-              const txservice::Schema *rec_schema,
-              const txservice::KVCatalogInfo *kv_info,
-              uint64_t table_schema_ts) override
-    {
-        assert(false);
-        return false;
-    }
-
-    bool ReadSk(const txservice::TableName &index_name,
-                const txservice::TxKey &key,
-                txservice::TxRecord &rec,
-                bool &found,
-                uint64_t &version_ts,
-                const txservice::Schema *key_schema,
-                const txservice::Schema *rec_schema,
-                const txservice::KVCatalogInfo *kv_info,
-                uint64_t table_schema_ts) override
+              const txservice::TableSchema *table_schema) override
     {
         assert(false);
         return false;
@@ -240,9 +223,7 @@ public:
     bool CopyBaseToArchive(std::vector<LruEntry *> &batch,
                            uint32_t node_group,
                            const txservice::TableName &table_name,
-                           const txservice::TableSchema *table_schema,
-                           uint64_t schema_ts,
-                           bool is_sk) override
+                           const txservice::TableSchema *table_schema) override
     {
         assert(false);
         return true;

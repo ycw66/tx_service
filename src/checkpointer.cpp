@@ -252,13 +252,11 @@ void Checkpointer::Ckpt()
                 bool mv_base_ret = true;
                 if (local_shards_.EnableMvcc() && mv_base_vec.size() > 0)
                 {
-                    mv_base_ret = store_hd_->CopyBaseToArchive(
-                        mv_base_vec,
-                        node_group,
-                        ccm->table_name_,
-                        ccm->GetTableSchema(),
-                        ccm->SchemaTs(),
-                        ccm->Type() == TableType::Secondary);
+                    mv_base_ret =
+                        store_hd_->CopyBaseToArchive(mv_base_vec,
+                                                     node_group,
+                                                     table_name,
+                                                     ccm->GetTableSchema());
                     if (!mv_base_ret)
                     {
                         LOG(INFO)
@@ -269,34 +267,14 @@ void Checkpointer::Ckpt()
 
                 if (mv_base_ret && !ckpt_vec.empty())
                 {
-                    if (ccm->Type() == TableType::Primary)
+                    ckpt_ret = store_hd_->PutAll(ckpt_vec,
+                                                 table_name,
+                                                 ccm->GetTableSchema(),
+                                                 node_group);
+                    if (!ckpt_ret)
                     {
-                        // todo: stop flush process if this node is no longer
-                        // node
-                        //  group leader
-                        ckpt_ret = store_hd_->PutAll(ckpt_vec,
-                                                     ccm->GetTableSchema(),
-                                                     ccm->SchemaTs(),
-                                                     node_group);
-                        if (!ckpt_ret)
-                        {
-                            LOG(INFO) << "checkpointer PutAll flush to kv "
-                                         "storage failed";
-                        }
-                    }
-                    else
-                    {
-                        ckpt_ret = store_hd_->PutSkAll(table_name,
-                                                       ckpt_vec,
-                                                       ccm->GetTableSchema(),
-                                                       ccm->SchemaTs(),
-                                                       node_group);
-                        if (!ckpt_ret)
-                        {
-                            LOG(INFO)
-                                << "checkpointer PutSkAll flush to kv storage "
-                                   "failed";
-                        }
+                        LOG(INFO) << "checkpointer PutAll flush to kv "
+                                     "storage failed";
                     }
                 }
 
@@ -304,7 +282,7 @@ void Checkpointer::Ckpt()
                 {
                     bool flush_undo_ret = store_hd_->PutArchivesAll(
                         node_group,
-                        ccm->table_name_,
+                        table_name,
                         ccm->GetTableSchema()->GetKVCatalogInfo(),
                         archive_vec);
 
@@ -452,17 +430,9 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
     TableName table_name{ccm->table_name_.StringView(),
                          ccm->table_name_.Type()};
     uint32_t ng = Sharder::Instance().NodeId();
-    if (ccm->Type() == TableType::Primary)
-    {
-        ckpt_ret = store_hd_->PutAll(
-            ckpt_vec, ccm->GetTableSchema(), ccm->SchemaTs(), ng);
-    }
-    else
-    {
-        uint32_t ng = 0;
-        ckpt_ret = store_hd_->PutSkAll(
-            table_name, ckpt_vec, ccm->GetTableSchema(), ccm->SchemaTs(), ng);
-    }
+    ckpt_ret = store_hd_->PutAll(
+        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng);
+
     return ckpt_ret;
 }
 

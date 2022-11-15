@@ -43,34 +43,19 @@ public:
     virtual bool Connect() = 0;
 
     /**
-     * flush entries in @param batch to data store, stop and return false if
-     * node_group is no longer leader
+     * @brief flush entries in \@param batch to base table or skindex table in
+     * data store, stop and return false if node_group is not longer leader.
      * @param batch
+     * @param table_name base table name or sk index name
      * @param table_schema
      * @param schema_ts
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(std::vector<FlushRecord> &batch,
-                        const TableSchema *table_schema,
-                        uint64_t schema_ts,
+    virtual bool PutAll(std::vector<txservice::FlushRecord> &batch,
+                        const txservice::TableName &table_name,
+                        const txservice::TableSchema *table_schema,
                         uint32_t node_group) = 0;
-
-    /**
-     * flush entries in @param batch to data store, stop and return false if
-     * node_group is no longer leader
-     * @param index_name
-     * @param batch
-     * @param sk_schema
-     * @param schema_ts
-     * @param node_group
-     * @return whether all entries are written to data store successfully
-     */
-    virtual bool PutSkAll(const TableName &index_name,
-                          std::vector<FlushRecord> &batch,
-                          const TableSchema *table_schema,
-                          uint64_t schema_ts,
-                          uint32_t node_group) = 0;
 
     virtual void UpsertTable(const TableSchema *table_schema,
                              bool is_deleted,
@@ -83,25 +68,16 @@ public:
     virtual void FetchTableRanges(const KVCatalogInfo *kv_info,
                                   void *fetch_req) = 0;
 
-    virtual bool Read(const TableName &table_name,
-                      const TxKey &key,
-                      TxRecord &rec,
+    /**
+     * @brief Read a row from base table or skindex table in datastore with
+     * specified key. Caller should pass in complete primary key or skindex key.
+     */
+    virtual bool Read(const txservice::TableName &table_name,
+                      const txservice::TxKey &key,
+                      txservice::TxRecord &rec,
                       bool &found,
                       uint64_t &version_ts,
-                      const Schema *key_schema,
-                      const Schema *rec_schema,
-                      const KVCatalogInfo *kv_info,
-                      uint64_t table_schema_ts) = 0;
-
-    virtual bool ReadSk(const TableName &table_name,
-                        const TxKey &key,
-                        TxRecord &rec,
-                        bool &found,
-                        uint64_t &version_ts,
-                        const Schema *key_schema,
-                        const Schema *rec_schema,
-                        const KVCatalogInfo *kv_info,
-                        uint64_t table_schema_ts) = 0;
+                      const txservice::TableSchema *table_schema) = 0;
 
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
@@ -141,12 +117,11 @@ public:
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
-    virtual bool CopyBaseToArchive(std::vector<LruEntry *> &batch,
-                                   uint32_t node_group,
-                                   const txservice::TableName &table_name,
-                                   const txservice::TableSchema *table_schema,
-                                   uint64_t schema_ts,
-                                   bool is_sk) = 0;
+    virtual bool CopyBaseToArchive(
+        std::vector<LruEntry *> &batch,
+        uint32_t node_group,
+        const txservice::TableName &table_name,
+        const txservice::TableSchema *table_schema) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
