@@ -357,6 +357,16 @@ public:
         return enable_mvcc_;
     }
 
+    bool SetWaitingCkpt(bool is_waiting)
+    {
+        is_waiting_ckpt_.store(is_waiting, std::memory_order_release);
+    }
+
+    bool IsWaitingCkpt()
+    {
+        return is_waiting_ckpt_.load(std::memory_order_acquire);
+    }
+
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
@@ -373,6 +383,13 @@ private:
     // shards to the current wall clock.
     std::thread timer_thd_;
     std::atomic<bool> timer_terminate_;
+
+    // When ccshard is full and no ccentry can be kicked-out, it will notify
+    // checkpointer to do checkpoint and set flag is_wait_ckpt_ to true.
+    // Subsequent ccrequest is able to skip checking freeable ccentry when
+    // is_wait_ckpt_ is true. After checkpoint done, set is_wait_ckpt_ to false.
+    std::atomic<bool> is_waiting_ckpt_;
+
     // The static variable storing the local time. It is delayed time and
     // refreshed in roughly every 2 seconds by the background thread, so as to
     // reduce the cost of calling system functions to get the wall clock. The

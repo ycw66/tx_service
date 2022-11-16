@@ -340,6 +340,9 @@ void Checkpointer::Ckpt()
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
     }
+    // notify ccshard ckpt has finished and can re-check freeable ccentries.
+    local_shards_.SetWaitingCkpt(false);
+    LOG(INFO) << "End checkpoint with timestamp: " << ckpt_ts;
 }
 
 void Checkpointer::Run()

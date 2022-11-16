@@ -21,6 +21,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
       metrics_registry_(metrics_registry),
       node_id_(node_id),
       timer_terminate_(false),
+      is_waiting_ckpt_(false),
       catalog_factory_(catalog_factory),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc)

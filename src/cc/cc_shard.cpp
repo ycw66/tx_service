@@ -463,6 +463,13 @@ size_t CcShard::Clean()
 {
     LruEntry *cce = head_cce_.lru_next_;
     size_t free_cnt = 0;
+
+    // previous check has notified ckpt since freeable entries cannot be found,
+    // skip iterate lru list before the ckpt is finished.
+    if (local_shards_.IsWaitingCkpt())
+    {
+        return 0;
+    }
     while (free_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
     {
         LruEntry *next_cce = cce->lru_next_;
@@ -480,6 +487,7 @@ size_t CcShard::Clean()
     // entries to be kicked out from ccmap.
     if (free_cnt == 0)
     {
+        local_shards_.SetWaitingCkpt(true);
         NotifyCkpt();
     }
 
