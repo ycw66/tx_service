@@ -243,7 +243,8 @@ public:
     }
 
     static uint64_t ClockTs();
-    uint64_t ShardClockTs(uint16_t core_id);
+    uint64_t TsBase();
+    void UpdateTsBase(uint64_t timestamp);
 
     const CatalogEntry *CreateCatalog(const TableName &table_name,
                                       NodeGroupId cc_ng_id,
@@ -330,8 +331,6 @@ public:
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
-    void UpdateTsBase(uint64_t timestamp);
-
     /**
      * @brief Drops all tables' catalogs associated with the specified cc node
      * group. The function is called when this node steps down from the leader
@@ -396,6 +395,10 @@ private:
     // local time is used by transaction state machines to determine if a lock
     // has been held too long and if so, invoke lock recovery.
     static std::atomic<uint64_t> local_clock;
+
+    // The base timestamp  which will be adjust by local clock and commit
+    // timestamp of transactions on all ccshards to keep it up to date.
+    std::atomic<uint64_t> ts_base_;
 
     CatalogFactory *const catalog_factory_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>

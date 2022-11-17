@@ -917,15 +917,14 @@ void txservice::LocalCcHandler::SetCommitTimestamp(
     CcShard &ccs = *cc_shards_.cc_shards_[thd_id_];
     TEntry &tx = ccs.tx_vec_.at(txid.vec_idx_);
     assert(tx.ident_ == txid.ident_);
-    uint64_t local_ts = ccs.ts_base_.load(std::memory_order_relaxed);
+    uint64_t local_ts = ccs.Now();
     tx.commit_ts_ = std::max(local_ts, std::max(tx.lower_bound_, commit_ts));
 
     // The thread-local timer is monotonically increasing. If the
     // comparison fails, the timer must have been advanced by the
     // machine clock and the newest time must be greater than
     // tx.commit_ts_ + 1.
-    ccs.ts_base_.compare_exchange_strong(local_ts,
-                                         std::max(local_ts, tx.commit_ts_ + 1));
+    ccs.UpdateTsBase(std::max(local_ts, tx.commit_ts_ + 1));
 
     hres.SetValue(tx.commit_ts_);
     hres.SetFinished();
@@ -1073,6 +1072,5 @@ uint32_t txservice::LocalCcHandler::GetNodeId() const
  */
 uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
 {
-    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-    return ccs.Now();
+    return cc_shards_.TsBase();
 }

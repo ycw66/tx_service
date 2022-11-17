@@ -90,7 +90,6 @@ public:
             uint32_t core_cnt,
             uint32_t node_memory_limit_mb,
             uint32_t node_log_limit_mb,
-            uint64_t base_ts,
             uint32_t node_id,
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory);
@@ -203,10 +202,8 @@ public:
         return (global_id << 10) | core_id_;
     }
 
-    uint64_t Now() const
-    {
-        return ts_base_.load(std::memory_order_relaxed);
-    }
+    uint64_t Now() const;
+    void UpdateTsBase(uint64_t ts);
 
     size_t QueueSize() const
     {
@@ -291,9 +288,9 @@ public:
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
 
-            uint64_t tsb = ts_base_.load(std::memory_order_acquire);
+            uint64_t tsb = Now();
             uint64_t max_ts = std::max(tsb, clock_ts);
-            ts_base_.compare_exchange_strong(tsb, max_ts);
+            UpdateTsBase(max_ts);
 
             // need to return max_ts - 1 at here, since lock_holding_txs_'s
             // timestamp is read from ts_base_ which could be the same as
@@ -521,9 +518,6 @@ private:
     // after wraparound. Global tx_number is 64 bits: higher 32 bits are
     // global_core_id, while lower 32 bits are tx_ident.
     uint32_t next_tx_ident_;
-    // the base timestamp of ccshard which will be adjust by local clock and
-    // commit timestamp of transaction on this ccshard to keep it up to date.
-    std::atomic<uint64_t> ts_base_;
 
     /**
      * @brief Reserved head and tail for the double-linked list of cc entries.

@@ -30,6 +30,8 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();
+    ts_base_.store(ts_base);
+    local_clock.store(ts_base);
     timer_thd_ = std::thread([this] { TimerRun(); });
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
@@ -38,7 +40,6 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                                                           core_cnt,
                                                           memory_limit_mb,
                                                           log_limit_mb,
-                                                          ts_base,
                                                           node_id,
                                                           *this,
                                                           catalog_factory_));
@@ -77,10 +78,23 @@ uint64_t LocalCcShards::ClockTs()
     return LocalCcShards::local_clock.load(std::memory_order_relaxed);
 }
 
-uint64_t LocalCcShards::ShardClockTs(uint16_t core_id)
+uint64_t LocalCcShards::TsBase()
 {
-    assert(core_id < cc_shards_.size());
-    return cc_shards_[core_id]->Now();
+    return ts_base_.load(std::memory_order_acquire);
+}
+
+void LocalCcShards::UpdateTsBase(uint64_t timestamp)
+{
+    uint64_t tsb = ts_base_.load(std::memory_order_acquire);
+    while (timestamp > tsb && !ts_base_.compare_exchange_strong(tsb, timestamp))
+    {
+        // If the CAS fails, since timestamps always roll forward, the ts base
+        // must be greater than the current time or the old ts base.
+        // ts_base_ can also be updated when calculating commit timestamp, which
+        // results in system clock could be smaller than ts_base_. In this case
+        // we should not update ts_base_.
+        tsb = ts_base_.load(std::memory_order_acquire);
+    }
 }
 
 void LocalCcShards::TimerRun()
@@ -94,15 +108,7 @@ void LocalCcShards::TimerRun()
                 std::chrono::system_clock::now().time_since_epoch())
                 .count();
         LocalCcShards::local_clock.store(clock_ts, std::memory_order_relaxed);
-
-        for (std::unique_ptr<CcShard> &ccs : cc_shards_)
-        {
-            uint64_t tsb = ccs->ts_base_.load(std::memory_order_acquire);
-            // If the CAS fails, since timestamps always roll forward, the
-            // ts base must be greater than the current time or the old ts
-            // base.
-            ccs->ts_base_.compare_exchange_strong(tsb, std::max(tsb, clock_ts));
-        }
+        UpdateTsBase(clock_ts);
 
         std::this_thread::sleep_for(2s);
     }
@@ -489,25 +495,6 @@ void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
         LOG(INFO) << "cc shard on core: " << cc_shard->core_id_
                   << " set next_tx_ident_ to " << latest_committed_tx_no + 1;
         cc_shard->next_tx_ident_ = latest_committed_tx_no + 1;
-    }
-}
-
-void LocalCcShards::UpdateTsBase(uint64_t timestamp)
-{
-    for (std::unique_ptr<CcShard> &ccs : cc_shards_)
-    {
-        uint64_t tsb = ccs->ts_base_.load(std::memory_order_acquire);
-        while (timestamp > tsb &&
-               !ccs->ts_base_.compare_exchange_strong(tsb, timestamp))
-        {
-            tsb = ccs->ts_base_.load(std::memory_order_acquire);
-        }
-        if (timestamp > tsb)
-        {
-            LOG(INFO) << "cc shard on core: " << ccs->core_id_
-                      << " update ts_base_ from: " << tsb
-                      << " to: " << timestamp;
-        }
     }
 }
 

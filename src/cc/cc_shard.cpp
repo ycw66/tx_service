@@ -14,7 +14,6 @@ CcShard::CcShard(uint16_t core_id,
                  uint32_t core_cnt,
                  uint32_t node_memory_limit_mb,
                  uint32_t node_log_limit_mb,
-                 uint64_t base_ts,
                  uint32_t node_id,
                  LocalCcShards &local_shards,
                  CatalogFactory *catalog_factory)
@@ -32,7 +31,6 @@ CcShard::CcShard(uint16_t core_id,
       next_lock_idx_(0),
       used_lock_count_(0),
       next_tx_ident_(0),
-      ts_base_(base_ts),
       head_cce_(nullptr),
       tail_cce_(nullptr),
       size_(0),
@@ -149,7 +147,7 @@ void CcShard::Enqueue(CcRequestBase *req)
 TEntry &CcShard::NewTx()
 {
     // allocate start timestamp.
-    uint64_t start_ts = ts_base_.load(std::memory_order_relaxed);
+    uint64_t start_ts = Now();
     int64_t term = Sharder::Instance().LeaderTerm(node_id_);
 
     // Cicurlar iteration to find an available transaction entry.
@@ -980,4 +978,15 @@ void CcShard::TryResizeLockArray()
         DLOG(INFO) << "the size of lock array decreased to: " << new_size;
     }
 }
+
+uint64_t CcShard::Now() const
+{
+    return local_shards_.TsBase();
+}
+
+void CcShard::UpdateTsBase(uint64_t ts)
+{
+    local_shards_.UpdateTsBase(ts);
+}
+
 }  // namespace txservice
