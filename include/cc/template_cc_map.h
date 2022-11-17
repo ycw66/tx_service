@@ -2595,6 +2595,14 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        // If all of the entries older than ckpt_ts in this map have been
+        // flushed to KV store, skip the scan.
+        if (ckpt_ts_.load(std::memory_order_acquire) >= req.ckpt_ts_)
+        {
+            req.Notify();
+            return false;
+        }
+
         LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
                                                         : req.start_entry_;
         CcEntry<KeyT, ValueT> *cce =

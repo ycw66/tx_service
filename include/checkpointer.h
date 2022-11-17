@@ -65,11 +65,20 @@ private:
         Terminated
     };
 
+    struct CkptrWorkData
+    {
+        uint32_t node_group_;
+        int64_t term_;
+        uint64_t ckpt_ts_;
+        TableName table_name_;
+    };
+
     LocalCcShards &local_shards_;
     // last checkpoint timestamp of each cc node
     std::unordered_map<uint32_t, uint64_t> last_ckpt_ts_;
-    std::mutex mux_;
-    std::condition_variable cv_;
+    // protects request_ckpt_ and status_
+    std::mutex ckpt_mux_;
+    std::condition_variable ckpt_cv_;
     bool request_ckpt_;
     store::DataStoreHandler *store_hd_;
     std::thread thd_;
@@ -77,10 +86,18 @@ private:
     const uint32_t checkpoint_interval_;
     // ckpt_ts = {min_being_held_locks_ts} - {ckpt_delay_time_}
     uint32_t ckpt_delay_time_;  // unit: Microsecond
-
     TxService *tx_service_;
     TxLog *log_agent_;
+    // protects active_workers_ and pending_work
+    std::mutex worker_mux_;
+    std::condition_variable worker_cv_;
+    std::vector<CkptrWorkData> pending_work_;
+    std::vector<std::thread> worker_thds_;
+    int active_workers_{0};
+    std::atomic_bool worker_flushed_{true};
+    static const int checkpointer_worker_num_ = 5;
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
+    static void CkptWorker(Checkpointer *ckptr);
 };
 }  // namespace txservice
