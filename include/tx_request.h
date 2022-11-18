@@ -278,7 +278,7 @@ struct UpsertTableTxRequest
                          uint64_t schema_ts,
                          const std::string *dirty_image,
                          txservice::OperationType op_type,
-                         const std::string &alter_table_info_image = "")
+                         const std::string *alter_table_info_image = nullptr)
         : table_name_(table_name),
           curr_image_(curr_image),
           curr_schema_ts_(schema_ts),
@@ -293,7 +293,7 @@ struct UpsertTableTxRequest
     uint64_t curr_schema_ts_;
     const std::string *dirty_image_;
     txservice::OperationType op_type_;
-    const std::string &alter_table_info_image_;
+    const std::string *alter_table_info_image_;
 };
 
 struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>

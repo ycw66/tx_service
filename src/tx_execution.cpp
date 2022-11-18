@@ -157,7 +157,7 @@ void TransactionExecution::RecoverSchemaTx(
                 schema_op.new_catalog_blob(),
                 static_cast<OperationType>(table_msg.op_type()),
                 this,
-                schema_op.alter_table_info_blob());
+                &(schema_op.alter_table_info_blob()));
 
         if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
                                      SchemaOpMessage_Stage_PrepareSchema)

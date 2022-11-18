@@ -322,7 +322,7 @@ struct SchemaOp : public TransactionOperation
              const std::string &current_image,
              const std::string &dirty_image,
              uint64_t schema_ts,
-             const std::string &alter_table_info_image);
+             const std::string *alter_table_info_image);
 
     CatalogKey table_key_;  // string owner
     CatalogRecord catalog_rec_;
@@ -341,7 +341,7 @@ struct UpsertTableOp : public SchemaOp
                   const std::string &dirty_image,
                   OperationType op_type,
                   TransactionExecution *txm,
-                  const std::string &alter_table_info_image);
+                  const std::string *alter_table_info_image);
 
     void Forward(TransactionExecution *txm) override;
 

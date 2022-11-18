@@ -1030,7 +1030,7 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
                    const std::string &current_image,
                    const std::string &dirty_image,
                    uint64_t schema_ts,
-                   const std::string &alter_table_info_image)
+                   const std::string *alter_table_info_image)
     : table_key_(TableName(
           table_name_sv.data(), table_name_sv.size(), TableType::Primary))
 {
@@ -1039,7 +1039,9 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = schema_ts;
-    alter_table_info_image_str_ = alter_table_info_image;
+    alter_table_info_image_str_ = alter_table_info_image != nullptr
+                                      ? *alter_table_info_image
+                                      : std::string("");
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
@@ -1048,7 +1050,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
                              const std::string &dirty_image,
                              OperationType op_type,
                              TransactionExecution *txm,
-                             const std::string &alter_table_info_image)
+                             const std::string *alter_table_info_image)
     : SchemaOp(table_name_str,
                current_image,
                dirty_image,
