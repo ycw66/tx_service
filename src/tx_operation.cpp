@@ -1000,9 +1000,9 @@ bool PostWriteAllOp::IsFailed()
 }
 
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
-                                 bool is_deleted,
+                                 OperationType op_type,
                                  TransactionExecution *txm)
-    : table_name_(table_name), is_deleted_(is_deleted), hd_result_(txm)
+    : table_name_(table_name), op_type_(op_type), hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1029,7 +1029,8 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 SchemaOp::SchemaOp(const std::string_view table_name_sv,
                    const std::string &current_image,
                    const std::string &dirty_image,
-                   uint64_t schema_ts)
+                   uint64_t schema_ts,
+                   const std::string &alter_table_info_image)
     : table_key_(TableName(
           table_name_sv.data(), table_name_sv.size(), TableType::Primary))
 {
@@ -1038,20 +1039,26 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = schema_ts;
+    alter_table_info_image_str_ = alter_table_info_image;
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
                              const std::string &current_image,
                              uint64_t curr_schema_ts,
                              const std::string &dirty_image,
-                             bool is_deleted,
-                             TransactionExecution *txm)
-    : SchemaOp(table_name_str, current_image, dirty_image, curr_schema_ts),
-      is_deleted_(is_deleted),
+                             OperationType op_type,
+                             TransactionExecution *txm,
+                             const std::string &alter_table_info_image)
+    : SchemaOp(table_name_str,
+               current_image,
+               dirty_image,
+               curr_schema_ts,
+               alter_table_info_image),
+      op_type_(op_type),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
       post_all_intent_op_(txm),
-      upsert_kv_table_op_(&table_key_.Name(), is_deleted, txm),
+      upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       post_all_lock_op_(txm),
@@ -1065,8 +1072,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     post_all_intent_op_.table_name_ = &catalog_ccm_name;
     post_all_intent_op_.key_ = &table_key_;
     post_all_intent_op_.rec_ = &catalog_rec_;
-    post_all_intent_op_.dml_op_ =
-        is_deleted ? DmlOperation::Delete : DmlOperation::Upsert;
+    post_all_intent_op_.op_type_ = op_type_;
     post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
@@ -1077,9 +1083,10 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
     post_all_lock_op_.key_ = &table_key_;
     post_all_lock_op_.rec_ = &catalog_rec_;
-    post_all_lock_op_.dml_op_ =
-        is_deleted ? DmlOperation::Delete : DmlOperation::Upsert;
+    post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
@@ -1258,7 +1265,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (is_deleted_)
+        else if (op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::DropIndex)
         {
             // For DROP TABLE operations, the data store operation of
             // deleting the k-v table happens after the commit log is
@@ -1274,6 +1282,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // installs the dirty schema in the tx service and returns a
             // local view (pointer) of the committed and dirty schema.
             upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
+            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
             txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }
@@ -1308,7 +1317,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (is_deleted_)
+        else if (op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::DropIndex)
         {
             // Clear write set before commit dirty schema.
             txm->rw_set_.ClearTable(table_key_.Name());
@@ -1359,10 +1369,15 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (is_deleted_)
+            if (op_type_ == OperationType::DropTable ||
+                op_type_ == OperationType::DropIndex)
             {
                 op_ = &upsert_kv_table_op_;
-                upsert_kv_table_op_.table_schema_ = catalog_rec_.Schema();
+                upsert_kv_table_op_.table_schema_ =
+                    (op_type_ == OperationType::DropTable)
+                        ? catalog_rec_.Schema()
+                        : catalog_rec_.DirtySchema();
+                upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
@@ -1544,14 +1559,9 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
     prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
     prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
     prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
-    if (is_deleted_)
-    {
-        prepare_schema_msg->mutable_table_op()->set_is_deleted(true);
-    }
-    else
-    {
-        prepare_schema_msg->mutable_table_op()->set_is_deleted(false);
-    }
+    prepare_schema_msg->set_alter_table_info_blob(alter_table_info_image_str_);
+    prepare_schema_msg->mutable_table_op()->set_op_type(
+        static_cast<::google::protobuf::uint32>(op_type_));
     prepare_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareSchema);
 
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
@@ -1845,7 +1855,7 @@ DsSplitRangeOp::DsSplitRangeOp(
 
     post_all_lock_for_update_old_range_op_.table_name_ = &range_table_name_;
     post_all_lock_for_update_old_range_op_.key_ = range_key_;
-    post_all_lock_for_update_old_range_op_.dml_op_ = DmlOperation::Update;
+    post_all_lock_for_update_old_range_op_.op_type_ = OperationType::Update;
     post_all_lock_for_update_old_range_op_.write_type_ =
         PostWriteType::PrepareCommit;
 
@@ -1858,7 +1868,7 @@ DsSplitRangeOp::DsSplitRangeOp(
     // prepare the post_write_all_for_dirty_old_range_op_ for failed case
     post_write_all_for_dirty_old_range_op_.table_name_ = &range_table_name_;
     post_write_all_for_dirty_old_range_op_.key_ = range_key_;
-    post_write_all_for_dirty_old_range_op_.dml_op_ = DmlOperation::Update;
+    post_write_all_for_dirty_old_range_op_.op_type_ = OperationType::Update;
     post_write_all_for_dirty_old_range_op_.write_type_ =
         PostWriteType::PostCommit;
 

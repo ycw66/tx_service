@@ -117,7 +117,7 @@ public:
                     assert(req.PayloadStr() != nullptr);
                     std::unique_ptr<CatalogRecord> decoded_rec =
                         std::make_unique<CatalogRecord>();
-                    if (req.DmlOp() != DmlOperation::Delete)
+                    if (req.OpType() != OperationType::DropTable)
                     {
                         size_t offset = 0;
                         decoded_rec->Deserialize(req.PayloadStr()->data(),
@@ -246,27 +246,134 @@ public:
 
                 // This is a CREATE TABLE statement. Creates the cc maps
                 // associated with the table in the final commit step.
-                shard_->CreatePkCcMap(table_key->Name(),
-                                      new_schema,
-                                      req.NodeGroupId(),
-                                      catalog_entry->DirtyVersion(),
-                                      true);
+                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
+                                              new_schema,
+                                              req.NodeGroupId(),
+                                              catalog_entry->DirtyVersion(),
+                                              true,
+                                              true);
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    shard_->CreateSkCcMap(index_name,
-                                          new_schema,
-                                          req.NodeGroupId(),
-                                          catalog_entry->DirtyVersion());
+                    shard_->CreateOrUpdateSkCcMap(
+                        index_name,
+                        new_schema,
+                        req.NodeGroupId(),
+                        catalog_entry->DirtyVersion());
+                }
+            }
+            // Alter Table
+            else
+            {
+                assert(old_schema != nullptr && new_schema != nullptr);
+                // Update pk cc map using new schema.
+                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
+                                              new_schema,
+                                              req.NodeGroupId(),
+                                              catalog_entry->DirtyVersion(),
+                                              false);
+
+                if (req.OpType() == OperationType::AddIndex ||
+                    req.OpType() == OperationType::DropIndex)
+                {
+                    std::vector<TableName> new_index_names =
+                        new_schema->IndexNames();
+                    std::vector<TableName> old_index_names =
+                        old_schema->IndexNames();
+
+                    bool found = false;
+                    for (const TableName &old_index_name : old_index_names)
+                    {
+                        found = false;
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            if (!new_index_name.String().compare(
+                                    old_index_name.String()))
+                            {
+                                found = true;
+                                // Update current sk cc map using new schema.
+                                shard_->CreateOrUpdateSkCcMap(
+                                    old_index_name,
+                                    new_schema,
+                                    req.NodeGroupId(),
+                                    catalog_entry->DirtyVersion(),
+                                    false);
+#ifdef RANGE_PARTITION_ENABLED
+                                // Update current sk range table if exist.
+                                std::map<int32_t, TableRangeEntryWithShade> *
+                                    ranges = shard_->GetAllTableRangesForATable(
+                                        old_index_name);
+                                if (ranges != nullptr)
+                                {
+                                    shard_->CreateOrUpdateRangeCcMap(
+                                        old_index_name,
+                                        new_schema,
+                                        req.NodeGroupId(),
+                                        catalog_entry->DirtyVersion());
+                                }
+#endif
+                                break;
+                            }
+                        }
+                        if (!found)
+                        {
+                            // Remove sk cc map for dropped index.
+                            shard_->DropCcm(old_index_name, req.NodeGroupId());
+// range table operation.
+#ifdef RANGE_PARTITION_ENABLED
+                            // Drop range table if exist
+                            TableName old_index_range_table_name{
+                                old_index_name.StringView(),
+                                TableType::RangePartition};
+                            shard_->DropCcm(old_index_range_table_name,
+                                            req.NodeGroupId());
+#endif
+                        }
+                    }
+                    // for range table, upate tableschema.
                 }
             }
         }
-        else if (req.CommitType() == PostWriteType::PrepareCommit)
+        else if (req.CommitType() == PostWriteType::PrepareCommit &&
+                 catalog_entry->DirtyVersion() > 0)
         {
             // Prepare commit. For certain schema operations, e.g., create
             // secondary index, the cc map is modified in the prepare commit
             // step.
+            // ALTER TABLE statement (include CREATE/DROP INDEX)
+            if (new_schema != nullptr && old_schema != nullptr &&
+                req.OpType() == OperationType::AddIndex)
+            {
+                std::vector<TableName> new_index_names =
+                    new_schema->IndexNames();
+                std::vector<TableName> old_index_names =
+                    old_schema->IndexNames();
+                bool found = false;
+                for (const TableName &new_index_name : new_index_names)
+                {
+                    found = false;
+                    for (const auto &old_index_name : old_index_names)
+                    {
+                        if (!new_index_name.String().compare(
+                                old_index_name.String()))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                    {
+                        // In this step, just create cc map for new sk.
+                        // We will update current sk ccmap in PostCommit.
+                        shard_->CreateOrUpdateSkCcMap(
+                            new_index_name,
+                            new_schema,
+                            req.NodeGroupId(),
+                            catalog_entry->DirtyVersion());
+                    }
+                }
+            }
         }
 
         if (req.CommitType() == PostWriteType::PostCommit &&
@@ -369,18 +476,18 @@ public:
             const TableSchema *curr_schema = catalog_entry->schema_.get();
             if (curr_schema != nullptr)
             {
-                shard_->CreatePkCcMap(table_key->Name(),
-                                      curr_schema,
-                                      req.NodeGroupId(),
-                                      catalog_entry->Version());
+                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
+                                              curr_schema,
+                                              req.NodeGroupId(),
+                                              catalog_entry->Version());
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    shard_->CreateSkCcMap(index_name,
-                                          curr_schema,
-                                          req.NodeGroupId(),
-                                          catalog_entry->Version());
+                    shard_->CreateOrUpdateSkCcMap(index_name,
+                                                  curr_schema,
+                                                  req.NodeGroupId(),
+                                                  catalog_entry->Version());
                 }
             }
         }
@@ -403,19 +510,20 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
-                    shard_->CreatePkCcMap(table_key->Name(),
-                                          catalog_entry->schema_.get(),
-                                          req.NodeGroupId(),
-                                          catalog_entry->Version());
+                    shard_->CreateOrUpdatePkCcMap(table_key->Name(),
+                                                  catalog_entry->schema_.get(),
+                                                  req.NodeGroupId(),
+                                                  catalog_entry->Version());
 
                     std::vector<TableName> index_names =
                         catalog_entry->schema_->IndexNames();
                     for (const TableName &index_name : index_names)
                     {
-                        shard_->CreateSkCcMap(index_name,
-                                              catalog_entry->schema_.get(),
-                                              req.NodeGroupId(),
-                                              catalog_entry->Version());
+                        shard_->CreateOrUpdateSkCcMap(
+                            index_name,
+                            catalog_entry->schema_.get(),
+                            req.NodeGroupId(),
+                            catalog_entry->Version());
                     }
 
                     req.SetReadType(ReadType::OutsideNormal);
@@ -505,19 +613,19 @@ public:
                     catalog_entry->schema_.get();
                 if (committed_schema != nullptr)
                 {
-                    shard_->CreatePkCcMap(table_name,
-                                          committed_schema,
-                                          req.NodeGroupId(),
-                                          catalog_entry->Version());
+                    shard_->CreateOrUpdatePkCcMap(table_name,
+                                                  committed_schema,
+                                                  req.NodeGroupId(),
+                                                  catalog_entry->Version());
 
                     std::vector<TableName> index_names =
                         committed_schema->IndexNames();
                     for (const TableName &index_name : index_names)
                     {
-                        shard_->CreateSkCcMap(index_name,
-                                              committed_schema,
-                                              req.NodeGroupId(),
-                                              catalog_entry->Version());
+                        shard_->CreateOrUpdateSkCcMap(index_name,
+                                                      committed_schema,
+                                                      req.NodeGroupId(),
+                                                      catalog_entry->Version());
                     }
                 }
             }

@@ -368,7 +368,7 @@ public:
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
         const std::string *payload_str = req.PayloadStr();
-        bool is_del = req.GetDmlOperation() == DmlOperation::Delete;
+        bool is_del = req.GetOperationType() == OperationType::Delete;
 
         if (cce_addr.InsertPtr() != 0)
         {
@@ -858,7 +858,7 @@ public:
         }
 
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
-        if (req.DmlOp() == DmlOperation::Insert)
+        if (req.OpType() == OperationType::Insert)
         {
             cce_ptr = Floor(*target_key);
         }
@@ -876,7 +876,7 @@ public:
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
 
-        if (req.DmlOp() == DmlOperation::Insert &&
+        if (req.OpType() == OperationType::Insert &&
             !(*cce_ptr->key_ == *target_key))
         {
             auto insert_it = cce_ptr->insert_intention_set_.find(target_key);
@@ -968,7 +968,8 @@ public:
                     {
                         cce_ptr->commit_ts_ = commit_ts;
                         cce_ptr->payload_status_ =
-                            req.DmlOp() == DmlOperation::Delete
+                            (req.OpType() == OperationType::Delete ||
+                             req.OpType() == OperationType::DropTable)
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
 

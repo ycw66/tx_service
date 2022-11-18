@@ -2,9 +2,13 @@
 
 #include <cassert>
 #include <iostream>
+#include <iterator>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>  //move
+#include <vector>
 
 #include "constants.h"
 
@@ -22,15 +26,17 @@ constexpr Void void_ = Void();
 
 #define void_return return void_;
 
-// @brief DmlOperation is not strictly equivalent to SQL DML.
-// One line of SQL update statement may be implemented by multple
-// UpsertTxRequest.
-enum class DmlOperation
+// @brief OperationType contain SQL DML and SQL DDL.
+enum class OperationType
 {
     Update = 1,
     Delete,
     Insert,
-    Upsert
+    Upsert,
+    CreateTable,
+    DropTable,
+    AddIndex,
+    DropIndex
 };
 
 enum class TxnStatus
@@ -342,3 +348,147 @@ struct hash<txservice::TableName>
     }
 };
 }  // namespace std
+
+namespace txservice
+{
+struct AlterTableInfo
+{
+    AlterTableInfo() : index_add_count_(0), index_drop_count_(0)
+    {
+    }
+
+    /**
+     * Serialized altered table info string:
+     * ------------------------------------------------------------------------
+     * | add index count | add index names len | add index names(consist of
+     * ------------------------------------------------------------------------
+     * ------------------------------------------------------------------------
+     * TableName and kv table name) | drop index count | drop index names len |
+     * ------------------------------------------------------------------------
+     * ----------------------------------------------------------
+     * drop index names(consist of TableName and kv table name) |
+     * ----------------------------------------------------------
+     */
+    std::string SerializeAlteredTableInfo()
+    {
+        std::string res;
+        if (index_add_count_ == 0 && index_drop_count_ == 0)
+        {
+            return res.append("");
+        }
+        // add index
+        res.append(reinterpret_cast<const char *>(&(index_add_count_)),
+                   sizeof(uint8_t));
+        size_t index_name_len;
+        std::string add_index_name;
+        for (auto add_index_it = index_add_names_.cbegin();
+             add_index_it != index_add_names_.cend();
+             add_index_it++)
+        {
+            add_index_name.append(add_index_it->first.String())
+                .append(" ")
+                .append(add_index_it->second)
+                .append(" ");
+        }
+        index_name_len = add_index_name.length();
+        res.append(reinterpret_cast<const char *>(&index_name_len),
+                   sizeof(add_index_name.length()));
+        res.append(add_index_name.data(), add_index_name.length());
+
+        // drop index
+        std::string drop_index_name;
+        res.append(reinterpret_cast<const char *>(&(index_drop_count_)),
+                   sizeof(uint8_t));
+        for (auto drop_index_it = index_drop_names_.cbegin();
+             drop_index_it != index_drop_names_.cend();
+             drop_index_it++)
+        {
+            drop_index_name.append(drop_index_it->first.String())
+                .append(" ")
+                .append(drop_index_it->second)
+                .append(" ");
+        }
+        index_name_len = drop_index_name.length();
+        res.append(reinterpret_cast<const char *>(&index_name_len),
+                   sizeof(drop_index_name.length()));
+        res.append(drop_index_name.data(), drop_index_name.length());
+
+        return res;
+    }
+
+    void DeserializeAlteredTableInfo(
+        const std::string &altered_table_info_image)
+    {
+        if (altered_table_info_image.length() <= 0)
+        {
+            index_add_count_ = 0;
+            index_drop_count_ = 0;
+            return;
+        }
+        size_t offset = 0;
+        const char *buf = altered_table_info_image.data();
+
+        index_add_count_ = *(uint8_t *) (buf + offset);
+        offset += sizeof(uint8_t);
+        size_t add_index_names_len = *(size_t *) (buf + offset);
+        offset += sizeof(add_index_names_len);
+        if (index_add_count_ > 0)
+        {
+            std::string add_index_names(buf + offset, add_index_names_len);
+
+            std::stringstream add_ss(add_index_names);
+            std::istream_iterator<std::string> begin(add_ss);
+            std::istream_iterator<std::string> end;
+            std::vector<std::string> tokens(begin, end);
+            for (auto it = tokens.begin(); it != tokens.end(); ++it)
+            {
+                txservice::TableName add_index_name(
+                    std::string_view(*it), txservice::TableType::Secondary);
+                const std::string &add_index_kv_name = *(++it);
+
+                index_add_names_.emplace(add_index_name, add_index_kv_name);
+            }
+        }
+        else
+        {
+            index_add_names_.clear();
+        }
+        offset += add_index_names_len;
+
+        index_drop_count_ = *(uint8_t *) (buf + offset);
+        offset += sizeof(uint8_t);
+        size_t drop_index_names_len = *(size_t *) (buf + offset);
+        offset += sizeof(drop_index_names_len);
+        if (index_drop_count_ > 0)
+        {
+            std::string drop_index_names(buf + offset, drop_index_names_len);
+
+            std::stringstream drop_ss(drop_index_names);
+            std::istream_iterator<std::string> begin(drop_ss);
+            std::istream_iterator<std::string> end;
+            std::vector<std::string> tokens(begin, end);
+            for (auto it = tokens.begin(); it != tokens.end(); ++it)
+            {
+                txservice::TableName drop_index_name(
+                    std::string_view(*it), txservice::TableType::Secondary);
+                const std::string &drop_index_kv_name = *(++it);
+
+                index_drop_names_.emplace(drop_index_name, drop_index_kv_name);
+            }
+        }
+        else
+        {
+            index_drop_names_.clear();
+        }
+        offset += drop_index_names_len;
+
+        assert(offset == altered_table_info_image.length());
+    }
+
+    uint8_t index_add_count_;
+    uint8_t index_drop_count_;
+    // map of <mysql_index_table_name, kv_index_table_name>
+    std::unordered_map<txservice::TableName, std::string> index_add_names_;
+    std::unordered_map<txservice::TableName, std::string> index_drop_names_;
+};
+}  // namespace txservice

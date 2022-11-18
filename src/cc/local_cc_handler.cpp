@@ -135,7 +135,7 @@ void txservice::LocalCcHandler::PostWriteAll(
     uint16_t command_id,
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
-    DmlOperation dml_op,
+    OperationType op_type,
     PostWriteType post_write_type)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -156,7 +156,7 @@ void txservice::LocalCcHandler::PostWriteAll(
                        tx_number,
                        commit_ts,
                        &rec,
-                       dml_op,
+                       op_type,
                        &hres,
                        post_write_type,
                        tx_term);
@@ -170,7 +170,7 @@ void txservice::LocalCcHandler::PostWriteAll(
                        tx_number,
                        commit_ts,
                        std::move(dup_rec),
-                       dml_op,
+                       op_type,
                        &hres,
                        post_write_type,
                        tx_term);
@@ -194,7 +194,7 @@ void txservice::LocalCcHandler::PostWriteAll(
                                 command_id,
                                 commit_ts,
                                 hres,
-                                dml_op,
+                                op_type,
                                 post_write_type);
     }
 }
@@ -206,7 +206,7 @@ void txservice::LocalCcHandler::PostWrite(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
-    DmlOperation dml_operation,
+    OperationType operation_type,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -229,7 +229,7 @@ void txservice::LocalCcHandler::PostWrite(
                    tx_number,
                    commit_ts,
                    record,
-                   dml_operation,
+                   operation_type,
                    &hres,
                    protocol);
         TX_TRACE_ACTION(this, req);
@@ -249,7 +249,7 @@ void txservice::LocalCcHandler::PostWrite(
                              commit_ts,
                              cce_addr,
                              record,
-                             dml_operation,
+                             operation_type,
                              hres,
                              protocol);
     }
@@ -1010,11 +1010,13 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
 
 void txservice::LocalCcHandler::DataStoreUpsertTable(
     const TableSchema *schema,
-    bool is_deleted,
+    OperationType op_type,
     uint64_t commit_ts,
-    CcHandlerResult<Void> &hres)
+    CcHandlerResult<Void> &hres,
+    const txservice::AlterTableInfo *alter_table_info)
 {
-    cc_shards_.store_hd_->UpsertTable(schema, is_deleted, commit_ts, &hres);
+    cc_shards_.store_hd_->UpsertTable(
+        schema, op_type, commit_ts, &hres, alter_table_info);
 }
 
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,

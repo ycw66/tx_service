@@ -49,7 +49,7 @@ public:
                       uint16_t command_id,
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
-                      DmlOperation dml_op,
+                      OperationType op_type,
                       PostWriteType post_write_type) override;
 
     /// <summary>
@@ -71,7 +71,7 @@ public:
                    uint64_t commit_ts,
                    const CcEntryAddr &ccentry_addr,
                    const TxRecord *record,
-                   DmlOperation dml_operation,
+                   OperationType operation_type,
                    CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol) override;
 
@@ -252,10 +252,12 @@ public:
                      std::vector<int> &vct_node_id,
                      CcHandlerResult<bool> &hres) override;
 
-    void DataStoreUpsertTable(const TableSchema *schema,
-                              bool is_deleted,
-                              uint64_t commit_ts,
-                              CcHandlerResult<Void> &hres) override;
+    void DataStoreUpsertTable(
+        const TableSchema *schema,
+        OperationType op_type,
+        uint64_t commit_ts,
+        CcHandlerResult<Void> &hres,
+        const txservice::AlterTableInfo *alter_table_info = nullptr) override;
 
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,

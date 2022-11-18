@@ -70,9 +70,10 @@ public:
 
     void UpsertTable(
         const txservice::TableSchema *table_schema,
-        bool is_deleted,
+        OperationType op_type,
         uint64_t commit_ts,
-        txservice::CcHandlerResult<txservice::Void> *hd_res) override
+        txservice::CcHandlerResult<txservice::Void> *hd_res,
+        const txservice::AlterTableInfo *alter_table_info = nullptr) override
     {
     }
 
@@ -313,6 +314,15 @@ public:
     int MaxKey() const
     {
         return int_store_.rbegin()->first;
+    }
+
+    std::string CreateNewKVCatalogInfo(
+        const txservice::TableName &table_name,
+        const txservice::TableSchema *current_table_schema,
+        txservice::AlterTableInfo &alter_table_info) override
+    {
+        assert(false);
+        return std::string("");
     }
 
 private:

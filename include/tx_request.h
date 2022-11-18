@@ -170,29 +170,29 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     UpsertTxRequest(const TableName *tab_name,
                     TxKey *key,
                     TxRecord *rec,
-                    DmlOperation dml_operation)
+                    OperationType operation_type)
         : tab_name_(tab_name),
           key_(key),
           rec_(rec),
-          dml_operation_(dml_operation)
+          operation_type_(operation_type)
     {
     }
 
     UpsertTxRequest(const TableName *tab_name,
                     TxKey::Uptr key,
                     TxRecord::Uptr rec,
-                    DmlOperation dml_operation)
+                    OperationType operation_type)
         : tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
-          dml_operation_(dml_operation)
+          operation_type_(operation_type)
     {
     }
 
     const TableName *tab_name_;
     TxKey::Uptr key_;
     TxRecord::Uptr rec_;
-    DmlOperation dml_operation_;
+    OperationType operation_type_;
 };
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
@@ -277,12 +277,14 @@ struct UpsertTableTxRequest
                          const std::string *curr_image,
                          uint64_t schema_ts,
                          const std::string *dirty_image,
-                         bool is_deleted)
+                         txservice::OperationType op_type,
+                         const std::string &alter_table_info_image = "")
         : table_name_(table_name),
           curr_image_(curr_image),
           curr_schema_ts_(schema_ts),
           dirty_image_(dirty_image),
-          is_deleted_(is_deleted)
+          op_type_(op_type),
+          alter_table_info_image_(alter_table_info_image)
     {
     }
 
@@ -290,7 +292,8 @@ struct UpsertTableTxRequest
     const std::string *curr_image_;
     uint64_t curr_schema_ts_;
     const std::string *dirty_image_;
-    bool is_deleted_;
+    txservice::OperationType op_type_;
+    const std::string &alter_table_info_image_;
 };
 
 struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>

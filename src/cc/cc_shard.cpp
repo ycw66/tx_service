@@ -667,11 +667,12 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
     fetch_reqs_.erase(table_name);
 }
 
-CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
-                              const TableSchema *table_schema,
-                              NodeGroupId ng_id,
-                              uint64_t schema_ts,
-                              bool ccm_has_full_entries)
+CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
+                                      const TableSchema *table_schema,
+                                      NodeGroupId ng_id,
+                                      uint64_t schema_ts,
+                                      bool is_create,
+                                      bool ccm_has_full_entries)
 {
     if (ng_id == node_id_)
     {
@@ -682,6 +683,14 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                                             schema_ts,
                                             ccm_has_full_entries,
                                             this));
+        // update table schema for alter table command.
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
         assert(ccm_it.first->first.IsStringOwner());
         return ccm_it.first->second.get();
     }
@@ -697,14 +706,23 @@ CcMap *CcShard::CreatePkCcMap(const TableName &table_name,
                                             schema_ts,
                                             ccm_has_full_entries,
                                             this));
+        // update table schema for alter table command.
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
         return ccm_it.first->second.get();
     }
 }
 
-CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
-                              const TableSchema *table_schema,
-                              NodeGroupId ng_id,
-                              uint64_t schema_ts)
+CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
+                                      const TableSchema *table_schema,
+                                      NodeGroupId ng_id,
+                                      uint64_t schema_ts,
+                                      bool is_create)
 {
     if (ng_id == node_id_)
     {
@@ -712,6 +730,14 @@ CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
             index_name,
             catalog_factory_->CreateSkCcMap(
                 index_name, table_schema, schema_ts, this));
+        // update table schema for current sk cc map
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
         return ccm_it.first->second.get();
     }
     else
@@ -723,6 +749,14 @@ CcMap *CcShard::CreateSkCcMap(const TableName &index_name,
             ccms.try_emplace(ng_id,
                              catalog_factory_->CreateSkCcMap(
                                  index_name, table_schema, schema_ts, this));
+        // update table schema for current sk cc map
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
         return ccm_it.first->second.get();
     }
 }
@@ -813,27 +847,44 @@ void CcShard::DropCcms(NodeGroupId ng_id)
     }
 }
 
-void CcShard::CreateRangeCcMap(const TableName &range_table_name,
-                               const TableSchema *table_schema,
-                               NodeGroupId ng_id,
-                               uint64_t schema_ts)
+void CcShard::CreateOrUpdateRangeCcMap(const TableName &range_table_name,
+                                       const TableSchema *table_schema,
+                                       NodeGroupId ng_id,
+                                       uint64_t schema_ts,
+                                       bool is_create)
 {
     if (ng_id == node_id_)
     {
-        native_ccms_.try_emplace(
+        auto ccm_it = native_ccms_.try_emplace(
             range_table_name,
             catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this));
+        // update table schema for current range cc map
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
     }
     else
     {
         auto fail_range_it = failover_ccms_.try_emplace(range_table_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &range_maps =
             fail_range_it->second;
-        range_maps.try_emplace(
+        auto ccm_it = range_maps.try_emplace(
             ng_id,
             catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this));
+        // update table schema for current range cc map
+        if (!is_create)
+        {
+            assert(!ccm_it.second);
+            CcMap *ccm = ccm_it.first->second.get();
+            ccm->SetTableSchema(table_schema);
+            ccm->SetSchemaTs(schema_ts);
+        }
     }
 }
 

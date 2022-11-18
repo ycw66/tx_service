@@ -98,10 +98,10 @@ public:
                         ccs.GetAllTableRangesForATable(*table_name_);
                     if (ranges != nullptr)
                     {
-                        ccs.CreateRangeCcMap(*table_name_,
-                                             table_schema,
-                                             node_group_id_,
-                                             table_schema->Version());
+                        ccs.CreateOrUpdateRangeCcMap(*table_name_,
+                                                     table_schema,
+                                                     node_group_id_,
+                                                     table_schema->Version());
                         ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                     else
@@ -138,19 +138,20 @@ public:
                             catalog_entry->schema_.get();
                         if (curr_schema != nullptr)
                         {
-                            ccs.CreatePkCcMap(base_table_name,
-                                              curr_schema,
-                                              node_group_id_,
-                                              catalog_entry->Version());
+                            ccs.CreateOrUpdatePkCcMap(base_table_name,
+                                                      curr_schema,
+                                                      node_group_id_,
+                                                      catalog_entry->Version());
 
                             std::vector<TableName> index_names =
                                 curr_schema->IndexNames();
                             for (const TableName &index_name : index_names)
                             {
-                                ccs.CreateSkCcMap(index_name,
-                                                  curr_schema,
-                                                  node_group_id_,
-                                                  catalog_entry->Version());
+                                ccs.CreateOrUpdateSkCcMap(
+                                    index_name,
+                                    curr_schema,
+                                    node_group_id_,
+                                    catalog_entry->Version());
                             }
 
                             ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -253,18 +254,18 @@ protected:
             const TableSchema *curr_schema = catalog_entry->schema_.get();
             if (curr_schema != nullptr && catalog_entry->Version() > 0)
             {
-                ccs.CreatePkCcMap(base_table_name,
-                                  curr_schema,
-                                  node_group_id_,
-                                  catalog_entry->Version());
+                ccs.CreateOrUpdatePkCcMap(base_table_name,
+                                          curr_schema,
+                                          node_group_id_,
+                                          catalog_entry->Version());
 
                 std::vector<TableName> index_names = curr_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    ccs.CreateSkCcMap(index_name,
-                                      curr_schema,
-                                      node_group_id_,
-                                      catalog_entry->Version());
+                    ccs.CreateOrUpdateSkCcMap(index_name,
+                                              curr_schema,
+                                              node_group_id_,
+                                              catalog_entry->Version());
                 }
             }
         }
@@ -582,7 +583,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                const TxRecord *rec,
-               DmlOperation dml_operation,
+               OperationType operation_type,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -593,7 +594,7 @@ public:
         commit_ts_ = ts;
         payload_ = rec;
         payload_str_ = nullptr;
-        dml_operation_ = dml_operation;
+        operation_type_ = operation_type;
 
         if (addr->InsertPtr() != 0)
         {
@@ -613,7 +614,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                const std::string *rec,
-               DmlOperation dml_operation,
+               OperationType operation_type,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -624,7 +625,7 @@ public:
         commit_ts_ = ts;
         payload_ = nullptr;
         payload_str_ = rec;
-        dml_operation_ = dml_operation;
+        operation_type_ = operation_type;
 
         if (addr->InsertPtr() != 0)
         {
@@ -660,9 +661,9 @@ public:
         return payload_str_;
     }
 
-    DmlOperation GetDmlOperation() const
+    OperationType GetOperationType() const
     {
-        return dml_operation_;
+        return operation_type_;
     }
 
 private:
@@ -670,7 +671,7 @@ private:
     uint64_t commit_ts_;
     const TxRecord *payload_;
     const std::string *payload_str_;
-    DmlOperation dml_operation_;
+    OperationType operation_type_;
 };
 
 struct PostWriteAllCc
@@ -687,7 +688,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                TxRecord *rec,
-               DmlOperation dml_op,
+               OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
@@ -702,7 +703,7 @@ public:
         payload_ = rec;
         payload_str_ = nullptr;
         decoded_payload_ = nullptr;
-        dml_op_ = dml_op;
+        op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
     }
@@ -713,7 +714,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                std::unique_ptr<TxRecord> rec,
-               DmlOperation dml_op,
+               OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
@@ -728,7 +729,7 @@ public:
         payload_ = rec.get();
         payload_str_ = nullptr;
         decoded_payload_ = std::move(rec);
-        dml_op_ = dml_op;
+        op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
     }
@@ -739,7 +740,7 @@ public:
                uint64_t tx_number,
                uint64_t ts,
                const std::string *rec,
-               DmlOperation dml_op,
+               OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
                int64_t tx_term)
@@ -754,7 +755,7 @@ public:
         payload_ = nullptr;
         payload_str_ = rec;
         decoded_payload_ = nullptr;
-        dml_op_ = dml_op;
+        op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
     }
@@ -774,9 +775,9 @@ public:
         return payload_str_;
     }
 
-    DmlOperation DmlOp() const
+    OperationType OpType() const
     {
-        return dml_op_;
+        return op_type_;
     }
 
     void SetTxKey(const TxKey *key)
@@ -845,7 +846,7 @@ private:
      *
      */
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
-    DmlOperation dml_op_{DmlOperation::Update};
+    OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
     int64_t tx_term_{0};
 };
@@ -1839,10 +1840,10 @@ public:
                     auto ranges = ccs.GetAllTableRangesForATable(*table_name_);
                     if (ranges != nullptr)
                     {
-                        ccs.CreateRangeCcMap(*table_name_,
-                                             table_schema_,
-                                             node_group_id_,
-                                             table_schema_->Version());
+                        ccs.CreateOrUpdateRangeCcMap(*table_name_,
+                                                     table_schema_,
+                                                     node_group_id_,
+                                                     table_schema_->Version());
                         ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                     else

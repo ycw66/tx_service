@@ -356,7 +356,7 @@ public:
         return enable_mvcc_;
     }
 
-    bool SetWaitingCkpt(bool is_waiting)
+    void SetWaitingCkpt(bool is_waiting)
     {
         is_waiting_ckpt_.store(is_waiting, std::memory_order_release);
     }

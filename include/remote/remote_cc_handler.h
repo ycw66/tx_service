@@ -56,7 +56,7 @@ public:
                    uint64_t commit_ts,
                    const CcEntryAddr &cce_addr,
                    const TxRecord *record,
-                   DmlOperation dml_operation,
+                   OperationType operation_type,
                    CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol);
 
@@ -70,7 +70,7 @@ public:
                       uint16_t command_id,
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
-                      DmlOperation dml_op,
+                      OperationType op_type,
                       PostWriteType post_write_type);
 
     void PostRead(uint32_t src_node_id,

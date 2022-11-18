@@ -409,16 +409,18 @@ public:
 
     void RemoveFetchRequest(const TableName &table_name);
 
-    CcMap *CreatePkCcMap(const TableName &table_name,
-                         const TableSchema *table_schema,
-                         NodeGroupId ng_id,
-                         uint64_t schema_ts,
-                         bool ccm_has_full_entries = false);
+    CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
+                                 const TableSchema *table_schema,
+                                 NodeGroupId ng_id,
+                                 uint64_t schema_ts,
+                                 bool is_create = true,
+                                 bool ccm_has_full_entries = false);
 
-    CcMap *CreateSkCcMap(const TableName &index_name,
-                         const TableSchema *table_schema,
-                         NodeGroupId ng_id,
-                         uint64_t schema_ts);
+    CcMap *CreateOrUpdateSkCcMap(const TableName &index_name,
+                                 const TableSchema *table_schema,
+                                 NodeGroupId ng_id,
+                                 uint64_t schema_ts,
+                                 bool is_create = true);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 
@@ -434,10 +436,11 @@ public:
      */
     void DropCcms(NodeGroupId ng_id);
 
-    void CreateRangeCcMap(const TableName &range_table_name,
-                          const TableSchema *table_schema,
-                          NodeGroupId ng_id,
-                          uint64_t schema_ts);
+    void CreateOrUpdateRangeCcMap(const TableName &range_table_name,
+                                  const TableSchema *table_schema,
+                                  NodeGroupId ng_id,
+                                  uint64_t schema_ts,
+                                  bool is_create = true);
 
     void DecrementMemory(size_t mem_size);
 

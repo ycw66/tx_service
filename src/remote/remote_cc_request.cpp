@@ -482,7 +482,7 @@ void txservice::remote::RemotePostWrite::Reset(
                        input_msg->tx_number(),
                        commit_ts,
                        rec_str,
-                       static_cast<DmlOperation>(post_commit.dml_operation()),
+                       static_cast<OperationType>(post_commit.operation_type()),
                        &cc_res_,
                        proto_);
 
@@ -538,8 +538,8 @@ void txservice::remote::RemotePostWriteAll::Reset(
     uint64_t commit_ts = post_write_all.commit_ts();
     const std::string *rec_str =
         commit_ts > 0 ? &post_write_all.record() : nullptr;
-    DmlOperation dml_op = post_write_all.is_deleted() ? DmlOperation::Delete
-                                                      : DmlOperation::Upsert;
+    OperationType op_type =
+        static_cast<OperationType>(post_write_all.operation_type());
     PostWriteType write_type =
         ToLocalType::ConvertCommitType(post_write_all.commit_type());
 
@@ -551,7 +551,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
                           input_msg->tx_number(),
                           commit_ts,
                           rec_str,
-                          dml_op,
+                          op_type,
                           &cc_res_,
                           write_type,
                           tx_term);

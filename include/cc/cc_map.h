@@ -122,6 +122,16 @@ public:
         return table_schema_;
     }
 
+    void SetTableSchema(const TableSchema *table_schema)
+    {
+        table_schema_ = table_schema;
+    }
+
+    void SetSchemaTs(uint64_t schema_ts)
+    {
+        schema_ts_ = schema_ts;
+    }
+
     CcShard *const shard_;
     TableName table_name_;  // string owner
     // Kv store can be skipped if we know ccm contains all the entries. This is

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 
 #include "cc/cc_map.h"
 #include "schema.h"
@@ -15,6 +16,10 @@ struct KVCatalogInfo
     virtual ~KVCatalogInfo() = default;
     virtual std::string Serialize() const = 0;
     virtual void Deserialize(const char *buf, size_t &offset) = 0;
+
+    std::string kv_table_name_;
+    // map of <mysql_index_table_name, kv_index_table_name>
+    std::unordered_map<txservice::TableName, std::string> kv_index_names_;
 };
 
 struct TableSchema

@@ -294,7 +294,7 @@ struct PostWriteAllOp : public TransactionOperation
     const TableName *table_name_{nullptr};
     const TxKey *key_{nullptr};
     TxRecord *rec_{nullptr};
-    DmlOperation dml_op_{DmlOperation::Upsert};
+    OperationType op_type_{OperationType::Upsert};
     PostWriteType write_type_{PostWriteType::PrepareCommit};
 };
 
@@ -302,7 +302,7 @@ struct DsUpsertTableOp : public TransactionOperation
 {
     DsUpsertTableOp() = delete;
     DsUpsertTableOp(const TableName *table_name,
-                    bool is_deleted,
+                    OperationType op_type,
                     TransactionExecution *txm);
 
     void Reset();
@@ -310,8 +310,9 @@ struct DsUpsertTableOp : public TransactionOperation
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
-    bool is_deleted_{false};
+    OperationType op_type_{OperationType::Upsert};
     CcHandlerResult<Void> hd_result_;
+    const txservice::AlterTableInfo *alter_table_info_{nullptr};
 };
 
 struct SchemaOp : public TransactionOperation
@@ -320,13 +321,15 @@ struct SchemaOp : public TransactionOperation
     SchemaOp(const std::string_view table_name_sv,
              const std::string &current_image,
              const std::string &dirty_image,
-             uint64_t schema_ts);
+             uint64_t schema_ts,
+             const std::string &alter_table_info_image);
 
     CatalogKey table_key_;  // string owner
     CatalogRecord catalog_rec_;
     std::string image_str_{""};
     std::string dirty_image_str_{""};
     uint64_t curr_schema_ts_;
+    std::string alter_table_info_image_str_{""};
 };
 
 struct UpsertTableOp : public SchemaOp
@@ -336,12 +339,13 @@ struct UpsertTableOp : public SchemaOp
                   const std::string &current_image,
                   uint64_t curr_schema_ts,
                   const std::string &dirty_image,
-                  bool is_deleted,
-                  TransactionExecution *txm);
+                  OperationType op_type,
+                  TransactionExecution *txm,
+                  const std::string &alter_table_info_image);
 
     void Forward(TransactionExecution *txm) override;
 
-    bool is_deleted_{false};
+    OperationType op_type_{OperationType::Insert};
     /**
      * @brief The current stage of this multi-stage schema operation.
      *
@@ -395,6 +399,8 @@ struct UpsertTableOp : public SchemaOp
      *
      */
     WriteToLogOp clean_log_op_;
+
+    txservice::AlterTableInfo alter_table_info_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);

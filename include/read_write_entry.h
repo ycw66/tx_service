@@ -18,7 +18,7 @@ struct WriteSetEntry
     using Uptr = std::unique_ptr<WriteSetEntry>;
 
     WriteSetEntry()
-        : key_(nullptr), rec_(nullptr), op_(DmlOperation::Upsert), cce_addr_()
+        : key_(nullptr), rec_(nullptr), op_(OperationType::Upsert), cce_addr_()
     {
     }
 
@@ -44,7 +44,7 @@ struct WriteSetEntry
 
     TxKey::Uptr key_;
     TxRecord::Uptr rec_;
-    DmlOperation op_;
+    OperationType op_;
     CcEntryAddr cce_addr_;
 };
 

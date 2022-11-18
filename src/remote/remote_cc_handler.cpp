@@ -110,7 +110,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
-    DmlOperation dml_operation,
+    OperationType operation_type,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -139,7 +139,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     }
 
     post_commit->clear_record();
-    if (commit_ts > 0 && dml_operation != DmlOperation::Delete)
+    if (commit_ts > 0 && operation_type != OperationType::Delete)
     {
         // The commit ts is 0, if the post-write request is used to clear the
         // write lock when the tx aborts.
@@ -150,7 +150,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     }
 
     post_commit->set_commit_ts(commit_ts);
-    post_commit->set_dml_operation(static_cast<uint32_t>(dml_operation));
+    post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
     post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
@@ -167,7 +167,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     uint16_t command_id,
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
-    DmlOperation dml_op,
+    OperationType op_type,
     PostWriteType post_write_type)
 {
     CcMessage send_msg;
@@ -191,7 +191,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_commit_ts(commit_ts);
 
     post_write_all->clear_record();
-    if (commit_ts > 0 && dml_op != DmlOperation::Delete &&
+    if (commit_ts > 0 && op_type != OperationType::Delete &&
+        op_type != OperationType::DropTable &&
         (post_write_type == PostWriteType::PrepareCommit ||
          post_write_type == PostWriteType::Commit))
     {
@@ -200,14 +201,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
         rec.Serialize(*post_write_all->mutable_record());
     }
 
-    if (dml_op == DmlOperation::Delete)
-    {
-        post_write_all->set_is_deleted(true);
-    }
-    else
-    {
-        post_write_all->set_is_deleted(false);
-    }
+    post_write_all->set_operation_type(static_cast<uint32_t>(op_type));
 
     CommitType commit_type =
         ToRemoteType::ConvertPostWriteType(post_write_type);

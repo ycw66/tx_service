@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>  // std::vector
 
 #include "catalog_factory.h"
@@ -57,10 +58,12 @@ public:
                         const txservice::TableSchema *table_schema,
                         uint32_t node_group) = 0;
 
-    virtual void UpsertTable(const TableSchema *table_schema,
-                             bool is_deleted,
-                             uint64_t commit_ts,
-                             CcHandlerResult<Void> *hd_res) = 0;
+    virtual void UpsertTable(
+        const TableSchema *table_schema,
+        OperationType op_type,
+        uint64_t commit_ts,
+        CcHandlerResult<Void> *hd_res,
+        const txservice::AlterTableInfo *alter_table_info = nullptr) = 0;
 
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    void *fetch_req) = 0;
@@ -188,6 +191,11 @@ public:
 
     virtual KVCatalogInfo::uptr DeserializeKVCatalogInfo(
         const std::string &kv_info_str, size_t &offset) const = 0;
+
+    virtual std::string CreateNewKVCatalogInfo(
+        const txservice::TableName &table_name,
+        const txservice::TableSchema *current_table_schema,
+        txservice::AlterTableInfo &alter_table_info) = 0;
 
 protected:
     TxService *tx_service_;

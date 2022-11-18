@@ -150,12 +150,14 @@ void TransactionExecution::RecoverSchemaTx(
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
         std::unique_ptr<UpsertTableOp> table_op =
-            std::make_unique<UpsertTableOp>(schema_op.table_name_str(),
-                                            schema_op.old_catalog_blob(),
-                                            schema_op.catalog_ts(),
-                                            schema_op.new_catalog_blob(),
-                                            table_msg.is_deleted(),
-                                            this);
+            std::make_unique<UpsertTableOp>(
+                schema_op.table_name_str(),
+                schema_op.old_catalog_blob(),
+                schema_op.catalog_ts(),
+                schema_op.new_catalog_blob(),
+                static_cast<OperationType>(table_msg.op_type()),
+                this,
+                schema_op.alter_table_info_blob());
 
         if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
                                      SchemaOpMessage_Stage_PrepareSchema)
@@ -500,7 +502,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
     Upsert(*upsert_req.tab_name_,
            std::move(upsert_req.key_),
            std::move(upsert_req.rec_),
-           upsert_req.dml_operation_);
+           upsert_req.operation_type_);
 }
 
 void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
@@ -561,8 +563,9 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                                                  *req.curr_image_,
                                                  req.curr_schema_ts_,
                                                  *req.dirty_image_,
-                                                 req.is_deleted_,
-                                                 this);
+                                                 req.op_type_,
+                                                 this,
+                                                 req.alter_table_info_image_);
     PushOperation(schema_op_.get());
     Forward();
 }
@@ -740,7 +743,7 @@ void TransactionExecution::Process(ReadOperation &read)
             const WriteSetEntry *write = rw_set_.FindWrite(table_name, key);
             if (write != nullptr)
             {
-                if (write->op_ == DmlOperation::Delete)
+                if (write->op_ == OperationType::Delete)
                 {
                     state_stack_.pop_back();
                     assert(state_stack_.empty());
@@ -1351,7 +1354,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             *local_write.key_ < *cc_scan_tuple->Key())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == DmlOperation::Delete)
+            if (local_write.op_ == OperationType::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
                     local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
@@ -1395,7 +1398,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         else if (*cc_scan_tuple->Key() == *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == DmlOperation::Delete)
+            if (local_write.op_ == OperationType::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
                     local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
@@ -1455,7 +1458,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             *cc_scan_tuple->Key() < *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == DmlOperation::Delete)
+            if (local_write.op_ == OperationType::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
                     local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
@@ -1500,7 +1503,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         else if (*cc_scan_tuple->Key() == *local_write.key_.get())
         {
             // Returns the key-value pair in the local write set.
-            if (local_write.op_ == DmlOperation::Delete)
+            if (local_write.op_ == OperationType::Delete)
             {
                 kvp_resp_->Finish(std::make_tuple(
                     local_write.key_.get(), nullptr, RecordStatus::Deleted, 0));
@@ -1617,27 +1620,27 @@ void TransactionExecution::Update(const TableName &table_name,
                                   TxKey::Uptr key,
                                   TxRecord::Uptr rec)
 {
-    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Update);
+    Upsert(table_name, std::move(key), std::move(rec), OperationType::Update);
 }
 
 void TransactionExecution::Insert(const TableName &table_name,
                                   TxKey::Uptr key,
                                   TxRecord::Uptr rec)
 {
-    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Insert);
+    Upsert(table_name, std::move(key), std::move(rec), OperationType::Insert);
 }
 
 void TransactionExecution::Delete(const TableName &table_name, TxKey::Uptr key)
 {
     TxRecord::Uptr rec{nullptr};
-    Upsert(table_name, std::move(key), std::move(rec), DmlOperation::Delete);
+    Upsert(table_name, std::move(key), std::move(rec), OperationType::Delete);
 }
 
 // Upsert modify tuple without locking in OCC protocol.
 void TransactionExecution::Upsert(const TableName &table_name,
                                   TxKey::Uptr key,
                                   TxRecord::Uptr rec,
-                                  DmlOperation op)
+                                  OperationType op)
 {
     if (!rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op))
     {
@@ -2052,11 +2055,11 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 wset_entry->key_->Serialize(*log_ng_blob);
 
                 uint8_t delete_flag =
-                    wset_entry->op_ == DmlOperation::Delete ? 1 : 0;
+                    wset_entry->op_ == OperationType::Delete ? 1 : 0;
                 log_ng_blob->append(
                     reinterpret_cast<const char *>(&delete_flag), 1);
 
-                if (wset_entry->op_ != DmlOperation::Delete &&
+                if (wset_entry->op_ != OperationType::Delete &&
                     wset_entry->rec_ != nullptr)
                 {
                     wset_entry->rec_->Serialize(*log_ng_blob);
@@ -2310,7 +2313,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 }
                 assert(!write_entry.cce_addr_.Empty());
 
-                // Abort doesn't care the DmlOperation, since PostWrite is just
+                // Abort doesn't care the OperationType, since PostWrite is just
                 // used to release the lock.
                 handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
@@ -2478,7 +2481,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                               command_id_.load(std::memory_order_relaxed),
                               commit_ts_,
                               post_write_all_op.hd_result_,
-                              post_write_all_op.dml_op_,
+                              post_write_all_op.op_type_,
                               post_write_all_op.write_type_);
     }
 
@@ -2519,9 +2522,10 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
     handler->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
-                                  ds_upsert_table_op.is_deleted_,
+                                  ds_upsert_table_op.op_type_,
                                   commit_ts_,
-                                  ds_upsert_table_op.hd_result_);
+                                  ds_upsert_table_op.hd_result_,
+                                  ds_upsert_table_op.alter_table_info_);
 }
 
 void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)

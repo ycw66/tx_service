@@ -182,7 +182,7 @@ public:
     bool AddWrite(const TableName &table_name,
                   TxKey::Uptr key,
                   TxRecord::Uptr rec,
-                  DmlOperation op_type)
+                  OperationType op_type)
     {
         // Check write set bytes count.
         wset_bytes_cnt_ += ((key.get() ? key.get()->MemUsage() : 0) +
