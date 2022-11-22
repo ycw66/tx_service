@@ -467,7 +467,7 @@ TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
               CcProtocol::Locking,
               IsolationLevel::Snapshot);
     entry.key_lock_ptr_->AcquireWriteLock(&req, CcProtocol::Locking);
-    entry.wlock_ts_ = 13;
+    entry.key_lock_ptr_->SetWLockTs(13);
 
     // (read_ts: 9)->... => 9
     {

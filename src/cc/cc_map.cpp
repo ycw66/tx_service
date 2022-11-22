@@ -32,24 +32,16 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
         LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
 
     TxNumber tx_number = req->Txn();
-    bool is_already_held = false;
     LockOpStatus lock_op_status = LockOpStatus::Successful;
 
     if (lock_type != LockType::NoLock)
     {
         if (lock_type == LockType::WriteLock ||
+            lock_type == LockType::WriteIntent ||
             cce_payload_status != RecordStatus::Deleted)
         {
-            LockType held_lock = cce->GetKeyLock().LockTypeHeldByTx(tx_number);
-            if (held_lock < lock_type)
-            {
-                lock_op_status =
-                    cce->GetKeyLock().AcquireLock(req, protocol, lock_type);
-            }
-            else
-            {
-                is_already_held = true;
-            }
+            lock_op_status =
+                cce->GetKeyLock().AcquireLock(req, protocol, lock_type);
         }
         else
         {
@@ -71,20 +63,21 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
                         .append(",\"CcEntry\":")
                         .append(FMT_POINTER_TO_UINT64T(cce))
                         .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(&(cce->GetKeyLock())));
+                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
                 }));
 
-        if (lock_type != LockType::NoLock && !is_already_held)
+        if (lock_type != LockType::NoLock)
         {
             shard_->UpsertLockHoldingTx(
                 tx_number, tx_term, cce, lock_type == LockType::WriteLock);
         }
 
-        if (cce->key_lock_ptr_ != nullptr && cce->GetKeyLock().HasWriteLock() &&
-            cce->GetKeyLock().WriteLockTx() != tx_number)
+        if (cce->key_lock_ptr_ != nullptr &&
+            cce->key_lock_ptr_->HasWriteLock() &&
+            cce->key_lock_ptr_->WriteLockTx() != tx_number)
         {
             shard_->CheckRecoverTx(
-                cce->GetKeyLock().WriteLockTx(), ng_id, ng_term);
+                cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
         }
     }
     else if (lock_op_status == LockOpStatus::Failed)
@@ -101,11 +94,12 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
                         .append(",\"CcEntry\":")
                         .append(FMT_POINTER_TO_UINT64T(cce))
                         .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(&(cce->GetKeyLock())));
+                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
                 }));
 
         // check and recover conflicted transactions.
-        RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
+        RecoverTxForLockConfilct(
+            *(cce->key_lock_ptr_), lock_type, ng_id, ng_term);
     }
     else
     {
@@ -121,11 +115,12 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
                         .append(",\"CcEntry\":")
                         .append(FMT_POINTER_TO_UINT64T(cce))
                         .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(&(cce->GetKeyLock())));
+                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
                 }));
 
         // check and recover conflicted transactions.
-        RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
+        RecoverTxForLockConfilct(
+            *(cce->key_lock_ptr_), lock_type, ng_id, ng_term);
     }
 
     return std::pair<LockType, LockOpStatus>(lock_type, lock_op_status);
@@ -135,25 +130,24 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
                                             int64_t tx_term,
                                             LruEntry *cce,
                                             RecordStatus cce_payload_status,
-                                            bool is_wait_for_postwrite)
+                                            CcOperation cc_op,
+                                            IsolationLevel iso_level,
+                                            CcProtocol protocol)
 {
     TxNumber tx_number = req->Txn();
-    LockType acquired_lock = cce->GetKeyLock().LockTypeHeldByTx(tx_number);
-    if (is_wait_for_postwrite)
+    LockType acquired_lock =
+        LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
+
+    if (cce_payload_status == RecordStatus::Deleted &&
+        acquired_lock != LockType::WriteLock &&
+        acquired_lock != LockType::WriteIntent)
     {
-        assert(acquired_lock == LockType::ReadLock);
-        cce->GetKeyLock().ReleaseLock(tx_number, shard_, LockType::ReadLock);
-        acquired_lock = LockType::NoLock;
-    }
-    else if (cce_payload_status == RecordStatus::Deleted &&
-             acquired_lock != LockType::WriteLock)
-    {
-        cce->GetKeyLock().ReleaseLock(tx_number, shard_, acquired_lock);
+        cce->key_lock_ptr_->ReleaseLock(tx_number, shard_, acquired_lock);
         cce->RecycleKeyLock();
         acquired_lock = LockType::NoLock;
         // Here "DeleteLockHoldingTx" is required. For, this may be a retried
         // request and the prior blocked request may has upsert tx's lock info.
-        shard_->DeleteLockHoldingTx(tx_number, cce, false);
+        shard_->DeleteLockHoldingTx(tx_number, cce);
     }
     else
     {
@@ -163,13 +157,6 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
     }
 
     return acquired_lock;
-}
-
-void CcMap::WaitForPostWriteDone(CcRequestBase *req, LruEntry *cce)
-{
-    assert(cce->GetKeyLock().HasWriteLock() &&
-           cce->GetKeyLock().WriteLockTx() != req->Txn());
-    cce->GetKeyLock().InsertBlockingQueue(req, LockType::ReadLock);
 }
 
 void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
@@ -241,26 +228,20 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
 
 void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
 {
-    cce->GetKeyLock().DowngradeWriteLock(tx_number, shard_);
-    shard_->DecTxHeldWriteLockCount(tx_number);
-}
-
-LockType CcMap::CceKeyLockTypeHeldByTx(LruEntry *cce, TxNumber tx_number)
-{
-    return cce->GetKeyLock().LockTypeHeldByTx(tx_number);
+    cce->key_lock_ptr_->DowngradeWriteLock(tx_number, shard_);
 }
 
 void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
 {
     if (cce != nullptr && cce->key_lock_ptr_ != nullptr)
     {
-        bool is_write_lock = (cce->GetKeyLock().HasWriteLock() &&
-                              cce->GetKeyLock().WriteLockTx() == tx_number);
-        cce->GetKeyLock().ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);
+        bool is_write_lock = (cce->key_lock_ptr_->HasWriteLock() &&
+                              cce->key_lock_ptr_->WriteLockTx() == tx_number);
+        cce->key_lock_ptr_->ClearTx(tx_number, shard_);
+        shard_->DeleteLockHoldingTx(tx_number, cce);
         if (is_write_lock)
         {
-            cce->wlock_ts_ = 0;
+            cce->key_lock_ptr_->SetWLockTs(0);
         }
         cce->RecycleKeyLock();
     }
@@ -270,13 +251,13 @@ void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number)
 {
     if (cce != nullptr && cce->gap_lock_ptr_ != nullptr)
     {
-        bool is_write_lock = (cce->GetGapLock().HasWriteLock() &&
-                              cce->GetGapLock().WriteLockTx() == tx_number);
-        cce->GetGapLock().ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce, is_write_lock);
+        bool is_write_lock = (cce->gap_lock_ptr_->HasWriteLock() &&
+                              cce->gap_lock_ptr_->WriteLockTx() == tx_number);
+        cce->gap_lock_ptr_->ClearTx(tx_number, shard_);
+        shard_->DeleteLockHoldingTx(tx_number, cce);
         if (is_write_lock)
         {
-            cce->wlock_ts_ = 0;
+            cce->gap_lock_ptr_->SetWLockTs(0);
         }
         cce->RecycleGapLock();
     }

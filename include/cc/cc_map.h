@@ -186,10 +186,9 @@ protected:
                                          int64_t tx_term,
                                          LruEntry *cce,
                                          RecordStatus cce_payload_status,
-                                         bool is_wait_for_postwrite = false);
-
-    // Insert the request into key_lock's blocking queue.
-    void WaitForPostWriteDone(CcRequestBase *req, LruEntry *cce);
+                                         CcOperation cc_op,
+                                         IsolationLevel iso_level,
+                                         CcProtocol protocol);
 
     void RecoverTxForLockConfilct(NonBlockingLock &lock,
                                   LockType lock_type,
@@ -207,15 +206,6 @@ protected:
      */
     void ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number);
     void ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number);
-    /**
-     * @brief The lock type of CcEntry's key_lock that held by some one
-     * transaction.
-     *
-     * @param cce
-     * @param tx_number
-     * @return LockType
-     */
-    LockType CceKeyLockTypeHeldByTx(LruEntry *cce, TxNumber tx_number);
 
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;

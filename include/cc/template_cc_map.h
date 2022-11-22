@@ -141,8 +141,14 @@ public:
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-            acquired_lock = LockHandleForResumedRequest(
-                &req, req.TxTerm(), cce_ptr, cce_ptr->payload_status_);
+            acquired_lock =
+                LockHandleForResumedRequest(&req,
+                                            req.TxTerm(),
+                                            cce_ptr,
+                                            cce_ptr->payload_status_,
+                                            CcOperation::Write,
+                                            req.Isolation(),
+                                            req.Protocol());
             lock_op_status = LockOpStatus::Successful;
         }
         else
@@ -276,7 +282,7 @@ public:
                 assert(acquired_lock == LockType::WriteLock);
                 // for mvcc
                 uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
-                cc_entry.wlock_ts_ = lock_ts;
+                cc_entry.key_lock_ptr_->SetWLockTs(lock_ts);
 
                 // Updates last_vali_ts after successfully acquiring the write
                 // lock such that it is no smaller than the current time of
@@ -470,8 +476,8 @@ public:
                 *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
             if (cce.key_lock_ptr_ != nullptr &&
-                cce.GetKeyLock().HasWriteLock() &&
-                cce.GetKeyLock().WriteLockTx() != txn)
+                cce.key_lock_ptr_->HasWriteLock() &&
+                cce.key_lock_ptr_->WriteLockTx() != txn)
             {
                 req.Result()->SetFinished();
                 return true;
@@ -574,8 +580,14 @@ public:
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            acquired_lock = LockHandleForResumedRequest(
-                &req, req.TxTerm(), cce_ptr, cce_ptr->payload_status_);
+            acquired_lock =
+                LockHandleForResumedRequest(&req,
+                                            req.TxTerm(),
+                                            cce_ptr,
+                                            cce_ptr->payload_status_,
+                                            req.CcOp(),
+                                            req.Isolation(),
+                                            req.Protocol());
             lock_op_status = LockOpStatus::Successful;
         }
         else
@@ -953,10 +965,23 @@ public:
         }
         else
         {
-            LockType lk_type = CceKeyLockTypeHeldByTx(cce_ptr, txn);
+            LockType lk_type = LockType::NoLock;
+            if (cce_ptr->key_lock_ptr_ != nullptr)
+            {
+                // AcquireAllCc only acquire WriteIntent or WriteLock
+                if (cce_ptr->key_lock_ptr_->HasWriteLock() &&
+                    cce_ptr->key_lock_ptr_->WriteLockTx() == txn)
+                {
+                    lk_type = LockType::WriteLock;
+                }
+                else if (cce_ptr->key_lock_ptr_->HasWriteIntent() &&
+                         cce_ptr->key_lock_ptr_->WriteIntentTx() == txn)
+                {
+                    lk_type = LockType::WriteIntent;
+                }
+            }
 
-            if (lk_type == LockType::WriteLock ||
-                lk_type == LockType::WriteIntent)
+            if (lk_type != LockType::NoLock)
             {
                 if (commit_ts > 0)
                 {
@@ -1109,21 +1134,22 @@ public:
                     std::max(cc_entry.last_read_ts_, commit_ts);
 
                 if (cc_entry.key_lock_ptr_ != nullptr &&
-                    cc_entry.GetKeyLock().HasWriteLock() &&
-                    txn != cc_entry.GetKeyLock().HasWriteLock())
+                    cc_entry.key_lock_ptr_->HasWriteLock() &&
+                    cc_entry.key_lock_ptr_->WriteLockTx() != txn)
                 {
                     int64_t ng_term =
                         Sharder::Instance().LeaderTerm(req.NodeGroupId());
-                    shard_->CheckRecoverTx(cc_entry.GetKeyLock().WriteLockTx(),
-                                           req.NodeGroupId(),
-                                           ng_term);
+                    shard_->CheckRecoverTx(
+                        cc_entry.key_lock_ptr_->WriteLockTx(),
+                        req.NodeGroupId(),
+                        ng_term);
                     conflicting_txs.AddConflictingTx(
-                        cc_entry.GetKeyLock().WriteLockTx());
+                        cc_entry.key_lock_ptr_->WriteLockTx());
 
                     DLOG_IF(INFO, TRACE_OCC_ERR)
                         << "PostReadCc, occ_err, txn:" << txn
                         << " ,cce: " << &cc_entry << " ,key conflict tx: "
-                        << cc_entry.GetKeyLock().WriteLockTx();
+                        << cc_entry.key_lock_ptr_->WriteLockTx();
                 }
             }
 
@@ -1243,14 +1269,25 @@ public:
 
                 if (req.IsWaitForPostWrite())
                 {
-                    acquired_lock = LockHandleForResumedRequest(
-                        &req, req.TxTerm(), cce, cce->payload_status_, true);
                     req.SetIsWaitForPostWrite(false);
+                    // Since when we are waiting for PostWrite, the ReadCc
+                    // request is put into the blocking queue with ReadLock.
+                    // After PostWrite finished, this ReadLock should be
+                    // released.
+                    cce->key_lock_ptr_->ReleaseLock(
+                        req.Txn(), shard_, LockType::ReadLock);
+                    acquired_lock = LockType::NoLock;
                 }
                 else
                 {
-                    acquired_lock = LockHandleForResumedRequest(
-                        &req, req.TxTerm(), cce, cce->payload_status_, false);
+                    acquired_lock =
+                        LockHandleForResumedRequest(&req,
+                                                    req.TxTerm(),
+                                                    cce,
+                                                    cce->payload_status_,
+                                                    cc_op,
+                                                    iso_lvl,
+                                                    cc_proto);
                 }
                 lock_op_status = LockOpStatus::Successful;
             }
@@ -1466,8 +1503,24 @@ public:
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
                 cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp())
             {
+                // When backtracking the content of primary key record according
+                // to the secondary index key, if the commit_ts of this
+                // primary key record is smaller than the commit_ts of the
+                // secondary index key("req.ReadTimestamp()"), it means that the
+                // current primary key has not been updated and there must be a
+                // PostWriteCc request waiting to be executed. So, this read
+                // should wait for the PostWriteCc completed.
                 req.SetIsWaitForPostWrite(true);
-                WaitForPostWriteDone(&req, cce);
+                assert(cce->key_lock_ptr_ != nullptr &&
+                       cce->key_lock_ptr_->HasWriteLock() &&
+                       cce->key_lock_ptr_->WriteLockTx() != req.Txn());
+                // Put the request to top of key lock's blocking queue with
+                // acquring readlock. And then should release the readlock
+                // before handling this requst when PostWriteCc finished.
+                cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                        LockType::ReadLock);
+                shard_->CheckRecoverTx(
+                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
 
                 // After inserting to blocking queue, the execution of current
                 // ReadCc request should stop.
@@ -1719,8 +1772,13 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(
-                &req, tx_term, cce, cce->payload_status_);
+            LockHandleForResumedRequest(&req,
+                                        tx_term,
+                                        cce,
+                                        cce->payload_status_,
+                                        cc_op,
+                                        iso_lvl,
+                                        cc_proto);
 
             AddScanTuple(cce,
                          typed_cache,
@@ -1946,8 +2004,13 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(
-                &req, tx_term, prior_cce, prior_cce->payload_status_);
+            LockHandleForResumedRequest(&req,
+                                        tx_term,
+                                        prior_cce,
+                                        prior_cce->payload_status_,
+                                        cc_op,
+                                        iso_lvl,
+                                        cc_proto);
 
             AddScanTuple(prior_cce,
                          typed_cache,
@@ -2210,8 +2273,13 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(
-                &req, tx_term, cce, cce->payload_status_);
+            LockHandleForResumedRequest(&req,
+                                        tx_term,
+                                        cce,
+                                        cce->payload_status_,
+                                        cc_op,
+                                        iso_lvl,
+                                        cc_proto);
 
             AddScanTupleMsg(cce,
                             cache,
@@ -2444,8 +2512,13 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(
-                &req, tx_term, prior_cce, prior_cce->payload_status_);
+            LockHandleForResumedRequest(&req,
+                                        tx_term,
+                                        prior_cce,
+                                        prior_cce->payload_status_,
+                                        cc_op,
+                                        iso_lvl,
+                                        cc_proto);
 
             AddScanTupleMsg(prior_cce,
                             req.scan_cache_,
@@ -2836,7 +2909,7 @@ public:
                 TryInsertCkptList(cce);
 
                 if (cce->key_lock_ptr_ != nullptr &&
-                    cce->GetKeyLock().HasWriteLock())
+                    cce->key_lock_ptr_->HasWriteLock())
                 {
                     // If the record in the log has a commit ts greater than
                     // that of the cc entry and the cc entry has a write
@@ -2844,7 +2917,7 @@ public:
                     // the log record.
                     // TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
-                    TxNumber txn = cce->GetKeyLock().WriteLockTx();
+                    TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
                     ReleaseCceKeyLock(cce, txn);
                 }
             }

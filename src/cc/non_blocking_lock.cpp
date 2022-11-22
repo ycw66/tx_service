@@ -506,28 +506,6 @@ void NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
     }
 }
 
-LockType NonBlockingLock::LockTypeHeldByTx(TxNumber tx_number)
-{
-    LockType lock_type = LockType::NoLock;
-    if (HasWriteLock() && WriteLockTx() == tx_number)
-    {
-        lock_type = LockType::WriteLock;
-    }
-    else if (HasWriteIntent() && WriteIntentTx() == tx_number)
-    {
-        lock_type = LockType::WriteIntent;
-    }
-    else if (read_locks_.find(tx_number) != read_locks_.end())
-    {
-        lock_type = LockType::ReadLock;
-    }
-    else if (read_intentions_.find(tx_number) != read_intentions_.end())
-    {
-        lock_type = LockType::ReadIntent;
-    }
-    return lock_type;
-}
-
 const std::unordered_set<TxNumber> &NonBlockingLock::ReadLocks() const
 {
     return read_locks_;

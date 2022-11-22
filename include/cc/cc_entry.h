@@ -245,9 +245,6 @@ public:
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{1};
-
-    // The time when a write tx acquires the write lock/intent on this cc entry.
-    uint64_t wlock_ts_;
 };
 
 /**
@@ -377,8 +374,8 @@ public:
         // size of lru_prev_, lru_next_, ckpt_prev_, ckpt_next_, parent_map_
         mem_usage_ += 5 * ptr_size;
         // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_,
-        // ckpt_ts_ and wlock_ts_
-        mem_usage_ += 6 * sizeof(uint64_t);
+        // ckpt_ts_
+        mem_usage_ += 5 * sizeof(uint64_t);
 
         // size of key_lock_ptr_ and gap_lock_ptr_
         mem_usage_ += 2 * sizeof(uint64_t);
@@ -434,8 +431,6 @@ public:
 
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
     std::unique_ptr<std::deque<VersionRecord<ValueT>>> archives_;
-    // The time when a write tx acquires the write lock/intent on this cc entry.
-    uint64_t wlock_ts_;
 
     /**
      * @brief Move(not copy) the current version (payload, payload_status,
@@ -647,8 +642,8 @@ public:
         }
         if (commit_ts_ <= ts)
         {
-            if (key_lock_ptr_ != nullptr && GetKeyLock().HasWriteLock() &&
-                wlock_ts_ < ts)
+            if (key_lock_ptr_ != nullptr && key_lock_ptr_->HasWriteLock() &&
+                key_lock_ptr_->WLockTs() < ts)
             {
                 // Having write lock means the ccentry will be updated soon.
                 // If wlock_ts_ < ts, the future 'commit_ts' is may also less

@@ -73,6 +73,7 @@ public:
         is_write_intent_empty_ = true;
         is_used_ = false;
         blocking_queue_.Reset();
+        wlock_ts_ = 0;
     }
 
     void SetUsedStatus(bool is_used)
@@ -159,10 +160,17 @@ public:
 
     void ClearTx(TxNumber tx_number, CcShard *ccs);
 
-    LockType LockTypeHeldByTx(TxNumber tx_number);
-
     const std::unordered_set<TxNumber> &ReadLocks() const;
     const std::unordered_set<TxNumber> &ReadIntents() const;
+
+    uint64_t WLockTs() const
+    {
+        return wlock_ts_;
+    }
+    void SetWLockTs(uint64_t ts)
+    {
+        wlock_ts_ = ts;
+    }
 
     size_t MemUsage() const
     {
@@ -178,6 +186,8 @@ public:
         mem_size_ += sizeof(is_write_intent_empty_);
         mem_size_ += blocking_queue_.MemUsage() +
                      blocking_queue_.Capacity() * sizeof(LockQueueEntry);
+        mem_size_ += sizeof(is_used_);
+        mem_size_ += sizeof(wlock_ts_);
 
         return mem_size_;
     }
@@ -262,6 +272,8 @@ private:
     TxNumber write_intent_tx_{0};
     bool is_write_intent_empty_{true};
     bool is_used_{false};
+    // The time when a write tx acquires the write lock on this lock.
+    uint64_t wlock_ts_;
 
     // blocking_queue_ stores the requests that 1) want to acquire lock/intent
     // but failed due to conflict, or 2) want to read a pk record whose commit

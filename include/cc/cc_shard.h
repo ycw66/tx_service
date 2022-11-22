@@ -54,30 +54,24 @@ public:
 struct TxLockInfo
 {
     TxLockInfo() = delete;
-    TxLockInfo(int64_t tx_coord_term, uint64_t ts)
+    explicit TxLockInfo(int64_t tx_coord_term)
         : tx_coord_term_(tx_coord_term),
-          ts_(ts),
+          wlock_ts_(0),
           last_recover_ts_(0),
-          cce_list_(),
-          key_write_lock_count_(0)
+          cce_list_()
     {
-    }
-
-    bool HasWriteLock() const
-    {
-        return (key_write_lock_count_ > 0);
     }
 
     // tx coordinator's term.
     int64_t tx_coord_term_;
-    // The timestamp when the tx acquires the first lock in the cc shard.
-    uint64_t ts_;
-    // The last time when the tx is recovered.
+    // The timestamp when the tx acquires the first write lock in the cc shard.
+    // If tx has not acquired any write lock, set wlock_ts_ to 0.
+    uint64_t wlock_ts_;
+    // The last time when the tx is recovered or the tx acquired the latest
+    // lock.
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     std::unordered_set<LruEntry *> cce_list_;
-    // How many write locks in this tx for current shard
-    int32_t key_write_lock_count_;
 };
 
 class CcShard
@@ -244,11 +238,7 @@ public:
                                     LruEntry *cce_ptr,
                                     bool is_key_write_lock);
 
-    void DeleteLockHoldingTx(TxNumber txn,
-                             LruEntry *cce_ptr,
-                             bool is_key_write_lock);
-
-    void DecTxHeldWriteLockCount(TxNumber txn);
+    void DeleteLockHoldingTx(TxNumber txn, LruEntry *cce_ptr);
 
     /**
      * @brief When a tx fails to acquire a lock, it invokes this method to check
@@ -269,9 +259,9 @@ public:
         uint64_t min_ts = UINT64_MAX;
         for (const auto &tx_pair : lock_holding_txs_)
         {
-            if (tx_pair.second.HasWriteLock())
+            if (tx_pair.second.wlock_ts_ != 0)
             {
-                min_ts = std::min(min_ts, tx_pair.second.ts_ - 1);
+                min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
             }
         }
 

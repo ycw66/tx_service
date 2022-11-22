@@ -52,7 +52,7 @@ CcShard::CcShard(uint16_t core_id,
     }
 
     lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
-    for (int idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
+    for (uint32_t idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
     {
         lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
     }
@@ -334,24 +334,20 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          LruEntry *cce_ptr,
                                          bool is_key_write_lock)
 {
-    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term, Now());
+    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term);
     em_it.first->second.cce_list_.emplace(cce_ptr);
+    em_it.first->second.last_recover_ts_ = Now();
+
     if (is_key_write_lock)
     {
         // write lock should update ts if the txn exists, or the CkptTsCc
         // request may get an older ckpt_ts.
-        if (!em_it.second)
-        {
-            em_it.first->second.ts_ = Now();
-        }
-        em_it.first->second.key_write_lock_count_++;
+        em_it.first->second.wlock_ts_ = Now();
     }
     return &em_it.first->second;
 }
 
-void CcShard::DeleteLockHoldingTx(TxNumber txn,
-                                  LruEntry *cce_ptr,
-                                  bool is_key_write_lock)
+void CcShard::DeleteLockHoldingTx(TxNumber txn, LruEntry *cce_ptr)
 {
     auto tx_it = lock_holding_txs_.find(txn);
     if (tx_it == lock_holding_txs_.end())
@@ -361,23 +357,10 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
 
     TxLockInfo &lk_info = tx_it->second;
     lk_info.cce_list_.erase(cce_ptr);
-    if (is_key_write_lock)
-    {
-        lk_info.key_write_lock_count_--;
-    }
 
     if (lk_info.cce_list_.empty())
     {
         lock_holding_txs_.erase(tx_it);
-    }
-}
-
-void CcShard::DecTxHeldWriteLockCount(TxNumber txn)
-{
-    auto tx_it = lock_holding_txs_.find(txn);
-    if (tx_it != lock_holding_txs_.end())
-    {
-        tx_it->second.key_write_lock_count_--;
     }
 }
 
@@ -404,8 +387,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
     // time (more than 5 seconds), inquires the tx's status. If the tx has
     // failed or committed, recovers the orphan lock/intention. Or, does
     // nothing and waits for the tx to make further actions.
-    if (now_ts - lk_info.ts_ >= ts_gap &&
-        now_ts - lk_info.last_recover_ts_ >= ts_gap)
+    if (now_ts - lk_info.last_recover_ts_ >= ts_gap)
     {
         uint32_t txn_node_group = lock_holding_txn >> 42L;
 
@@ -422,11 +404,8 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         }
         LOG(WARNING) << "orphan lock detected, lock holding txn: "
                      << lock_holding_txn << ", try to recover";
-        Sharder::Instance().RecoverTx(lock_holding_txn,
-                                      lk_info.tx_coord_term_,
-                                      cc_ng_id,
-                                      cc_ng_term,
-                                      lk_info.key_write_lock_count_);
+        Sharder::Instance().RecoverTx(
+            lock_holding_txn, lk_info.tx_coord_term_, cc_ng_id, cc_ng_term);
 
         // Updates the last_recover_ts field, so that following
         // conflicting tx's will not try recovery immediately,
@@ -446,8 +425,11 @@ void CcShard::ClearTx(TxNumber txn)
     TxLockInfo &lk_info = tx_it->second;
     for (auto &lru_ptr : lk_info.cce_list_)
     {
-        lru_ptr->GetKeyLock().ClearTx(txn, this);
-        lru_ptr->RecycleKeyLock();
+        if (lru_ptr->key_lock_ptr_ != nullptr)
+        {
+            lru_ptr->key_lock_ptr_->ClearTx(txn, this);
+            lru_ptr->RecycleKeyLock();
+        }
     }
     lock_holding_txs_.erase(tx_it);
 }

@@ -245,7 +245,8 @@ public:
     LockType DeduceScanTupleLockType(const ScanTuple *scan_tuple)
     {
         if (scan_tuple == nullptr ||
-            scan_tuple->rec_status_ == RecordStatus::Deleted)
+            (scan_tuple->rec_status_ == RecordStatus::Deleted &&
+             !is_for_write_))
         {
             return LockType::NoLock;
         }

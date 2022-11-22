@@ -12,15 +12,13 @@ LruEntry::~LruEntry()
         // Deletes key write lock.
         if (key_lock_ptr_->HasWriteLock())
         {
-            ccshard->DeleteLockHoldingTx(
-                key_lock_ptr_->WriteLockTx(), this, true);
+            ccshard->DeleteLockHoldingTx(key_lock_ptr_->WriteLockTx(), this);
         }
 
         // Deletes key write intent.
         if (key_lock_ptr_->HasWriteIntent())
         {
-            ccshard->DeleteLockHoldingTx(
-                key_lock_ptr_->WriteIntentTx(), this, false);
+            ccshard->DeleteLockHoldingTx(key_lock_ptr_->WriteIntentTx(), this);
         }
 
         // Deletes key read locks.
@@ -28,12 +26,12 @@ LruEntry::~LruEntry()
             key_lock_ptr_->ReadLocks();
         for (const TxNumber &txn : key_read_locks)
         {
-            ccshard->DeleteLockHoldingTx(txn, this, false);
+            ccshard->DeleteLockHoldingTx(txn, this);
         }
 
         for (const TxNumber &txn : key_lock_ptr_->ReadIntents())
         {
-            ccshard->DeleteLockHoldingTx(txn, this, false);
+            ccshard->DeleteLockHoldingTx(txn, this);
         }
 
         // reset lock entry in ccshard lock array to make it reusable.
@@ -48,15 +46,13 @@ LruEntry::~LruEntry()
         // Deletes gap write lock.
         if (gap_lock_ptr_->HasWriteLock())
         {
-            ccshard->DeleteLockHoldingTx(
-                gap_lock_ptr_->WriteLockTx(), this, false);
+            ccshard->DeleteLockHoldingTx(gap_lock_ptr_->WriteLockTx(), this);
         }
 
         // Deletes gap write intent.
         if (gap_lock_ptr_->HasWriteIntent())
         {
-            ccshard->DeleteLockHoldingTx(
-                gap_lock_ptr_->WriteIntentTx(), this, false);
+            ccshard->DeleteLockHoldingTx(gap_lock_ptr_->WriteIntentTx(), this);
         }
 
         // Deletes gap read locks.
@@ -64,12 +60,12 @@ LruEntry::~LruEntry()
             gap_lock_ptr_->ReadLocks();
         for (const TxNumber &txn : gap_read_locks)
         {
-            ccshard->DeleteLockHoldingTx(txn, this, false);
+            ccshard->DeleteLockHoldingTx(txn, this);
         }
 
         for (const TxNumber &txn : gap_lock_ptr_->ReadIntents())
         {
-            ccshard->DeleteLockHoldingTx(txn, this, false);
+            ccshard->DeleteLockHoldingTx(txn, this);
         }
 
         // reset lock entry in ccshard lock array to make it reusable.
@@ -97,8 +93,8 @@ LruEntry::LruEntry(CcMap *parent) : parent_map_(parent)
 
 bool LruEntry::IsFree()
 {
-    return (key_lock_ptr_ == nullptr || GetKeyLock().IsEmpty()) &&
-           (gap_lock_ptr_ == nullptr || GetGapLock().IsEmpty()) &&
+    return (key_lock_ptr_ == nullptr || key_lock_ptr_->IsEmpty()) &&
+           (gap_lock_ptr_ == nullptr || gap_lock_ptr_->IsEmpty()) &&
            commit_ts_ <= ckpt_ts_.load(std::memory_order_acquire);
 }
 

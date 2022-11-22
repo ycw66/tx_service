@@ -169,8 +169,16 @@ public:
             // been acquired.
             floor_cce = static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
 
-            acquired_lock = LockHandleForResumedRequest(
-                &req, req.TxTerm(), floor_cce, floor_cce->payload_status_);
+            CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                                 : CcOperation::Read;
+            acquired_lock =
+                LockHandleForResumedRequest(&req,
+                                            req.TxTerm(),
+                                            floor_cce,
+                                            floor_cce->payload_status_,
+                                            cc_op,
+                                            req.Isolation(),
+                                            req.Protocol());
             lock_op_status = LockOpStatus::Successful;
         }
         else
