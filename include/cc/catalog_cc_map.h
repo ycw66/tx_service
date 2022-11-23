@@ -464,10 +464,19 @@ public:
             {
                 assert(schema_rec->SchemaImage().size() > 0);
 
-                catalog_entry = shard_->CreateCatalog(table_key->Name(),
-                                                      req.NodeGroupId(),
-                                                      schema_rec->SchemaImage(),
-                                                      req.ReadTimestamp());
+                auto [success, new_catalog_entry] =
+                    shard_->CreateCatalog(table_key->Name(),
+                                          req.NodeGroupId(),
+                                          schema_rec->SchemaImage(),
+                                          req.ReadTimestamp());
+                if (!success)
+                {
+                    LOG(INFO) << "create catalog entry fails, table name: "
+                              << table_key->Name().StringView()
+                              << ", catalog entry of the same or higher "
+                                 "version exists";
+                }
+                catalog_entry = new_catalog_entry;
             }
             schema_rec->Set(catalog_entry->schema_.get(),
                             catalog_entry->dirty_schema_.get(),
@@ -603,11 +612,23 @@ public:
                 uint64_t commit_ts = req.CommitTs();
                 assert(commit_ts > 0);
 
-                catalog_entry =
+                auto [success, new_catalog_entry] =
                     shard_->CreateCatalog(table_name,
                                           req.NodeGroupId(),
                                           schema_op_msg.new_catalog_blob(),
                                           commit_ts);
+                if (!success)
+                {
+                    // create fail, the catalog to be created is out of date
+                    LOG(INFO)
+                        << "create catalog entry fails, table name: "
+                        << table_name_sv
+                        << ", catalog entry of the same or higher version "
+                           "exists, stop replaying this schema op";
+                    req.SetFinish();
+                    return false;
+                }
+                catalog_entry = new_catalog_entry;
 
                 const TableSchema *committed_schema =
                     catalog_entry->schema_.get();
@@ -631,13 +652,24 @@ public:
             }
             else
             {
-                catalog_entry = shard_->CreateReplayCatalog(
+                auto [success, new_catalog_entry] = shard_->CreateReplayCatalog(
                     table_name,
                     req.NodeGroupId(),
                     schema_op_msg.old_catalog_blob(),
                     schema_op_msg.new_catalog_blob(),
                     schema_op_msg.catalog_ts(),
                     req.CommitTs());
+                if (!success)
+                {
+                    // create fail, the catalog to be created is out of date
+                    LOG(INFO)
+                        << "create catalog fails, table name: " << table_name_sv
+                        << ", catalog entry of the same or higher "
+                           "version exists, stop replaying this schema op";
+                    req.SetFinish();
+                    return false;
+                }
+                catalog_entry = new_catalog_entry;
             }
         }
         else

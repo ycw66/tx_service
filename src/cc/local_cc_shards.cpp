@@ -114,7 +114,7 @@ void LocalCcShards::TimerRun()
     }
 }
 
-const CatalogEntry *LocalCcShards::CreateCatalog(
+std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
@@ -150,12 +150,16 @@ const CatalogEntry *LocalCcShards::CreateCatalog(
                           table_name, catalog_image, commit_ts, cc_ng_id),
                 commit_ts);
         }
+        else
+        {
+            return {false, &catalog_entry};
+        }
     }
 
-    return &catalog_entry;
+    return {true, &catalog_entry};
 }
 
-const CatalogEntry *LocalCcShards::CreateReplayCatalog(
+std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &old_catalog_image,
@@ -173,9 +177,6 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
     {
         // If catalog entry is not initialized yet, use the old schema image
         // stored in prepare log to restore old schema.
-        // Using 1 as commit ts here as a place holder. Commit ts here should
-        // not matter since the old schema should be removed once replay is
-        // done.
         catalog_entry.InitSchema(
             old_catalog_image.empty()
                 ? nullptr
@@ -194,8 +195,12 @@ const CatalogEntry *LocalCcShards::CreateReplayCatalog(
                 : catalog_factory_->CreateTableSchema(
                       table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
             dirty_schema_ts);
+        return {true, &catalog_entry};
     }
-    return &catalog_entry;
+    else
+    {
+        return {false, &catalog_entry};
+    }
 }
 
 const CatalogEntry *LocalCcShards::CreateDirtyCatalog(

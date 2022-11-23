@@ -503,16 +503,17 @@ void CcShard::NotifyCkpt()
     }
 }
 
-const CatalogEntry *CcShard::CreateCatalog(const TableName &table_name,
-                                           NodeGroupId cc_ng_id,
-                                           const std::string &catalog_image,
-                                           uint64_t commit_ts)
+std::pair<bool, const CatalogEntry *> CcShard::CreateCatalog(
+    const TableName &table_name,
+    NodeGroupId cc_ng_id,
+    const std::string &catalog_image,
+    uint64_t commit_ts)
 {
     return local_shards_.CreateCatalog(
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
-const CatalogEntry *CcShard::CreateReplayCatalog(
+std::pair<bool, const CatalogEntry *> CcShard::CreateReplayCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &old_schema_image,

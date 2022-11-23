@@ -246,17 +246,35 @@ public:
     uint64_t TsBase();
     void UpdateTsBase(uint64_t timestamp);
 
-    const CatalogEntry *CreateCatalog(const TableName &table_name,
-                                      NodeGroupId cc_ng_id,
-                                      const std::string &catalog_image,
-                                      uint64_t commit_ts);
+    /**
+     * Returns false if catalog entry of higher version already exists.
+     * @param table_name
+     * @param cc_ng_id
+     * @param catalog_image
+     * @param commit_ts
+     * @return
+     */
+    std::pair<bool, const CatalogEntry *> CreateCatalog(
+        const TableName &table_name,
+        NodeGroupId cc_ng_id,
+        const std::string &catalog_image,
+        uint64_t commit_ts);
 
     const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                            NodeGroupId cc_ng_id,
                                            const std::string &catalog_image,
                                            uint64_t commit_ts);
 
-    const CatalogEntry *CreateReplayCatalog(
+    /**
+     * Returns false if catalog entry of higher version already exists.
+     * @param table_name
+     * @param cc_ng_id
+     * @param old_catalog_image
+     * @param new_catalog_image
+     * @param commit_ts
+     * @return
+     */
+    std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &old_catalog_image,
