@@ -383,7 +383,7 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
     }
 
     ng_it->second->FinishLogGroupReplay(
-        log_group_id, cc_ng_term, latest_txn_no);
+        log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
     local_shards_.UpdateTsBase(last_ckpt_ts);
 }
 
@@ -544,6 +544,26 @@ void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
     {
         it->second->UnpinData();
     }
+}
+
+uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
+{
+    auto it = cc_nodes_.find(cc_ng_id);
+    if (it != cc_nodes_.end())
+    {
+        return it->second->GetCkptTs();
+    }
+    return 0;
+}
+
+bool Sharder::UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts)
+{
+    auto it = cc_nodes_.find(cc_ng_id);
+    if (it != cc_nodes_.end())
+    {
+        return it->second->UpdateCkptTs(ckpt_ts);
+    }
+    return false;
 }
 
 void Sharder::SetCommandLineOptions()

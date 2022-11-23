@@ -74,8 +74,6 @@ private:
     };
 
     LocalCcShards &local_shards_;
-    // last checkpoint timestamp of each cc node
-    std::unordered_map<uint32_t, uint64_t> last_ckpt_ts_;
     // protects request_ckpt_ and status_
     std::mutex ckpt_mux_;
     std::condition_variable ckpt_cv_;

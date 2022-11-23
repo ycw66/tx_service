@@ -288,6 +288,10 @@ public:
      */
     void UnpinNodeGroupData(uint32_t cc_ng_id);
 
+    uint64_t GetNodeGroupCkptTs(uint32_t cc_ng_id);
+
+    bool UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts);
+
     TxWorkerPool *GetTxWorkerPool()
     {
         return tx_worker_pool_.get();

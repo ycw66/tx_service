@@ -63,7 +63,8 @@ public:
 
     void FinishLogGroupReplay(uint32_t log_group_id,
                               int64_t ng_term,
-                              uint32_t latest_committed_txn_no);
+                              uint32_t latest_committed_txn_no,
+                              uint64_t last_ckpt_ts);
 
     int64_t CandidateTerm() const
     {
@@ -84,6 +85,13 @@ public:
      * waitToFinish: true - Wait until the UnpinData to finish
      */
     void UnpinData();
+
+    bool UpdateCkptTs(uint64_t new_ckpt_ts);
+
+    uint64_t GetCkptTs()
+    {
+        return last_ckpt_ts_.load(std::memory_order_relaxed);
+    }
 
 private:
     static braft::NodeOptions BaseNodeOptions()
@@ -144,6 +152,8 @@ private:
     braft::Node *volatile node_;
     std::atomic<int64_t> leader_term_;
     std::atomic<int64_t> candidate_leader_term_;
+
+    std::atomic<uint64_t> last_ckpt_ts_;
 
     // number of threads currently accessing data of this node group, this node
     // group's data cannot be cleared unless pinning_threads_ is 0

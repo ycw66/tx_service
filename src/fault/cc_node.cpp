@@ -24,6 +24,7 @@ CcNode::CcNode(const uint32_t ng_id,
       storage_path_(storage_path),
       leader_term_(-1),
       candidate_leader_term_(-1),
+      last_ckpt_ts_(0),
       pinning_threads_(0),
       local_cc_shards_(local_shards),
       replay_service_(replay_service),
@@ -169,7 +170,8 @@ int CcNode::TransferLeader()
 
 void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
                                   int64_t ng_term,
-                                  uint32_t latest_committed_txn_no)
+                                  uint32_t latest_committed_txn_no,
+                                  uint64_t last_ckpt_ts)
 {
     // recovery_mux_ is used to protect recovered_log_groups_, since raft
     // service thread will also modify it concurrently.
@@ -183,6 +185,10 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     {
         return;
     }
+
+    // set CcNode's last_ckpt_ts to the greatest last_ckpt_ts received from all
+    // log groups
+    UpdateCkptTs(last_ckpt_ts);
 
     // native cc node finishes log replay from its bound log group, set
     // starting txn numbers of local cc shards. Since only native cc_node can
@@ -232,6 +238,21 @@ void CcNode::UnpinData()
         // wake up braft thread in case it is waiting in on_leader_stop()
         pinning_threads_cv_.notify_one();
     }
+}
+
+bool CcNode::UpdateCkptTs(uint64_t new_ckpt_ts)
+{
+    uint64_t expected_old_value = last_ckpt_ts_.load(std::memory_order_relaxed);
+    // update last_ckpt_ts_ only if new_ckpt_ts is bigger
+    bool success = false;
+    while (new_ckpt_ts > expected_old_value && !success)
+    {
+        // if CAS fails, expected_old_value will be set to the actual value of
+        // last_ckpt_ts_
+        success = last_ckpt_ts_.compare_exchange_weak(
+            expected_old_value, new_ckpt_ts, std::memory_order_relaxed);
+    }
+    return success;
 }
 
 /**

@@ -86,6 +86,9 @@ uint64_t LocalCcShards::TsBase()
 void LocalCcShards::UpdateTsBase(uint64_t timestamp)
 {
     uint64_t tsb = ts_base_.load(std::memory_order_acquire);
+    // Update ts_base_ only if new timestamp is bigger. If the CAS fails, tsb
+    // will be set to the actual value of ts_base_, keep retrying until success
+    // or ts_base_ is already bigger than timestamp.
     while (timestamp > tsb && !ts_base_.compare_exchange_strong(tsb, timestamp))
     {
         // If the CAS fails, since timestamps always roll forward, the ts base
@@ -93,7 +96,6 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
         // ts_base_ can also be updated when calculating commit timestamp, which
         // results in system clock could be smaller than ts_base_. In this case
         // we should not update ts_base_.
-        tsb = ts_base_.load(std::memory_order_acquire);
     }
 }
 
@@ -495,6 +497,11 @@ const TableRangeEntryWithShade *LocalCcShards::GetTableRangeWithShade(
 
 void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
 {
+    // Each cc_shard's `next_tx_ident_` is concurrently accessed by log replay
+    // thread in this func when native cc node finishes log replay from its
+    // bound log group, and tx_processor thread in CcShard::NewTx().
+    // They are coordinated by the point when native cc node's `leader_term_`
+    // atomic variable becomes positive so no lock is needed.
     for (const auto &cc_shard : cc_shards_)
     {
         LOG(INFO) << "cc shard on core: " << cc_shard->core_id_

@@ -11,7 +11,6 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                            TxLog *log_agent,
                            uint32_t ckpt_delay_seconds)
     : local_shards_(shards),
-      last_ckpt_ts_(0),
       ckpt_mux_(),
       ckpt_cv_(),
       request_ckpt_(false),
@@ -105,17 +104,14 @@ void Checkpointer::Ckpt()
     std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)
     {
-        assert(ckpt_ts >= last_ckpt_ts_[node_group]);
-        uint64_t last_ckpt_ts = 0;
-        auto ite = last_ckpt_ts_.find(node_group);
-        if (ite != last_ckpt_ts_.end())
+        uint64_t last_ckpt_ts =
+            Sharder::Instance().GetNodeGroupCkptTs(node_group);
+        if (ckpt_ts <= last_ckpt_ts)
         {
-            last_ckpt_ts = ite->second;
-        }
-        if (ckpt_ts == last_ckpt_ts)
-        {
+            // skip checkpoint for this node group
             continue;
         }
+
         // check whether this node is group leader, pin its data if it is
         int64_t leader_term =
             Sharder::Instance().TryPinNodeGroupData(node_group);
@@ -169,7 +165,7 @@ void Checkpointer::Ckpt()
         if (worker_flushed_.load(std::memory_order_acquire) &&
             Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
-            last_ckpt_ts_.insert_or_assign(node_group, ckpt_ts);
+            Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
     }
