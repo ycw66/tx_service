@@ -184,7 +184,6 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
     std::vector<LruEntry *> extra_vec;
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<LruEntry *> mv_base_vec;
-    const CcShard &shard = *ckptr->local_shards_.cc_shards_[0];
 
     std::unique_lock<std::mutex> worker_lk(ckptr->worker_mux_);
     ckptr->active_workers_++;
@@ -310,28 +309,10 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
             // Flushes to the data store
             bool ckpt_ret = true;
 
-            CcMap *ccm;
-            auto iter = shard.native_ccms_.find(table_name);
-            if (iter == shard.native_ccms_.end())
-            {
-                // ccm.table_schema_ and ccm.schema_ts_ should be the same
-                // if table_name exists in native_ccms_ as well as
-                // failover_ccms_. Or refactor this part to use
-                // LeaderTerm(node_group) to differentiate findings in
-                // different places.
-                auto it = shard.failover_ccms_.find(table_name);
-                assert(it != shard.failover_ccms_.end());
-                ccm = it->second.begin()->second.get();
-            }
-            else
-            {
-                ccm = iter->second.get();
-            }
-
             if (ckptr->local_shards_.EnableMvcc() && mv_base_vec.size() > 0)
             {
                 ckpt_ret = ckptr->store_hd_->CopyBaseToArchive(
-                    mv_base_vec, node_group, table_name, ccm->GetTableSchema());
+                    mv_base_vec, node_group, table_name, catalog_rec.Schema());
                 if (!ckpt_ret)
                 {
                     LOG(INFO) << "checkpointer CopyBaseToArchive flush to kv "
@@ -342,7 +323,7 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
             if (ckpt_ret && !ckpt_vec.empty())
             {
                 ckpt_ret = ckptr->store_hd_->PutAll(
-                    ckpt_vec, table_name, ccm->GetTableSchema(), node_group);
+                    ckpt_vec, table_name, catalog_rec.Schema(), node_group);
                 if (!ckpt_ret)
                 {
                     LOG(INFO) << "checkpointer PutAll flush to kv "
@@ -371,7 +352,7 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
                 flush_undo_ret = ckptr->store_hd_->PutArchivesAll(
                     node_group,
                     table_name,
-                    ccm->GetTableSchema()->GetKVCatalogInfo(),
+                    catalog_rec.Schema()->GetKVCatalogInfo(),
                     archive_vec);
 
                 if (flush_undo_ret)
@@ -393,17 +374,10 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
                 }
             }
 
-            // Update last ckpt ts of ccmap if every entry older than ckpt_ts in
-            // ccmap has been flushed to KV store.
-            if (flush_undo_ret && ckpt_ret)
-            {
-                ccm->ckpt_ts_.store(ckpt_ts, std::memory_order_release);
-            }
-
 #ifdef RANGE_PARTITIONED
             ckptr->UpdateStoreSlice(table_name,
-                                    ccm->GetTableSchema()->GetKVCatalogInfo(),
-                                    ccm->SchemaTs(),
+                                    catalog_rec.Schema()->GetKVCatalogInfo(),
+                                    catalog_rec.SchemaTs(),
                                     node_group,
                                     ckpt_vec,
                                     cur_work.last_ckpt_ts_,
