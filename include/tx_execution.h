@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <stack>
 #include <string>
@@ -28,7 +29,7 @@ struct InitTxRequest;
 struct ReadTxRequest;
 struct ReadOutsideTxRequest;
 struct ScanOpenTxRequest;
-struct ScanNextTxRequest;
+struct ScanBatchTxRequest;
 struct ScanCloseTxRequest;
 struct UpsertTxRequest;
 struct CommitTxRequest;
@@ -101,7 +102,7 @@ public:
     void ProcessTxRequest(ReadTxRequest &read_req);
     void ProcessTxRequest(ReadOutsideTxRequest &read_outside_req);
     void ProcessTxRequest(ScanOpenTxRequest &scan_open_req);
-    void ProcessTxRequest(ScanNextTxRequest &scan_next_req);
+    void ProcessTxRequest(ScanBatchTxRequest &scan_batch_req);
     void ProcessTxRequest(ScanCloseTxRequest &scan_close_req);
     void ProcessTxRequest(UpsertTxRequest &upsert_req);
     void ProcessTxRequest(CommitTxRequest &commit_req);
@@ -229,6 +230,8 @@ private:
     void PostProcess(ScanOpenOperation &scan_open);
     void Process(ScanNextOperation &scan_next);
     void PostProcess(ScanNextOperation &scan_next);
+    void Process(LockWriteRangesOp &lock_write_ranges);
+    void PostProcess(LockWriteRangesOp &lock_write_ranges);
     void Process(AcquireWriteOperation &acquire_write);
     void PostProcess(AcquireWriteOperation &acquire_write);
     void Process(SetCommitTsOperation &set_ts);
@@ -296,6 +299,8 @@ private:
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
+
+    void ReleaseCatalogLock(CcHandlerResult<PostProcessResult> &hd_result);
 
     enum struct TxType
     {
@@ -370,7 +375,7 @@ private:
      * opened.
      *
      */
-    std::unordered_map<size_t, std::unique_ptr<CcScanner>> scans_;
+    std::unordered_map<size_t, ScanState> scans_;
 
     // Response whose returned result is void
     TxResult<Void> *void_resp_;
@@ -403,7 +408,10 @@ private:
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
 
-    // Committing phase.
+// Committing phase.
+#ifdef RANGE_PARTITIONED
+    LockWriteRangesOp lock_write_ranges_;
+#endif
     AcquireWriteOperation acquire_write_;
     SetCommitTsOperation set_ts_;
     ValidateOperation validate_;
@@ -429,6 +437,7 @@ private:
     friend struct CompositeTransactionOperation;
     friend struct ReadOperation;
     friend struct ReadOutsideOperation;
+    friend struct LockWriteRangesOp;
     friend struct AcquireWriteOperation;
     friend struct SetCommitTsOperation;
     friend struct WriteToLogOp;

@@ -400,7 +400,7 @@ template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
-                                     txservice::ScanNextTxRequest *,
+                                     txservice::ScanBatchTxRequest *,
                                      std::function<std::string()>);
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,

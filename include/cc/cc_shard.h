@@ -23,6 +23,8 @@
 #include "metrics/metrics.h"
 #include "moodycamelqueue.h"
 #include "range_record.h"
+#include "range_slice.h"
+#include "secondary_key.h"
 #include "sharder.h"
 #include "tentry.h"
 
@@ -381,14 +383,15 @@ public:
     void CleanTableRange(const TableName &table_name, uint32_t ng_id);
 
     /**
-     * @brief Fetches the table's catalog from the data store and temporarily
-     * caches the demanding cc request in the cc shard. After the catalog is
-     * fetched and instantiated in this node, re-enqueues the cc request for
-     * re-execution.
+     * @brief Fetches the table's catalog from the data store and
+     * temporarily caches the demanding cc request in the cc shard. After
+     * the catalog is fetched and instantiated in this node, re-enqueues the
+     * cc request for re-execution.
      *
      * @param table_name The table name
-     * @param requester The cc request that needs to access the input table's cc
-     * map but the cc map does not exist due to the missing of the catalog.
+     * @param requester The cc request that needs to access the input
+     * table's cc map but the cc map does not exist due to the missing of
+     * the catalog.
      */
     void FetchCatalog(const TableName &table_name,
                       NodeGroupId cc_ng_id,
@@ -437,6 +440,23 @@ public:
     void DecrementMemory(size_t mem_size);
 
     void DecreaseLockCount();
+
+    std::pair<std::unique_ptr<TxKey>, size_t> GetSliceMiddleKey(
+        const TableName &table_name,
+        NodeGroupId cc_ng_id,
+        const TxKey *slice_start,
+        const TxKey *slice_end);
+
+    RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const Schema *key_schema,
+                               const Schema *rec_schema,
+                               uint64_t schema_ts,
+                               const KVCatalogInfo *kv_info,
+                               uint32_t range_id,
+                               const TxKey &key,
+                               bool inclusive,
+                               CcRequestBase *cc_request,
+                               RangeSliceOpStatus &pin_status);
 
     const uint32_t node_id_;
     const uint16_t core_id_;

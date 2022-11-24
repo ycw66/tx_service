@@ -58,6 +58,14 @@ public:
     }
 
 private:
+    bool UpdateStoreSlice(const TableName &tbl_name,
+                          const KVCatalogInfo *kv_info,
+                          uint64_t schema_ts,
+                          NodeGroupId node_group_id,
+                          std::vector<FlushRecord> &flush_batch,
+                          uint64_t last_ckpt_ts,
+                          uint64_t ckpt_ts);
+
     enum struct Status
     {
         Active,
@@ -70,6 +78,7 @@ private:
         uint32_t node_group_;
         int64_t term_;
         uint64_t ckpt_ts_;
+        uint64_t last_ckpt_ts_;
         TableName table_name_;
     };
 

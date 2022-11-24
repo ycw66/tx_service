@@ -28,7 +28,8 @@ struct WriteSetEntry
         : key_(std::move(other.key_)),
           rec_(std::move(other.rec_)),
           op_(other.op_),
-          cce_addr_(other.cce_addr_)
+          cce_addr_(other.cce_addr_),
+          key_shard_code_(other.key_shard_code_)
     {
     }
 
@@ -38,6 +39,7 @@ struct WriteSetEntry
         rec_ = std::move(other.rec_);
         op_ = other.op_;
         cce_addr_ = other.cce_addr_;
+        key_shard_code_ = other.key_shard_code_;
 
         return *this;
     }
@@ -46,6 +48,7 @@ struct WriteSetEntry
     TxRecord::Uptr rec_;
     OperationType op_;
     CcEntryAddr cce_addr_;
+    uint32_t key_shard_code_;
 };
 
 struct ReadSetEntry

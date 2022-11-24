@@ -12,6 +12,7 @@
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
+#include "tx_request.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
 #include "util.h"
@@ -73,28 +74,141 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     txm->StartTiming();
 }
 
-ReadOperation::ReadOperation(TransactionExecution *txm) : hd_result_(txm)
+ReadOperation::ReadOperation(TransactionExecution *txm)
+    : hd_result_(txm)
+#ifdef RANGE_PARTITIONED
+      ,
+      lock_range_result_(txm),
+      unlock_range_result_(txm)
+#endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void ReadOperation::Reset()
 {
+    hd_result_.Value().Reset();
     hd_result_.Reset();
+    local_cache_miss_ = false;
+#ifdef RANGE_PARTITIONED
+    lock_range_result_.Reset();
+    unlock_range_result_.Reset();
+#endif
 }
 
 void ReadOperation::Forward(TransactionExecution *txm)
 {
-    // start the state machine if not running.
     if (!is_running_)
     {
+#ifdef RANGE_PARTITIONED
+        if (read_tx_req_->read_local_)
+        {
+            txm->Process(*this);
+            return;
+        }
+
+        if (lock_range_result_.IsFinished())
+        {
+            if (lock_range_result_.IsError())
+            {
+                // There is an error when getting the input key's range. The
+                // read operation is set to be errored.
+                hd_result_.SetError((int8_t) CcErrorCode::GET_RANGE_ID_ERR);
+            }
+            else
+            {
+                if (iso_level_ >= IsolationLevel::RepeatableRead)
+                {
+                    // For isolation levels greater than or equal to Repeatable
+                    // Read, keeps the read lock on the range because there will
+                    // be a post read on the key in this range. The range cannot
+                    // be changed before this tx finishes post-processing.
+                    const ReadKeyResult &read_res = lock_range_result_.Value();
+                    txm->rw_set_.AddRead(read_res.cce_addr_,
+                                         read_res.ts_,
+                                         CcProtocol::Locking,
+                                         LockType::ReadLock,
+                                         &range_table_name_);
+                }
+
+                txm->Process(*this);
+            }
+        }
+        else
+        {
+            // The get-range request has not finished. The read operation cannot
+            // proceed without knowing the input key's range.
+            return;
+        }
+#else
         txm->Process(*this);
+#endif
     }
 
     const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
 
-    if (cce_addr.Term() < 0 && txm->IsTimeOut() ||
-        !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(), txm->TxTerm()))
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.ErrorCode() == -1 && retry_num_ >= 0)
+        {
+            // The read request was directed to a non-leader node. Updates
+            // the leader cache. Sine UpdateLeader() is a sync call, we only
+            // do it when re-run the operation fails.
+            if (retry_num_ == 0)
+            {
+                Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+                retry_num_ = -1;
+            }
+            else if (retry_num_ > 0)
+            {
+                hd_result_.Value().Reset();
+                hd_result_.Reset();
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+#ifdef RANGE_PARTITIONED
+        if (!read_tx_req_->read_local_ &&
+            iso_level_ < IsolationLevel::RepeatableRead)
+        {
+            if (lock_range_result_.IsFinished())
+            {
+                unlock_range_result_.Reset();
+                txm->handler->PostRead(txm->TxNumber(),
+                                       txm->TxTerm(),
+                                       txm->CommandId(),
+                                       0,
+                                       0,
+                                       0,
+                                       lock_range_result_.Value().cce_addr_,
+                                       unlock_range_result_,
+                                       CcProtocol::Locking,
+                                       LockType::ReadLock);
+
+                // After the unlock range request is sent,
+                // lock_range_result_ is reset, so that when the tx machine
+                // is re-executed, its status is unfinished, indicating that
+                // the read operation has finished and is waiting for the
+                // response of unlocking the range.
+                lock_range_result_.Reset();
+            }
+            else if (unlock_range_result_.IsFinished())
+            {
+                txm->PostProcess(*this);
+            }
+        }
+        else
+        {
+            txm->PostProcess(*this);
+        }
+#else
+        txm->PostProcess(*this);
+#endif
+    }
+    else if (cce_addr.Term() < 0 && txm->IsTimeOut() ||
+             !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                  txm->TxTerm()))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -125,32 +239,13 @@ void ReadOperation::Forward(TransactionExecution *txm)
         // If forcing error fails, it means that the remote response returns
         // normally and the tx has been moved from the waiting queue to the
         // execution queue. Does not continue execution. The tx will be
-        // re-executed when the tx processor visits it in the execution queue.
-    }
-    else if (hd_result_.IsFinished())
-    {
-        if (hd_result_.ErrorCode() == -1)
-        {
-            // The read request was directed to a non-leader node. Updates the
-            // leader cache. Sine UpdateLeader() is a sync call, we only do it
-            // when re-run the operation fails.
-            if (retry_num_ == 0)
-            {
-                Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
-            }
-            else if (retry_num_ > 0)
-            {
-                ReRunOp(txm);
-                return;
-            }
-        }
-
-        txm->PostProcess(*this);
+        // re-executed when the tx processor visits it in the execution
+        // queue.
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
-    // arbitrarily long after the read request is acknowledged, we still need
-    // to periodically check liveness of the remote node and force the tx to
-    // cancel if the remote node is unresponsive.
+    // arbitrarily long after the read request is acknowledged, we still
+    // need to periodically check liveness of the remote node and force the
+    // tx to cancel if the remote node is unresponsive.
 }
 
 AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
@@ -176,7 +271,6 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
     acquire_write_entries_.resize(acquire_write_cnt);
 
     rset_has_expired_ = false;
-    // acquire_write_cnt_ = acquire_write_cnt;
 }
 
 void AcquireWriteOperation::Reset()
@@ -266,10 +360,63 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
             AggregateAcquiredKeys(txm);
             txm->PostProcess(*this);
         }
-        // Else, all acquire-write requests finish normally. The tx must have
-        // been moved from the waiting queue to the execution queue. Does not
-        // forword the tx now, as it will be re-executed when the tx processor
-        // visits the execution queue.
+        // Else, all acquire-write requests finish normally. The tx must
+        // have been moved from the waiting queue to the execution queue.
+        // Does not forword the tx now, as it will be re-executed when the
+        // tx processor visits the execution queue.
+    }
+}
+
+void LockWriteRangesOp::Forward(TransactionExecution *txm)
+{
+    if (lock_range_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+}
+
+void LockWriteRangesOp::Advance()
+{
+    // Advances the write key iterator such that it points to the first key
+    // belonging to the next range.
+    const TxKey *range_end_key = range_rec_.end_key_;
+    auto next_range_start = write_key_it_;
+    if (range_end_key == nullptr ||
+        range_end_key->Type() == KeyType::PositiveInf)
+    {
+        next_range_start = write_key_end_;
+    }
+    else
+    {
+        TableWriteSet &table_write_set = table_it_->second;
+        next_range_start = table_write_set.lower_bound(range_end_key);
+    }
+
+    uint32_t range_id = range_rec_.RangeEntry()->partition_id_;
+    // Updates the sharding codes of the write-set keys belonging to this
+    // range. The higher 22 bits represent the range ID.
+    while (write_key_it_ != next_range_start)
+    {
+        WriteSetEntry &write_entry = write_key_it_->second;
+        size_t hash = write_entry.key_->Hash();
+        write_entry.key_shard_code_ = (range_id << 10) | (hash & 0x3FF);
+
+        ++write_key_it_;
+    }
+
+    if (write_key_it_ == write_key_end_)
+    {
+        // Has acquired range locks for all write keys in the current table.
+        // Moves to the next table, if there are any.
+        ++table_it_;
+        if (table_it_ != table_end_)
+        {
+            const TableName &next_tbl_name = table_it_->first;
+            range_table_name_ = TableName(next_tbl_name.StringView(),
+                                          TableType::RangePartition);
+            write_key_it_ = table_it_->second.begin();
+            write_key_end_ = table_it_->second.end();
+        }
     }
 }
 
@@ -316,12 +463,12 @@ bool ValidateOperation::IsError()
     // If validating read keys returns one or more conflicting tx's who are
     // holding write locks on the read keys during validation, validation is
     // considered failed and the tx is aborted. In theory, it's possible to
-    // negotiate conflicting tx's such that if conflicting tx's agree to commit
-    // at timestamps later than this (read) tx's commit timestamp, validation
-    // still succeeds and this tx is allowed to commit. For simplicity, we skip
-    // the negotiation step for now. Note that for 2PL, the validation phase
-    // releases read locks acquired earlier. Since read locks block writes,
-    // validation always succeeds.
+    // negotiate conflicting tx's such that if conflicting tx's agree to
+    // commit at timestamps later than this (read) tx's commit timestamp,
+    // validation still succeeds and this tx is allowed to commit. For
+    // simplicity, we skip the negotiation step for now. Note that for 2PL,
+    // the validation phase releases read locks acquired earlier. Since read
+    // locks block writes, validation always succeeds.
 
     return hd_result_.IsFinished() &&
            (hd_result_.IsError() || hd_result_.Value().Size() > 0);
@@ -337,20 +484,18 @@ void ValidateOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        // All validation requests have returned, either successfully or with
-        // error codes. Post-processing skips read-set keys.
+        // All validation requests have returned, either successfully or
+        // with error codes. Post-processing skips read-set keys.
         txm->rw_set_.ClearReadSet();
         txm->rw_set_.ClearScanSet();
 
-        // validation cannot re-run since the remote locks of the readset are
-        // lost during auto-failover, we should abort the transaction if remote
-        // node, which contains read entries, is dead.
+        // validation cannot re-run since the remote locks of the readset
+        // are lost during auto-failover, we should abort the transaction if
+        // remote node, which contains read entries, is dead.
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
-        LOG(INFO) << "Validation times out, txn #" << txm->TxNumber();
-
         bool success = hd_result_.ForceError();
         if (success)
         {
@@ -482,29 +627,52 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
     }
 }
 
-PostProcessOp::PostProcessOp(TransactionExecution *txm) : hd_result_(txm)
+PostProcessOp::PostProcessOp(TransactionExecution *txm)
+    : hd_result_(txm), catalog_hd_result_(txm)
 {
 }
 
-void PostProcessOp::Reset(size_t write_cnt, size_t read_cnt)
+void PostProcessOp::Reset(size_t write_cnt,
+                          size_t data_read_cnt,
+                          size_t catalog_read_cnt)
 {
-    write_cnt_ = write_cnt;
-    read_cnt_ = read_cnt;
     hd_result_.Reset();
-    hd_result_.SetRefCnt(write_cnt + read_cnt);
+    hd_result_.Value().Clear();
+    if (write_cnt + data_read_cnt == 0)
+    {
+        hd_result_.SetFinished();
+    }
+    else
+    {
+        hd_result_.SetRefCnt(write_cnt + data_read_cnt);
+    }
+
+    catalog_hd_result_.Reset();
+    catalog_hd_result_.Value().Clear();
+
+    if (catalog_read_cnt == 0)
+    {
+        catalog_hd_result_.SetFinished();
+    }
+    else
+    {
+        catalog_hd_result_.SetRefCnt(catalog_read_cnt);
+    }
 }
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
-    // start the state machine if not running.
-    if (!is_running_)
-    {
-        txm->Process(*this);
-    }
-
     if (hd_result_.IsFinished())
     {
-        txm->PostProcess(*this);
+        if (catalog_hd_result_.IsFinished())
+        {
+            txm->PostProcess(*this);
+        }
+        else if (!is_running_)
+        {
+            is_running_ = true;
+            txm->ReleaseCatalogLock(catalog_hd_result_);
+        }
     }
     else if (txm->IsTimeOut())
     {
@@ -523,7 +691,7 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
-            txm->PostProcess(*this);
+            txm->ReleaseCatalogLock(catalog_hd_result_);
         }
     }
 }
@@ -632,6 +800,12 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
     : hd_result_(txm)
+#ifdef RANGE_PARTITIONED
+      ,
+      slice_hd_result_(txm),
+      lock_range_result_(txm),
+      unlock_range_result_(txm)
+#endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -639,19 +813,74 @@ ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
 void ScanNextOperation::Reset()
 {
     hd_result_.Reset();
-    scanner_ = nullptr;
     alias_ = 0;
+    scan_state_ = nullptr;
+#ifdef RANGE_PARTITIONED
+    slice_hd_result_.Reset();
+    unlock_range_result_.Reset();
+    lock_range_result_.Reset();
+#endif
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
 {
+    CcScanner &scanner = *scan_state_->scanner_;
+
     // start the state machine if not running.
     if (!is_running_)
     {
-        txm->Process(*this);
+        if (scanner.Type() == CcmScannerType::HashPartition)
+        {
+            txm->Process(*this);
+        }
+#ifdef RANGE_PARTITIONED
+        else
+        {
+            if (!lock_range_result_.IsFinished())
+            {
+                // The locking-next-range request has not finished. The scan
+                // next operation cannot proceed without locking the range.
+                return;
+            }
+
+            assert(lock_range_result_.IsFinished());
+
+            if (lock_range_result_.IsError())
+            {
+                // There is an error when getting the next range's lock and ID.
+                // The scan next operation is set to be errored.
+                hd_result_.SetError((int8_t) CcErrorCode::GET_RANGE_ID_ERR);
+                unlock_range_result_.SetFinished();
+            }
+            else
+            {
+                const ReadKeyResult &read_res = lock_range_result_.Value();
+
+                if (txm->iso_level_ >= IsolationLevel::RepeatableRead)
+                {
+                    // For isolation levels greater than or equal to Repeatable
+                    // Read, keeps the read lock on the range because there will
+                    // be a post read on the key in this range. The range cannot
+                    // be split or merged before the tx finishes
+                    // post-processing.
+                    txm->rw_set_.AddRead(read_res.cce_addr_,
+                                         read_res.ts_,
+                                         CcProtocol::Locking,
+                                         LockType::ReadLock,
+                                         &range_table_name_);
+                }
+
+                scan_state_->range_cce_addr_ = read_res.cce_addr_;
+                scan_state_->range_id_ = range_rec_.RangeEntry()->partition_id_;
+                txm->Process(*this);
+                return;
+            }
+        }
+#endif
     }
 
-    if (hd_result_.IsFinished())
+    if (scanner.Type() == CcmScannerType::HashPartition &&
+        hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
         if (hd_result_.ErrorCode() == -1)
@@ -667,11 +896,79 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 return;
             }
         }
-        else
-        {
-            txm->PostProcess(*this);
-        }
+
+        scanner.SetStatus(ScannerStatus::Open);
+
+        txm->PostProcess(*this);
     }
+#ifdef RANGE_PARTITIONED
+    else if (scanner.Type() == CcmScannerType::RangePartition &&
+             slice_hd_result_.IsFinished())
+    {
+        // Error code -1 indicates send message failed or term changed.
+        if (hd_result_.ErrorCode() == -1)
+        {
+            if (retry_num_ == 0)
+            {
+                // Sharder::Instance().UpdateLeader(
+                //     hd_result_.Value().node_group_id_);
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        if (scanner.Status() == ScannerStatus::Blocked)
+        {
+            RangeScanSliceResult &scan_slice_result = slice_hd_result_.Value();
+
+            // If the scanned slice is the last (or first) of the range and
+            // the tx's isolation level is less than Repeatable Read,
+            // unlocks the range now.
+            if (scan_slice_result.slice_position_ != SlicePosition::Middle &&
+                txm->iso_level_ < IsolationLevel::RepeatableRead &&
+                scan_state_->range_cce_addr_.CcePtr() != 0)
+            {
+                if (lock_range_result_.IsFinished())
+                {
+                    txm->handler->PostRead(txm->TxNumber(),
+                                           txm->TxTerm(),
+                                           txm->CommandId(),
+                                           0,
+                                           0,
+                                           0,
+                                           scan_state_->range_cce_addr_,
+                                           unlock_range_result_,
+                                           CcProtocol::Locking,
+                                           LockType::ReadLock);
+
+                    // After the unlock range request is sent,
+                    // lock_range_result_ is reset. When the tx machine is
+                    // re-executed, its status is unfinished, indicating that
+                    // the scan next operation is waiting for the response of
+                    // unlocking the current range.
+                    lock_range_result_.Reset();
+                    return;
+                }
+                else if (!unlock_range_result_.IsFinished())
+                {
+                    return;
+                }
+            }
+
+            scan_state_->SetSliceLastKey(
+                std::move(scan_slice_result.last_key_));
+            scan_state_->inclusive_ =
+                Direction() == ScanDirection::Forward ? false : true;
+            scan_state_->slice_position_ = scan_slice_result.slice_position_;
+            scanner.SetStatus(ScannerStatus::Open);
+        }
+
+        txm->PostProcess(*this);
+    }
+#endif
     else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -821,11 +1118,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     if (read_version > 0 &&
                         read_version != acquire_res.commit_ts_)
                     {
-                        // Each write-set key acquires a write lock and gets the
-                        // key's last validation ts and commit ts. If the write
-                        // key has been read before and the key's commit ts
-                        // mismatches the prior version, this is not a
-                        // repeatable read.
+                        // Each write-set key acquires a write lock and gets
+                        // the key's last validation ts and commit ts. If
+                        // the write key has been read before and the key's
+                        // commit ts mismatches the prior version, this is
+                        // not a repeatable read.
                         fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
@@ -857,9 +1154,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                 txm->PostProcess(*this);
             }
             // Else, all remote requests finish normally, meaning the tx has
-            // been moved from the waiting queue to the execution queue. Does
-            // not forword the tx now, as it will be re-executed when the tx
-            // processor visits the execution queue.
+            // been moved from the waiting queue to the execution queue.
+            // Does not forword the tx now, as it will be re-executed when
+            // the tx processor visits the execution queue.
         }
     }
     else if (finish_cnt_.load(std::memory_order_relaxed) == upload_cnt_)
@@ -1237,20 +1534,21 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (failed)
         {
-            // When a cc node leader begins recovery, the candidate term is set
-            // to the Raft term. When recovery finishes, the candidate term is
-            // set to -1 after the leader term. So, obtains the candidate term
-            // before the leader term.
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
             int64_t tx_node_candid_term =
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
             int64_t tx_node_term =
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
-            // After the prepare log is flushed, the schema op is guaranteed to
-            // succeed and can only roll forward. Retry this step to install the
-            // dirty schema in the tx service, if the tx node is still the
-            // leader. The tx is also allowed to proceed if the tx is in the
-            // recovery mode and the tx node is a leader candidate.
+            // After the prepare log is flushed, the schema op is guaranteed
+            // to succeed and can only roll forward. Retry this step to
+            // install the dirty schema in the tx service, if the tx node is
+            // still the leader. The tx is also allowed to proceed if the tx
+            // is in the recovery mode and the tx node is a leader
+            // candidate.
 
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
@@ -1294,18 +1592,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
             // The candidate term is set when the cc node becomes the Raft
-            // leader of the cc node group. It is set to -1 after the cc node
-            // leader has replayed the log and the leader term is set. Since the
-            // candidate term is set to -1 after the leader term , obtains
-            // the candidate term before the leader term.
+            // leader of the cc node group. It is set to -1 after the cc
+            // node leader has replayed the log and the leader term is set.
+            // Since the candidate term is set to -1 after the leader term ,
+            // obtains the candidate term before the leader term.
             int64_t tx_node_candid_term =
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
             int64_t tx_node_term =
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
             // The data store operation failed. Retries the operation if the
-            // tx node is the leader or the tx is in the recovery mode and the
-            // cc node is a leader candidate.
+            // tx node is the leader or the tx is in the recovery mode and
+            // the cc node is a leader candidate.
 
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
@@ -1326,8 +1624,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->rw_set_.ClearTable(table_key_.Name());
             txm->rw_set_.ClearReadSet(table_key_.Name());
 
-            // For DROP TABLE, the data store operation happens after all write
-            // locks are acquired and before the commit log is flushed.
+            // For DROP TABLE, the data store operation happens after all
+            // write locks are acquired and before the commit log is
+            // flushed.
             op_ = &commit_log_op_;
             FillCommitLogRequest(txm);
             txm->PushOperation(&commit_log_op_);
@@ -1344,10 +1643,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
         {
-            // When a cc node leader begins recovery, the candidate term is set
-            // to the Raft term. When recovery finishes, the candidate term is
-            // set to -1 after the leader term. So, obtains the candidate term
-            // before the leader term.
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
             int64_t tx_node_candid_term =
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
             int64_t tx_node_term =
@@ -1355,8 +1654,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             // Fails to acquire the write lock. The schema operation can
             // only roll forward after flushing the prepare log. Retries the
-            // request if the tx node is still the leader or the tx is in the
-            // recovery mode and the cc node is a leader candidate.
+            // request if the tx node is still the leader or the tx is in
+            // the recovery mode and the cc node is a leader candidate.
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
@@ -1396,18 +1695,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // When a cc node leader begins recovery, the candidate term is set
-            // to the Raft term. When recovery finishes, the candidate term is
-            // set to -1 after the leader term. So, obtains the candidate term
-            // before the leader term.
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
             int64_t tx_node_candid_term =
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
             int64_t tx_node_term =
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
-            // Fails to flush the commit log. Retries the operation if the tx
-            // node is still the leader or the tx is in the  recovery mode and
-            // the cc node is a leader candidate.
+            // Fails to flush the commit log. Retries the operation if the
+            // tx node is still the leader or the tx is in the  recovery
+            // mode and the cc node is a leader candidate.
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
@@ -1451,20 +1750,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else if (failed)
         {
-            // When a cc node leader begins recovery, the candidate term is set
-            // to the Raft term. When recovery finishes, the candidate term is
-            // set to -1 after the leader term. So, obtains the candidate term
-            // before the leader term.
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
             int64_t tx_node_candid_term =
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
             int64_t tx_node_term =
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
-            // After the prepare log is flushed, the schema op is guaranteed to
-            // succeed and can only roll forward. Retry this step to install the
-            // committed schema and remove write locks, if the tx node is still
-            // the leader or the tx is in the recovery mode and the cc node is a
-            // leader candidate.
+            // After the prepare log is flushed, the schema op is guaranteed
+            // to succeed and can only roll forward. Retry this step to
+            // install the committed schema and remove write locks, if the
+            // tx node is still the leader or the tx is in the recovery mode
+            // and the cc node is a leader candidate.
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))

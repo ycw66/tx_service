@@ -21,6 +21,7 @@
 #include "constants.h"
 #include "fault/fault_inject.h"
 #include "log_closure.h"
+#include "proto/cc_request.pb.h"
 #include "scan.h"
 #include "sharder.h"
 #include "tx_operation_result.h"
@@ -231,56 +232,6 @@ public:
     }
 
 protected:
-    /**
-     * @brief Initializes the request's target cc map, if the table
-     * schema is available and indicates that the table exists. Sends an async
-     * request to fetch the schema from the data store, if the schema is not
-     * cached locally.
-     *
-     * @return const TableSchemaView* The pointer to the schema view of the
-     * request's target cc map. Null, if the schema is not cached at the node
-     * level.
-     */
-    const CatalogEntry *InitCcm(CcShard &ccs)
-    {
-        const TableName base_table_name{table_name_->GetBaseTableNameSV(),
-                                        TableType::Primary};
-
-        const CatalogEntry *catalog_entry =
-            ccs.GetCatalog(base_table_name, node_group_id_);
-
-        if (catalog_entry != nullptr)
-        {
-            const TableSchema *curr_schema = catalog_entry->schema_.get();
-            if (curr_schema != nullptr && catalog_entry->Version() > 0)
-            {
-                ccs.CreateOrUpdatePkCcMap(base_table_name,
-                                          curr_schema,
-                                          node_group_id_,
-                                          catalog_entry->Version());
-
-                std::vector<TableName> index_names = curr_schema->IndexNames();
-                for (const TableName &index_name : index_names)
-                {
-                    ccs.CreateOrUpdateSkCcMap(index_name,
-                                              curr_schema,
-                                              node_group_id_,
-                                              catalog_entry->Version());
-                }
-            }
-        }
-        else
-        {
-            // The local node does not contain the table's schema instance. The
-            // FetchCatalog() method sends an async request toward the data
-            // store to fetch the catalog. After fetching is finished, this cc
-            // request is re-enqueued for re-execution.
-            ccs.FetchCatalog(base_table_name, node_group_id_, this);
-        }
-
-        return catalog_entry;
-    }
-
     CcHandlerResult<ResultType> *res_{nullptr};
     const TableName *table_name_{nullptr};
     // track the ccmap for ccrequest, it has two usages: a. ccreq is blocked by
@@ -324,8 +275,9 @@ public:
                CcProtocol proto,
                IsolationLevel iso_level)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, key_shard_code >> 10, txn, proto, iso_level);
+            tname, res, ng_id, txn, proto, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
@@ -350,8 +302,9 @@ public:
                CcProtocol proto,
                IsolationLevel iso_level)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, key_shard_code >> 10, txn, proto);
+            tname, res, ng_id, txn, proto);
 
         key_ = nullptr;
         key_str_ = key_str;
@@ -584,6 +537,7 @@ public:
                uint64_t ts,
                const TxRecord *rec,
                OperationType operation_type,
+               uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -595,6 +549,7 @@ public:
         payload_ = rec;
         payload_str_ = nullptr;
         operation_type_ = operation_type;
+        key_shard_code_ = key_shard_code;
 
         if (addr->InsertPtr() != 0)
         {
@@ -615,6 +570,7 @@ public:
                uint64_t ts,
                const std::string *rec,
                OperationType operation_type,
+               uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                CcProtocol proto)
     {
@@ -626,6 +582,7 @@ public:
         payload_ = nullptr;
         payload_str_ = rec;
         operation_type_ = operation_type;
+        key_shard_code_ = key_shard_code;
 
         if (addr->InsertPtr() != 0)
         {
@@ -666,12 +623,18 @@ public:
         return operation_type_;
     }
 
+    uint32_t KeyShardCode() const
+    {
+        return key_shard_code_;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
     const TxRecord *payload_;
     const std::string *payload_str_;
     OperationType operation_type_;
+    uint32_t key_shard_code_;
 };
 
 struct PostWriteAllCc
@@ -954,8 +917,9 @@ public:
                bool is_for_write = false,
                std::vector<VersionTxRecord> *archives = nullptr)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
-            nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
+            nullptr, res, ng_id, tx_number, protocol, iso_level);
 
         key_ = key;
         key_str_ = nullptr;
@@ -1000,8 +964,9 @@ public:
                bool is_for_write = false,
                std::vector<VersionTxRecord> *archives = nullptr)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
-            nullptr, res, key_shard_code >> 10, tx_number, protocol, iso_level);
+            nullptr, res, ng_id, tx_number, protocol, iso_level);
 
         key_ = nullptr;
         key_str_ = key_str;
@@ -1122,9 +1087,37 @@ public:
         return is_wait_for_post_write_;
     }
 
+    enum struct BlockingType
+    {
+        None = 0,
+        OnLock,
+        OnLoading
+    };
+
+    BlockingType BlockType() const
+    {
+        return blocking_type_;
+    }
+
+    void SetBlockType(BlockingType type)
+    {
+        blocking_type_ = type;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
+    /**
+     * @brief The key sharding code shards a key into one of the cores in the tx
+     * service. The lower 10 bits of the sharding code are drawn from the lower
+     * 10 bits of the hash code of the key. They shard the key into one core
+     * given a node. The remaining 22 bits of the sharding code shard the key
+     * into one of the nodes of the tx service. When the tx service is hash
+     * partitioned, the higher 22 bits represent the cc node group ID. When the
+     * tx service is range partitioned, the higher 22 bits represent the range
+     * ID.
+     *
+     */
     uint32_t key_shard_code_;
     TxRecord *rec_;
     std::string *rec_str_;
@@ -1143,6 +1136,8 @@ private:
     // "PkReadCorrespondingSk" or "SnapshotRead", there must be a PostWriteCc
     // request has not done, then, this read should wait until it is completed.
     bool is_wait_for_post_write_{false};
+
+    BlockingType blocking_type_;
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };
@@ -1375,6 +1370,185 @@ public:
     bool inclusive_;
 };
 
+struct ScanSliceCc
+    : public TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>
+{
+public:
+    ScanSliceCc()
+    {
+        parallel_req_ = true;
+    }
+
+    void Set(const TableName &tbl_name,
+             uint32_t range_id,
+             uint32_t ng_id,
+             const TxKey *start_key,
+             bool inclusive,
+             uint64_t read_ts,
+             TxNumber tx_number,
+             int64_t tx_term,
+             CcScanner *scanner,
+             CcHandlerResult<RangeScanSliceResult> &hd_res,
+             IsolationLevel iso_level,
+             CcProtocol protocol)
+    {
+        TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
+            &tbl_name, &hd_res, ng_id, tx_number, protocol, iso_level);
+
+        range_id_ = range_id;
+        start_key_ = start_key;
+        inclusive_ = inclusive;
+        direction_ = scanner->Direction();
+        scanner_ = scanner;
+        ts_ = read_ts;
+        tx_term_ = tx_term;
+        is_local_ = true;
+        range_slice_id_.Reset();
+    }
+
+    uint32_t RangeId() const
+    {
+        return range_id_;
+    }
+
+    const TxKey *StartKey() const
+    {
+        return start_key_;
+    }
+
+    bool Inclusive() const
+    {
+        return inclusive_;
+    }
+
+    ScanDirection Direction() const
+    {
+        return direction_;
+    }
+
+    uint64_t ReadTimestamp() const
+    {
+        return ts_;
+    }
+
+    int64_t TxTerm() const
+    {
+        return tx_term_;
+    }
+
+    ScanCache *GetScanCache(size_t shard_id)
+    {
+        assert(is_local_);
+        return scanner_->Cache(shard_id);
+    }
+
+    uint64_t PriorCceAddr(uint16_t shard_id)
+    {
+        assert(shard_id < cce_addr_vec_.size());
+        return cce_addr_vec_[shard_id];
+    }
+
+    void SetShardCount(uint16_t shard_cnt)
+    {
+        cce_addr_vec_.resize(shard_cnt);
+        cce_ptr_vec_.resize(shard_cnt);
+        blocked_scan_types_.resize(shard_cnt);
+        unfinished_core_cnt_.store(shard_cnt, std::memory_order_release);
+    }
+
+    void SetPriorCceAddr(uint64_t addr, uint16_t shard_id)
+    {
+        assert(shard_id < cce_addr_vec_.size());
+        cce_addr_vec_[shard_id] = addr;
+        cce_ptr_vec_[shard_id] = nullptr;
+    }
+
+    uint64_t PriorCceAddr(uint16_t shard_id) const
+    {
+        assert(shard_id < cce_addr_vec_.size());
+        return cce_addr_vec_[shard_id];
+    }
+
+    LruEntry *CcePtr(uint16_t shard_id)
+    {
+        assert(shard_id < cce_ptr_vec_.size());
+        return cce_ptr_vec_[shard_id];
+    }
+
+    void SetCcePtr(LruEntry *block_on_cce, uint16_t shard_id)
+    {
+        cce_ptr_vec_[shard_id] = block_on_cce;
+    }
+
+    /**
+     * @brief Notifies the scan slice request that the scan at the calling core
+     * has finished.
+     *
+     * @return true, if all cores have finished the scan.
+     * @return false, if the scan is not completed in all cores.
+     */
+    bool SetFinish()
+    {
+        uint16_t remaining_cnt =
+            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
+
+        if (remaining_cnt == 1)
+        {
+            res_->SetFinished();
+        }
+
+        return remaining_cnt == 1;
+    }
+
+    bool IsForWrite() const
+    {
+        return read_for_write_;
+    }
+
+    const RangeSliceId &SliceId() const
+    {
+        return range_slice_id_;
+    }
+
+    void SetSliceId(const RangeSliceId &slice)
+    {
+        range_slice_id_ = slice;
+    }
+
+    void SetCceScanType(ScanType blocked_scan_type, uint16_t core_id)
+    {
+        blocked_scan_types_[core_id] = blocked_scan_type;
+    }
+
+    ScanType BlockedCceScanType(uint16_t core_id) const
+    {
+        return blocked_scan_types_[core_id];
+    }
+
+private:
+    uint32_t range_id_;
+    const TxKey *start_key_{nullptr};
+    bool inclusive_{false};
+    ScanDirection direction_;
+    uint64_t ts_{0};
+    int64_t tx_term_{-1};
+    bool read_for_write_{false};
+
+    union
+    {
+        CcScanner *scanner_;
+        std::vector<std::vector<remote::ScanTuple_msg *>> *scan_msg_vec_;
+    };
+    bool is_local_{true};
+
+    std::vector<ScanType> blocked_scan_types_;
+
+    std::vector<uint64_t> cce_addr_vec_;
+    std::vector<LruEntry *> cce_ptr_vec_;
+    std::atomic<uint16_t> unfinished_core_cnt_{0};
+    RangeSliceId range_slice_id_;
+};
+
 struct CkptTsCc : public CcRequestBase
 {
 public:
@@ -1602,7 +1776,7 @@ public:
         {
             // The conflicting tx has set the commit ts, which is larger than
             // the read tx. Read stability is satisfied.
-            res_->SetValue(conflict_tx->commit_ts_);
+            res_->SetValue(std::move(conflict_tx->commit_ts_));
             res_->SetFinished();
         }
         else
@@ -1806,7 +1980,8 @@ public:
                     // Makse sure base table catalog and ccm already exists
                     if (base_table_ccm == nullptr)
                     {
-                        catalog_entry = InitCcm(ccs);
+                        catalog_entry =
+                            InitCcm(*table_name_, node_group_id_, ccs);
 
                         // Wait for FetchCatalogCc to finish
                         if (catalog_entry == nullptr)
@@ -1863,7 +2038,8 @@ public:
                 }
                 else
                 {
-                    const CatalogEntry *catalog_entry = InitCcm(ccs);
+                    const CatalogEntry *catalog_entry =
+                        InitCcm(*table_name_, node_group_id_, ccs);
 
                     if (catalog_entry != nullptr)
                     {
@@ -1877,7 +2053,8 @@ public:
                             SetRecoveryError();
                             return false;
                         }
-                        else if (catalog_entry->schema_ != nullptr)
+                        else if (catalog_entry->schema_ != nullptr &&
+                                 commit_ts_ >= catalog_entry->Version())
                         {
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                             assert(ccm_ != nullptr);
@@ -2032,8 +2209,9 @@ public:
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
-            tn, res, key_shard_code >> 10, tx_number);
+            tn, res, ng_id, tx_number);
         key_ = key;
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
@@ -2050,8 +2228,9 @@ public:
                uint64_t tx_number,
                CcHandlerResult<bool> *res)
     {
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<CleanCcEntryForTestCc, bool>::Reset(
-            tn, res, key_shard_code >> 10, tx_number);
+            tn, res, ng_id, tx_number);
         key_ = nullptr;
         key_str_ = key_str;
         key_shard_code_ = key_shard_code;

@@ -18,7 +18,8 @@ class ReadWriteSet
     static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
 
 public:
-    ReadWriteSet() : rset_(), wset_(), wset_cnt_(0), wset_bytes_cnt_(0)
+    ReadWriteSet()
+        : rset_(), wset_(), wset_cnt_(0), data_rset_cnt_(0), wset_bytes_cnt_(0)
     //, sset_(), sset_cnt_(0)
     {
     }
@@ -30,19 +31,26 @@ public:
         rset_.clear();
         read_cache_.clear();
         wset_bytes_cnt_ = 0;
+        data_rset_cnt_ = 0;
 
         // sset_cnt_ = 0;
         // sset_.clear();
     }
 
+    /**
+     * @brief Returns the number of read data items, excluding catalog entries.
+     *
+     * @return size_t
+     */
     size_t ReadSetSize() const
     {
-        size_t rset_size = 0;
-        for (auto &table_key_it : rset_)
-        {
-            rset_size += table_key_it.second.size();
-        }
-        return rset_size;
+        return data_rset_cnt_;
+    }
+
+    size_t CatalogSetSize() const
+    {
+        auto catalog_it = rset_.find(catalog_ccm_name);
+        return catalog_it == rset_.end() ? 0 : catalog_it->second.size();
     }
 
     size_t WriteSetSize() const
@@ -74,15 +82,15 @@ public:
         auto iter = rset_.find(*table_name);
         if (iter == rset_.end())
         {
-            rset_.emplace(std::piecewise_construct,
-                          std::forward_as_tuple(table_name->StringView(),
-                                                table_name->Type()),
-                          std::forward_as_tuple(
-                              std::unordered_map<CcEntryAddr, ReadSetEntry>()));
+            auto insert_it = rset_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_name->StringView(),
+                                      table_name->Type()),
+                std::forward_as_tuple(
+                    std::unordered_map<CcEntryAddr, ReadSetEntry>()));
+            iter = insert_it.first;
         }
 
-        // find again to locate iter
-        iter = rset_.find(*table_name);
         assert(!iter->first.IsStringOwner());
 
         auto [it, inserted] =
@@ -125,6 +133,10 @@ public:
                 it->second.protocol_ = proto;
             }
         }
+        else if (!(*table_name == catalog_ccm_name))
+        {
+            ++data_rset_cnt_;
+        }
         return true;
     }
 
@@ -165,13 +177,19 @@ public:
     uint64_t DedupRead(const CcEntryAddr &cce_addr)
     {
         uint64_t read_ts = 0;
-        for (auto &table_key_it : rset_)
+        for (auto &[table_name, tbl_read_set] : rset_)
         {
-            auto cce_it = table_key_it.second.find(cce_addr);
-            if (cce_it != table_key_it.second.end())
+            auto cce_it = tbl_read_set.find(cce_addr);
+            if (cce_it != tbl_read_set.end())
             {
+                if (!(table_name == catalog_ccm_name))
+                {
+                    --data_rset_cnt_;
+                }
+
                 read_ts = cce_it->second.version_ts_;
-                table_key_it.second.erase(cce_it);
+                tbl_read_set.erase(cce_it);
+
                 break;
             }
         }
@@ -195,14 +213,14 @@ public:
         auto iter = wset_.find(table_name);
         if (iter == wset_.end())
         {
-            wset_.emplace(std::piecewise_construct,
-                          std::forward_as_tuple(table_name.StringView(),
-                                                table_name.Type()),
-                          std::forward_as_tuple(TableWriteSet()));
+            auto insert_it =
+                wset_.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(table_name.StringView(),
+                                                    table_name.Type()),
+                              std::forward_as_tuple(TableWriteSet()));
+            iter = insert_it.first;
         }
 
-        // find again to locate iter
-        iter = wset_.find(table_name);
         assert(!iter->first.IsStringOwner());
 
         TableWriteSet &tws = iter->second;
@@ -243,49 +261,6 @@ public:
         return nullptr;
     }
 
-    const ReadSetEntry *FindRead(const TableName &tablename,
-                                 const CcEntryAddr &cce_addr) const
-    {
-        auto table_key_it = rset_.find(tablename);
-        if (table_key_it != rset_.end())
-        {
-            auto key_it = table_key_it->second.find(cce_addr);
-            if (key_it != table_key_it->second.end())
-            {
-                return &key_it->second;
-            }
-        }
-
-        return nullptr;
-    }
-
-    /*ScanSetEntry &NewScanEntry(const TableName &tabname, TxKey *key)
-    {
-        auto find_iter = sset_.find(tabname);
-        if (find_iter == sset_.end())
-        {
-            auto iter = sset_.emplace(
-                tabname,
-                std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>());
-            find_iter = iter.first;
-        }
-
-        TxKeyContainer keycon(key->Clone());
-        auto iter = find_iter->second.emplace(keycon.get(), ScanSetEntry());
-        ScanSetEntry &scan_entry = iter.first->second;
-        ++sset_cnt_;
-
-        return scan_entry;
-    }*/
-
-    // const std::unordered_map<
-    //    TableName,
-    //    std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>>
-    //    &ScanSet()
-    //{
-    //    return sset_;
-    //}
-
     std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>
     InitIter(const TableWriteSet &table_wset,
              const TxKey *start_key,
@@ -320,9 +295,27 @@ public:
         return std::make_pair(rit, table_wset.rend());
     }
 
+    /**
+     * @brief Removes all read-set entries of data items, keeping catalog read
+     * entries.
+     *
+     */
     void ClearReadSet()
     {
-        rset_.clear();
+        for (auto tbl_it = rset_.begin(); tbl_it != rset_.end();)
+        {
+            if (tbl_it->first == catalog_ccm_name)
+            {
+                ++tbl_it;
+            }
+            else
+            {
+                data_rset_cnt_ -= tbl_it->second.size();
+                tbl_it = rset_.erase(tbl_it);
+            }
+        }
+
+        assert(data_rset_cnt_ == 0);
     }
 
     void ClearScanSet()
@@ -395,7 +388,27 @@ public:
 
     void ClearReadSet(const TableName &table_name)
     {
-        rset_.erase(table_name);
+        auto tbl_it = rset_.find(table_name);
+        if (tbl_it != rset_.end())
+        {
+            if (!(table_name == catalog_ccm_name))
+            {
+                data_rset_cnt_ -= tbl_it->second.size();
+            }
+
+            rset_.erase(tbl_it);
+        }
+
+#ifdef RANGE_PARTITIONED
+        TableName range_tbl_name(table_name.StringView(),
+                                 TableType::RangePartition);
+        tbl_it = rset_.find(range_tbl_name);
+        if (tbl_it != rset_.end())
+        {
+            data_rset_cnt_ -= tbl_it->second.size();
+            rset_.erase(tbl_it);
+        }
+#endif
     }
 
 private:
@@ -404,6 +417,7 @@ private:
         rset_;
     std::unordered_map<TableName, TableWriteSet> wset_;
     size_t wset_cnt_;
+    size_t data_rset_cnt_;
     std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>
         read_cache_;
     size_t wset_bytes_cnt_;

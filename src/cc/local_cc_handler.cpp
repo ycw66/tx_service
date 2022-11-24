@@ -1,5 +1,6 @@
 #include "local_cc_handler.h"
 
+#include <chrono>
 #include <string>
 
 #include "local_cc_shards.h"
@@ -22,6 +23,7 @@ txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
 void txservice::LocalCcHandler::AcquireWrite(
     const TableName &table_name,
     const TxKey &key,
+    uint32_t key_shard_code,
     TxNumber tx_number,
     int64_t tx_term,
     uint16_t command_id,
@@ -32,8 +34,7 @@ void txservice::LocalCcHandler::AcquireWrite(
     CcProtocol proto,
     IsolationLevel iso_level)
 {
-    uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
-    uint32_t ng_id = shard_code >> 10;
+    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
     acquire_result.cce_addr_.SetNodeGroupId(ng_id);
     acquire_result.cce_addr_.SetCce(0, -1);
@@ -44,7 +45,7 @@ void txservice::LocalCcHandler::AcquireWrite(
         AcquireCc *req = acquire_pool.NextRequest();
         req->Reset(&table_name,
                    &key,
-                   shard_code,
+                   key_shard_code,
                    tx_number,
                    tx_term,
                    ts,
@@ -55,15 +56,16 @@ void txservice::LocalCcHandler::AcquireWrite(
                    iso_level);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }
     else
     {
         acquire_result.remote_ack_cnt_->fetch_add(1, std::memory_order_relaxed);
         remote_hd_.AcquireWrite(cc_shards_.node_id_,
+                                ng_id,
                                 table_name,
                                 key,
-                                shard_code,
+                                key_shard_code,
                                 tx_number,
                                 tx_term,
                                 command_id,
@@ -207,6 +209,7 @@ void txservice::LocalCcHandler::PostWrite(
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
     OperationType operation_type,
+    uint32_t key_shard_code,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -230,6 +233,7 @@ void txservice::LocalCcHandler::PostWrite(
                    commit_ts,
                    record,
                    operation_type,
+                   key_shard_code,
                    &hres,
                    protocol);
         TX_TRACE_ACTION(this, req);
@@ -250,6 +254,7 @@ void txservice::LocalCcHandler::PostWrite(
                              cce_addr,
                              record,
                              operation_type,
+                             key_shard_code,
                              hres,
                              protocol);
     }
@@ -316,6 +321,7 @@ void txservice::LocalCcHandler::PostRead(
 
 void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      const TxKey &key,
+                                     uint32_t key_shard_code,
                                      TxRecord &record,
                                      ReadType read_type,
                                      uint64_t tx_number,
@@ -328,19 +334,18 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      bool is_for_write)
 {
     hres.Value().rec_ = &record;
-    uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
-    uint32_t shard_id = shard_code >> 10;
+    uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     CcEntryAddr &cce_addr = hres.Value().cce_addr_;
-    cce_addr.SetNodeGroupId(shard_id);
+    cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, -1);
 
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(shard_id);
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
         ReadCc *req = read_pool.NextRequest();
         req->Reset(&table_name,
                    &key,
-                   shard_code,
+                   key_shard_code,
                    &record,
                    read_type,
                    tx_number,
@@ -352,14 +357,15 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    is_for_write);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }
     else
     {
         remote_hd_.Read(cc_shards_.node_id_,
+                        cc_ng_id,
                         table_name,
                         key,
-                        shard_code,
+                        key_shard_code,
                         record,
                         read_type,
                         tx_number,
@@ -522,7 +528,7 @@ void txservice::LocalCcHandler::ScanOpen(
     bool is_for_write,
     bool is_ckpt_delta)
 {
-    CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
+    CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
 
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::Secondary)
@@ -564,25 +570,30 @@ void txservice::LocalCcHandler::ScanOpen(
             direction, catalog_entry->schema_->KeySchema());
     }
 
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    size_t core_cnt = cc_shards_.Count();
-    // A scan sends requests to local cores and remote cc nodes.
-    uint32_t dependent_cnt = ng_cnt - 1 + core_cnt;
-    hd_res.SetRefCnt(dependent_cnt);
-
     ScanOpenResult &open_result = hd_res.Value();
-    open_result.Reset(ng_cnt);
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
     open_result.scan_alias_ = scan_alias_cnt_;
     ++scan_alias_cnt_;
-
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->iso_level_ = iso_level;
     scanner_ptr->protocol_ = proto;
     scanner_ptr->read_local_ = false;
+
+#ifdef RANGE_PARTITIONED
+    // For range-partitioned ccm scanners, adding the last shard implicitly
+    // allocates scan cache for all cores.
+    scanner_ptr->AddShard(cc_shards_.Count() - 1);
+    hd_res.SetFinished();
+#else
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    open_result.Reset(ng_cnt);
+    size_t core_cnt = cc_shards_.Count();
+    // A scan sends requests to local cores and remote cc nodes.
+    uint32_t dependent_cnt = ng_cnt - 1 + core_cnt;
+    hd_res.SetRefCnt(dependent_cnt);
 
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
@@ -660,6 +671,7 @@ void txservice::LocalCcHandler::ScanOpen(
                                 scanner_ptr->is_ckpt_delta_);
         }
     }
+#endif
 }
 
 void txservice::LocalCcHandler::ScanOpenLocal(
@@ -837,6 +849,61 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
 }
 
+void txservice::LocalCcHandler::ScanNextBatch(
+    const TableName &tbl_name,
+    uint32_t range_id,
+    const TxKey *start_key,
+    bool inclusive,
+    uint64_t read_ts,
+    uint64_t tx_number,
+    int64_t tx_term,
+    CcScanner &scanner,
+    CcHandlerResult<RangeScanSliceResult> &hd_res,
+    IsolationLevel iso_level,
+    CcProtocol proto)
+{
+    uint32_t cc_ng_id = range_id % Sharder::Instance().NodeGroupCount();
+
+    uint32_t node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
+    if (node_id == cc_shards_.node_id_)
+    {
+        ScanSliceCc *req = scan_slice_pool.NextRequest();
+        req->Set(tbl_name,
+                 range_id,
+                 cc_ng_id,
+                 start_key,
+                 inclusive,
+                 read_ts,
+                 tx_number,
+                 tx_term,
+                 &scanner,
+                 hd_res,
+                 iso_level,
+                 proto);
+
+        uint32_t core_cnt = cc_shards_.Count();
+        req->SetShardCount(core_cnt);
+
+        for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            ScanCache *cache = scanner.Cache(core_id);
+            const ScanTuple *last_tuple = cache->LastTuple();
+            req->SetPriorCceAddr(
+                last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0,
+                core_id);
+            cache->Reset();
+        }
+
+        // The scan slice request is dispatched to the first core. The first
+        // core tries to pin the slice in memory and if succeeds, further
+        // dispatches the request to remaining cores for parallel scans.
+        cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
+    }
+    else
+    {
+    }
+}
+
 void txservice::LocalCcHandler::ScanNextBatchLocal(
     uint64_t tx_number,
     int64_t tx_term,
@@ -926,7 +993,7 @@ void txservice::LocalCcHandler::SetCommitTimestamp(
     // tx.commit_ts_ + 1.
     ccs.UpdateTsBase(std::max(local_ts, tx.commit_ts_ + 1));
 
-    hres.SetValue(tx.commit_ts_);
+    hres.SetValue(std::move(tx.commit_ts_));
     hres.SetFinished();
 }
 

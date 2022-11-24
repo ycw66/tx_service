@@ -57,6 +57,11 @@ struct TxRecord
     {
         return 0;
     }
+
+    virtual size_t Size() const
+    {
+        return 0;
+    }
 };
 
 template <typename... Types>

@@ -1,11 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "butil/logging.h"
 #include "cc_handler_result.h"
 #include "scan.h"
 #include "tx_key.h"
@@ -22,7 +25,7 @@ class CcMapScanner;
 
 enum class ScannerStatus
 {
-    Open,
+    Open = 0,
     Closed,
     Blocked
 };
@@ -34,12 +37,21 @@ struct ScanCache
 public:
     static constexpr size_t ScanBatchSize = 128;
 
-    ScanCache(CcScanner *scanner) : idx_(0), size_(0), scanner_(scanner)
+    ScanCache(CcScanner *scanner)
+        : idx_(0), size_(0), scanner_(scanner), mem_size_(0)
+    {
+    }
+
+    ScanCache(size_t idx, size_t size, CcScanner *scanner)
+        : idx_(idx), size_(size), scanner_(scanner), mem_size_(0)
     {
     }
 
     ScanCache(ScanCache &&rhs) noexcept
-        : idx_(rhs.idx_), size_(rhs.size_), scanner_(rhs.scanner_)
+        : idx_(rhs.idx_),
+          size_(rhs.size_),
+          scanner_(rhs.scanner_),
+          mem_size_(rhs.mem_size_)
     {
     }
 
@@ -70,6 +82,7 @@ public:
     {
         idx_ = 0;
         size_ = 0;
+        mem_size_ = 0;
     }
 
     void Rewind()
@@ -108,6 +121,7 @@ protected:
     size_t idx_;
     size_t size_;
     CcScanner *const scanner_;
+    uint32_t mem_size_{0};
 };
 
 template <typename KeyT, typename ValueT>
@@ -117,14 +131,17 @@ public:
     TemplateScanCache() = delete;
 
     TemplateScanCache(CcScanner *scanner, const Schema *key_schema)
-        : ScanCache(scanner), cache_(), key_schema_(key_schema)
+        : ScanCache(scanner),
+          cache_(ScanCache::ScanBatchSize),
+          key_schema_(key_schema)
     {
+        assert(cache_.size() == ScanCache::ScanBatchSize);
     }
 
     TemplateScanCache(TemplateScanCache &&rhs)
-        : cache_(rhs.cache_),
-          key_schema_(rhs.key_schema_),
-          ScanCache(std::move(rhs))
+        : ScanCache(rhs.idx_, rhs.size_, rhs.scanner_),
+          cache_(std::move(rhs.cache_)),
+          key_schema_(rhs.key_schema_)
     {
     }
 
@@ -134,12 +151,30 @@ public:
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
     {
-        assert(size_ < cache_.size());
+        TemplateScanTuple<KeyT, ValueT> *scan_t = nullptr;
 
-        TemplateScanTuple<KeyT, ValueT> *scan_t = &cache_.at(size_);
+        if (size_ < cache_.size())
+        {
+            scan_t = &cache_[size_];
+        }
+        else
+        {
+            TemplateScanTuple<KeyT, ValueT> &new_tuple = cache_.emplace_back();
+            scan_t = &new_tuple;
+        }
         ++size_;
 
         return scan_t;
+    }
+
+    void AddScanTupleSize(uint32_t tuple_size)
+    {
+        mem_size_ += tuple_size;
+    }
+
+    bool IsFull() const
+    {
+        return mem_size_ >= 1024;
     }
 
     ScanTuple *AddScanTuple(const std::string &key_str,
@@ -152,32 +187,42 @@ public:
                             uint32_t ng_id,
                             bool is_ckpt_delta = false) override
     {
-        assert(size_ < cache_.size());
+        assert(size_ <= cache_.size());
 
-        TemplateScanTuple<KeyT, ValueT> &scan_tuple = cache_.at(size_);
+        TemplateScanTuple<KeyT, ValueT> *scan_tuple = nullptr;
+        if (size_ < cache_.size())
+        {
+            scan_tuple = &cache_[size_];
+        }
+        else
+        {
+            TemplateScanTuple<KeyT, ValueT> &new_tuple = cache_.emplace_back();
+            scan_tuple = &new_tuple;
+        }
 
-        scan_tuple.key_ts_ = key_ts;
+        scan_tuple->key_ts_ = key_ts;
         if (key_ts > 0)
         {
             // When the key's timestamp is 0, the tuple's key is not included in
             // this scan. Only deserializes the key when the key is included.
             size_t offset = 0;
-            scan_tuple.Key().Deserialize(key_str.data(), offset, key_schema_);
+            scan_tuple->KeyObj().Deserialize(
+                key_str.data(), offset, key_schema_);
         }
 
-        scan_tuple.rec_status_ = rec_status;
+        scan_tuple->rec_status_ = rec_status;
         if (rec_status == RecordStatus::Normal ||
             (rec_status == RecordStatus::Deleted && is_ckpt_delta))
         {
             size_t offset = 0;
-            scan_tuple.Record().Deserialize(record_str.data(), offset);
+            scan_tuple->RecordObj().Deserialize(record_str.data(), offset);
         }
 
-        scan_tuple.gap_ts_ = gap_ts;
-        scan_tuple.cce_addr_.SetCce(cce_ptr, term, ng_id);
+        scan_tuple->gap_ts_ = gap_ts;
+        scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id);
 
         ++size_;
-        return &scan_tuple;
+        return scan_tuple;
     }
 
     const TemplateScanTuple<KeyT, ValueT> *Current() const
@@ -187,7 +232,7 @@ public:
 
     const TemplateScanTuple<KeyT, ValueT> *Last() const
     {
-        return &cache_.at(size_ - 1);
+        return size_ > 0 ? &cache_[size_ - 1] : nullptr;
     }
 
     const ScanTuple *LastTuple() const override
@@ -196,9 +241,14 @@ public:
     }
 
 private:
-    std::array<TemplateScanTuple<KeyT, ValueT>, ScanCache::ScanBatchSize>
-        cache_;
+    std::vector<TemplateScanTuple<KeyT, ValueT>> cache_;
     const Schema *const key_schema_;
+};
+
+enum struct CcmScannerType
+{
+    HashPartition = 0,
+    RangePartition
 };
 
 class CcScanner
@@ -209,14 +259,13 @@ public:
     CcScanner(ScanDirection direction, ScanIndexType index_type)
         : direct_(direction),
           index_type_(index_type),
+          status_(ScannerStatus::Open),
           drain_cache_mode_(false),
           is_ckpt_delta_(false)
     {
     }
 
     virtual ~CcScanner() = default;
-
-    virtual CcScanner::Uptr Clone() const = 0;
 
     // virtual ScannerStatus MoveNext(const ScanTuple *&tuple) = 0;
     virtual uint32_t BlockedShard() const = 0;
@@ -226,7 +275,18 @@ public:
         std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) = 0;
 
     virtual const ScanTuple *Current() = 0;
-    virtual ScannerStatus Status() const = 0;
+    virtual CcmScannerType Type() const = 0;
+
+    ScannerStatus Status() const
+    {
+        return status_;
+    }
+
+    void SetStatus(ScannerStatus status)
+    {
+        status_ = status;
+    }
+
     virtual void MoveNext() = 0;
 
     virtual void SetDrainCacheMode(bool drain_cache_mode) = 0;
@@ -265,6 +325,7 @@ public:
 protected:
     ScanDirection direct_;
     ScanIndexType index_type_;
+    ScannerStatus status_;
     // In drain cache mode, Movenext/Current will drain out the cached the
     // tuples in each buckets
     bool drain_cache_mode_{false};
@@ -288,17 +349,8 @@ public:
           scans_(),
           curr_shard_code_(0),
           curr_tuple_(nullptr),
-          status_(ScannerStatus::Open),
           key_schema_(schema)
     {
-    }
-
-    ~TemplateCcScanner() = default;
-
-    CcScanner::Uptr Clone() const override
-    {
-        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
-            direct_, index_type_, key_schema_);
     }
 
     ScanCache *AddShard(uint32_t shard_code) override
@@ -406,11 +458,6 @@ public:
         }
     }
 
-    ScannerStatus Status() const override
-    {
-        return status_;
-    }
-
     void MoveNext() override
     {
         if (curr_tuple_ != nullptr)
@@ -444,6 +491,11 @@ public:
         return drain_cache_mode_;
     }
 
+    CcmScannerType Type() const override
+    {
+        return CcmScannerType::HashPartition;
+    }
+
 private:
     /// <summary>
     /// A collection of local and remote scan caches, one per core.
@@ -452,9 +504,169 @@ private:
 
     uint32_t curr_shard_code_;
     const TemplateScanTuple<KeyT, ValueT> *curr_tuple_;
-    ScannerStatus status_;
 
     const Schema *key_schema_;
     std::mutex mutex_;
+};
+
+template <typename KeyT, typename ValueT, bool IsForward>
+class RangePartitionedCcmScanner : public CcScanner
+{
+public:
+    RangePartitionedCcmScanner(ScanDirection direct,
+                               ScanIndexType index_type,
+                               const Schema *schema)
+        : CcScanner(direct, index_type), scans_(), key_schema_(schema)
+    {
+    }
+
+    ScanCache *AddShard(uint32_t shard_code) override
+    {
+        size_t curr_size = scans_.size();
+        if (shard_code >= curr_size)
+        {
+            scans_.reserve(shard_code + 1);
+            for (size_t idx = curr_size; idx < shard_code + 1; ++idx)
+            {
+                scans_.emplace_back(this, key_schema_);
+            }
+        }
+
+        for (size_t idx = 0; idx < curr_size; ++idx)
+        {
+            scans_[idx].Reset();
+        }
+
+        assert(shard_code < scans_.size());
+
+        return &scans_[shard_code];
+    }
+
+    uint32_t BlockedShard() const override
+    {
+        return UINT32_MAX;
+    }
+
+    ScanCache *Cache(uint32_t shard_code) override
+    {
+        return &scans_[shard_code];
+    }
+
+    void ShardCacheSizes(
+        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) override
+    {
+        for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
+        {
+            shard_code_and_sizes->emplace_back(core_id, scans_[core_id].Size());
+        }
+    }
+
+    const ScanTuple *Current() override
+    {
+        if (status_ != ScannerStatus::Open)
+        {
+            return nullptr;
+        }
+
+        if (heap_.empty())
+        {
+            for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
+            {
+                if (scans_[core_id].Status() == ScannerStatus::Open)
+                {
+                    const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+                        scans_[core_id].Current();
+                    assert(scan_tuple != nullptr);
+                    heap_.emplace(scan_tuple, core_id);
+                }
+            }
+        }
+
+        if (heap_.empty())
+        {
+            status_ = ScannerStatus::Blocked;
+            return nullptr;
+        }
+
+        const std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t> &top =
+            heap_.top();
+        return top.first;
+    }
+
+    void MoveNext() override
+    {
+        if (heap_.empty())
+        {
+            return;
+        }
+
+        size_t core_id = heap_.top().second;
+        heap_.pop();
+        scans_[core_id].MoveNext();
+
+        if (scans_[core_id].Status() == ScannerStatus::Open)
+        {
+            const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+                scans_[core_id].Current();
+            assert(scan_tuple != nullptr);
+            heap_.emplace(scan_tuple, core_id);
+        }
+
+        if (heap_.empty())
+        {
+            status_ = ScannerStatus::Blocked;
+        }
+    }
+
+    void SetDrainCacheMode(bool drain_cache_mode) override
+    {
+        drain_cache_mode_ = drain_cache_mode;
+    }
+
+    bool GetDrainCacheMode() override
+    {
+        return drain_cache_mode_;
+    }
+
+    CcmScannerType Type() const override
+    {
+        return CcmScannerType::RangePartition;
+    }
+
+private:
+    struct ForwardCompare
+    {
+        bool operator()(const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
+                                        size_t> &lhs,
+                        const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
+                                        size_t> &rhs)
+        {
+            return !(*lhs.first < *rhs.first);
+        }
+    };
+
+    struct BackwardCompare
+    {
+        bool operator()(const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
+                                        size_t> &lhs,
+                        const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
+                                        size_t> &rhs)
+        {
+            return *lhs.first < *rhs.first;
+        }
+    };
+
+    using CompareFunc =
+        std::conditional_t<IsForward, ForwardCompare, BackwardCompare>;
+
+    std::priority_queue<
+        std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t>,
+        std::vector<std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t>>,
+        CompareFunc>
+        heap_;
+
+    std::vector<TemplateScanCache<KeyT, ValueT>> scans_;
+
+    const Schema *key_schema_;
 };
 }  // namespace txservice

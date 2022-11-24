@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include "cc/cc_entry.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -65,14 +66,17 @@ struct ScanOpenResult
     {
     }
 
-    ScanOpenResult(const ScanOpenResult &other)
+    ScanOpenResult(ScanOpenResult &&other)
     {
         scan_alias_ = other.scan_alias_;
-        cc_node_terms_ = other.cc_node_terms_;
-        cc_node_returned_ = other.cc_node_returned_;
-        scanner_ = other.scanner_->Clone();
+        cc_node_terms_ = std::move(other.cc_node_terms_);
+        cc_node_returned_ = std::move(other.cc_node_returned_);
+        scanner_ = std::move(other.scanner_);
     }
-    ScanOpenResult &operator=(const ScanOpenResult &rhs)
+
+    ScanOpenResult &operator=(const ScanOpenResult &rhs) = delete;
+
+    ScanOpenResult &operator=(ScanOpenResult &&rhs)
     {
         if (this == &rhs)
         {
@@ -80,12 +84,13 @@ struct ScanOpenResult
         }
 
         scan_alias_ = rhs.scan_alias_;
-        cc_node_terms_ = rhs.cc_node_terms_;
-        cc_node_returned_ = rhs.cc_node_returned_;
-        scanner_ = rhs.scanner_->Clone();
+        cc_node_terms_ = std::move(rhs.cc_node_terms_);
+        cc_node_returned_ = std::move(rhs.cc_node_returned_);
+        scanner_ = std::move(rhs.scanner_);
 
         return *this;
     }
+
     void Reset(size_t cc_node_cnt)
     {
         cc_node_terms_.resize(cc_node_cnt);
@@ -112,6 +117,49 @@ struct ScanOpenResult
     // because if a scan request toward a cc node finishes with an error, the
     // error code is recorded in the cc handler result.
     std::vector<uint8_t> cc_node_returned_;
+};
+
+struct RangeScanSliceResult
+{
+    RangeScanSliceResult()
+        : last_key_(nullptr), slice_position_(SlicePosition::FirstSlice)
+    {
+    }
+
+    RangeScanSliceResult(TxKey::Uptr last_key, SlicePosition status)
+        : last_key_(std::move(last_key)), slice_position_(status)
+    {
+    }
+
+    RangeScanSliceResult(RangeScanSliceResult &&rhs)
+        : last_key_(std::move(rhs.last_key_)),
+          slice_position_(rhs.slice_position_)
+    {
+    }
+
+    RangeScanSliceResult &operator=(RangeScanSliceResult &&rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        last_key_ = std::move(rhs.last_key_);
+        slice_position_ = rhs.slice_position_;
+
+        return *this;
+    }
+
+    /**
+     * @brief The last key of the current scan batch. For forward scans, the
+     * last key is the exclusive end of the current slice, which is the
+     * inclusive start key of the next scan batch. For backward scans, the last
+     * key is the inclusive start of the current slice, which is the exclusive
+     * start key of the next scan batch.
+     *
+     */
+    TxKey::Uptr last_key_;
+    SlicePosition slice_position_;
 };
 
 struct ScanNextResult

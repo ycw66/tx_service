@@ -19,6 +19,7 @@ public:
 
     void AcquireWrite(const TableName &table_name,
                       const TxKey &key,
+                      uint32_t key_shard_code,
                       TxNumber tx_number,
                       int64_t tx_term,
                       uint16_t command_id,
@@ -72,6 +73,7 @@ public:
                    const CcEntryAddr &ccentry_addr,
                    const TxRecord *record,
                    OperationType operation_type,
+                   uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol) override;
 
@@ -110,6 +112,7 @@ public:
     /// <param name="proto"></param>
     void Read(const TableName &table_name,
               const TxKey &key,
+              uint32_t key_shard_code,
               TxRecord &record,
               ReadType read_type,
               uint64_t tx_number,
@@ -179,6 +182,18 @@ public:
                        uint64_t start_ts,
                        CcScanner &scanner,
                        CcHandlerResult<ScanNextResult> &hd_res) override;
+
+    void ScanNextBatch(const TableName &tbl_name,
+                       uint32_t range_id,
+                       const TxKey *start_key,
+                       bool inclusive,
+                       uint64_t read_ts,
+                       uint64_t tx_number,
+                       int64_t tx_term,
+                       CcScanner &scanner,
+                       CcHandlerResult<RangeScanSliceResult> &hd_res,
+                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+                       CcProtocol proto = CcProtocol::OCC) override;
 
     void ScanNextBatchLocal(uint64_t tx_number,
                             int64_t tx_term,
@@ -298,6 +313,7 @@ private:
     CcRequestPool<NegotiateCc> negoti_pool;
     CcRequestPool<ScanOpenBatchCc> scan_open_pool;
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
+    CcRequestPool<ScanSliceCc> scan_slice_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
 

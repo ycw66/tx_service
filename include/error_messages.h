@@ -52,6 +52,12 @@ enum struct TxErrorCode
     WRITE_SET_BYTES_COUNT_EXCEED_ERR
 };
 
+enum struct CcErrorCode
+{
+    NO_ERROR = 0,
+    GET_RANGE_ID_ERR
+};
+
 static const std::map<TxErrorCode, std::string> error_messages{
     {TxErrorCode::UNDEFINED_ERR, "Undefined error."},
     {TxErrorCode::OCC_BREAK_REPEATABLE_READ,

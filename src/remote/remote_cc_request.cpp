@@ -483,6 +483,7 @@ void txservice::remote::RemotePostWrite::Reset(
                        commit_ts,
                        rec_str,
                        static_cast<OperationType>(post_commit.operation_type()),
+                       post_commit.key_shard_code(),
                        &cc_res_,
                        proto_);
 

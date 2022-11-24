@@ -402,6 +402,43 @@ public:
                     }
                 }
             }
+            else if (old_schema == nullptr && new_schema != nullptr)
+            {
+                std::vector<InitRangeEntry> range_init_vec;
+                std::string_view table_name_view =
+                    table_key->Name().StringView();
+                int init_partition_id = 0;
+                if (table_name_view != "./mysql/sequences")
+                {
+                    size_t tbl_name_hash =
+                        std::hash<std::string_view>()(table_name_view);
+                    init_partition_id = tbl_name_hash & 0x3FF;
+                }
+
+                range_init_vec.emplace_back(
+                    nullptr, init_partition_id, req.CommitTs());
+
+                TableName range_table_name(table_name_view,
+                                           TableType::RangePartition);
+                shard_->InitTableRanges(range_table_name, range_init_vec);
+
+                std::vector<TableName> index_names = new_schema->IndexNames();
+                for (const TableName &index_name : index_names)
+                {
+                    // Drop range table if exist
+                    TableName index_range_table_name{index_name.StringView(),
+                                                     TableType::RangePartition};
+
+                    size_t tbl_name_hash =
+                        std::hash<std::string_view>()(index_name.StringView());
+                    init_partition_id = tbl_name_hash & 0x3FF;
+                    range_init_vec.clear();
+                    range_init_vec.emplace_back(
+                        nullptr, init_partition_id, req.CommitTs());
+                    shard_->InitTableRanges(index_range_table_name,
+                                            range_init_vec);
+                }
+            }
 #endif
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
@@ -753,6 +790,11 @@ public:
         }
 
         return false;
+    }
+
+    TableType Type() const override
+    {
+        return TableType::Catalog;
     }
 };
 }  // namespace txservice

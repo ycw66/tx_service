@@ -20,8 +20,8 @@
 #include "local_cc_handler.h"
 #include "metrics/metrics.h"
 #include "raft_log.pb.h"
+#include "range_slice.h"
 #include "store/data_store_handler.h"
-#include "template_cc_map.h"
 #include "type.h"
 
 namespace txservice
@@ -347,6 +347,20 @@ public:
     const TableRangeEntryWithShade *GetTableRangeWithShade(
         const TableName &table_name, int32_t partition_id);
 
+    RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const Schema *key_schema,
+                               const Schema *rec_schema,
+                               uint64_t schema_ts,
+                               const KVCatalogInfo *kv_info,
+                               uint32_t range_id,
+                               const TxKey &key,
+                               bool inclusive,
+                               CcRequestBase *cc_request,
+                               CcShard *cc_shard,
+                               RangeSliceOpStatus &pin_status);
+
+    StoreRange *FindRange(const TableName &table_name, const TxKey &key);
+
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
     /**
@@ -387,11 +401,15 @@ public:
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
+    bool KickoutRangeSlice(const TableName &tbl_name, const TxKey &key);
+
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
 
 private:
     void TimerRun();
+    uint32_t FindRangePartitionId(const TableName &range_tbl_name,
+                                  const TxKey &key);
 
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
@@ -424,6 +442,21 @@ private:
 
     std::unordered_map<TableName, std::map<int32_t, TableRangeEntryWithShade>>
         table_ranges_;  // string owner
+
+    struct RangesByKey
+    {
+        RangesByKey() = delete;
+
+        RangesByKey(uint32_t first_partition_id)
+            : first_partition_id_(first_partition_id)
+        {
+        }
+
+        uint32_t first_partition_id_;
+        std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> ranges_by_key_;
+    };
+
+    std::unordered_map<TableName, RangesByKey> table_range_maps_;
     std::shared_mutex catalog_mux_;
 
     TxService *tx_service_;

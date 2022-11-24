@@ -61,10 +61,7 @@ public:
                uint64_t schema_ts,
                CcShard *shard)
         : TemplateCcMap<KeyT, RangeRecord>(
-              shard, range_table_name, schema_ts, table_schema, false),
-          range_table_name_(range_table_name.StringView().data(),
-                            range_table_name.StringView().size(),
-                            range_table_name.Type())
+              shard, range_table_name, schema_ts, table_schema, false)
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
             CcMap::shard_->GetAllTableRangesForATable(range_table_name);
@@ -421,7 +418,7 @@ public:
             if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
             {
                 const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->GetTableRangeWithShade(range_table_name_,
+                    shard_->GetTableRangeWithShade(CcMap::table_name_,
                                                    partition_id);
                 old_table_range_entry = range_entry_shade->shader_.get();
             }
@@ -431,7 +428,7 @@ public:
             {
                 // upload the dirty range attributes to local cc shards
                 const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->CreateDirtyTableRange(range_table_name_,
+                    shard_->CreateDirtyTableRange(CcMap::table_name_,
                                                   partition_id,
                                                   std::move(new_range_key),
                                                   new_partition_id,
@@ -445,7 +442,7 @@ public:
                 // commit dirty range, old_range_entry switch back to shader
                 std::pair<TableRangeEntry *, TableRangeEntry *> entries =
                     shard_->CommitDirtyTableRange(
-                        range_table_name_, partition_id, req.CommitTs());
+                        CcMap::table_name_, partition_id, req.CommitTs());
                 old_table_range_entry = entries.first;
             }
         }
@@ -455,7 +452,7 @@ public:
                 stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
             {
                 const TableRangeEntryWithShade *table_range_entry_with_shard =
-                    shard_->GetTableRangeWithShade(range_table_name_,
+                    shard_->GetTableRangeWithShade(CcMap::table_name_,
                                                    partition_id);
                 old_table_range_entry =
                     table_range_entry_with_shard->shade_.get();
@@ -465,7 +462,7 @@ public:
             {
                 const TableRangeEntryWithShade
                     *old_table_range_entry_with_shard =
-                        shard_->GetTableRangeWithShade(range_table_name_,
+                        shard_->GetTableRangeWithShade(CcMap::table_name_,
                                                        partition_id);
                 old_table_range_entry =
                     old_table_range_entry_with_shard->shader_.get();
@@ -553,7 +550,9 @@ public:
         return true;
     }
 
-private:
-    TableName range_table_name_;
+    TableType Type() const override
+    {
+        return TableType::RangePartition;
+    }
 };
 }  // namespace txservice

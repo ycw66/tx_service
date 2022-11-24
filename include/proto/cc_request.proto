@@ -244,6 +244,7 @@ message PostCommitRequest {
 	bytes record = 5;
 	uint32 operation_type = 6;
 	CcProtocolType protocol = 7;
+	uint32 key_shard_code = 8;
 }
 
 message PostWriteAllRequest {

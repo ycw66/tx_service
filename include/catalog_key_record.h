@@ -21,8 +21,10 @@ struct CatalogKey : public TxKey
 public:
     CatalogKey();
     CatalogKey(const TableName &name);
-    CatalogKey(const CatalogKey &rhs, const Schema *);
+    CatalogKey(CatalogKey &&rhs);
+    CatalogKey(const CatalogKey &rhs);
     ~CatalogKey() = default;
+    CatalogKey(const CatalogKey &rhs, const Schema *);
 
     bool operator==(const TxKey &rhs) const override;
     bool operator<(const TxKey &rhs) const override;
@@ -43,6 +45,11 @@ public:
     friend bool operator<(const CatalogKey &lhs, const CatalogKey &rhs);
     const TableName &Name() const;
     TableName &Name();
+
+    size_t Size() const override
+    {
+        return table_name_.StringView().size();
+    }
 
 private:
     // table_name_ is string owner if the CatalogKey is stored in CcMap. When
@@ -161,6 +168,8 @@ struct CatalogRecord : public TxRecord
 {
 public:
     CatalogRecord() = default;
+    CatalogRecord(CatalogRecord &&rhs);
+    CatalogRecord(const CatalogRecord &rhs);
     ~CatalogRecord() = default;
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override;
@@ -184,6 +193,11 @@ public:
     const TableSchema *DirtySchema() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
+
+    size_t Size() const override
+    {
+        return 8 * 3;
+    }
 
 private:
     /**

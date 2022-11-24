@@ -58,18 +58,7 @@ public:
     {
     }
 
-    CcHandlerResult &operator=(const CcHandlerResult &rhs)
-    {
-        result_ = rhs.result_;
-        is_finished_ = rhs.is_finished_.load(std::memory_order_acquire);
-        error_code_.store(rhs.error_code_.load(std::memory_order_acquire),
-                          std::memory_order_release);
-        ref_cnted_ = rhs.ref_cnt_;
-        ref_cnt_.store(rhs.ref_cnt_.load(std::memory_order_acquire));
-        post_lambda_ = rhs.post_lambda_;
-
-        return *this;
-    }
+    CcHandlerResult &operator=(const CcHandlerResult &rhs) = delete;
 
     bool IsFinished() const override
     {
@@ -103,10 +92,7 @@ public:
         return ref_cnt_.load(std::memory_order_relaxed);
     }
 
-    void SetValue(const T &val)
-    {
-        result_ = val;
-    }
+    void SetValue(const T &val) = delete;
 
     void SetValue(T &&val)
     {

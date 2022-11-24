@@ -45,6 +45,7 @@ public:
     virtual void AcquireWrite(
         const TableName &table_name,
         const TxKey &key,
+        uint32_t key_shard_code,
         TxNumber tx_number,
         int64_t tx_term,
         uint16_t command_id,
@@ -117,6 +118,7 @@ public:
                            const CcEntryAddr &ccentry_addr,
                            const TxRecord *record,
                            OperationType operation_type,
+                           uint32_t key_shard_code,
                            CcHandlerResult<PostProcessResult> &hres,
                            CcProtocol protocol) = 0;
 
@@ -173,6 +175,7 @@ public:
      */
     virtual void Read(const TableName &table_name,
                       const TxKey &key,
+                      uint32_t key_shard_code,
                       TxRecord &rec,
                       ReadType read_type,
                       uint64_t tx_number,
@@ -277,6 +280,19 @@ public:
                                uint64_t start_ts,
                                CcScanner &scanner,
                                CcHandlerResult<ScanNextResult> &hd_res) = 0;
+
+    virtual void ScanNextBatch(
+        const TableName &tbl_name,
+        uint32_t range_id,
+        const TxKey *start_key,
+        bool inclusive,
+        uint64_t read_ts,
+        uint64_t tx_number,
+        int64_t tx_term,
+        CcScanner &scanner,
+        CcHandlerResult<RangeScanSliceResult> &hd_res,
+        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+        CcProtocol proto = CcProtocol::OCC) = 0;
 
     virtual void ScanNextBatchLocal(
         uint64_t tx_number,

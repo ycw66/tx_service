@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>  // std::max
+#include <chrono>
 #include <map>
 #include <string>
 #include <unordered_set>
@@ -10,9 +11,11 @@
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_protocol.h"
+#include "cc_req_misc.h"
 #include "cc_request.h"
 #include "cc_shard.h"
 #include "fault/fault_inject.h"
+#include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
@@ -24,6 +27,10 @@
 #include "tx_key.h"
 #include "tx_trace.h"
 #include "type.h"
+
+#ifdef RANGE_PARTITIONED
+#include "range_slice.h"
+#endif
 
 namespace txservice
 {
@@ -485,6 +492,39 @@ public:
 
             if (commit_ts > 0)
             {
+#ifdef RANGE_PARTITIONED
+                if (cce.delta_size_ != INT32_MAX)
+                {
+                    int32_t change_size = 0;
+                    if (is_del)
+                    {
+                        // Deleted record.
+                        change_size -= cce.key_->Size();
+                        change_size -= cce.PayloadSize();
+                    }
+                    else if (cce.payload_status_ == RecordStatus::Deleted ||
+                             cce.commit_ts_ == 1)
+                    {
+                        // A new inserted record.
+                        change_size += cce.key_->Size();
+                        change_size += commit_val != nullptr
+                                           ? commit_val->Size()
+                                           : payload_str->size();
+                    }
+                    else
+                    {
+                        // Updated record.
+                        change_size -= cce.PayloadSize();
+                        change_size += commit_val != nullptr
+                                           ? commit_val->Size()
+                                           : payload_str->size();
+                    }
+
+                    cce.delta_size_.fetch_add(change_size,
+                                              std::memory_order_acq_rel);
+                }
+#endif
+
                 // for mvcc
                 if (shard_->EnableMvcc())
                 {
@@ -655,14 +695,6 @@ public:
                     return false;
                 }
 
-                if (shard_->core_id_ == tx_core_id)
-                {
-                    acquire_all_result.local_cce_addr_.SetCce(
-                        reinterpret_cast<uint64_t>(cce_ptr),
-                        ng_term,
-                        req.NodeGroupId());
-                }
-
                 req.SetCcePtr(cce_ptr);
             }
         }
@@ -754,6 +786,16 @@ public:
                                  acquire_all_result.last_vali_ts_);
                 }
 
+                if (shard_->core_id_ == tx_core_id)
+                {
+                    acquire_all_result.local_cce_addr_.SetCce(
+                        reinterpret_cast<uint64_t>(cce_ptr),
+                        ng_term,
+                        req.NodeGroupId());
+                    acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
+                    acquire_all_result.node_term_ = ng_term;
+                }
+
                 // AcquireAllCc request is executed at all shards consecutively.
                 // The request is set to be finished after executed at the last
                 // shard. At other shards, after the request is executed,
@@ -761,11 +803,6 @@ public:
                 // through all shards.
                 if (shard_->core_id_ == shard_->core_cnt_ - 1)
                 {
-                    acquire_all_result.last_vali_ts_ = std::max(
-                        acquire_all_result.last_vali_ts_, shard_->Now());
-                    acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
-                    acquire_all_result.node_term_ = ng_term;
-
                     hd_res->SetFinished();
                 }
                 else
@@ -1293,20 +1330,76 @@ public:
             }
             else
             {
+                const KeyT *look_key = nullptr;
+                KeyT decoded_key;
+
                 if (req.Key() != nullptr)
                 {
-                    const KeyT *look_key = static_cast<const KeyT *>(req.Key());
-                    cce = FindEmplace(*look_key, req.ReadTimestamp());
+                    look_key = static_cast<const KeyT *>(req.Key());
                 }
                 else
                 {
                     assert(req.KeyBlob() != nullptr);
-                    KeyT decoded_key;
                     size_t offset = 0;
                     decoded_key.Deserialize(
                         req.KeyBlob()->data(), offset, KeySchema());
-                    cce = FindEmplace(decoded_key, req.ReadTimestamp());
+                    look_key = &decoded_key;
                 }
+
+#ifdef RANGE_PARTITIONED
+                cce = Find(*look_key);
+                if (cce == nullptr)
+                {
+                    if (Type() == TableType::Primary)
+                    {
+                        RangeSliceOpStatus pin_status;
+                        uint32_t range_id = req.KeyShardCode() >> 10;
+                        RangeSliceId slice_id = shard_->PinRangeSlice(
+                            table_name_,
+                            KeySchema(),
+                            RecordSchema(),
+                            schema_ts_,
+                            table_schema_->GetKVCatalogInfo(),
+                            range_id,
+                            *look_key,
+                            true,
+                            &req,
+                            pin_status);
+
+                        if (pin_status == RangeSliceOpStatus::Successful)
+                        {
+                            cce = Find(*look_key);
+                            if (cce == nullptr)
+                            {
+                                slice_id.Unpin();
+
+                                hd_res->Value().ts_ = 1;
+                                hd_res->Value().rec_status_ =
+                                    RecordStatus::Deleted;
+                                hd_res->SetFinished();
+
+                                return true;
+                            }
+                        }
+                        else if (pin_status == RangeSliceOpStatus::Blocked)
+                        {
+                            return false;
+                        }
+                        else
+                        {
+                            // If the pin operation returns an error, the data
+                            // store is inaccessible.
+                            hd_res->SetError(1);
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        cce = FindEmplace(*look_key, req.ReadTimestamp());
+                    }
+                }
+#else
+                cce = FindEmplace(*look_key, req.ReadTimestamp());
 
                 // The read request accesses a new key not in the cc map. But
                 // the cc map is full and cannot allocates a new entry.
@@ -1327,6 +1420,7 @@ public:
                     cce->gap_commit_ts_ = 1U;
                     cce->ckpt_ts_.store(2U);
                 }
+#endif
 
                 req.SetCcePtr(cce);
                 cce_addr.SetCce(reinterpret_cast<uint64_t>(cce),
@@ -1665,18 +1759,19 @@ public:
     {
         assert(scan_type != ScanType::ScanUnknow);
 
-        TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-            typed_cache->AddScanTuple();
-
         switch (scan_type)
         {
         case ScanType::ScanGap:
+        {
+            TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+                typed_cache->AddScanTuple();
             ScanGap(cce, scan_tuple, ng_id, ng_term);
             break;
+        }
         case ScanType::ScanBoth:
             ScanKey(
                 cce,
-                scan_tuple,
+                typed_cache,
                 true,
                 ng_id,
                 ng_term,
@@ -1687,7 +1782,7 @@ public:
         case ScanType::ScanKey:
             ScanKey(
                 cce,
-                scan_tuple,
+                typed_cache,
                 false,
                 ng_id,
                 ng_term,
@@ -2654,6 +2749,410 @@ public:
         return true;
     }
 
+    bool Execute(ScanSliceCc &req) override
+    {
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(-1);
+            return req.SetFinish();
+        }
+
+        IsolationLevel iso_lvl = req.Isolation();
+        CcProtocol cc_proto = req.Protocol();
+        CcOperation cc_op;
+        bool is_read_snapshot;
+        if (table_name_.Type() == TableType::Secondary)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
+        }
+        else
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
+
+        CcHandlerResult<RangeScanSliceResult> *hd_res = req.Result();
+        const KeyT *start_key = nullptr;
+        if (req.StartKey() != nullptr)
+        {
+            start_key = static_cast<const KeyT *>(req.StartKey());
+        }
+        else if (req.Direction() == ScanDirection::Forward)
+        {
+            start_key = NegativeInfinity<KeyT>::Instance();
+        }
+        else
+        {
+            start_key = PositiveInfinity<KeyT>::Instance();
+        }
+
+        uint16_t core_id = shard_->LocalCoreId();
+        TemplateScanCache<KeyT, ValueT> *scan_cache =
+            static_cast<TemplateScanCache<KeyT, ValueT> *>(
+                req.GetScanCache(core_id));
+
+        RangeSliceId slice_id;
+        if (shard_->core_id_ == 0 && req.SliceId().Slice() == nullptr)
+        {
+            // The scan slice request is first dispatched to the 1st core, which
+            // pins the slice in memory. After the slice is pinned, the same
+            // request is dispatched to other cores to scan in parallel.
+            RangeSliceOpStatus pin_status;
+            slice_id = shard_->PinRangeSlice(table_name_,
+                                             KeySchema(),
+                                             RecordSchema(),
+                                             schema_ts_,
+                                             table_schema_->GetKVCatalogInfo(),
+                                             req.RangeId(),
+                                             *start_key,
+                                             req.Inclusive(),
+                                             &req,
+                                             pin_status);
+
+            if (pin_status == RangeSliceOpStatus::Blocked)
+            {
+                return false;
+            }
+            else if (pin_status == RangeSliceOpStatus::Errored)
+            {
+                // If the pin operation returns an error, the data store
+                // is inaccessible.
+                hd_res->SetError(1);
+                return req.SetFinish();
+            }
+
+            req.SetSliceId(slice_id);
+        }
+        else
+        {
+            slice_id = req.SliceId();
+            assert(slice_id.Slice() != nullptr);
+        }
+
+        Iterator scan_ccm_it;
+        CcEntry<KeyT, ValueT> *cce = nullptr;
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t tx_term = req.TxTerm();
+
+        if (req.CcePtr(core_id) != nullptr)
+        {
+            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr(core_id));
+            ScanType scan_type = req.BlockedCceScanType(core_id);
+
+            req.SetCcePtr(nullptr, core_id);
+            req.SetCceScanType(ScanType::ScanUnknow, core_id);
+
+            // Lock has been acquired, UpsertLockHoldingTx
+            LockHandleForResumedRequest(&req,
+                                        tx_term,
+                                        cce,
+                                        cce->payload_status_,
+                                        cc_op,
+                                        iso_lvl,
+                                        req.Protocol());
+
+            AddScanTuple(cce,
+                         scan_cache,
+                         scan_type,
+                         ng_id,
+                         ng_term,
+                         req.ReadTimestamp(),
+                         is_read_snapshot);
+
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+        }
+        else if (req.PriorCceAddr(core_id) != 0)
+        {
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                req.PriorCceAddr(core_id));
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> start_pair =
+                req.Direction() == ScanDirection::Forward
+                    ? ForwardScanStart(*start_key, req.Inclusive())
+                    : BackwardScanStart(*start_key, req.Inclusive());
+
+            scan_ccm_it = start_pair.first;
+            ScanType scan_type = start_pair.second;
+            cce = scan_ccm_it->second;
+
+            if (scan_type != ScanType::ScanGap)
+            {
+                req.SetCcePtr(cce, core_id);
+                req.SetCceScanType(scan_type, core_id);
+
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+                    return false;
+                }
+
+                AddScanTuple(cce,
+                             scan_cache,
+                             scan_type,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot);
+            }
+        }
+
+        if (req.Direction() == ScanDirection::Forward)
+        {
+            ++scan_ccm_it;
+            const StoreSlice *slice = slice_id.Slice();
+
+            // The scan at core 0 sets the scan's end key. By default, the
+            // scan's end is the end of the slice. In case keys in the slice are
+            // too many to fit into the scan cache, the last key of the scan at
+            // core 0 becomes the end key of scans at other cores. In such a
+            // case, it is mandatory that all keys smaller than the end key at
+            // other cores are returned in this batch. So, scans at other cores
+            // may slightly exceed the scan cache's capacity.
+            const KeyT *slice_end =
+                shard_->core_id_ == 0
+                    ? static_cast<const KeyT *>(slice->EndKey())
+                    : static_cast<const KeyT *>(
+                          hd_res->Value().last_key_.get());
+
+            Iterator pos_inf_it = End();
+            cce = scan_ccm_it->second;
+            while (scan_ccm_it != pos_inf_it &&
+                   (shard_->core_id_ > 0 || !scan_cache->IsFull()) &&
+                   (slice_end == nullptr || *cce->key_ < *slice_end))
+            {
+                req.SetCcePtr(cce, core_id);
+                req.SetCceScanType(ScanType::ScanBoth, core_id);
+
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+                    return false;
+                }
+
+                AddScanTuple(cce,
+                             scan_cache,
+                             ScanType::ScanBoth,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot);
+
+                ++scan_ccm_it;
+                cce = scan_ccm_it->second;
+            }
+
+            // Only sets the result once at the first core.
+            if (shard_->core_id_ == 0)
+            {
+                const KeyT *scan_end_key = nullptr;
+                SlicePosition slice_position;
+
+                if (scan_ccm_it != pos_inf_it &&
+                    (slice_end == nullptr || *scan_ccm_it->first < *slice_end))
+                {
+                    // The slice is too large. The scan has not fully scanned
+                    // the slice, before reaching the cache's size limit.
+                    scan_end_key = &scan_cache->Last()->KeyObj();
+                    slice_position = SlicePosition::Middle;
+                }
+                else
+                {
+                    // The slice has been fully scanned.
+                    if (slice_end == nullptr)
+                    {
+                        slice_position = SlicePosition::LastSlice;
+                    }
+                    else
+                    {
+                        scan_end_key = slice_end;
+
+                        const KeyT *range_end =
+                            static_cast<const KeyT *>(slice_id.RangeEndKey());
+                        if (range_end != nullptr && *slice_end == *range_end)
+                        {
+                            slice_position = SlicePosition::LastSliceInRange;
+                        }
+                        else
+                        {
+                            slice_position = SlicePosition::Middle;
+                        }
+                    }
+                }
+
+                hd_res->SetValue(RangeScanSliceResult(
+                    scan_end_key != nullptr ? scan_end_key->Clone() : nullptr,
+                    slice_position));
+
+                // Dispatches to remaining cores to scan in parallel.
+                for (uint16_t core_id = 1;
+                     core_id < shard_->local_shards_.Count();
+                     ++core_id)
+                {
+                    shard_->local_shards_.EnqueueCcRequest(
+                        shard_->core_id_, core_id, &req);
+                }
+            }
+        }
+        else
+        {
+            --scan_ccm_it;
+            const StoreSlice *slice = slice_id.Slice();
+            const KeyT *slice_begin =
+                shard_->core_id_ == 0
+                    ? static_cast<const KeyT *>(slice->StartKey())
+                    : static_cast<const KeyT *>(
+                          hd_res->Value().last_key_.get());
+
+            Iterator neg_inf_it = Begin();
+            cce = scan_ccm_it->second;
+            while (scan_ccm_it != neg_inf_it &&
+                   (shard_->core_id_ > 0 || !scan_cache->IsFull()) &&
+                   (slice_begin == nullptr || !(*cce->key_ < *slice_begin)))
+            {
+                req.SetCcePtr(cce, core_id);
+                req.SetCceScanType(ScanType::ScanBoth, core_id);
+
+                auto lock_pair = AcquireCceKeyLock(cce,
+                                                   cce->payload_status_,
+                                                   &req,
+                                                   ng_id,
+                                                   ng_term,
+                                                   tx_term,
+                                                   cc_op,
+                                                   iso_lvl,
+                                                   cc_proto);
+                if (lock_pair.second == LockOpStatus::Failed)
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(1);
+                    return true;
+                }
+                else if (lock_pair.second == LockOpStatus::Blocked)
+                {
+                    // Lock fail should stop the execution of current
+                    // CC request since it's already in blocking queue.
+                    return false;
+                }
+
+                AddScanTuple(cce,
+                             scan_cache,
+                             ScanType::ScanBoth,
+                             ng_id,
+                             ng_term,
+                             req.ReadTimestamp(),
+                             is_read_snapshot);
+
+                --scan_ccm_it;
+                cce = scan_ccm_it->second;
+            }
+
+            if (shard_->core_id_ == 0)
+            {
+                const KeyT *scan_start_key = nullptr;
+                SlicePosition slice_position;
+
+                if (scan_ccm_it != neg_inf_it &&
+                    (slice_begin == nullptr ||
+                     !(*scan_ccm_it->first < *slice_begin)))
+                {
+                    // The slice is too large. The scan has not fully
+                    // scanned the slice, before reaching the cache's size
+                    // limit.
+                    scan_start_key = &scan_cache->Last()->KeyObj();
+                    slice_position = SlicePosition::Middle;
+                }
+                else
+                {
+                    // The slice has been fully scanned.
+                    if (slice_begin == nullptr)
+                    {
+                        slice_position = SlicePosition::FirstSlice;
+                    }
+                    else
+                    {
+                        scan_start_key = slice_begin;
+
+                        const KeyT *range_start =
+                            static_cast<const KeyT *>(slice_id.RangeStartKey());
+                        if (range_start != nullptr &&
+                            *slice_begin == *range_start)
+                        {
+                            slice_position = SlicePosition::FirstSliceInRange;
+                        }
+                        else
+                        {
+                            slice_position = SlicePosition::Middle;
+                        }
+                    }
+                }
+
+                hd_res->SetValue(RangeScanSliceResult(
+                    scan_start_key != nullptr ? scan_start_key->Clone()
+                                              : nullptr,
+                    slice_position));
+
+                // Dispatches to remaining cores to scan in parallel.
+                for (uint16_t core_id = 1;
+                     core_id < shard_->local_shards_.Count();
+                     ++core_id)
+                {
+                    shard_->local_shards_.EnqueueCcRequest(
+                        shard_->core_id_, core_id, &req);
+                }
+            }
+        }
+
+        bool finish = req.SetFinish();
+        if (finish)
+        {
+            slice_id.Unpin();
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
     bool Execute(CkptScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -2726,6 +3225,7 @@ public:
                 ref.cce_ = cce;
                 ref.payload_status_ = cce->payload_status_;
                 ref.commit_ts_ = cce->commit_ts_;
+                ref.delta_size_ = cce->delta_size_;
                 if (cce->payload_ != nullptr)
                 {
                     if (shard_->EnableMvcc())
@@ -2771,6 +3271,23 @@ public:
 
         if (cce == &pos_inf_)
         {
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                std::vector<FlushRecord> &ckpt_vec = req.ckpt_vec_;
+                std::sort(ckpt_vec.begin(),
+                          ckpt_vec.end(),
+                          [](const FlushRecord &lhs, const FlushRecord &rhs)
+                          {
+                              const CcEntry<KeyT, ValueT> *l_cce =
+                                  static_cast<const CcEntry<KeyT, ValueT> *>(
+                                      lhs.cce_);
+                              const CcEntry<KeyT, ValueT> *r_cce =
+                                  static_cast<const CcEntry<KeyT, ValueT> *>(
+                                      lhs.cce_);
+                              return *l_cce->key_ < *r_cce->key_;
+                          });
+            }
+
             req.Notify();
             return false;
         }
@@ -2840,8 +3357,7 @@ public:
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
 
-            uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
-            uint16_t core_id = (shard_code & 0x3FF) % shard_->core_cnt_;
+            uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
                 // Skips the the key in the log record that is not sharded
@@ -2865,9 +3381,10 @@ public:
             {
                 // If the key exists in the cc map and its commit ts is
                 // greater than that of the log record, and if (1) mvcc is
-                // enabled, then install  the log record into archives; (2) mvcc
-                // is not enabled, then skips installing the log record in the
-                // cc map and moves to the next key in the log record.
+                // enabled, then install  the log record into archives; (2)
+                // mvcc is not enabled, then skips installing the log record
+                // in the cc map and moves to the next key in the log
+                // record.
                 if (shard_->EnableMvcc())
                 {
                     auto rec_ptr = std::make_unique<ValueT>();
@@ -2997,20 +3514,230 @@ public:
         return true;
     }
 
+    bool Execute(FillStoreSliceCc &req) override
+    {
+        const std::vector<SliceDataItem> &slice_vec =
+            req.SliceData(shard_->core_id_);
+
+        for (const SliceDataItem &data_item : slice_vec)
+        {
+            const KeyT *key = static_cast<const KeyT *>(data_item.key_.get());
+            const ValueT *record =
+                static_cast<const ValueT *>(data_item.record_.get());
+
+            CcEntry<KeyT, ValueT> *cce = FindEmplace(*key, 0);
+            if (cce == nullptr)
+            {
+                // Memory reaches capacity while bringing a range slice into
+                // memory.
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
+
+            if (cce->commit_ts_ > 1)
+            {
+                assert(data_item.version_ts_ <= cce->commit_ts_);
+
+                if (cce->delta_size_ == INT32_MAX)
+                {
+                    if (cce->commit_ts_ == data_item.version_ts_)
+                    {
+                        cce->delta_size_.store(0, std::memory_order_relaxed);
+                    }
+                    else if (cce->payload_status_ == RecordStatus::Deleted)
+                    {
+                        int32_t delta = 0;
+                        delta -= cce->key_->Size();
+                        delta -= record->Size();
+                        cce->delta_size_.store(delta,
+                                               std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        cce->delta_size_.store(
+                            cce->PayloadSize() - record->Size(),
+                            std::memory_order_relaxed);
+                    }
+                }
+
+                // The cc entry's commit ts is 1 when it is initialized.
+                // Commit ts greater than 1 means that the key is already
+                // cached in memory.
+                continue;
+            }
+
+            shard_->DecrementMemory(cce->payload_->MemUsage());
+            *cce->payload_ = *record;
+            cce->commit_ts_ = data_item.version_ts_;
+            cce->payload_status_ = RecordStatus::Normal;
+            cce->delta_size_ = 0;
+
+            shard_->mem_usage_ += cce->payload_->MemUsage();
+        }
+
+        req.SetFinish();
+        return false;
+    }
+
+    bool Execute(GetPostCkptSlice &req) override
+    {
+        RangeSliceId slice_id = req.SliceId();
+        std::vector<std::pair<const TxKey *, uint32_t>> &item_vec =
+            req.SliceRecordCollection();
+
+        if (shard_->core_id_ == 0)
+        {
+            uint64_t last_ckpt_ts =
+                req.LastCkptTs() > 1 ? req.LastCkptTs() : req.CkptTs();
+            RangeSliceOpStatus pin_status =
+                slice_id.Range()->PinSlice(table_name_,
+                                           slice_id.Slice(),
+                                           KeySchema(),
+                                           RecordSchema(),
+                                           schema_ts_,
+                                           last_ckpt_ts,
+                                           table_schema_->GetKVCatalogInfo(),
+                                           &req,
+                                           shard_,
+                                           shard_->local_shards_.store_hd_);
+
+            if (pin_status == RangeSliceOpStatus::Blocked)
+            {
+                return false;
+            }
+            else if (pin_status == RangeSliceOpStatus::Errored)
+            {
+                item_vec.clear();
+                req.SetError();
+                return false;
+            }
+        }
+
+        Iterator it;
+        if (slice_id.Slice()->StartKey() == nullptr)
+        {
+            it = Begin();
+            ++it;
+        }
+        else
+        {
+            const KeyT *start_key =
+                static_cast<const KeyT *>(slice_id.Slice()->StartKey());
+
+            std::pair<Iterator, ScanType> start_pair =
+                ForwardScanStart(*start_key, true);
+            it = start_pair.first;
+            if (start_pair.second == ScanType::ScanGap)
+            {
+                ++it;
+            }
+        }
+
+        Iterator end_it;
+        if (slice_id.Slice()->EndKey() == nullptr)
+        {
+            end_it = End();
+        }
+        else
+        {
+            const KeyT *end_key =
+                static_cast<const KeyT *>(slice_id.Slice()->EndKey());
+            std::pair<Iterator, ScanType> end_pair =
+                ForwardScanStart(*end_key, true);
+            end_it = end_pair.first;
+            if (end_pair.second == ScanType::ScanGap)
+            {
+                ++end_it;
+            }
+        }
+
+        for (; it != end_it; ++it)
+        {
+            CcEntry<KeyT, ValueT> *cce = it->second;
+
+            if (cce->commit_ts_ <= 1)
+            {
+                // This is a new inserted key that the tx has not finished
+                // post-processing.
+                continue;
+            }
+
+            // For keys in the specified slice, calculates their sizes in the
+            // data store after this round of checkpointing.
+            if (cce->commit_ts_ <= req.CkptTs())
+            {
+                // The newest version have been flushed to the data store.
+                // The record's size in the data store is the size of the
+                // newest payload.
+                if (cce->payload_status_ != RecordStatus::Deleted)
+                {
+                    item_vec.emplace_back(
+                        cce->key_, cce->key_->Size() + cce->PayloadSize());
+                }
+            }
+            else
+            {
+                // If delta_size is unset (INT32_MAX) after the slice is pinned,
+                // it means that this key does not exist in the data store. So
+                // the delta size is set to the size of the key and the record.
+                if (cce->delta_size_.load(std::memory_order_relaxed) ==
+                    INT32_MAX)
+                {
+                    cce->delta_size_.store(
+                        cce->key_->Size() + cce->PayloadSize(),
+                        std::memory_order_relaxed);
+                }
+
+                // The key's newest version is greater than the checkpoint
+                // timestamp, meaning the record is not flushed in this round of
+                // checkpointing. The record's size in the data store is the
+                // size of record when it is last flushed. The delta_size_ of
+                // cce bookkeeps the accumulated size change since last
+                // checkpoint. So, the record's size in the data store is the
+                // size of the newest payload subtracting the delta size.
+                int32_t record_size = 0;
+                if (cce->payload_status_ != RecordStatus::Deleted)
+                {
+                    record_size += cce->key_->Size();
+                    record_size += cce->PayloadSize();
+                }
+                record_size -= cce->delta_size_.load(std::memory_order_relaxed);
+
+                if (record_size > 0)
+                {
+                    item_vec.emplace_back(cce->key_, record_size);
+                }
+                // Else, the record in the last checkpoint must be in the
+                // deleted status in the data store.
+            }
+        }
+
+        if (shard_->core_id_ == shard_->core_cnt_ - 1)
+        {
+            slice_id.Unpin();
+            std::sort(
+                item_vec.begin(),
+                item_vec.end(),
+                [](const std::pair<const TxKey *, uint32_t> &lhs,
+                   const std::pair<const TxKey *, uint32_t> &rhs)
+                {
+                    const KeyT *l_key = static_cast<const KeyT *>(lhs.first);
+                    const KeyT *r_key = static_cast<const KeyT *>(rhs.first);
+                    return *l_key < *r_key;
+                });
+            req.SetFinish();
+        }
+        else
+        {
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+
+        return false;
+    }
+
     size_t size() const override
     {
         return ccm_.size();
-    }
-
-    std::unique_ptr<CcScanner> CreateScanner(
-        ScanDirection direction) const override
-    {
-        return std::make_unique<TemplateCcScanner<KeyT, ValueT>>(
-            direction,
-            table_name_.Type() == TableType::Secondary
-                ? ScanIndexType::Secondary
-                : ScanIndexType::Primary,
-            KeySchema());
     }
 
     /**
@@ -3035,7 +3762,19 @@ public:
 
     void Clean(LruEntry *remove_entry) override
     {
-        // Don't call DetachLru if entry is not in lru list(Emplaced by force)
+        CcEntry<KeyT, ValueT> *cc_entry =
+            static_cast<CcEntry<KeyT, ValueT> *>(remove_entry);
+
+#ifdef RANGE_PARTITIONED
+        bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
+            table_name_, *cc_entry->key_);
+        if (!kick_ret)
+        {
+            return;
+        }
+#endif
+        // Don't call DetachLru if entry is not in lru list(Emplaced by
+        // force)
         if (remove_entry->lru_prev_ != nullptr &&
             remove_entry->lru_next_ != nullptr)
         {
@@ -3048,9 +3787,6 @@ public:
             // the checkpoint list.
             shard_->DetachCkpt(remove_entry);
         }
-
-        CcEntry<KeyT, ValueT> *cc_entry =
-            static_cast<CcEntry<KeyT, ValueT> *>(remove_entry);
 
         CcEntry<KeyT, ValueT> *prior = cc_entry->map_prev_;
         CcEntry<KeyT, ValueT> *next = cc_entry->map_next_;
@@ -3114,9 +3850,60 @@ public:
         return nullptr;
     }
 
+    std::pair<std::unique_ptr<TxKey>, size_t> SliceMiddleKey(
+        const TxKey *start_key, const TxKey *end_key) const override
+    {
+        const KeyT *start = start_key == nullptr
+                                ? NegativeInfinity<KeyT>::Instance()
+                                : static_cast<const KeyT *>(start_key);
+        const KeyT *end = end_key == nullptr
+                              ? PositiveInfinity<KeyT>::Instance()
+                              : static_cast<const KeyT *>(end_key);
+
+        const CcEntry<KeyT, ValueT> *cce_head = FindFloor(*start);
+        const CcEntry<KeyT, ValueT> *cce_tail = cce_head;
+        size_t half_size = 0;
+
+        while (cce_tail != &pos_inf_ && *cce_tail->key_ < *end &&
+               cce_tail->map_next_ != &pos_inf_ &&
+               *cce_tail->map_next_->key_ < *end)
+        {
+            if (cce_head != &neg_inf_)
+            {
+                half_size += cce_head->key_->Size();
+                half_size += cce_head->PayloadSize();
+            }
+
+            cce_head = cce_head->map_next_;
+            cce_tail = cce_tail->map_next_;
+            cce_tail = cce_tail->map_next_;
+        }
+
+        size_t est_global_size = half_size * shard_->core_cnt_;
+
+        if (cce_head->key_ == start)
+        {
+            return {nullptr, est_global_size};
+        }
+        else
+        {
+            return {std::make_unique<KeyT>(*cce_head->key_), est_global_size};
+        }
+    }
+
 protected:
     CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, uint64_t ts)
     {
+        bool emplace;
+        return FindEmplace(key, ts, emplace);
+    }
+
+    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key,
+                                       uint64_t ts,
+                                       bool &emplace)
+    {
+        emplace = false;
+
         if (&key == neg_inf_.key_)
         {
             return &neg_inf_;
@@ -3178,7 +3965,65 @@ protected:
 
         shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
 
+        emplace = true;
         return new_cce_ptr;
+    }
+
+    CcEntry<KeyT, ValueT> *Find(const KeyT &key)
+    {
+        if (&key == NegativeInfinity<KeyT>::Instance())
+        {
+            return &neg_inf_;
+        }
+
+        auto lb_it = ccm_.lower_bound(key);
+        if (lb_it != ccm_.end() && lb_it->first == key)
+        {
+            shard_->UpdateLruList(&lb_it->second);
+            return &lb_it->second;
+        }
+        else
+        {
+            // The input key does not exist.
+            return nullptr;
+        }
+    }
+
+    const CcEntry<KeyT, ValueT> *FindFloor(const KeyT &key) const
+    {
+        if (&key == NegativeInfinity<KeyT>::Instance())
+        {
+            return &neg_inf_;
+        }
+
+        auto lb_it = ccm_.lower_bound(key);
+        if (lb_it == ccm_.end())
+        {
+            // The input key is greater than the largest key in the cc map.
+            // Returns the last cc entry.
+            return &ccm_.rbegin()->second;
+        }
+        else if (lb_it == ccm_.begin())
+        {
+            // The inut key is smaller than or equal to the first key in the
+            // cc map.
+            if (lb_it->first == key)
+            {
+                return &lb_it->second;
+            }
+            else
+            {
+                return &neg_inf_;
+            }
+        }
+        else
+        {
+            if (!(lb_it->first == key))
+            {
+                --lb_it;
+            }
+            return &lb_it->second;
+        }
     }
 
     CcEntry<KeyT, ValueT> *Emplace(const KeyT &key, uint64_t ts)
@@ -3375,8 +4220,8 @@ protected:
                 }
                 else
                 {
-                    // The map is empty. The next entry of negative infinity is
-                    // positive infinity.
+                    // The map is empty. The next entry of negative infinity
+                    // is positive infinity.
                     current_.first = PositiveInfinity<KeyT>::Instance();
                     current_.second = nullptr;
                 }
@@ -3400,8 +4245,8 @@ protected:
                     UpdateCurrent();
                 }
             }
-            // If the current points to positive infinity, keeps the iterator
-            // unchanged.
+            // If the current points to positive infinity, keeps the
+            // iterator unchanged.
 
             return *this;
         }
@@ -3427,8 +4272,8 @@ protected:
                 }
                 else
                 {
-                    // The map is empty. The prior entry of positive infinity is
-                    // negative infinity.
+                    // The map is empty. The prior entry of positive
+                    // infinity is negative infinity.
                     current_.first = NegativeInfinity<KeyT>::Instance();
                     current_.second = neg_inf_cce_;
                 }
@@ -3440,8 +4285,8 @@ protected:
                         current_.second->parent_map_)
                         ->ccm_;
 
-                // If the current points to the beginning of the map, the prior
-                // entry is negative infinity.
+                // If the current points to the beginning of the map, the
+                // prior entry is negative infinity.
                 if (internal_it_ == internal_map.begin())
                 {
                     current_.first = NegativeInfinity<KeyT>::Instance();
@@ -3453,8 +4298,8 @@ protected:
                     UpdateCurrent();
                 }
             }
-            // If the current points to negative infinity, keeps the iterator
-            // unchanged.
+            // If the current points to negative infinity, keeps the
+            // iterator unchanged.
 
             return *this;
         }
@@ -3477,9 +4322,9 @@ protected:
 
         friend bool operator==(const Iterator &lhs, const Iterator &rhs)
         {
-            // The two iterators are equal, if they point to the same cc entry.
-            // Note that when the iterator points to positive infinity, the
-            // pointed cc entry is null.
+            // The two iterators are equal, if they point to the same cc
+            // entry. Note that when the iterator points to positive
+            // infinity, the pointed cc entry is null.
             return lhs.current_.second == rhs.current_.second;
         };
 
@@ -3559,8 +4404,8 @@ protected:
      * and returns both its key and gap.
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
      * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
-     * starting from the start cc entry and whether the scan includes the start
-     * cc entry's key or gap or both.
+     * starting from the start cc entry and whether the scan includes the
+     * start cc entry's key or gap or both.
      */
     std::pair<Iterator, ScanType> ForwardScanStart(
         const KeyT &key, bool inclusive, bool is_include_floor_cce = false)
@@ -3683,15 +4528,16 @@ protected:
     }
 
     void ScanKey(CcEntry<KeyT, ValueT> *cce,
-                 TemplateScanTuple<KeyT, ValueT> *tuple,
+                 TemplateScanCache<KeyT, ValueT> *typed_cache,
                  bool include_gap,
                  uint32_t ng_id,
                  int64_t ng_term,
                  uint64_t read_ts,
                  bool is_read_snapshot,
-                 bool is_ckpt_delta = false) const
+                 bool is_ckpt_delta = false)
     {
-        tuple->Key().Copy(*cce->key_);
+        TemplateScanTuple<KeyT, ValueT> *tuple = nullptr;
+        uint32_t tuple_size = 0;
 
         if (is_read_snapshot)
         {
@@ -3702,22 +4548,56 @@ protected:
                 // TODO(lzx): to handle this error.
                 // return error.
             }
+
+#ifdef RANGE_PARTITIONED
+            if (v_rec.payload_status_ == RecordStatus::Normal)
+            {
+                tuple = typed_cache->AddScanTuple();
+            }
+#else
+            tuple = typed_cache->AddScanTuple();
+#endif
+            if (tuple == nullptr)
+            {
+                return;
+            }
+            tuple->KeyObj().Copy(*cce->key_);
+            tuple_size = cce->key_->Size();
+
             if (v_rec.payload_status_ == RecordStatus::Normal ||
                 (is_ckpt_delta &&
                  v_rec.payload_status_ == RecordStatus::Deleted))
             {
-                tuple->Record() = *(v_rec.payload_ptr_);
+                tuple->RecordObj() = *v_rec.payload_ptr_;
+                tuple_size += v_rec.payload_ptr_->Size();
             }
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
         }
         else
         {
+#ifdef RANGE_PARTITIONED
+            if (cce->payload_status_ == RecordStatus::Normal)
+            {
+                tuple = typed_cache->AddScanTuple();
+            }
+#else
+            tuple = typed_cache->AddScanTuple();
+#endif
+
+            if (tuple == nullptr)
+            {
+                return;
+            }
+            tuple->KeyObj().Copy(*cce->key_);
+            tuple_size = cce->key_->Size();
+
             if (cce->payload_status_ == RecordStatus::Normal ||
                 (is_ckpt_delta &&
                  cce->payload_status_ == RecordStatus::Deleted))
             {
-                tuple->Record() = *(cce->payload_);
+                tuple->RecordObj() = *(cce->payload_);
+                tuple_size += cce->payload_->Size();
             }
             tuple->rec_status_ = cce->payload_status_;
             tuple->key_ts_ = cce->commit_ts_;
@@ -3726,6 +4606,8 @@ protected:
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
         tuple->cce_addr_.SetCce(
             reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
+
+        typed_cache->AddScanTupleSize(tuple_size);
     }
 
     void ScanKey(CcEntry<KeyT, ValueT> *cce,

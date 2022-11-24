@@ -34,6 +34,17 @@ public:
     {
     }
 
+    ScanTuple(uint64_t key_ts,
+              uint64_t gap_ts,
+              RecordStatus status,
+              const CcEntryAddr &cce_addr)
+        : key_ts_(key_ts),
+          gap_ts_(gap_ts),
+          rec_status_(status),
+          cce_addr_(cce_addr)
+    {
+    }
+
     ScanTuple(ScanTuple &&tuple) = delete;
     ScanTuple(const ScanTuple &other) = delete;
 
@@ -52,14 +63,14 @@ template <typename KeyT, typename ValueT>
 struct TemplateScanTuple : public ScanTuple
 {
 public:
-    TemplateScanTuple() : key_obj_(), rec_obj_()
+    TemplateScanTuple() : ScanTuple(), key_obj_(), rec_obj_()
     {
     }
 
     TemplateScanTuple(TemplateScanTuple<KeyT, ValueT> &&rhs)
-        : key_obj_(rhs.key_obj_),
-          rec_obj_(rhs.rec_obj_),
-          ScanTuple(std::move(rhs))
+        : ScanTuple(rhs.key_ts_, rhs.gap_ts_, rhs.rec_status_, rhs.cce_addr_),
+          key_obj_(std::move(rhs.key_obj_)),
+          rec_obj_(std::move(rhs.rec_obj_))
     {
     }
 
@@ -75,14 +86,27 @@ public:
         return &rec_obj_;
     }
 
-    KeyT &Key()
+    KeyT &KeyObj()
     {
         return key_obj_;
     }
 
-    ValueT &Record()
+    const KeyT &KeyObj() const
+    {
+        return key_obj_;
+    }
+
+    ValueT &RecordObj()
     {
         return rec_obj_;
+    }
+
+    friend bool operator<(const TemplateScanTuple<KeyT, ValueT> &lhs,
+                          const TemplateScanTuple<KeyT, ValueT> &rhs)
+    {
+        return lhs.key_ts_ != 0 && rhs.key_ts_ != 0 &&
+                   lhs.KeyObj() < rhs.KeyObj() ||
+               lhs.key_ts_ == 0 && rhs.key_ts_ != 0;
     }
 
 private:

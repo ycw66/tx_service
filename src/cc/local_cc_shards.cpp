@@ -344,29 +344,90 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
 
     assert(range_table_name.Type() == TableType::RangePartition);
     auto table_it = table_ranges_.try_emplace(range_table_name);
-    assert(table_it.second);
     std::map<int32_t, TableRangeEntryWithShade> &ranges =
         table_it.first->second;
 
     assert(init_ranges.size() > 0);
+
+    auto table_range_it = table_range_maps_.try_emplace(
+        range_table_name, init_ranges[0].partition_id_);
+    std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> &range_map_by_key =
+        table_range_it.first->second.ranges_by_key_;
+
     for (size_t pidx = 0; pidx < init_ranges.size() - 1; ++pidx)
     {
         InitRangeEntry &range_entry = init_ranges[pidx];
         InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
 
+        // pidx being 0 represents the first range starting from negative
+        // infinity. The key pointer of negative infinity is null.
+        if (pidx > 0)
+        {
+            assert(range_entry.key_ != nullptr);
+            range_map_by_key.try_emplace(range_entry.key_.get(),
+                                         range_entry.partition_id_);
+        }
+
+#ifdef RANGE_PARTITIONED
+        std::unique_ptr<StoreRange> range_slices = nullptr;
+        if (node_id_ ==
+            range_entry.partition_id_ % Sharder::Instance().NodeGroupCount())
+        {
+            range_slices =
+                std::make_unique<StoreRange>(range_entry.key_.get(),
+                                             next_range_entry.key_.get(),
+                                             range_entry.partition_id_,
+                                             *this);
+            range_slices->InitSlices(range_entry.slice_keys_);
+        }
+        ranges.try_emplace(range_entry.partition_id_,
+                           std::move(range_entry.key_),
+                           range_entry.version_ts_,
+                           range_entry.partition_id_,
+                           next_range_entry.partition_id_,
+                           std::move(range_slices));
+#else
         ranges.try_emplace(range_entry.partition_id_,
                            std::move(range_entry.key_),
                            range_entry.version_ts_,
                            range_entry.partition_id_,
                            next_range_entry.partition_id_);
+#endif
     }
 
     InitRangeEntry &last_range_entry = init_ranges.back();
+
+    if (last_range_entry.key_ != nullptr)
+    {
+        range_map_by_key.try_emplace(last_range_entry.key_.get(),
+                                     last_range_entry.partition_id_);
+    }
+
+#ifdef RANGE_PARTITIONED
+    std::unique_ptr<StoreRange> range_slices = nullptr;
+    if (node_id_ ==
+        last_range_entry.partition_id_ % Sharder::Instance().NodeGroupCount())
+    {
+        range_slices =
+            std::make_unique<StoreRange>(last_range_entry.key_.get(),
+                                         nullptr,
+                                         last_range_entry.partition_id_,
+                                         *this);
+        range_slices->InitSlices(last_range_entry.slice_keys_);
+    }
+    ranges.try_emplace(last_range_entry.partition_id_,
+                       std::move(last_range_entry.key_),
+                       last_range_entry.version_ts_,
+                       last_range_entry.partition_id_,
+                       UINT32_MAX,
+                       std::move(range_slices));
+#else
     ranges.try_emplace(last_range_entry.partition_id_,
                        std::move(last_range_entry.key_),
                        last_range_entry.version_ts_,
                        last_range_entry.partition_id_,
                        INT32_MAX);
+#endif
 }
 
 std::map<int32_t, TableRangeEntryWithShade> *
@@ -455,13 +516,24 @@ void LocalCcShards::PostCommitDirtyTableRange(const TableName &table_name,
     std::map<int32_t, TableRangeEntryWithShade> &ranges = table_it->second;
     auto range_it = ranges.find(partition_id);
     assert(range_it != ranges.end());
-    range_it->second.shade_ = std::unique_ptr<TableRangeEntry>(nullptr);
+
+    int32_t new_partition_id = range_it->second.shade_->new_partition_id_;
+    auto new_range_it = ranges.find(new_partition_id);
+    assert(new_range_it != ranges.end());
+    auto range_map_it = table_range_maps_.find(table_name);
+    std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> &range_map =
+        range_map_it->second.ranges_by_key_;
+    range_map.try_emplace(new_range_it->second.shader_->start_key_.get(),
+                          new_partition_id);
+
+    range_it->second.shade_ = nullptr;
 }
 
 void LocalCcShards::CleanTableRange(const TableName &table_name, uint32_t ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
     table_ranges_.erase(table_name);
+    table_range_maps_.erase(table_name);
 }
 
 const TableRangeEntry *LocalCcShards::GetTableEffectiveRangeEntry(
@@ -493,6 +565,79 @@ const TableRangeEntryWithShade *LocalCcShards::GetTableRangeWithShade(
     auto range_it = ranges.find(partition_id);
     assert(range_it != ranges.end());
     return &range_it->second;
+}
+
+RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
+                                          const Schema *key_schema,
+                                          const Schema *rec_schema,
+                                          uint64_t schema_ts,
+                                          const KVCatalogInfo *kv_info,
+                                          uint32_t range_id,
+                                          const TxKey &key,
+                                          bool inclusive,
+                                          CcRequestBase *cc_request,
+                                          CcShard *cc_shard,
+                                          RangeSliceOpStatus &pin_status)
+{
+    std::unique_lock<std::shared_mutex> lk(catalog_mux_);
+
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+
+    auto table_it = table_ranges_.find(range_table_name);
+    if (table_it == table_ranges_.end())
+    {
+        LOG(ERROR) << " The range table for " << table_name.StringView()
+                   << " is not found.";
+        pin_status = RangeSliceOpStatus::Errored;
+        return RangeSliceId(nullptr, nullptr);
+    }
+
+    auto range_it = table_it->second.find(range_id);
+    if (range_it == table_it->second.end())
+    {
+        LOG(ERROR) << " The range #" << range_id
+                   << " in not found in the range table of "
+                   << table_name.StringView();
+        pin_status = RangeSliceOpStatus::Errored;
+        return RangeSliceId(nullptr, nullptr);
+    }
+
+    return range_it->second.range_slices_->PinSlice(table_name,
+                                                    key,
+                                                    inclusive,
+                                                    key_schema,
+                                                    rec_schema,
+                                                    schema_ts,
+                                                    INT64_MAX,
+                                                    kv_info,
+                                                    cc_request,
+                                                    cc_shard,
+                                                    store_hd_,
+                                                    pin_status);
+}
+
+StoreRange *LocalCcShards::FindRange(const TableName &table_name,
+                                     const TxKey &key)
+{
+    std::shared_lock<std::shared_mutex> lk(catalog_mux_);
+
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    uint32_t range_partition_id = FindRangePartitionId(range_table_name, key);
+
+    auto table_range_it = table_ranges_.find(range_table_name);
+    if (table_range_it == table_ranges_.end())
+    {
+        LOG(ERROR) << " The range table of " << table_name.StringView()
+                   << " does not exist.";
+        return nullptr;
+    }
+
+    auto range_it = table_range_it->second.find(range_partition_id);
+    assert(range_it != table_range_it->second.end());
+
+    return range_it->second.range_slices_.get();
 }
 
 void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
@@ -564,5 +709,74 @@ std::shared_ptr<TableSchema> LocalCcShards::GetSharedTableSchema(
     --catalog_entry.waiting_thd_cnt_;
 
     return catalog_entry.schema_;
+}
+
+bool LocalCcShards::KickoutRangeSlice(const TableName &tbl_name,
+                                      const TxKey &key)
+{
+    std::shared_lock<std::shared_mutex> s_lk(catalog_mux_);
+
+    TableName range_tbl_name(tbl_name.StringView(), TableType::RangePartition);
+    uint32_t range_partition_id = FindRangePartitionId(range_tbl_name, key);
+
+    auto table_range_it = table_ranges_.find(range_tbl_name);
+    if (table_range_it == table_ranges_.end())
+    {
+        return true;
+    }
+    assert(table_range_it != table_ranges_.end());
+    auto range_it = table_range_it->second.find(range_partition_id);
+    assert(range_it != table_range_it->second.end());
+
+    return range_it->second.range_slices_->KickoutSlice(key);
+}
+
+uint32_t LocalCcShards::FindRangePartitionId(const TableName &range_tbl_name,
+                                             const TxKey &key)
+{
+    // The caller of the method must have acquired a shared lock. The table name
+    // must be the range table name.
+
+    auto range_map_it = table_range_maps_.find(range_tbl_name);
+    if (range_map_it == table_range_maps_.end())
+    {
+        return -1;
+    }
+    const auto &range_map = range_map_it->second.ranges_by_key_;
+
+    int32_t partition_id = -1;
+    if (range_map.empty())
+    {
+        partition_id = range_map_it->second.first_partition_id_;
+    }
+    else
+    {
+        auto lower_it = range_map.lower_bound(&key);
+
+        if (lower_it == range_map.begin())
+        {
+            // The input key is less than the first entry in the range map, so
+            // it falls into the first range.
+            partition_id = range_map_it->second.first_partition_id_;
+        }
+        else if (lower_it == range_map.end())
+        {
+            // The input key is greater than the last entry of the range map, so
+            // it falls into the last range.
+            --lower_it;
+            partition_id = lower_it->second;
+        }
+        else if (*lower_it->first == key)
+        {
+            partition_id = lower_it->second;
+        }
+        else
+        {
+            --lower_it;
+            partition_id = lower_it->second;
+        }
+    }
+
+    return partition_id;
 }
 }  // namespace txservice

@@ -14,6 +14,9 @@
 namespace txservice
 {
 class TxService;
+struct SliceDataItem;
+class StoreSlice;
+struct LoadRangeSliceRequest;
 
 namespace store
 {
@@ -86,6 +89,25 @@ public:
                             std::string &schema_image,
                             bool &found,
                             uint64_t &version_ts) const = 0;
+
+    virtual bool LoadRangeSlice(const TableName &table_name,
+                                const KVCatalogInfo *kv_info,
+                                uint32_t partition_id,
+                                LoadRangeSliceRequest *load_slice_req)
+    {
+        return false;
+    }
+
+    virtual bool UpdateRangeSlices(
+        const TableName &table_name,
+        const KVCatalogInfo *kv_info,
+        uint64_t schema_ts,
+        const TxKey *range_start_key,
+        const std::vector<std::unique_ptr<StoreSlice>> &slices,
+        bool update_slice_keys)
+    {
+        return false;
+    }
 
     virtual bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec) const = 0;

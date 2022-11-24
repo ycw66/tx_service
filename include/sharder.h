@@ -81,6 +81,11 @@ public:
         return (node_group_id << 10) | residual;
     }
 
+    uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
+    {
+        return (sharding_code >> 10) % ng_leader_cache_.size();
+    }
+
     uint32_t NodeGroupCount() const
     {
         return (uint32_t) ng_leader_cache_.size();

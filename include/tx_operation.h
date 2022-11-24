@@ -8,6 +8,7 @@
 #include "cc_handler.h"
 #include "log_closure.h"
 #include "range_record.h"
+#include "read_write_set.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
@@ -19,7 +20,7 @@ class TransactionExecution;
 struct ReadTxRequest;
 struct ReadOutsideTxRequest;
 struct ScanOpenTxRequest;
-struct ScanNextTxRequest;
+struct ScanBatchTxRequest;
 
 #define RETRY_NUM 5
 
@@ -86,6 +87,14 @@ public:
     ReadTxRequest *read_tx_req_{nullptr};
     ReadOutsideTxRequest *read_outside_tx_req_{nullptr};
     CcHandlerResult<ReadKeyResult> hd_result_;
+    bool local_cache_miss_{false};
+
+#ifdef RANGE_PARTITIONED
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> lock_range_result_;
+    CcHandlerResult<PostProcessResult> unlock_range_result_;
+#endif
 };
 
 struct SetCommitTsOperation : TransactionOperation
@@ -128,7 +137,6 @@ public:
 
     CcHandlerResult<std::vector<AcquireKeyResult>> hd_result_;
     std::vector<WriteSetEntry *> acquire_write_entries_{16};
-    // uint32_t acquire_write_cnt_{0};
 
     // Number of remote keys on which the acquire write operation needs to
     // acquire write intentions/locks.
@@ -136,6 +144,39 @@ public:
     // Identify whether any keys in rset are expired (may be updated by other
     // tx) under the RepeatableRead or Serializable isolation level.
     bool rset_has_expired_{false};
+};
+
+struct LockWriteRangesOp : public TransactionOperation
+{
+public:
+    LockWriteRangesOp(TransactionExecution *txm) : lock_range_result_(txm)
+    {
+    }
+
+    void Forward(TransactionExecution *txm) override;
+
+    void Reset()
+    {
+        init_ = false;
+        lock_range_result_.Reset();
+    }
+
+    /**
+     * @brief Advances the internal iterator to the next range to acquire a
+     * write lock.
+     *
+     */
+    void Advance();
+
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> lock_range_result_;
+
+    std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
+    std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
+    TableWriteSet::iterator write_key_it_;
+    TableWriteSet::iterator write_key_end_;
+    bool init_;
 };
 
 struct FaultInjectOp : TransactionOperation
@@ -187,12 +228,11 @@ struct UpdateTxnStatus : TransactionOperation
 struct PostProcessOp : TransactionOperation
 {
     PostProcessOp(TransactionExecution *txm);
-    void Reset(size_t write_cnt, size_t read_cnt);
+    void Reset(size_t write_cnt, size_t data_read_cnt, size_t catalog_read_cnt);
     void Forward(TransactionExecution *txm) override;
 
     CcHandlerResult<PostProcessResult> hd_result_;
-    uint32_t write_cnt_;
-    uint32_t read_cnt_;
+    CcHandlerResult<PostProcessResult> catalog_hd_result_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -237,23 +277,106 @@ struct ScanOpenOperation : TransactionOperation
     ScanOpenTxRequest *tx_req_{nullptr};
 };
 
+struct ScanState
+{
+    ScanState() = delete;
+    ScanState(std::unique_ptr<CcScanner> scanner) : scanner_(std::move(scanner))
+    {
+    }
+
+    std::unique_ptr<CcScanner> scanner_;
+
+#ifdef RANGE_PARTITIONED
+    ScanState(std::unique_ptr<CcScanner> scanner,
+              uint32_t range_id,
+              const TxKey *last_key,
+              bool inclusive,
+              SlicePosition position)
+        : scanner_(std::move(scanner)),
+          range_id_(range_id),
+          slice_last_key_ptr_(last_key),
+          is_key_owner_(false),
+          inclusive_(inclusive),
+          slice_position_(position)
+    {
+    }
+
+    ScanState(std::unique_ptr<CcScanner> scanner,
+              uint32_t range_id,
+              std::unique_ptr<TxKey> last_key,
+              bool inclusive,
+              SlicePosition position)
+        : scanner_(std::move(scanner)),
+          range_id_(range_id),
+          slice_last_key_uptr_(std::move(last_key)),
+          is_key_owner_(true),
+          inclusive_(inclusive),
+          slice_position_(position)
+    {
+    }
+
+    ~ScanState()
+    {
+        if (is_key_owner_)
+        {
+            slice_last_key_uptr_ = nullptr;
+        }
+    }
+
+    void SetSliceLastKey(TxKey::Uptr slice_last_key)
+    {
+        if (!is_key_owner_)
+        {
+            slice_last_key_uptr_.release();
+        }
+        slice_last_key_uptr_ = std::move(slice_last_key);
+        is_key_owner_ = true;
+    }
+
+    const TxKey *SliceLastKey() const
+    {
+        return is_key_owner_ ? slice_last_key_uptr_.get() : slice_last_key_ptr_;
+    }
+
+    uint32_t range_id_;
+    union
+    {
+        const TxKey *slice_last_key_ptr_;
+        TxKey::Uptr slice_last_key_uptr_;
+    };
+    bool is_key_owner_{false};
+    bool inclusive_;
+    SlicePosition slice_position_;
+    CcEntryAddr range_cce_addr_;
+#endif
+};
+
 struct ScanNextOperation : TransactionOperation
 {
     ScanNextOperation(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
-
-    void Set(size_t alias, CcScanner *scanner)
-    {
-        alias_ = alias;
-        scanner_ = scanner;
-    }
-
     void Reset();
 
+    ScanDirection Direction() const
+    {
+        return scan_state_->scanner_ != nullptr
+                   ? scan_state_->scanner_->Direction()
+                   : ScanDirection::Forward;
+    }
+
+    ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
+
+#ifdef RANGE_PARTITIONED
+    CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> lock_range_result_;
+    CcHandlerResult<PostProcessResult> unlock_range_result_;
+#endif
+
     size_t alias_{0};
-    CcScanner *scanner_{nullptr};
-    ScanNextTxRequest *tx_req_{nullptr};
+    ScanBatchTxRequest *tx_req_{nullptr};
 };
 
 struct AcquireAllOp : public TransactionOperation

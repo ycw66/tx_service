@@ -24,6 +24,7 @@ public:
     ~RemoteCcHandler() = default;
 
     void AcquireWrite(uint32_t src_node_id,
+                      NodeGroupId dest_ng_id,
                       const TableName &table_name,
                       const TxKey &key,
                       uint32_t key_shard_code,
@@ -57,6 +58,7 @@ public:
                    const CcEntryAddr &cce_addr,
                    const TxRecord *record,
                    OperationType operation_type,
+                   uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres,
                    CcProtocol protocol);
 
@@ -86,6 +88,7 @@ public:
                   LockType lock_type);
 
     void Read(uint32_t src_node_id,
+              NodeGroupId dest_ng_id,
               const TableName &table_name,
               const TxKey &key,
               uint32_t key_shard_code,

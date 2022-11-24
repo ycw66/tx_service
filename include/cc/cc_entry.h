@@ -71,6 +71,7 @@ struct FlushRecord
     PayloadPtr payload_{nullptr};
     uint64_t commit_ts_{1U};
     LruEntry *cce_;
+    int32_t delta_size_{0};
 
     FlushRecord()
     {
@@ -85,12 +86,18 @@ struct FlushRecord
 
     FlushRecord(const FlushRecord &rhs) = delete;
     FlushRecord &operator=(const FlushRecord &rhs) = delete;
+
     FlushRecord &operator=(FlushRecord &&rhs)
     {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
         if (rhs.is_rec_owner_)
         {
             SetPayload(std::move(rhs.payload_.uptr_));
-            is_rec_owner_ = rhs.is_rec_owner_;
+            is_rec_owner_ = true;
             rhs.is_rec_owner_ = false;
         }
         else
@@ -159,6 +166,8 @@ struct FlushRecord
         }
         return payload_.ptr_;
     }
+
+    const TxKey *Key() const;
 };
 
 struct LruEntry
@@ -197,6 +206,8 @@ public:
     void RecycleKeyLock();
 
     void RecycleGapLock();
+
+    virtual const TxKey *Key() const = 0;
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key
@@ -245,6 +256,12 @@ public:
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
     std::atomic<uint64_t> ckpt_ts_{1};
+
+    /**
+     * @brief Accumulated size change since last checkpoint.
+     *
+     */
+    std::atomic<int32_t> delta_size_{INT32_MAX};
 };
 
 /**
@@ -415,6 +432,11 @@ public:
         {
             return payload_->MemUsage();
         }
+    }
+
+    size_t PayloadSize() const
+    {
+        return payload_ == nullptr ? 0 : payload_->Size();
     }
 
     const KeyT *key_;
@@ -780,6 +802,11 @@ public:
         {
             archives_.reset(nullptr);
         }
+    }
+
+    const TxKey *Key() const override
+    {
+        return key_;
     }
 };
 

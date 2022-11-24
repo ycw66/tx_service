@@ -197,6 +197,8 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
+    ScanOpenTxRequest() = delete;
+
     ScanOpenTxRequest(const TableName *tabname,
                       ScanIndexType index_type,
                       const TxKey *start_key,
@@ -218,6 +220,11 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     {
     }
 
+    const TxKey *StartKey() const
+    {
+        return start_key_;
+    }
+
     const TableName *tab_name_;
     ScanIndexType indx_type_;
     const TxKey *start_key_;
@@ -229,18 +236,47 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     bool read_local_;
 };
 
-struct ScanNextTxRequest
-    : public TemplateTxRequest<
-          ScanNextTxRequest,
-          std::tuple<const TxKey *, const TxRecord *, RecordStatus, uint64_t>>
+struct ScanBatchTuple
 {
-    ScanNextTxRequest(size_t alias, const TableName &table_name)
-        : alias_(alias), table_name_(table_name)
+    ScanBatchTuple() = default;
+
+    ScanBatchTuple(const TxKey *key,
+                   const TxRecord *rec,
+                   RecordStatus status,
+                   uint64_t version)
+        : key_(key), record_(rec), status_(status), version_ts_(version)
     {
+    }
+
+    ScanBatchTuple(ScanBatchTuple &&rhs)
+        : key_(rhs.key_),
+          record_(rhs.record_),
+          status_(rhs.status_),
+          version_ts_(rhs.version_ts_)
+    {
+    }
+
+    const TxKey *key_{nullptr};
+    const TxRecord *record_{nullptr};
+    RecordStatus status_{RecordStatus::Unknown};
+    uint64_t version_ts_{0};
+};
+
+struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
+{
+    ScanBatchTxRequest() = delete;
+
+    ScanBatchTxRequest(size_t alias,
+                       const TableName &table_name,
+                       std::vector<ScanBatchTuple> *batch_vec)
+        : alias_(alias), table_name_(table_name), batch_(batch_vec)
+    {
+        batch_->clear();
     }
 
     size_t alias_;
     const TableName &table_name_;
+    std::vector<ScanBatchTuple> *batch_;
 };
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>

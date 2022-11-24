@@ -181,7 +181,8 @@ struct TableName
 
     bool operator<(const TableName &rhs) const
     {
-        return type_ == rhs.type_ && this->StringView() < rhs.StringView();
+        return type_ < rhs.type_ ||
+               type_ == rhs.type_ && this->StringView() < rhs.StringView();
     }
 
     std::string_view StringView() const
@@ -263,15 +264,16 @@ struct TableName
 
     const std::string_view GetBaseTableNameSV() const
     {
-        if (type_ == TableType::Secondary || type_ == TableType::RangePartition)
+        std::string_view base_name_view = StringView();
+        size_t pos = base_name_view.find(INDEX_NAME_PREFIX);
+        if (pos != std::string_view::npos)
         {
-            size_t pos = this->StringView().find(INDEX_NAME_PREFIX);
-            std::string_view base_table_name =
-                this->StringView().substr(0, pos);
-
-            return base_table_name;
+            return base_name_view.substr(0, pos);
         }
-        return this->StringView();
+        else
+        {
+            return base_name_view;
+        }
     }
 
     bool IsBase() const
@@ -304,15 +306,38 @@ private:
 
 enum struct ReadType
 {
-    // Starts concurrency control for the input key and returns the key's
-    // value.
+    /**
+     * @brief Starts concurrency control for the input key and returns the key's
+     * value if the value is cached.
+     *
+     */
     Inside = 0,
-    // Starts concurrency control for the input key-value pair retrieved from
-    // the data store.
+    /**
+     * @brief Starts concurrency control for the input key-value pair retrieved
+     * from the data store.
+     *
+     */
     OutsideNormal,
-    // Starts concurrency control for the input key that does not exist in the
-    // data store.
-    OutsideDeleted
+    /**
+     * @brief Starts concurrency control for the input key that does not exist
+     * in the data store.
+     *
+     */
+    OutsideDeleted,
+    /**
+     * @brief Given the input key k0, starts concurrency control for the range
+     * [start, end) such that start <= k0 < end. This is to lock the next range
+     * when scanning forward.
+     *
+     */
+    RangeLeftInclusive,
+    /**
+     * @brief Given the input key k0, starts concurrency control for the range
+     * [start, end) such that start < k0 <= end. This is to lock the next range
+     * when scanning backward.
+     *
+     */
+    RangeRightExclusive
 };
 
 enum class PostWriteType
@@ -335,6 +360,33 @@ inline static std::string_view catalog_ccm_name_sv{"__catalog"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
+
+enum struct SlicePosition
+{
+    Middle = 0,
+    /**
+     * @brief The scanned slice is the first slice in its range.
+     *
+     */
+    FirstSliceInRange,
+    /**
+     * @brief The scanned slice is the last slice in its range.
+     *
+     */
+    LastSliceInRange,
+    /**
+     * @brief The scanned slice is the first slice in the first range. In
+     * other words, the slice's start key is negative infinity.
+     *
+     */
+    FirstSlice,
+    /**
+     * @brief The scanned slice is the last slice in the last range. In
+     * other words, the slice's end key is positive infinity.
+     *
+     */
+    LastSlice
+};
 }  // namespace txservice
 
 namespace std

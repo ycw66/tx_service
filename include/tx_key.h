@@ -59,6 +59,11 @@ public:
         return 0;
     }
 
+    virtual size_t Size() const
+    {
+        return 0;
+    }
+
     static size_t HashCode(const TxKey &sk, const TxKey &pk)
     {
         size_t hash = 17;

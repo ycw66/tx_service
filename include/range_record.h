@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "range_slice.h"
 #include "tx_key.h"
 #include "tx_record.h"
 
@@ -12,10 +13,11 @@ namespace txservice
 struct TableRangeEntry
 {
     TableRangeEntry() = delete;
+
     TableRangeEntry(std::unique_ptr<TxKey> start_key,
                     uint64_t version_ts,
-                    int32_t partition_id,
-                    int32_t next_partition_id)
+                    uint32_t partition_id,
+                    uint32_t next_partition_id)
         : start_key_(std::move(start_key)),
           version_ts_(version_ts),
           partition_id_(partition_id),
@@ -98,15 +100,19 @@ struct TableRangeEntryWithShade
     TableRangeEntryWithShade(std::unique_ptr<TxKey> start_key,
                              uint64_t version_ts,
                              int32_t partition_id,
-                             int32_t next_partition_id)
+                             int32_t next_partition_id,
+                             std::unique_ptr<StoreRange> slices = nullptr)
         : shader_(std::make_unique<TableRangeEntry>(std::move(start_key),
                                                     version_ts,
                                                     partition_id,
                                                     next_partition_id)),
-          shade_(std::unique_ptr<TableRangeEntry>(nullptr)){};
+          shade_(std::unique_ptr<TableRangeEntry>(nullptr)),
+          range_slices_(std::move(slices)){};
 
     std::unique_ptr<TableRangeEntry> shader_;
     std::unique_ptr<TableRangeEntry> shade_;
+
+    std::unique_ptr<StoreRange> range_slices_{nullptr};
 };
 
 struct InitRangeEntry
@@ -134,10 +140,28 @@ struct InitRangeEntry
     {
     }
 
+#ifdef RANGE_PARTITIONED
+    InitRangeEntry(
+        std::unique_ptr<TxKey> start_key,
+        int32_t partition_id,
+        uint64_t version_ts,
+        std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> keys)
+        : key_(std::move(start_key)),
+          partition_id_(partition_id),
+          version_ts_(version_ts),
+          slice_keys_(std::move(keys))
+    {
+    }
+#endif
+
     InitRangeEntry(InitRangeEntry &&rhs)
         : key_(std::move(rhs.key_)),
           partition_id_(rhs.partition_id_),
           version_ts_(rhs.version_ts_)
+#ifdef RANGE_PARTITIONED
+          ,
+          slice_keys_(std::move(rhs.slice_keys_))
+#endif
     {
     }
 
@@ -159,6 +183,9 @@ struct InitRangeEntry
     std::unique_ptr<TxKey> key_{nullptr};
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
+#ifdef RANGE_PARTITIONED
+    std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> slice_keys_;
+#endif
 };
 
 struct RangeRecord : public TxRecord
@@ -214,6 +241,18 @@ public:
         return range_entry_;
     }
 
+    size_t Size() const override
+    {
+        return 8 + 8;
+    }
+
     const TableRangeEntry *range_entry_{nullptr};
+    /**
+     * @brief The exclusive end of the range, which is also the start of the
+     * next range. Null, if this is the last range and end key points to
+     * positive infinity.
+     *
+     */
+    const TxKey *end_key_{nullptr};
 };
 }  // namespace txservice

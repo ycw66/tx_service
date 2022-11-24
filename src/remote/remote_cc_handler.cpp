@@ -15,6 +15,7 @@ txservice::remote::RemoteCcHandler::RemoteCcHandler(CcStreamSender &sender)
 
 void txservice::remote::RemoteCcHandler::AcquireWrite(
     uint32_t src_id,
+    NodeGroupId dest_ng_id,
     const TableName &table_name,
     const TxKey &key,
     uint32_t key_shard_code,
@@ -111,6 +112,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
     OperationType operation_type,
+    uint32_t key_shard_code,
     CcHandlerResult<PostProcessResult> &hres,
     CcProtocol protocol)
 {
@@ -151,6 +153,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
 
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
+    post_commit->set_key_shard_code(key_shard_code);
     post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
@@ -249,6 +252,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
 
 void txservice::remote::RemoteCcHandler::Read(
     uint32_t src_node_id,
+    NodeGroupId dest_ng_id,
     const TableName &table_name,
     const TxKey &key,
     uint32_t key_shard_code,

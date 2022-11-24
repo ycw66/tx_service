@@ -6,10 +6,12 @@
 
 #include "cc_protocol.h"
 #include "tx_id.h"
+#include "type.h"
 
 namespace txservice
 {
 class CcShard;
+struct CatalogEntry;
 
 struct CcRequestBase
 {
@@ -62,6 +64,20 @@ public:
 
 protected:
     CcRequestBase() = default;
+
+    /**
+     * @brief Initializes the request's target cc map, if the table
+     * schema is available and indicates that the table exists. Sends an async
+     * request to fetch the schema from the data store, if the schema is not
+     * cached locally.
+     *
+     * @return const TableSchemaView* The pointer to the schema view of the
+     * request's target cc map. Null, if the schema is not cached at the node
+     * level.
+     */
+    const CatalogEntry *InitCcm(const TableName &tbl_name,
+                                NodeGroupId cc_ng_id,
+                                CcShard &ccs);
 
     std::atomic<bool> in_use_{false};
     TxNumber tx_number_{0};

@@ -239,6 +239,22 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
         return true;
     }
 
+    if (!NoWriteLockConflict(tx_number))
+    {
+        LOG(INFO) << "existing write lock holder: " << write_lock_tx_;
+    }
+    if (!NoWriteIntentConflict(tx_number))
+    {
+        LOG(INFO) << "existing write intent holder: " << write_intent_tx_;
+    }
+    if (!NoReadLockConflict(tx_number))
+    {
+        for (auto &read_lk_tx : read_locks_)
+        {
+            LOG(INFO) << "existing read lock: " << read_lk_tx;
+        }
+    }
+
     // lock succeeds if there is no conflict.
     if (NoWriteLockConflict(tx_number) && NoWriteIntentConflict(tx_number) &&
         NoReadLockConflict(tx_number))

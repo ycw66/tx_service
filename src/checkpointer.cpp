@@ -1,5 +1,6 @@
 #include "checkpointer.h"
 
+#include "range_slice.h"
 #include "sharder.h"
 #include "tx_service.h"
 
@@ -81,7 +82,7 @@ void Checkpointer::Ckpt()
 
     if (local_shards_.EnableMvcc())
     {
-        archive_vec.reserve(10000);
+        // archive_vec.reserve(10000);
         uint64_t min_si_tx_ts =
             TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
         uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
@@ -144,8 +145,8 @@ void Checkpointer::Ckpt()
             {
                 continue;
             }
-            pending_work_.push_back(
-                CkptrWorkData{node_group, leader_term, ckpt_ts, table_name});
+            pending_work_.push_back(CkptrWorkData{
+                node_group, leader_term, ckpt_ts, last_ckpt_ts, table_name});
         }
 
         if (pending_work_.size() != 0 || active_workers_ != 0)
@@ -222,6 +223,7 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
         uint32_t node_group = cur_work.node_group_;
         int64_t leader_term = cur_work.term_;
         uint64_t ckpt_ts = cur_work.ckpt_ts_;
+        // uint64_t last_ckpt_ts = cur_work.last_ckpt_ts_;
         TableName table_name = cur_work.table_name_;
         ckptr->pending_work_.erase(ckptr->pending_work_.begin());
         worker_lk.unlock();
@@ -397,6 +399,16 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
             {
                 ccm->ckpt_ts_.store(ckpt_ts, std::memory_order_release);
             }
+
+#ifdef RANGE_PARTITIONED
+            ckptr->UpdateStoreSlice(table_name,
+                                    ccm->GetTableSchema()->GetKVCatalogInfo(),
+                                    ccm->SchemaTs(),
+                                    node_group,
+                                    ckpt_vec,
+                                    cur_work.last_ckpt_ts_,
+                                    ckpt_ts);
+#endif
         }
 
         // Use CommitTxRequest to release read lock.
@@ -527,6 +539,184 @@ bool Checkpointer::FlushArchiveForTest(LruEntry *entry,
                                   ccm->GetTableSchema()->GetKVCatalogInfo(),
                                   archives);
     return ckpt_ret;
+}
+
+bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
+                                    const KVCatalogInfo *kv_info,
+                                    uint64_t schema_ts,
+                                    NodeGroupId node_group_id,
+                                    std::vector<FlushRecord> &ckpt_vec,
+                                    uint64_t last_ckpt_ts,
+                                    uint64_t ckpt_ts)
+{
+    bool success = true;
+    bool slice_change = false;
+    StoreRange *curr_range = nullptr;
+    StoreSlice *curr_slice = nullptr;
+    size_t slice_first_idx = 0;
+
+    for (size_t idx = 0; idx < ckpt_vec.size(); ++idx)
+    {
+        if (slice_first_idx == idx)
+        {
+            const TxKey &ckpt_key = *ckpt_vec[idx].Key();
+
+            if (curr_range == nullptr ||
+                curr_range->RangeEndKey() != nullptr &&
+                    (*curr_range->RangeEndKey() < ckpt_key ||
+                     *curr_range->RangeEndKey() == ckpt_key))
+            {
+                if (curr_range != nullptr)
+                {
+                    bool ret = store_hd_->UpdateRangeSlices(
+                        table_name,
+                        kv_info,
+                        schema_ts,
+                        curr_range->RangeStartKey(),
+                        curr_range->Slices(),
+                        slice_change);
+                    success = ret && success;
+                    slice_change = false;
+                }
+
+                // The current ckpt key falls into a new range. Finds the range.
+                curr_range = local_shards_.FindRange(table_name, ckpt_key);
+                if (curr_range == nullptr)
+                {
+                    LOG(ERROR)
+                        << "Fail to find the range for the checkpoint key, "
+                        << table_name.StringView();
+                    return false;
+                }
+            }
+
+            curr_slice = curr_range->FindSlice(ckpt_key);
+        }
+
+        // Have iterated all flushed data items falling into the
+        // current slice. Re-calculates the slice's size.
+        if (idx == ckpt_vec.size() - 1 ||
+            curr_slice->EndKey() != nullptr &&
+                !(*ckpt_vec[idx + 1].Key() < *curr_slice->EndKey()))
+        {
+            GetPostCkptSlice post_ckpt_slice(table_name,
+                                             node_group_id,
+                                             curr_slice,
+                                             curr_range,
+                                             last_ckpt_ts,
+                                             ckpt_ts);
+
+            int32_t slice_delta_size = 0;
+            uint32_t slice_size = 0;
+
+            for (size_t pos = slice_first_idx; pos <= idx; ++pos)
+            {
+                int32_t delta = ckpt_vec[pos].cce_->delta_size_.load(
+                    std::memory_order_relaxed);
+                if (delta == INT32_MAX)
+                {
+                    slice_delta_size = INT32_MAX;
+                    break;
+                }
+                slice_delta_size += delta;
+            }
+
+            if (slice_delta_size == INT32_MAX)
+            {
+                local_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
+                post_ckpt_slice.Wait();
+
+                if (post_ckpt_slice.IsError())
+                {
+                    // There is a data store error when loading the slice.
+                }
+
+                const auto &item_vec = post_ckpt_slice.SliceRecordCollection();
+                for (const auto &item : item_vec)
+                {
+                    slice_size += item.second;
+                }
+            }
+            else
+            {
+                int32_t sum = curr_slice->Size();
+                sum += slice_delta_size;
+                slice_size = sum >= 0 ? sum : 0;
+            }
+
+            // If the slice needs to be split, loads the slice from the
+            // data store to calculate splitting keys and sub-slices'
+            // sizes.
+            const auto &item_vec = post_ckpt_slice.SliceRecordCollection();
+            if (slice_size > StoreSlice::slice_upper_bound &&
+                item_vec.size() > 1)
+            {
+                if (!post_ckpt_slice.IsFinish())
+                {
+                    local_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
+                    post_ckpt_slice.Wait();
+                }
+
+                if (post_ckpt_slice.IsError())
+                {
+                }
+
+                uint32_t subslice_cnt =
+                    slice_size / StoreSlice::slice_upper_bound + 1;
+                uint32_t avg_subslice_size = slice_size / subslice_cnt;
+                std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>>
+                    splitting_keys;
+                splitting_keys.reserve(subslice_cnt);
+
+                uint32_t subslice_size = 0;
+                uint32_t subslice_start = 0;
+                for (size_t idx = 0; idx < item_vec.size(); ++idx)
+                {
+                    subslice_size += item_vec[idx].second;
+
+                    if (subslice_size >= avg_subslice_size ||
+                        idx == item_vec.size() - 1)
+                    {
+                        if (splitting_keys.empty())
+                        {
+                            // The first sub-slice's start key re-uses
+                            // the old slice's start key, so there is no
+                            // need to allocate a new key.
+                            splitting_keys.emplace_back(nullptr, subslice_size);
+                        }
+                        else
+                        {
+                            splitting_keys.emplace_back(
+                                item_vec[subslice_start].first->Clone(),
+                                subslice_size);
+                        }
+                        subslice_size = 0;
+                        subslice_start = idx + 1;
+                    }
+                }
+
+                curr_range->UpdateSlice(curr_slice, splitting_keys);
+                slice_change = true;
+            }
+            else
+            {
+                curr_slice->UpdateSize(slice_size);
+            }
+
+            // The next entry falls into a new slice.
+            slice_first_idx = idx + 1;
+        }
+    }
+
+    bool ret = store_hd_->UpdateRangeSlices(table_name,
+                                            kv_info,
+                                            schema_ts,
+                                            curr_range->RangeStartKey(),
+                                            curr_range->Slices(),
+                                            slice_change);
+    success = success && ret;
+
+    return success;
 }
 
 }  // namespace txservice

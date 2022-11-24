@@ -136,6 +136,7 @@ template class CcHandlerResult<InitTxResult>;
 template class CcHandlerResult<ReadKeyResult>;
 template class CcHandlerResult<ScanNextResult>;
 template class CcHandlerResult<ScanOpenResult>;
+template class CcHandlerResult<RangeScanSliceResult>;
 template class CcHandlerResult<AcquireAllResult>;
 template class CcHandlerResult<std::vector<AcquireKeyResult>>;
 template class CcHandlerResult<RangeMedianKeyResult>;

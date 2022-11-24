@@ -29,6 +29,7 @@ struct ReadCc;
 struct ScanCloseCc;
 struct ScanOpenBatchCc;
 struct ScanNextBatchCc;
+struct ScanSliceCc;
 struct NegotiateCc;
 struct CkptScanCc;
 struct CkptUpdateCc;
@@ -36,6 +37,8 @@ struct CkptTs;
 struct ReplayLogCc;
 struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
+struct FillStoreSliceCc;
+struct GetPostCkptSlice;
 
 enum struct ScanType
 {
@@ -81,14 +84,14 @@ public:
     virtual bool Execute(ScanNextBatchCc &req) = 0;
     virtual bool Execute(remote::RemoteScanOpen &req) = 0;
     virtual bool Execute(remote::RemoteScanNextBatch &req) = 0;
+    virtual bool Execute(ScanSliceCc &req) = 0;
     virtual bool Execute(CkptScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
     virtual bool Execute(CleanCcEntryForTestCc &req) = 0;
-
-    virtual std::unique_ptr<CcScanner> CreateScanner(
-        ScanDirection direction) const = 0;
+    virtual bool Execute(FillStoreSliceCc &req) = 0;
+    virtual bool Execute(GetPostCkptSlice &req) = 0;
 
     virtual size_t size() const = 0;
 
@@ -131,6 +134,8 @@ public:
     {
         schema_ts_ = schema_ts;
     }
+    virtual std::pair<std::unique_ptr<TxKey>, size_t> SliceMiddleKey(
+        const TxKey *start_key, const TxKey *end_key) const = 0;
 
     CcShard *const shard_;
     TableName table_name_;  // string owner

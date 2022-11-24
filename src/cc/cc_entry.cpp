@@ -143,4 +143,9 @@ void LruEntry::RecycleGapLock()
     }
     return;
 }
+
+const TxKey *FlushRecord::Key() const
+{
+    return cce_->Key();
+}
 }  // namespace txservice

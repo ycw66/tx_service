@@ -18,10 +18,19 @@ CatalogKey::CatalogKey(const TableName &name)
     assert(table_name_.Type() == TableType::Primary);
 }
 
+CatalogKey::CatalogKey(CatalogKey &&rhs)
+    : table_name_(std::move(rhs.table_name_))
+{
+}
+
+CatalogKey::CatalogKey(const CatalogKey &rhs) : table_name_(rhs.table_name_)
+{
+}
+
 CatalogKey::CatalogKey(const CatalogKey &rhs, const Schema *)
-    : table_name_(TableName{rhs.table_name_.StringView().data(),
-                            rhs.table_name_.StringView().size(),
-                            rhs.table_name_.Type()})
+    : table_name_(rhs.table_name_.StringView().data(),
+                  rhs.table_name_.StringView().size(),
+                  rhs.table_name_.Type())
 {
     assert(table_name_.Type() == TableType::Primary);
     assert(table_name_.IsStringOwner());
@@ -147,6 +156,24 @@ const TableName &CatalogKey::Name() const
 TableName &CatalogKey::Name()
 {
     return table_name_;
+}
+
+CatalogRecord::CatalogRecord(CatalogRecord &&rhs)
+    : schema_(rhs.schema_),
+      dirty_schema_(rhs.dirty_schema_),
+      schema_ts_(rhs.schema_ts_),
+      schema_image_(std::move(rhs.schema_image_)),
+      dirty_schema_image_(std::move(rhs.dirty_schema_image_))
+{
+}
+
+CatalogRecord::CatalogRecord(const CatalogRecord &rhs)
+    : schema_(rhs.schema_),
+      dirty_schema_(rhs.dirty_schema_),
+      schema_ts_(rhs.schema_ts_),
+      schema_image_(rhs.schema_image_),
+      dirty_schema_image_(rhs.dirty_schema_image_)
+{
 }
 
 void CatalogRecord::Serialize(std::vector<char> &buf, size_t &offset) const

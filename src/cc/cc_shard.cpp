@@ -398,7 +398,13 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             LOG(WARNING)
                 << "orphan lock detected, lock holding txn: "
                 << lock_holding_txn
-                << ", txn is initiated by this machine, no need to recover";
+                << ", txn is initiated by this machine, no need to recover.";
+
+            for (const auto &lru : lk_info.cce_list_)
+            {
+                LOG(INFO) << "table: "
+                          << lru->parent_map_->table_name_.StringView();
+            }
             // no need to check and recover local txn, it must be ongoing
             return;
         }
@@ -1023,4 +1029,39 @@ void CcShard::UpdateTsBase(uint64_t ts)
     local_shards_.UpdateTsBase(ts);
 }
 
+std::pair<std::unique_ptr<TxKey>, size_t> CcShard::GetSliceMiddleKey(
+    const TableName &table_name,
+    NodeGroupId cc_ng_id,
+    const TxKey *slice_start,
+    const TxKey *slice_end)
+{
+    CcMap *ccm = GetCcm(table_name, cc_ng_id);
+    assert(ccm != nullptr);
+
+    return ccm->SliceMiddleKey(slice_start, slice_end);
+}
+
+RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
+                                    const Schema *key_schema,
+                                    const Schema *rec_schema,
+                                    uint64_t schema_ts,
+                                    const KVCatalogInfo *kv_info,
+                                    uint32_t range_id,
+                                    const TxKey &key,
+                                    bool inclusive,
+                                    CcRequestBase *cc_request,
+                                    RangeSliceOpStatus &pin_status)
+{
+    return local_shards_.PinRangeSlice(table_name,
+                                       key_schema,
+                                       rec_schema,
+                                       schema_ts,
+                                       kv_info,
+                                       range_id,
+                                       key,
+                                       inclusive,
+                                       cc_request,
+                                       this,
+                                       pin_status);
+}
 }  // namespace txservice
