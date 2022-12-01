@@ -240,12 +240,3 @@ So, historical version unflushed can be restored along with replaying redo log.
 
 For flushing to base table and flushing archives table is different function now, what if flushing to base table succeeds, but flushing to the undo log fails? It is safe to update the local checkpoint timestamp, but not safe to truncate the redo log. We need to consider this case.
 
-
-## TODO 
-1- Also flushthe current version into kvstore's `archives` table every time flushing undo, even if the checkpoint operaion of current version is not needed.( `commit_ts` > `ckpt_ts` ) 
-
-Why ? This is promise all historical versions maybe needed can be fetched even if the node group crashes and it's redo log be truncated.
-Eg. A ccentry's versions is "[1,3,5,7]", `ckpt_ts` is "8", after doing checkpoint, then the redo log is truncated.
-After a while,  the ccentry is updated, versions changed to "[1,3,5,7,8]". If the version "7" is not flushed into archives table before and node group crashes, the archives "7" cannot be fetched from archives table. Fetching base table is needed even if return "VersionUnknown".
-
-However, flushing current version may be a big waste. We also should improve it.

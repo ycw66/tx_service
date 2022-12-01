@@ -1646,13 +1646,11 @@ public:
                const uint64_t ckpt_ts,
                std::vector<FlushRecord> &ckpt_vec,
                std::vector<FlushRecord> &archive_vec,
-               std::vector<LruEntry *> &extra_vec,
                std::vector<LruEntry *> &mv_base_vec)
         : table_name_(table_name),
           ckpt_ts_(ckpt_ts),
           ckpt_vec_(ckpt_vec),
           archive_vec_(archive_vec),
-          extra_vec_(extra_vec),
           mv_base_vec_(mv_base_vec),
           start_entry_(nullptr),
           status_(CkptScanStatus::Ongoing),
@@ -1720,8 +1718,6 @@ private:
     const uint64_t ckpt_ts_;
     std::vector<FlushRecord> &ckpt_vec_;
     std::vector<FlushRecord> &archive_vec_;
-    // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
-    std::vector<LruEntry *> &extra_vec_;
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<LruEntry *> &mv_base_vec_;
     LruEntry *start_entry_;

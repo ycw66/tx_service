@@ -30,6 +30,10 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
     }
 
     thd_ = std::thread([this] { Run(); });
+
+    DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
+               << checkpoint_interval_
+               << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
 Checkpointer::~Checkpointer()
@@ -180,8 +184,6 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
     std::vector<FlushRecord> ckpt_vec;
     ckpt_vec.reserve(10000);
     std::vector<FlushRecord> archive_vec;
-    // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
-    std::vector<LruEntry *> extra_vec;
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<LruEntry *> mv_base_vec;
 
@@ -289,10 +291,9 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
         // Clear the container.
         ckpt_vec.clear();
         archive_vec.clear();
-        extra_vec.clear();
         mv_base_vec.clear();
         CkptScanCc ckpt_scan_cc(
-            table_name, ckpt_ts, ckpt_vec, archive_vec, extra_vec, mv_base_vec);
+            table_name, ckpt_ts, ckpt_vec, archive_vec, mv_base_vec);
 
         for (auto &ccs : ckptr->local_shards_.cc_shards_)
         {
@@ -332,12 +333,12 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
             }
 
             // If flush to data store succeeds, update the ckpt_ts for each
-            // entry in ccmap.
+            // entry in ccmap to latest checkpoint version's commit_ts.
             if (ckpt_ret)
             {
                 for (auto &ref : ckpt_vec)
                 {
-                    ref.cce_->ckpt_ts_.store(ckpt_ts,
+                    ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                              std::memory_order_release);
                 }
             }
@@ -355,14 +356,7 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
                     catalog_rec.Schema()->GetKVCatalogInfo(),
                     archive_vec);
 
-                if (flush_undo_ret)
-                {
-                    for (auto &ref : extra_vec)
-                    {
-                        ref->ckpt_ts_.store(ckpt_ts, std::memory_order_release);
-                    }
-                }
-                else
+                if (!flush_undo_ret)
                 {
                     // If ckpt succeeds and flushing undo fails, it is safe
                     // to update the local checkpoint timestamp, but not

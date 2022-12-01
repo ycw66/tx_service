@@ -18,10 +18,15 @@ TxStartTsCollector::TxStartTsCollector(LocalCcShards *shards,
     {
         min_start_ts_map_.emplace(ng_id, 1U);
     }
+
+    DLOG(INFO) << "TxStartTsCollector init, interval seconds: "
+               << delay_seconds;
 }
 
 void TxStartTsCollector::Start()
 {
+    DLOG(INFO) << "TxStartTsCollector start, interval seconds: "
+               << delay_seconds_;
     active_.store(true);
     thd_ = std::thread([this] { Run(); });
 }

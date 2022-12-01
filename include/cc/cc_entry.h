@@ -178,14 +178,6 @@ public:
 
     LruEntry(CcMap *parent);
 
-    virtual size_t GetCcEntryMemUsage() const = 0;
-
-    virtual size_t ArchiveRecordsCount() const = 0;
-    virtual size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) = 0;
-    virtual size_t ExportArchives(std::vector<FlushRecord> &akvs,
-                                  uint64_t to_ts,
-                                  TableType tbl_type) const = 0;
-
     /**
      * @brief Get key lock from lock array if it is null.
      *
@@ -251,11 +243,11 @@ public:
     // Accumulated size of key-value pairs committed since last checkpoint.
     size_t estimate_ccentry_log_size_{0};
 
-    // The timestamp when this record was last flushed to the data store. Unlike
+    // The commit timestamp of the latest checkpoint version record. Unlike
     // other fields that are read/modified via a single thread, this field is
     // updated by a separate checkpointing thread, after it flushes changes to
     // the data store.
-    std::atomic<uint64_t> ckpt_ts_{1};
+    std::atomic<uint64_t> ckpt_ts_{0};
 
     /**
      * @brief Accumulated size change since last checkpoint.
@@ -382,7 +374,7 @@ public:
 
     ~CcEntry() = default;
 
-    size_t GetCcEntryMemUsage() const override
+    size_t GetCcEntryMemUsage() const
     {
         size_t mem_usage_ = 0;
         size_t ptr_size = sizeof(nullptr);
@@ -495,14 +487,6 @@ public:
             archives_->emplace_front(nullptr, commit_ts_, payload_status_);
         }
         mem_usage += sizeof(VersionResultRecord<ValueT>);
-
-        if (ckpt_ts_ >= commit_ts_ && commit_ts_ != 1U)
-        {
-            // This version has not been flushed to archive table, adjust
-            // 'ckpt_ts_' to let this version can be flushed at next checkpoint.
-            ckpt_ts_.store(commit_ts_ - 1);
-        }
-
         return mem_usage;
     }
 
@@ -590,7 +574,7 @@ public:
      *
      * @return mem usage of archive records kicked out
      */
-    size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts) override
+    size_t KickOutArchiveRecords(uint64_t oldest_active_tx_ts)
     {
         if (archives_ == nullptr)
         {
@@ -721,19 +705,26 @@ public:
         rec.commit_ts_ = 1U;
         if (ckpt_ts_ == 1U)
         {
-            // need fetch base table
-            rec.payload_status_ = RecordStatus::Unknown;
+            rec.payload_status_ = RecordStatus::Deleted;
         }
         else
         {
-            rec.payload_status_ = RecordStatus::VersionUnknown;
+            if (ckpt_ts_ <= ts)
+            {
+                // need fetch base table
+                rec.payload_status_ = RecordStatus::Unknown;
+            }
+            else
+            {
+                rec.payload_status_ = RecordStatus::VersionUnknown;
+            }
         }
         return true;
     }
 
-    bool HasVisibleVersion(uint64_t ts)
+    bool HasVisibleVersion(uint64_t ts) const
     {
-        if (commit_ts_ <= ts)
+        if (commit_ts_ <= ts || ckpt_ts_ == 1U)
         {
             return true;
         }
@@ -746,48 +737,114 @@ public:
     }
 
     /**
-     * @brief Export the historical versions when flushing(checkpoint).
-     * From "last_ckpt_ts" to latest version (include current version).
-     * @param akvs - the continer of exported records.
-     * @param to_ts - the upper bound ts.
-     * @return count of records exported
+     * @brief Export version records to flush into KvStore when mvcc is enabled.
+     * eg. CcEntry's versions is [10,8,7,5,4], param ckpt_ts is "9",
+     * then the version "8" is exported to ckpt_vec, versions [7,5,4] are
+     * exported to akv_vec.
+     * @param ckpt_vec - store the version records to flush into "base table".
+     * @param akv_vec - store the version records to flush into "archives
+     * table".
+     * @param to_ts - Current round checkpoint timestamp.
+     * @return the number of exported version records.
      */
-    size_t ExportArchives(std::vector<FlushRecord> &akvs,
-                          uint64_t to_ts,
-                          TableType tbl_type) const override
+    size_t ExportForCkpt(std::vector<FlushRecord> &ckpt_vec,
+                         std::vector<FlushRecord> &akv_vec,
+                         std::vector<LruEntry *> &mv_base_vec,
+                         uint64_t to_ts,
+                         uint64_t oldest_active_tx_ts,
+                         TableType tbl_type,
+                         bool mvcc_enabled) const
     {
-        if (archives_ == nullptr)
+        size_t exported_count = 0;
+        if (commit_ts_ <= ckpt_ts_)
         {
-            return 0;
+            return exported_count;
         }
-        size_t count = 0;
-        if (archives_->size() > 0)
+        if (commit_ts_ <= to_ts)
         {
-            for (const VersionRecord<ValueT> &rec : *archives_)
+            auto &ref = ckpt_vec.emplace_back();
+            ref.cce_ =
+                const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
+            if (mvcc_enabled)
             {
-                if (rec.commit_ts_ > ckpt_ts_ && rec.commit_ts_ <= to_ts)
+                ref.SetPayload(payload_.get());
+            }
+            else
+            {
+                ref.SetPayload(std::make_unique<ValueT>(*payload_));
+            }
+            ref.payload_status_ = payload_status_;
+            ref.commit_ts_ = commit_ts_;
+            ref.delta_size_ = delta_size_;
+            exported_count++;
+        }
+
+        if (!mvcc_enabled)
+        {
+            return exported_count;
+        }
+        if (archives_ != nullptr && archives_->size() > 0)
+        {
+            for (auto it = archives_->begin(); it != archives_->end(); it++)
+            {
+                if (it->commit_ts_ <= to_ts)
                 {
-                    auto &ref = akvs.emplace_back();
-                    ref.cce_ = const_cast<LruEntry *>(
-                        static_cast<const LruEntry *>(this));
-                    if (tbl_type != TableType::Secondary)
+                    if (it->commit_ts_ < ckpt_ts_ || it->commit_ts_ == 1U)
                     {
-                        ref.SetPayload(rec.payload_.get());  // pk
+                        break;
                     }
                     else
                     {
-                        ref.SetPayload(payload_.get());  // sk
+                        if (exported_count == 0)
+                        {
+                            auto &ref = ckpt_vec.emplace_back();
+                            ref.cce_ = const_cast<LruEntry *>(
+                                static_cast<const LruEntry *>(this));
+                            if (tbl_type != TableType::Secondary)
+                            {
+                                ref.SetPayload(it->payload_.get());  // pk
+                            }
+                            else
+                            {
+                                ref.SetPayload(payload_.get());  // sk
+                            }
+                            ref.payload_status_ = it->payload_status_;
+                            ref.commit_ts_ = it->commit_ts_;
+                            ref.delta_size_ = delta_size_;
+                        }
+                        else
+                        {
+                            auto &ref = akv_vec.emplace_back();
+                            ref.cce_ = const_cast<LruEntry *>(
+                                static_cast<const LruEntry *>(this));
+                            if (tbl_type != TableType::Secondary)
+                            {
+                                ref.SetPayload(it->payload_.get());  // pk
+                            }
+                            else
+                            {
+                                ref.SetPayload(payload_.get());  // sk
+                            }
+                            ref.payload_status_ = it->payload_status_;
+                            ref.commit_ts_ = it->commit_ts_;
+                        }
+                        exported_count++;
                     }
-                    ref.payload_status_ = rec.payload_status_;
-                    ref.commit_ts_ = rec.commit_ts_;
-                    count++;
                 }
             }
         }
-        return count;
+
+        if (exported_count > 0 && !HasVisibleVersion(oldest_active_tx_ts))
+        {
+            // last ckpt version is needed but not in memory, need copy record
+            // from "base table" into "mvcc_archives table".
+            mv_base_vec.push_back(
+                const_cast<LruEntry *>(static_cast<const LruEntry *>(this)));
+        }
+        return exported_count;
     }
 
-    size_t ArchiveRecordsCount() const override
+    size_t ArchiveRecordsCount() const
     {
         if (archives_ == nullptr)
         {

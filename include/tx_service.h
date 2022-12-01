@@ -352,6 +352,9 @@ public:
         }
 
         Sharder::Instance().Init(local_path);
+        TxStartTsCollector::Instance(
+            &local_cc_shards_,
+            conf.find("collect_active_tx_ts_interval_seconds")->second);
     }
 
     TxService(const std::string &local_path,
@@ -401,7 +404,7 @@ public:
 
         if (local_cc_shards_.EnableMvcc())
         {
-            TxStartTsCollector::Instance(&local_cc_shards_).Start();
+            TxStartTsCollector::Instance().Start();
         }
     }
 

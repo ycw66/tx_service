@@ -86,7 +86,7 @@ public:
         TX_TRACE_ASSOCIATE_WITH_CONTEXT(
             (txservice::CcMap *) this,
             (txservice::LruEntry *) &pos_inf_,
-            [this]() -> string
+            [this]() -> std::string
             {
                 return std::string("\"associate\":\"neg_inf_\", \"cce_ptr_\":")
                     .append(std::to_string(
@@ -465,8 +465,7 @@ public:
 
                 size_t key_size = new_cce->key_->MemUsage();
                 size_t payload_size = new_cce->PayloadMemUsage();
-                new_cce->parent_map_->shard_->UpdateEstimateLogSize(
-                    new_cce, key_size, payload_size);
+                shard_->UpdateEstimateLogSize(new_cce, key_size, payload_size);
             }
 
             req.Result()->SetFinished();
@@ -552,8 +551,7 @@ public:
 
                 size_t key_size = cce.key_->MemUsage();
                 size_t payload_size = cce.PayloadMemUsage();
-                cce.parent_map_->shard_->UpdateEstimateLogSize(
-                    &cce, key_size, payload_size);
+                shard_->UpdateEstimateLogSize(&cce, key_size, payload_size);
 
                 cce.payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
@@ -1418,7 +1416,7 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                     cce->commit_ts_ = 1U;
                     cce->gap_commit_ts_ = 1U;
-                    cce->ckpt_ts_.store(2U);
+                    cce->ckpt_ts_.store(1U);
                 }
 #endif
 
@@ -1517,11 +1515,11 @@ public:
                 cce->payload_status_ = tmp_payload_status;
                 cce->commit_ts_ = req.ReadTimestamp();
                 // set "ckpt_ts_" to identify the entry is refilled
-                uint64_t tmp_ts = 1U;
+                uint64_t tmp_ts = 0U;
                 cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
-                                                      req.ReadTimestamp() - 1);
+                                                      req.ReadTimestamp());
             }
-            else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
+            else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
                      cce->commit_ts_ > req.ReadTimestamp())
             {
                 // Trying to insert the record to backfill into archives is
@@ -1532,9 +1530,9 @@ public:
                                           tmp_payload_status,
                                           req.ReadTimestamp());
                 // set "ckpt_ts_" to identify the entry is refilled
-                uint64_t tmp_ts = 1U;
+                uint64_t tmp_ts = 0U;
                 cce->ckpt_ts_.compare_exchange_strong(tmp_ts,
-                                                      req.ReadTimestamp() - 1);
+                                                      req.ReadTimestamp());
             }
 
             // Refill mvcc archives
@@ -1693,10 +1691,10 @@ public:
             cce->payload_status_ = req.RecordStatus();
 
             // set "ckpt_ts_" to identify the entry is refilled
-            uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs() - 1);
+            uint64_t tmp_ts = 0U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
         }
-        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 1U &&
+        else if (shard_->EnableMvcc() && cce->ckpt_ts_ == 0U &&
                  cce->commit_ts_ > req.CommitTs())
         {
             // Trying to insert the record to backfill into archives is needed,
@@ -1711,8 +1709,8 @@ public:
                 std::move(tmp_payload), req.RecordStatus(), req.CommitTs());
 
             // set "ckpt_ts_" to identify the entry is refilled
-            uint64_t tmp_ts = 1U;
-            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs() - 1);
+            uint64_t tmp_ts = 0U;
+            cce->ckpt_ts_.compare_exchange_strong(tmp_ts, req.CommitTs());
         }
         // Refill mvcc archives.
         if (shard_->EnableMvcc())
@@ -3202,56 +3200,24 @@ public:
             if (shard_->EnableMvcc())
             {
                 shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
-                if (cce->commit_ts_ > req.ckpt_ts_)
-                {
-                    // Don't do checkpoint but flush undo
-                    if (cce->ExportArchives(
-                            req.archive_vec_, req.ckpt_ts_, Type()) > 0)
-                    {
-                        req.extra_vec_.push_back(cce);
-                        if (cce->ckpt_ts_ == 1U &&
-                            !cce->HasVisibleVersion(recycle_ts))
-                        {
-                            req.mv_base_vec_.push_back(cce);
-                        }
-                    }
-                }
             }
 
-            if (cce->commit_ts_ <= req.ckpt_ts_ &&
-                cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
+            if (cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
             {
-                auto &ref = req.ckpt_vec_.emplace_back();
-                ref.cce_ = cce;
-                ref.payload_status_ = cce->payload_status_;
-                ref.commit_ts_ = cce->commit_ts_;
-                ref.delta_size_ = cce->delta_size_;
-                if (cce->payload_ != nullptr)
-                {
-                    if (shard_->EnableMvcc())
-                    {
-                        ref.SetPayload(cce->payload_.get());
-                    }
-                    else
-                    {
-                        ref.SetPayload(
-                            std::make_unique<ValueT>(*cce->payload_));
-                    }
-                }
-                if (shard_->EnableMvcc())
-                {
-                    // Also flush undo before truncating redo log.
-                    cce->ExportArchives(req.archive_vec_, req.ckpt_ts_, Type());
-                    if (cce->ckpt_ts_ == 1U &&
-                        !cce->HasVisibleVersion(recycle_ts))
-                    {
-                        req.mv_base_vec_.push_back(cce);
-                    }
-                }
+                cce->ExportForCkpt(req.ckpt_vec_,
+                                   req.archive_vec_,
+                                   req.mv_base_vec_,
+                                   req.ckpt_ts_,
+                                   recycle_ts,
+                                   Type(),
+                                   shard_->EnableMvcc());
 
-                cce->parent_map_->shard_->estimate_ccshard_log_size_ -=
-                    cce->estimate_ccentry_log_size_;
-                cce->estimate_ccentry_log_size_ = 0;
+                if (cce->commit_ts_ <= req.ckpt_ts_)
+                {
+                    shard_->estimate_ccshard_log_size_ -=
+                        cce->estimate_ccentry_log_size_;
+                    cce->estimate_ccentry_log_size_ = 0;
+                }
             }
             else if (cce->commit_ts_ <=
                      cce->ckpt_ts_.load(std::memory_order_acquire))
@@ -3475,27 +3441,18 @@ public:
                 if (req.WithFlush())
                 {
                     std::vector<FlushRecord> tmp_ckpt_vec;
-                    auto &ref = tmp_ckpt_vec.emplace_back();
-                    ref.cce_ = cce;
-                    ref.payload_status_ = cce->payload_status_;
-                    ref.commit_ts_ = cce->commit_ts_;
-                    if (cce->payload_ != nullptr)
-                    {
-                        if (shard_->EnableMvcc())
-                        {
-                            ref.SetPayload(cce->payload_.get());
-                        }
-                        else
-                        {
-                            ref.SetPayload(
-                                std::make_unique<ValueT>(*cce->payload_));
-                        }
-                    }
 
-                    std::vector<FlushRecord> tmp_akvs;
-                    cce->ExportArchives(tmp_akvs, cce->commit_ts_ - 1, Type());
+                    std::vector<FlushRecord> tmp_akv_vec;
+                    std::vector<LruEntry *> tmp_mv_base_vec;
+                    cce->ExportForCkpt(tmp_ckpt_vec,
+                                       tmp_akv_vec,
+                                       tmp_mv_base_vec,
+                                       cce->commit_ts_,
+                                       1U,
+                                       Type(),
+                                       shard_->EnableMvcc());
                     bool res = shard_->FlushEntryForTest(
-                        cce, tmp_ckpt_vec, tmp_akvs, only_archives);
+                        cce, tmp_ckpt_vec, tmp_akv_vec, only_archives);
                     assert(res == true);
                 }
                 if (only_archives)

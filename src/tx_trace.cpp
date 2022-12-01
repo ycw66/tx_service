@@ -762,9 +762,18 @@ template std::string tx_trace_action(
     std::string,
     txservice::RangeMedianKeyResult *,
     std::function<std::string()>);
-
 template std::string tx_trace_action(
     txservice::CcHandlerResult<txservice::RangeMedianKeyResult> *,
+    std::string,
+    int8_t,
+    std::function<std::string()>);
+template std::string tx_trace_action(
+    txservice::CcHandlerResult<txservice::RangeScanSliceResult> *,
+    std::string,
+    txservice::RangeScanSliceResult *,
+    std::function<std::string()>);
+template std::string tx_trace_action(
+    txservice::CcHandlerResult<txservice::RangeScanSliceResult> *,
     std::string,
     int8_t,
     std::function<std::string()>);
@@ -1369,29 +1378,43 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcOperation r)
     outs << cc_op;
     return outs;
 };
-std::ostream &operator<<(std::ostream &outs, txservice::DmlOperation r)
+
+std::ostream &operator<<(std::ostream &outs, txservice::OperationType r)
 {
     std::string dml_op;
     switch (r)
     {
-    case txservice::DmlOperation::Update:
+    case txservice::OperationType::Update:
         dml_op = "Update";
         break;
-    case txservice::DmlOperation::Delete:
+    case txservice::OperationType::Delete:
         dml_op = "Delete";
         break;
-    case txservice::DmlOperation::Insert:
+    case txservice::OperationType::Insert:
         dml_op = "Insert";
         break;
-    case txservice::DmlOperation::Upsert:
+    case txservice::OperationType::Upsert:
         dml_op = "Upsert";
         break;
+    case txservice::OperationType::CreateTable:
+        dml_op = "CreateTable";
+        break;
+    case txservice::OperationType::DropTable:
+        dml_op = "DropTable";
+        break;
+    case txservice::OperationType::AddIndex:
+        dml_op = "AddIndex";
+        break;
+    case txservice::OperationType::DropIndex:
+        dml_op = "DropIndex";
+        break;
     default:
-        dml_op = "[Unknown DML Operation]";
+        dml_op = "[Unknown DML and DDL OperationType]";
     };
     outs << dml_op;
     return outs;
 }
+
 std::ostream &operator<<(std::ostream &outs, txservice::PostWriteType r)
 {
     std::string pwt;
@@ -1591,7 +1614,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteCc *r)
          << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
          << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"is_delete_\":" << r->IsDeleted() << "}";
+         << ",\"operation_type_\":" << r->GetOperationType() << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
@@ -1609,7 +1632,7 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"commit_ts_\":" << r->CommitTs()
          << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
          << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-         << ",\"is_delete_\":" << r->IsDeleted()
+         << ",\"operation_type_\":" << r->GetOperationType()
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
@@ -1629,9 +1652,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteAllCc *r)
          << ",\"commit_ts_\":" << r->CommitTs()
          << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
          << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-         << ",\"dml_op_\":\""
-         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << r->DmlOp()
-         << "\""
+         << ",\"op_type_\":\"" << r->OpType()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << "\""
          << ",\"commit_type_\":\"" << r->CommitType() << "\""
          << "}";
     return outs;
@@ -1652,9 +1674,8 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"commit_ts_\":" << r->CommitTs()
          << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
          << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-         << ",\"dml_op_\":\""
-         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << r->DmlOp()
-         << "\""
+         << ",\"op_type_\":\"" << r->OpType()
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << "\""
          << ",\"commit_type_\":\"" << r->CommitType() << "\""
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
@@ -2033,6 +2054,8 @@ template std::string tx_trace_dump(txservice::CkptScanCc *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::ReplayLogCc *,
                                    std::function<std::string()>);
+template std::string tx_trace_dump(txservice::ScanSliceCc *,
+                                   std::function<std::string()>);
 template std::string tx_trace_dump(txservice::remote::RemoteAcquire *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::remote::RemoteAcquireAll *,
@@ -2073,6 +2096,8 @@ template std::string tx_trace_dump(const txservice::remote::CcMessage *,
 template std::string tx_trace_dump(txservice::remote::CcMessage *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::RangeMedianKeyResult *,
+                                   std::function<std::string()>);
+template std::string tx_trace_dump(txservice::RangeScanSliceResult *,
                                    std::function<std::string()>);
 // TxOp
 std::string tx_trace_dump(txservice::Void *result,

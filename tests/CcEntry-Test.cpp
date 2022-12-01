@@ -325,7 +325,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
-    // (read_ts: 5, ckpt_ts:1)->... => Unknown
+    // (read_ts: 5, ckpt_ts:0)->... => Unknown
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
@@ -335,8 +335,19 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
-    // (read_ts: 5, ckpt_ts>1)->... => VersionUnknown
+    // (read_ts: 5, ckpt_ts=3, ckpt_ts<=read_ts)->... => Unknown
     entry.ckpt_ts_ = 3;
+    {
+        uint64_t ts = 5;
+        VersionResultRecord<CompositeRecord<int>> rec;
+
+        bool res = entry.MvccGet(ts, rec, TableType::Primary);
+        REQUIRE(res);
+        REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
+    }
+
+    // (read_ts: 5, ckpt_ts=8, ckpt_ts>read_ts)->... =>VesionUnknown
+    entry.ckpt_ts_ = 8;
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;

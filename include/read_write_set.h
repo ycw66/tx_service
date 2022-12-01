@@ -101,33 +101,35 @@ public:
             // isolation level, the read operation adds ReadIntent locktype,
             // not read lock. So, we must verify whether the record has been
             // changed between current read and previous.
-            // (read_ts == 0) means it is a boundary key added gap lock.
-            // (read_ts == 1) means it's payload status is Unkonwn.
-            if (it->second.version_ts_ != read_ts)
+            // (read_ts == 0) means it is a boundary key added gap lock or its
+            // payload status is Unkonwn.
+            if (it->second.version_ts_ != read_ts &&
+                it->second.version_ts_ != 0 && read_ts != 0)
             {
-                if (it->second.version_ts_ > 1)
+                if (it->second.lock_type_ == LockType::ReadIntent)
                 {
-                    if (it->second.lock_type_ == LockType::ReadIntent)
-                    {
-                        // breaks repeatable read isolation level under
-                        // Occ/OccRead protocol, return error.
-                        it->second.lock_type_ = lock_type;
-                        return false;
-                    }
-                    else
-                    {
-                        // ReadLock and WriteIntent always block update.
-                        // Case enter this branch, must be a bug.
-                        assert(false);
-                    }
+                    // breaks repeatable read isolation level under
+                    // Occ/OccRead protocol, return error.
+                    it->second.lock_type_ = lock_type;
+                    return false;
                 }
                 else
                 {
-                    // The entry maybe has been backfilled.
-                    it->second.version_ts_ = read_ts;
+                    // ReadLock and WriteIntent always block update.
+                    // Case enter this branch, must be a bug.
+                    assert(false);
                 }
             }
-            else if (lock_type >= it->second.lock_type_)
+            // Case (it->second.version_ts_>0 and read_ts==0), means read_set
+            // has been updated by ReadOutside request, but ccmap has not
+            // received ReadOutside CcRequest.
+            // Case (it->second.version_ts_==0 and read_ts>0), means the entry
+            // maybe has been backfilled by other tx.
+            if (it->second.version_ts_ < read_ts)
+            {
+                it->second.version_ts_ = read_ts;
+            }
+            if (lock_type >= it->second.lock_type_)
             {
                 it->second.lock_type_ = lock_type;
                 it->second.protocol_ = proto;
