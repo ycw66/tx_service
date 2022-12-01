@@ -70,7 +70,7 @@ CcShard::CcShard(uint16_t core_id,
 
     native_ccms_.try_emplace(
         catalog_ccm_name,
-        std::make_unique<CatalogCcMap>(this, catalog_ccm_name));
+        std::make_unique<CatalogCcMap>(this, node_id_, catalog_ccm_name));
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -104,9 +104,10 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
             // cc maps when the cc shard is initialized. The cc map in failed
             // over cc node is initialized lazily, when the cc node becomes the
             // leader.
-            auto catalog_it = ng_ccm.try_emplace(
-                node_group,
-                std::make_unique<CatalogCcMap>(this, catalog_ccm_name));
+            auto catalog_it =
+                ng_ccm.try_emplace(node_group,
+                                   std::make_unique<CatalogCcMap>(
+                                       this, node_group, catalog_ccm_name));
 
             return catalog_it.first->second.get();
         }
@@ -671,7 +672,8 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             table_schema,
                                             schema_ts,
                                             ccm_has_full_entries,
-                                            this));
+                                            this,
+                                            ng_id));
         // update table schema for alter table command.
         if (!is_create)
         {
@@ -694,7 +696,8 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             table_schema,
                                             schema_ts,
                                             ccm_has_full_entries,
-                                            this));
+                                            this,
+                                            ng_id));
         // update table schema for alter table command.
         if (!is_create)
         {
@@ -718,7 +721,7 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
             catalog_factory_->CreateSkCcMap(
-                index_name, table_schema, schema_ts, this));
+                index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create)
         {
@@ -734,10 +737,10 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        auto ccm_it =
-            ccms.try_emplace(ng_id,
-                             catalog_factory_->CreateSkCcMap(
-                                 index_name, table_schema, schema_ts, this));
+        auto ccm_it = ccms.try_emplace(
+            ng_id,
+            catalog_factory_->CreateSkCcMap(
+                index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create)
         {
@@ -847,7 +850,7 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &range_table_name,
         auto ccm_it = native_ccms_.try_emplace(
             range_table_name,
             catalog_factory_->CreateRangeMap(
-                range_table_name, table_schema, schema_ts, this));
+                range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
         if (!is_create)
         {
@@ -865,7 +868,7 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &range_table_name,
         auto ccm_it = range_maps.try_emplace(
             ng_id,
             catalog_factory_->CreateRangeMap(
-                range_table_name, table_schema, schema_ts, this));
+                range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
         if (!is_create)
         {

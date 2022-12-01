@@ -57,11 +57,13 @@ public:
     using uptr = std::unique_ptr<CcMap>;
 
     CcMap(CcShard *shard,
+          NodeGroupId cc_ng_id,
           const TableName &table_name,
           const TableSchema *table_schema,
           uint64_t schema_ts,
           bool ccm_has_full_entries = false)
         : shard_(shard),
+          cc_ng_id_(cc_ng_id),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
                       table_name.Type()),
@@ -138,6 +140,7 @@ public:
         const TxKey *start_key, const TxKey *end_key) const = 0;
 
     CcShard *const shard_;
+    NodeGroupId cc_ng_id_;
     TableName table_name_;  // string owner
     // Kv store can be skipped if we know ccm contains all the entries. This is
     // crucial for performance. This flag is true when the table is created and

@@ -59,9 +59,10 @@ public:
     RangeCcMap(const TableName &range_table_name,
                const txservice::TableSchema *table_schema,
                uint64_t schema_ts,
-               CcShard *shard)
+               CcShard *shard,
+               txservice::NodeGroupId cc_ng_id)
         : TemplateCcMap<KeyT, RangeRecord>(
-              shard, range_table_name, schema_ts, table_schema, false)
+              shard, cc_ng_id, range_table_name, schema_ts, table_schema, false)
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
             CcMap::shard_->GetAllTableRangesForATable(range_table_name);

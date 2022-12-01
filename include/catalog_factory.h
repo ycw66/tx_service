@@ -56,17 +56,20 @@ public:
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
                                       bool ccm_has_full_entries,
-                                      CcShard *shard) = 0;
+                                      CcShard *shard,
+                                      NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
-                                      CcShard *shard) = 0;
+                                      CcShard *shard,
+                                      NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreateRangeMap(const TableName &range_table_name,
                                        const TableSchema *table_schema,
                                        uint64_t schema_ts,
-                                       CcShard *shard) = 0;
+                                       CcShard *shard,
+                                       NodeGroupId cc_ng_id) = 0;
 
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const Schema *key_schema) = 0;

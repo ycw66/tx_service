@@ -148,17 +148,24 @@ public:
                               const TableSchema *table_schema,
                               uint64_t schema_ts,
                               bool ccm_has_full_entries,
-                              CcShard *shard) override
+                              CcShard *shard,
+                              txservice::NodeGroupId cc_ng_id) override
     {
         return std::make_unique<
             txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
-            shard, table_name, schema_ts, table_schema, ccm_has_full_entries);
+            shard,
+            cc_ng_id,
+            table_name,
+            schema_ts,
+            table_schema,
+            ccm_has_full_entries);
     }
 
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,
                               const txservice::TableSchema *table_schema,
                               uint64_t schema_ts,
-                              txservice::CcShard *shard) override
+                              txservice::CcShard *shard,
+                              txservice::NodeGroupId cc_ng_id) override
     {
         assert(false);
         return nullptr;
@@ -167,7 +174,8 @@ public:
     CcMap::uptr CreateRangeMap(const txservice::TableName &range_table_name,
                                const txservice::TableSchema *table_schema,
                                uint64_t schema_ts,
-                               txservice::CcShard *shard) override
+                               txservice::CcShard *shard,
+                               txservice::NodeGroupId cc_ng_id) override
     {
         assert(false);
         return nullptr;

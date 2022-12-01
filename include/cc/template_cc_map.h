@@ -43,13 +43,18 @@ public:
     explicit TemplateCcMap(CcMap &&rhs) = delete;
 
     TemplateCcMap(CcShard *shard,
+                  NodeGroupId cc_ng_id,
                   const TableName &table_name,
                   uint64_t schema_ts,
                   const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false,
                   bool is_catalog_cc_map = false)
-        : CcMap(
-              shard, table_name, table_schema, schema_ts, ccm_has_full_entries),
+        : CcMap(shard,
+                cc_ng_id,
+                table_name,
+                table_schema,
+                schema_ts,
+                ccm_has_full_entries),
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
