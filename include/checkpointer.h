@@ -105,6 +105,17 @@ private:
     static const int checkpointer_worker_num_ = 5;
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
+
     static void CkptWorker(Checkpointer *ckptr);
+
+    /**
+     * @brief Flush statistics to storage and broadcast statistics to other
+     * nodes.
+     */
+    static void SyncStatistics(Checkpointer *ckptr,
+                               const TableName &table_name,
+                               uint32_t table_shard_code,
+                               const TableSchema *table_schema,
+                               uint64_t table_schema_ts);
 };
 }  // namespace txservice

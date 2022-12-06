@@ -26,6 +26,10 @@ public:
     virtual TxKey &operator=(const TxKey &that) = 0;*/
     virtual bool operator==(const TxKey &rhs) const = 0;
     virtual bool operator<(const TxKey &rhs) const = 0;
+    virtual bool operator<=(const TxKey &rhs) const
+    {
+        return *this < rhs || *this == rhs;
+    }
     virtual size_t Hash() const = 0;
     virtual void Serialize(std::vector<char> &buf, size_t &offset) const = 0;
     virtual void Serialize(std::string &str) const = 0;
@@ -62,6 +66,26 @@ public:
     virtual size_t Size() const
     {
         return 0;
+    }
+
+    virtual double PosInInterval(const Schema *key_schema,
+                                 const TxKey &min_key,
+                                 const TxKey &max_key) const
+    {
+        assert(min_key < max_key);
+
+        if (*this <= min_key)
+        {
+            return 0;
+        }
+        else if (max_key <= *this)
+        {
+            return 1;
+        }
+        else
+        {
+            return 0.5;
+        }
     }
 
     static size_t HashCode(const TxKey &sk, const TxKey &pk)
@@ -455,6 +479,41 @@ struct VoidKey : public TxKey
     {
         return 0;
     }
+};
+
+// PositiveInfinity<KeyT> and NegativeInfinity<KeyT> are both singleton
+// instance. But KeyT can be copyable/movable. When put them together, a wrapper
+// is required.
+template <typename KeyT>
+class MaybeInfinityKey
+{
+public:
+    void Set(const PositiveInfinity<KeyT> *key)
+    {
+        key_ = key;
+        ukey_.reset(nullptr);
+    }
+
+    void Set(const NegativeInfinity<KeyT> *key)
+    {
+        key_ = key;
+        ukey_.reset(nullptr);
+    }
+
+    void Set(std::unique_ptr<KeyT> &&ukey)
+    {
+        ukey_ = std::move(ukey);
+        key_ = ukey_.get();
+    }
+
+    const KeyT *Key() const
+    {
+        return key_;
+    }
+
+private:
+    const KeyT *key_{nullptr};
+    std::unique_ptr<KeyT> ukey_{nullptr};
 };
 
 }  // namespace txservice

@@ -329,11 +329,13 @@ public:
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &catalog_image,
+        const std::string &statistics_binary,
         uint64_t commit_ts);
 
     const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                            NodeGroupId cc_ng_id,
                                            const std::string &catalog_image,
+                                           const std::string &statistics_binary,
                                            uint64_t commit_ts);
 
     std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
@@ -546,7 +548,7 @@ private:
      */
     CcEntry<VoidKey, VoidRecord> head_cce_, tail_cce_;
 
-    // the number of ccentry in all the ccmap of this ccshard.
+    // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;
 
     Checkpointer *ckpter_;

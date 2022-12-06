@@ -33,7 +33,7 @@ public:
                  NodeGroupId cc_ng_id,
                  const TableName &table_name)
         : TemplateCcMap<CatalogKey, CatalogRecord>(
-              shard, cc_ng_id, table_name, 1, nullptr, false, true)
+              shard, cc_ng_id, table_name, 1, nullptr, false, false, true)
     {
     }
 
@@ -133,6 +133,7 @@ public:
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                req.NodeGroupId(),
                                                schema_rec->DirtySchemaImage(),
+                                               schema_rec->StatisticsBinary(),
                                                req.CommitTs());
 
                 schema_rec->Set(catalog_entry->schema_.get(),
@@ -507,6 +508,7 @@ public:
                     shard_->CreateCatalog(table_key->Name(),
                                           req.NodeGroupId(),
                                           schema_rec->SchemaImage(),
+                                          schema_rec->StatisticsBinary(),
                                           req.ReadTimestamp());
                 if (!success)
                 {
@@ -655,6 +657,7 @@ public:
                     shard_->CreateCatalog(table_name,
                                           req.NodeGroupId(),
                                           schema_op_msg.new_catalog_blob(),
+                                          Statistics::EMPTY_STATISTICS_BINARY,
                                           commit_ts);
                 if (!success)
                 {

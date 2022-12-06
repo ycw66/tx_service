@@ -44,8 +44,11 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
         if (status_ == RecordStatus::Normal)
         {
             assert(commit_ts_ > 0);
-            ccs.CreateCatalog(
-                table_name_, cc_ng_id_, catalog_image_, commit_ts_);
+            ccs.CreateCatalog(table_name_,
+                              cc_ng_id_,
+                              catalog_image_,
+                              statistics_binary_,
+                              commit_ts_);
         }
         else if (status_ == RecordStatus::Deleted)
         {
@@ -53,13 +56,15 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
             // The catalog of the specified table does not exists. The version
             // of the non-existent catalog starts from the beginning of history,
             // i.e., ts=1.
-            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
+            ccs.CreateCatalog(
+                table_name_, cc_ng_id_, catalog_image_, statistics_binary_, 1);
         }
         else
         {
             // Timestamp being 0 means that there is an error when fetching from
             // the data store and the catalog status is unknown.
-            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 0);
+            ccs.CreateCatalog(
+                table_name_, cc_ng_id_, catalog_image_, statistics_binary_, 0);
         }
     }
 

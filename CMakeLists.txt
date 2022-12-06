@@ -71,13 +71,18 @@ if ( CMAKE_COMPILER_IS_GNUCC )
 endif()
 
 
-
-set(PROTO_SRC ${CMAKE_SOURCE_DIR}/include/proto)
-set(PROTO_NAME cc_request)
-execute_process(
-    COMMAND protoc ./${PROTO_NAME}.proto --cpp_out=./ --proto_path=./
-    WORKING_DIRECTORY ${PROTO_SRC}
-)
+# Compile all protobuf files under proto directory.
+SET(PROTO_SRC ${CMAKE_SOURCE_DIR}/include/proto)
+FILE(GLOB PROTO_FILES RELATIVE ${PROTO_SRC} ${PROTO_SRC}/*.proto)
+FOREACH(PROTO_FILE ${PROTO_FILES})
+	STRING(REGEX REPLACE "[^/]proto" "" PROTO_NAME ${PROTO_FILE})
+	LIST(APPEND PROTO_CC_FILES ${PROTO_SRC}/${PROTO_NAME}.pb.cc)
+	ADD_CUSTOM_COMMAND(
+		OUTPUT "${PROTO_SRC}/${PROTO_NAME}.pb.cc" "${PROTO_SRC}/${PROTO_NAME}.pb.h"
+		COMMAND protoc ${PROTO_FILE} --proto_path=./ --cpp_out=./
+		WORKING_DIRECTORY ${PROTO_SRC}
+	)
+ENDFOREACH(PROTO_FILE)
 
 add_subdirectory(log_service)
 
@@ -154,7 +159,7 @@ SET(TxService_SOURCES
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})
-set(TxService_SOURCES ${TxService_SOURCES} ${PROTO_SRC}/${PROTO_NAME}.pb.cc)
+set(TxService_SOURCES ${TxService_SOURCES} ${PROTO_CC_FILES})
 
 add_library(txservice STATIC ${TxService_SOURCES} )
 

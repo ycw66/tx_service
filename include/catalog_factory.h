@@ -5,6 +5,7 @@
 
 #include "cc/cc_map.h"
 #include "schema.h"
+#include "statistics.h"
 
 namespace txservice
 {
@@ -33,6 +34,8 @@ struct TableSchema
     virtual const std::string &SchemaImage() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
     virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
+    virtual Statistics *StatisticsObject() const = 0;
+    virtual const std::string &StatisticsBinary() const = 0;
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
     virtual std::vector<TableName> IndexNames() const = 0;
@@ -49,6 +52,7 @@ public:
     virtual TableSchema::uptr CreateTableSchema(
         const TableName &table_name,
         const std::string &catalog_image,
+        const std::string &statistics_binary,
         uint64_t version,
         NodeGroupId cc_ng_id) = 0;
 
@@ -56,12 +60,14 @@ public:
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
                                       bool ccm_has_full_entries,
+                                      bool maintain_statistics,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
+                                      bool maintain_statistics,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 

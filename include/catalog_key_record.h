@@ -179,8 +179,8 @@ public:
     void Copy(const TxRecord &rhs) override;
     std::string ToString() const override;
 
-    void Set(TableSchema *schema,
-             TableSchema *dirty_schema,
+    void Set(const TableSchema *schema,
+             const TableSchema *dirty_schema,
              uint64_t schema_ts);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
@@ -191,6 +191,10 @@ public:
     const TableSchema *Schema() const;
     uint64_t SchemaTs() const;
     const TableSchema *DirtySchema() const;
+
+    const std::string &StatisticsBinary() const;
+    void SetStatisticsBinary(const std::string &statistics_binary);
+    void SetStatisticsBinary(std::string &&statistics_binary);
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
 
@@ -219,5 +223,6 @@ private:
     uint64_t schema_ts_{0};
     std::string schema_image_{""};
     std::string dirty_schema_image_{""};
+    std::string statistics_binary_{""};
 };
 }  // namespace txservice

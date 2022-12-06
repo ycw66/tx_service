@@ -48,6 +48,11 @@ public:
         return catalog_image_;
     }
 
+    std::string &StatisticsBinary()
+    {
+        return statistics_binary_;
+    }
+
     uint64_t &CommitTs()
     {
         return commit_ts_;
@@ -63,6 +68,7 @@ public:
 private:
     const TableName table_name_;
     std::string catalog_image_;
+    std::string statistics_binary_;
     uint64_t commit_ts_;
     RecordStatus status_;
     int error_code_{0};

@@ -350,6 +350,13 @@ message RecoverStateCheckResponse {
   uint32 node_group_id = 2;
 }
 
+message BroadcastStatisticsRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	string table_name_str = 3;
+	bytes statistics_binary = 4;
+}
+
 message CcMessage {
 	enum MessageType {
 		Shutdown = 0;
@@ -375,6 +382,7 @@ message CcMessage {
 		CleanCcEntryForTestResponse = 33;
 		RecoverStateCheckRequest = 34;
 		RecoverStateCheckResponse = 35;
+		BroadcastStatisticsRequest = 36;
 	}
 
 	MessageType type = 1;
@@ -406,5 +414,6 @@ message CcMessage {
 		CleanCcEntryForTestResponse clean_cc_entry_resp= 41;
 		RecoverStateCheckRequest recover_state_check_req = 42;
 		RecoverStateCheckResponse recover_state_check_resp = 43;
+		BroadcastStatisticsRequest broadcast_statistics_req = 44;
 	}
 }

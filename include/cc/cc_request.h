@@ -1560,11 +1560,6 @@ public:
           shard_cnt_(shard_cnt),
           cc_ng_id_(ng_id)
     {
-        for (size_t i = 0; i < shard_cnt_; i++)
-        {
-            memory_usage_kb_vec_.emplace_back(0);
-            log_usage_kb_vec_.emplace_back(0);
-        }
     }
 
     CkptTsCc() = delete;
@@ -1739,6 +1734,45 @@ private:
     friend class Checkpointer;
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::CkptScanCc *r);
+};
+
+struct CkptStatisticsCc : public CcRequestBase
+{
+public:
+    CkptStatisticsCc(const Statistics *statistics,
+                     store::Statistics *store_statistics)
+        : statistics_(statistics),
+          store_statistics_(store_statistics),
+          done_(false),
+          mux_(),
+          cv_()
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+
+        statistics_->ToSerializableObj(store_statistics_);
+
+        done_ = true;
+        cv_.notify_one();
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return done_; });
+    }
+
+private:
+    const Statistics *statistics_{nullptr};
+    store::Statistics *store_statistics_{nullptr};
+
+    bool done_{false};
+    std::mutex mux_;
+    std::condition_variable cv_;
 };
 
 struct NegotiateCc : public CcRequestBase

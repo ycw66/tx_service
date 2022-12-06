@@ -68,6 +68,11 @@ public:
         CcHandlerResult<Void> *hd_res,
         const txservice::AlterTableInfo *alter_table_info = nullptr) = 0;
 
+    virtual bool UpsertTableStatistics(
+        const txservice::TableName &ccm_table_name,
+        const std::string &statistics_binary,
+        uint64_t schema_ts) = 0;
+
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    void *fetch_req) = 0;
 
@@ -87,8 +92,27 @@ public:
 
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
+                            std::string &statistics_binary,
                             bool &found,
                             uint64_t &version_ts) const = 0;
+
+    bool FetchTable(const txservice::TableName &table_name,
+                    std::string &schema_image,
+                    bool &found,
+                    uint64_t &version_ts) const
+    {
+        std::string statistics_binary;
+        return FetchTable(
+            table_name, schema_image, statistics_binary, found, version_ts);
+    }
+
+    bool FetchTable(const txservice::TableName &table_name,
+                    std::string &schema_image,
+                    bool &found) const
+    {
+        uint64_t version_ts;
+        return FetchTable(table_name, schema_image, found, version_ts);
+    }
 
     virtual bool LoadRangeSlice(const TableName &table_name,
                                 const KVCatalogInfo *kv_info,

@@ -258,11 +258,13 @@ public:
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &catalog_image,
+        const std::string &statistics_binary,
         uint64_t commit_ts);
 
     const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                            NodeGroupId cc_ng_id,
                                            const std::string &catalog_image,
+                                           const std::string &statistics_binary,
                                            uint64_t commit_ts);
 
     /**

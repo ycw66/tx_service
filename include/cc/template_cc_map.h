@@ -21,12 +21,14 @@
 #include "remote/remote_cc_request.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_trace.h"
 #include "type.h"
+#include "typed_statistics.h"
 
 #ifdef RANGE_PARTITIONED
 #include "range_slice.h"
@@ -48,6 +50,7 @@ public:
                   uint64_t schema_ts,
                   const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false,
+                  bool maintain_statistics = false,
                   bool is_catalog_cc_map = false)
         : CcMap(shard,
                 cc_ng_id,
@@ -58,7 +61,8 @@ public:
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
-          is_catalog_cc_map_(is_catalog_cc_map)
+          is_catalog_cc_map_(is_catalog_cc_map),
+          maintain_statistics_(maintain_statistics)
     {
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
@@ -72,6 +76,21 @@ public:
         neg_inf_.ckpt_next_ = &pos_inf_;
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
+
+        if (maintain_statistics && table_schema)
+        {
+            assert(table_schema->StatisticsObject());
+            ShardProfile *shard_profile = table_schema->StatisticsObject()
+                                              ->GetShardProfile(table_name)
+                                              .get();
+            assert(shard_profile);
+            shard_profile_ =
+                static_cast<TypedShardProfile<KeyT> *>(shard_profile);
+        }
+        else
+        {
+            shard_profile_ = nullptr;
+        }
 
         TX_TRACE_ASSOCIATE_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -388,7 +407,8 @@ public:
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
         const std::string *payload_str = req.PayloadStr();
-        bool is_del = req.GetOperationType() == OperationType::Delete;
+        OperationType op_type = req.GetOperationType();
+        bool is_del = op_type == OperationType::Delete;
 
         if (cce_addr.InsertPtr() != 0)
         {
@@ -473,6 +493,11 @@ public:
                 size_t key_size = new_cce->key_->MemUsage();
                 size_t payload_size = new_cce->PayloadMemUsage();
                 shard_->UpdateEstimateLogSize(new_cce, key_size, payload_size);
+
+                if (maintain_statistics_)
+                {
+                    shard_profile_->OnInsert(*new_cce->key_);
+                }
             }
 
             req.Result()->SetFinished();
@@ -567,6 +592,18 @@ public:
                 DLOG_IF(INFO, TRACE_OCC_ERR)
                     << "PostWriteCc, txn:" << txn << " ,cce: " << &cce
                     << " ,commit_ts: " << commit_ts;
+
+                if (maintain_statistics_)
+                {
+                    if (op_type == OperationType::Insert)
+                    {
+                        shard_profile_->OnInsert(*cce.key_);
+                    }
+                    else if (op_type == OperationType::Delete)
+                    {
+                        shard_profile_->OnDelete(*cce.key_);
+                    }
+                }
             }
 
             req.Result()->SetFinished();
@@ -4677,5 +4714,11 @@ protected:
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
     bool is_catalog_cc_map_;
+
+    // When maintain_statistics_ is true, shard_profile_ is valid.
+    bool maintain_statistics_{false};
+
+    // shard_profile_ points to TypedShardProfile in TableSchema.
+    TypedShardProfile<KeyT> *shard_profile_{nullptr};
 };
 }  // namespace txservice

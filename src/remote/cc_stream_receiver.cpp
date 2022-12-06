@@ -456,6 +456,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::CcMessage_MessageType_ReadOutsideRequest:
     {
         RemoteReadOutside *read_outside = read_outside_pool_.NextRequest();
+
         TX_TRACE_ASSOCIATE(msg.get(), read_outside);
         read_outside->Reset(std::move(msg));
 
@@ -925,6 +926,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (resp.error_code() == 0)
         {
             Sharder::Instance().RemoteNodeFinishRecovery(resp.node_group_id());
+        }
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_BroadcastStatisticsRequest:
+    {
+        const BroadcastStatisticsRequest &req = msg->broadcast_statistics_req();
+        TableName table_name(req.table_name_str(), TableType::Primary);
+        NodeGroupId node_group_id = req.node_group_id();
+        const std::string &statistics_binary = req.statistics_binary();
+
+        const CatalogEntry *catalog_entry =
+            local_shards_.GetCatalog(table_name, node_group_id);
+        if (catalog_entry)
+        {
+            catalog_entry->schema_->StatisticsObject()->Reset(statistics_binary,
+                                                              true);
         }
         break;
     }

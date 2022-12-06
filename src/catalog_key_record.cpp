@@ -240,6 +240,7 @@ TxRecord::Uptr CatalogRecord::Clone() const
     rec->schema_ts_ = schema_ts_;
     rec->schema_image_ = schema_image_;
     rec->dirty_schema_image_ = dirty_schema_image_;
+    rec->statistics_binary_ = statistics_binary_;
 
     return rec;
 }
@@ -255,8 +256,8 @@ std::string CatalogRecord::ToString() const
     return std::string();
 }
 
-void CatalogRecord::Set(TableSchema *schema,
-                        TableSchema *dirty_schema,
+void CatalogRecord::Set(const TableSchema *schema,
+                        const TableSchema *dirty_schema,
                         uint64_t schema_ts)
 {
     schema_ = schema;
@@ -307,6 +308,21 @@ uint64_t CatalogRecord::SchemaTs() const
 const TableSchema *CatalogRecord::DirtySchema() const
 {
     return dirty_schema_;
+}
+
+const std::string &CatalogRecord::StatisticsBinary() const
+{
+    return statistics_binary_;
+}
+
+void CatalogRecord::SetStatisticsBinary(const std::string &statistics_binary)
+{
+    statistics_binary_ = statistics_binary;
+}
+
+void CatalogRecord::SetStatisticsBinary(std::string &&statistics_binary)
+{
+    statistics_binary_ = std::move(statistics_binary);
 }
 
 CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)

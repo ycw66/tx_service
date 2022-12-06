@@ -49,13 +49,17 @@ struct MockTableSchema : public TableSchema
 public:
     MockTableSchema(const TableName &table_name,
                     const std::string &catalog_image,
+                    const std::string &statistics_binary,
                     uint64_t version)
         : table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
                       table_name.Type()),
           schema_image_(catalog_image),
+          statistics_binary_(statistics_binary),
           version_(version)
     {
+        statistics_ = std::make_unique<TypedStatistics<CompositeKey<int>>>(
+            this, statistics_binary);
     }
     ~MockTableSchema()
     {
@@ -77,6 +81,14 @@ public:
     const std::string &SchemaImage() const override
     {
         return schema_image_;
+    }
+    Statistics *StatisticsObject() const override
+    {
+        return statistics_.get();
+    }
+    const std::string &StatisticsBinary() const override
+    {
+        return statistics_binary_;
     }
     uint64_t Version() const override
     {
@@ -125,6 +137,8 @@ private:
     std::unique_ptr<MockKeySchema> key_schema_;
     MockRecordSchema record_schema_;
     KVCatalogInfo::uptr kv_info_;
+    std::unique_ptr<TypedStatistics<CompositeKey<int>>> statistics_;
+    std::string statistics_binary_;
 };
 
 class MockCatalogFactory : public CatalogFactory
@@ -137,17 +151,19 @@ public:
 
     TableSchema::uptr CreateTableSchema(const TableName &table_name,
                                         const std::string &catalog_image,
+                                        const std::string &statistics_binary,
                                         uint64_t version,
                                         NodeGroupId cc_ng_id) override
     {
         return std::make_unique<MockTableSchema>(
-            table_name, catalog_image, version);
+            table_name, catalog_image, statistics_binary, version);
     }
 
     CcMap::uptr CreatePkCcMap(const TableName &table_name,
                               const TableSchema *table_schema,
                               uint64_t schema_ts,
                               bool ccm_has_full_entries,
+                              bool maintain_statistics,
                               CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {
@@ -164,6 +180,7 @@ public:
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,
                               const txservice::TableSchema *table_schema,
                               uint64_t schema_ts,
+                              bool maintain_statistics,
                               txservice::CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {

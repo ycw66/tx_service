@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <sstream>
@@ -105,6 +106,11 @@ struct TableName
 
     explicit TableName(const char *name_ptr, size_t name_len, TableType type)
         : name_str_(name_ptr, name_len), own_string_(true), type_(type)
+    {
+    }
+
+    explicit TableName(const std::string &name_str, TableType type)
+        : TableName(name_str.data(), name_str.length(), type)
     {
     }
 

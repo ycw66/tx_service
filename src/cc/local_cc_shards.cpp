@@ -120,6 +120,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
+    const std::string &statistics_binary,
     uint64_t commit_ts)
 {
     assert(table_name.Type() == TableType::Primary);
@@ -135,21 +136,27 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
         catalog_entry.InitSchema(
             catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, catalog_image, commit_ts, cc_ng_id),
+                : catalog_factory_->CreateTableSchema(table_name,
+                                                      catalog_image,
+                                                      statistics_binary,
+                                                      commit_ts,
+                                                      cc_ng_id),
             commit_ts);
     }
     else
     {
         // If the input schema version is greater than the existing one,
-        // replaces the existing schemaw with the new one.
+        // replaces the existing scheme with the new one.
         if (catalog_entry.Version() < commit_ts)
         {
             catalog_entry.InitSchema(
                 catalog_image.empty()
                     ? nullptr
-                    : catalog_factory_->CreateTableSchema(
-                          table_name, catalog_image, commit_ts, cc_ng_id),
+                    : catalog_factory_->CreateTableSchema(table_name,
+                                                          catalog_image,
+                                                          statistics_binary,
+                                                          commit_ts,
+                                                          cc_ng_id),
                 commit_ts);
         }
         else
@@ -179,12 +186,15 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     {
         // If catalog entry is not initialized yet, use the old schema image
         // stored in prepare log to restore old schema.
-        catalog_entry.InitSchema(
-            old_catalog_image.empty()
-                ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, old_catalog_image, old_schema_ts, cc_ng_id),
-            1);
+        catalog_entry.InitSchema(old_catalog_image.empty()
+                                     ? nullptr
+                                     : catalog_factory_->CreateTableSchema(
+                                           table_name,
+                                           old_catalog_image,
+                                           Statistics::EMPTY_STATISTICS_BINARY,
+                                           old_schema_ts,
+                                           cc_ng_id),
+                                 1);
     }
     if (catalog_entry.Version() < dirty_schema_ts &&
         catalog_entry.DirtyVersion() < dirty_schema_ts)
@@ -192,10 +202,13 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
-            new_catalog_image.empty()
-                ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
+            new_catalog_image.empty() ? nullptr
+                                      : catalog_factory_->CreateTableSchema(
+                                            table_name,
+                                            new_catalog_image,
+                                            Statistics::EMPTY_STATISTICS_BINARY,
+                                            dirty_schema_ts,
+                                            cc_ng_id),
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
@@ -209,6 +222,7 @@ const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
+    const std::string &statistics_binary,
     uint64_t commit_ts)
 {
     std::unique_lock<std::shared_mutex> lk(catalog_mux_);
@@ -225,8 +239,11 @@ const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
         catalog_entry.SetDirtySchema(
             catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, catalog_image, commit_ts, cc_ng_id),
+                : catalog_factory_->CreateTableSchema(table_name,
+                                                      catalog_image,
+                                                      statistics_binary,
+                                                      commit_ts,
+                                                      cc_ng_id),
             commit_ts);
     }
 
@@ -779,4 +796,5 @@ uint32_t LocalCcShards::FindRangePartitionId(const TableName &range_tbl_name,
 
     return partition_id;
 }
+
 }  // namespace txservice
