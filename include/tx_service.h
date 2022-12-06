@@ -387,19 +387,6 @@ public:
 
             tp->InitializeLocalHandler();
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
-
-#ifdef __linux__
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(thd_idx << 1, &cpuset);
-
-            int rc = pthread_setaffinity_np(
-                thd_pool_[thd_idx].native_handle(), sizeof(cpu_set_t), &cpuset);
-            if (rc != 0)
-            {
-                LOG(ERROR) << "Error calling pthread_setaffinity_np: " << rc;
-            }
-#endif
         }
 
         if (local_cc_shards_.EnableMvcc())
