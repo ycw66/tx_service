@@ -69,52 +69,9 @@ void Checkpointer::Ckpt()
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<LruEntry *> mv_base_vec;
 
-    size_t shard_cnt = local_shards_.Count();
-    CkptTsCc ckpt_req(shard_cnt);
-
-    // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is the
-    // minimum timestamp minus 1 among all the active transactions, thus it's
-    // safe to flush all the entries smaller than or equal to ckpt_ts.
-    for (auto &ccs : local_shards_.cc_shards_)
-    {
-        ccs->Enqueue(&ckpt_req);
-    }
-    ckpt_req.Wait();
-
-    uint64_t ckpt_ts = UINT64_MAX;
-    ckpt_ts = ckpt_req.GetCkptTs();
-
-    if (local_shards_.EnableMvcc())
-    {
-        // archive_vec.reserve(10000);
-        uint64_t min_si_tx_ts =
-            TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
-        uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
-        if (min_si_tx_ts < delayed_ckpt_ts)
-        {
-            ckpt_ts = delayed_ckpt_ts;
-        }
-        else if (min_si_tx_ts < ckpt_req.GetCkptTs())
-        {
-            ckpt_ts = min_si_tx_ts;
-        }
-    }
-
-    LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
-              << ". The ccshard memory usage is: " << ckpt_req.GetMemUsage()
-              << "KB.";
-
     std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)
     {
-        uint64_t last_ckpt_ts =
-            Sharder::Instance().GetNodeGroupCkptTs(node_group);
-        if (ckpt_ts <= last_ckpt_ts)
-        {
-            // skip checkpoint for this node group
-            continue;
-        }
-
         // check whether this node is group leader, pin its data if it is
         int64_t leader_term =
             Sharder::Instance().TryPinNodeGroupData(node_group);
@@ -122,6 +79,50 @@ void Checkpointer::Ckpt()
         {
             continue;
         }
+
+        // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
+        // the minimum timestamp minus 1 among all the active transactions, thus
+        // it's safe to flush all the entries smaller than or equal to ckpt_ts.
+        size_t shard_cnt = local_shards_.Count();
+        CkptTsCc ckpt_req(shard_cnt, node_group);
+        for (auto &ccs : local_shards_.cc_shards_)
+        {
+            ccs->Enqueue(&ckpt_req);
+        }
+        ckpt_req.Wait();
+
+        uint64_t ckpt_ts = UINT64_MAX;
+        ckpt_ts = ckpt_req.GetCkptTs();
+
+        if (local_shards_.EnableMvcc())
+        {
+            uint64_t min_si_tx_ts =
+                TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+            uint64_t delayed_ckpt_ts = ckpt_req.GetCkptTs() - ckpt_delay_time_;
+            if (min_si_tx_ts < delayed_ckpt_ts)
+            {
+                ckpt_ts = delayed_ckpt_ts;
+            }
+            else if (min_si_tx_ts < ckpt_req.GetCkptTs())
+            {
+                ckpt_ts = min_si_tx_ts;
+            }
+        }
+
+        uint64_t last_ckpt_ts =
+            Sharder::Instance().GetNodeGroupCkptTs(node_group);
+        if (ckpt_ts <= last_ckpt_ts)
+        {
+            // skip checkpoint for this node group
+            Sharder::Instance().UnpinNodeGroupData(node_group);
+            continue;
+        }
+
+        LOG(INFO) << "Begin checkpoint node group #" << node_group
+                  << " with timestamp: " << ckpt_ts
+                  << ". The ccshard memory usage is: " << ckpt_req.GetMemUsage()
+                  << "KB.";
+
         bool flushed = false;
         worker_flushed_.compare_exchange_strong(flushed, true);
 
@@ -171,10 +172,12 @@ void Checkpointer::Ckpt()
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
+
+        LOG(INFO) << "End checkpoint node group #" << node_group
+                  << " with timestamp: " << ckpt_ts;
     }
     // notify ccshard ckpt has finished and can re-check freeable ccentries.
     local_shards_.SetWaitingCkpt(false);
-    LOG(INFO) << "End checkpoint with timestamp: " << ckpt_ts;
 }
 
 void Checkpointer::CkptWorker(Checkpointer *ckptr)

@@ -1,5 +1,7 @@
 #include "cc/cc_shard.h"
 
+#include <chrono>  // std::chrono
+
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
@@ -333,35 +335,44 @@ void CcShard::UpdateEstimateLogSize(LruEntry *entry,
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr,
-                                         bool is_key_write_lock)
+                                         bool is_key_write_lock,
+                                         NodeGroupId cc_ng_id)
 {
-    auto em_it = lock_holding_txs_.try_emplace(txn, tx_term);
-    em_it.first->second.cce_list_.emplace(cce_ptr);
-    em_it.first->second.last_recover_ts_ = Now();
+    auto ng_em_it = lock_holding_txs_.try_emplace(cc_ng_id);
+    auto tx_em_it = ng_em_it.first->second.try_emplace(txn, tx_term);
+    tx_em_it.first->second.cce_list_.emplace(cce_ptr);
+    tx_em_it.first->second.last_recover_ts_ = Now();
 
     if (is_key_write_lock)
     {
         // write lock should update ts if the txn exists, or the CkptTsCc
         // request may get an older ckpt_ts.
-        em_it.first->second.wlock_ts_ = Now();
+        tx_em_it.first->second.wlock_ts_ = Now();
     }
-    return &em_it.first->second;
+    return &tx_em_it.first->second;
 }
 
-void CcShard::DeleteLockHoldingTx(TxNumber txn, LruEntry *cce_ptr)
+void CcShard::DeleteLockHoldingTx(TxNumber txn,
+                                  LruEntry *cce_ptr,
+                                  NodeGroupId cc_ng_id)
 {
-    auto tx_it = lock_holding_txs_.find(txn);
-    if (tx_it == lock_holding_txs_.end())
+    auto ng_it = lock_holding_txs_.find(cc_ng_id);
+    if (ng_it == lock_holding_txs_.end())
     {
         return;
     }
 
+    auto tx_it = ng_it->second.find(txn);
+    if (tx_it == ng_it->second.end())
+    {
+        return;
+    }
     TxLockInfo &lk_info = tx_it->second;
     lk_info.cce_list_.erase(cce_ptr);
 
     if (lk_info.cce_list_.empty())
     {
-        lock_holding_txs_.erase(tx_it);
+        ng_it->second.erase(tx_it);
     }
 }
 
@@ -369,14 +380,25 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                              uint32_t cc_ng_id,
                              int64_t cc_ng_term)
 {
-    auto tx_it = lock_holding_txs_.find(lock_holding_txn);
-    if (tx_it == lock_holding_txs_.end())
+    auto ng_it = lock_holding_txs_.find(cc_ng_id);
+    if (ng_it == lock_holding_txs_.end())
     {
         return;
     }
-    TxLockInfo &lk_info = tx_it->second;
+    auto tx_it = ng_it->second.find(lock_holding_txn);
+    if (tx_it == ng_it->second.end())
+    {
+        return;
+    }
 
-    using namespace std::chrono_literals;
+    CheckRecoverTx(lock_holding_txn, tx_it->second, cc_ng_id, cc_ng_term);
+}
+
+void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
+                             TxLockInfo &lk_info,
+                             uint32_t cc_ng_id,
+                             int64_t cc_ng_term)
+{
     constexpr uint64_t ts_gap =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::seconds(5))
@@ -423,22 +445,25 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
 void CcShard::ClearTx(TxNumber txn)
 {
-    auto tx_it = lock_holding_txs_.find(txn);
-    if (tx_it == lock_holding_txs_.end())
+    for (auto &ng_pair : lock_holding_txs_)
     {
-        return;
-    }
-
-    TxLockInfo &lk_info = tx_it->second;
-    for (auto &lru_ptr : lk_info.cce_list_)
-    {
-        if (lru_ptr->key_lock_ptr_ != nullptr)
+        auto tx_it = ng_pair.second.find(txn);
+        if (tx_it == ng_pair.second.end())
         {
-            lru_ptr->key_lock_ptr_->ClearTx(txn, this);
-            lru_ptr->RecycleKeyLock();
+            return;
         }
+
+        TxLockInfo &lk_info = tx_it->second;
+        for (auto &lru_ptr : lk_info.cce_list_)
+        {
+            if (lru_ptr->key_lock_ptr_ != nullptr)
+            {
+                lru_ptr->key_lock_ptr_->ClearTx(txn, this);
+                lru_ptr->RecycleKeyLock();
+            }
+        }
+        ng_pair.second.erase(tx_it);
     }
-    lock_holding_txs_.erase(tx_it);
 }
 
 /**

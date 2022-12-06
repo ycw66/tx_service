@@ -170,10 +170,12 @@ public:
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
             acquired_lock =
-                LockHandleForResumedRequest(&req,
-                                            req.TxTerm(),
-                                            floor_cce,
+                LockHandleForResumedRequest(floor_cce,
                                             floor_cce->payload_status_,
+                                            &req,
+                                            req.NodeGroupId(),
+                                            ng_term,
+                                            req.TxTerm(),
                                             cc_op,
                                             req.Isolation(),
                                             req.Protocol());

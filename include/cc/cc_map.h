@@ -190,10 +190,12 @@ protected:
         IsolationLevel iso_level,
         CcProtocol protocol);
 
-    LockType LockHandleForResumedRequest(CcRequestBase *req,
-                                         int64_t tx_term,
-                                         LruEntry *cce,
+    LockType LockHandleForResumedRequest(LruEntry *cce,
                                          RecordStatus cce_payload_status,
+                                         CcRequestBase *req,
+                                         uint32_t ng_id,
+                                         int64_t ng_term,
+                                         int64_t tx_term,
                                          CcOperation cc_op,
                                          IsolationLevel iso_level,
                                          CcProtocol protocol);
@@ -212,8 +214,8 @@ protected:
      * @param tx_number
      * @param lock_type
      */
-    void ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number);
-    void ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number);
+    void ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id);
+    void ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id);
 
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;

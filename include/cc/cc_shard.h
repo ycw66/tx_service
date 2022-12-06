@@ -238,9 +238,17 @@ public:
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
                                     int64_t tx_term,
                                     LruEntry *cce_ptr,
-                                    bool is_key_write_lock);
+                                    bool is_key_write_lock,
+                                    NodeGroupId cc_ng_id);
 
-    void DeleteLockHoldingTx(TxNumber txn, LruEntry *cce_ptr);
+    void DeleteLockHoldingTx(TxNumber txn,
+                             LruEntry *cce_ptr,
+                             NodeGroupId cc_ng_id);
+
+    void DropLockHoldingTxs(NodeGroupId cc_ng_id)
+    {
+        lock_holding_txs_.erase(cc_ng_id);
+    }
 
     /**
      * @brief When a tx fails to acquire a lock, it invokes this method to check
@@ -253,17 +261,30 @@ public:
      * @param cc_ng_term Leader term of the cc node group
      */
     void CheckRecoverTx(TxNumber txn, uint32_t cc_ng_id, int64_t cc_ng_term);
+    void CheckRecoverTx(TxNumber txn,
+                        TxLockInfo &lk_info,
+                        uint32_t cc_ng_id,
+                        int64_t cc_ng_term);
 
     void ClearTx(TxNumber txn);
 
-    uint64_t ActiveTxMinTs()
+    uint64_t ActiveTxMinTs(NodeGroupId cc_ng_id)
     {
         uint64_t min_ts = UINT64_MAX;
-        for (const auto &tx_pair : lock_holding_txs_)
+
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        auto it = lock_holding_txs_.find(cc_ng_id);
+        if (it != lock_holding_txs_.end())
         {
-            if (tx_pair.second.wlock_ts_ != 0)
+            for (auto &tx_pair : it->second)
             {
-                min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
+                if (tx_pair.second.wlock_ts_ != 0)
+                {
+                    min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
+                    // check and recover holding write lock transactions.
+                    CheckRecoverTx(
+                        tx_pair.first, tx_pair.second, cc_ng_id, cc_ng_term);
+                }
             }
         }
 
@@ -291,33 +312,6 @@ public:
             // would be possible to trigger assert(ckpt_ts >= last_ckpt_ts_); if
             // we return max_ts directly.
             min_ts = max_ts - 1;
-        }
-
-        if (lock_holding_txs_.size() > 0)
-        {
-            std::unordered_set<uint32_t> set;
-            set.insert(node_id_);
-            for (auto iter = failover_ccms_.begin();
-                 iter != failover_ccms_.end();
-                 iter++)
-            {
-                for (auto it = iter->second.begin(); it != iter->second.end();
-                     it++)
-                {
-                    set.insert(it->first);
-                }
-            }
-
-            for (uint32_t ng_id : set)
-            {
-                int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-                for (auto iter = lock_holding_txs_.begin();
-                     iter != lock_holding_txs_.end();
-                     iter++)
-                {
-                    CheckRecoverTx(iter->first, ng_id, ng_term);
-                }
-            }
         }
 
         TryResizeLockArray();
@@ -504,6 +498,17 @@ private:
     {
         processor_sleep_.store(false, std::memory_order_release);
     }
+
+    /**
+     * @brief A collection of active tx's that have acquired locks/intentions in
+     * this shard and the tx's information, including when the tx acquires the
+     * latest write lock, the term of the tx node and a list of pointers to the
+     * cc entries containing the tx's locks/intentions.
+     *
+     */
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+        lock_holding_txs_;
+
     // below are all string owners
     std::unordered_map<TableName, CcMap::uptr> native_ccms_;
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CcMap::uptr>>
@@ -543,15 +548,6 @@ private:
 
     // the number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;
-
-    /**
-     * @brief A collection of active tx's that have acquired locks/intentions in
-     * this shard and the tx's information, including when the tx acquires the
-     * first lock, the term of the tx node and a list of pointers to the cc
-     * entries containing the tx's locks/intentions.
-     *
-     */
-    std::unordered_map<TxNumber, TxLockInfo> lock_holding_txs_;
 
     Checkpointer *ckpter_;
 

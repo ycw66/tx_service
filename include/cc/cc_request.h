@@ -1552,12 +1552,13 @@ private:
 struct CkptTsCc : public CcRequestBase
 {
 public:
-    CkptTsCc(size_t shard_cnt)
+    CkptTsCc(size_t shard_cnt, NodeGroupId ng_id)
         : ckpt_ts_(UINT64_MAX),
           mux_(),
           cv_(),
           finish_cnt_(0),
-          shard_cnt_(shard_cnt)
+          shard_cnt_(shard_cnt),
+          cc_ng_id_(ng_id)
     {
         for (size_t i = 0; i < shard_cnt_; i++)
         {
@@ -1573,7 +1574,7 @@ public:
     bool Execute(CcShard &ccs) override
     {
         std::unique_lock<std::mutex> lk(mux_);
-        ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs());
+        ckpt_ts_ = std::min(ckpt_ts_, ccs.ActiveTxMinTs(cc_ng_id_));
         memory_usage_kb_vec_[ccs.LocalCoreId()] = ccs.mem_usage_ / 1000;
 
         assert(finish_cnt_ < shard_cnt_);
@@ -1627,6 +1628,7 @@ private:
     size_t shard_cnt_;
     std::vector<uint64_t> memory_usage_kb_vec_;
     std::vector<uint64_t> log_usage_kb_vec_;
+    NodeGroupId cc_ng_id_;
 };
 
 struct CkptScanCc : public CcRequestBase

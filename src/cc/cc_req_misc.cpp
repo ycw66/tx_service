@@ -111,6 +111,7 @@ void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges,
 
 bool ClearCcNodeGroup::Execute(CcShard &ccs)
 {
+    ccs.DropLockHoldingTxs(cc_ng_id_);
     ccs.DropCcms(cc_ng_id_);
 
     if (cc_ng_id_ == ccs.node_id_)

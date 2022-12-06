@@ -12,13 +12,15 @@ LruEntry::~LruEntry()
         // Deletes key write lock.
         if (key_lock_ptr_->HasWriteLock())
         {
-            ccshard->DeleteLockHoldingTx(key_lock_ptr_->WriteLockTx(), this);
+            ccshard->DeleteLockHoldingTx(
+                key_lock_ptr_->WriteLockTx(), this, parent_map_->cc_ng_id_);
         }
 
         // Deletes key write intent.
         if (key_lock_ptr_->HasWriteIntent())
         {
-            ccshard->DeleteLockHoldingTx(key_lock_ptr_->WriteIntentTx(), this);
+            ccshard->DeleteLockHoldingTx(
+                key_lock_ptr_->WriteIntentTx(), this, parent_map_->cc_ng_id_);
         }
 
         // Deletes key read locks.
@@ -26,12 +28,12 @@ LruEntry::~LruEntry()
             key_lock_ptr_->ReadLocks();
         for (const TxNumber &txn : key_read_locks)
         {
-            ccshard->DeleteLockHoldingTx(txn, this);
+            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
         }
 
         for (const TxNumber &txn : key_lock_ptr_->ReadIntents())
         {
-            ccshard->DeleteLockHoldingTx(txn, this);
+            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
         }
 
         // reset lock entry in ccshard lock array to make it reusable.
@@ -46,13 +48,15 @@ LruEntry::~LruEntry()
         // Deletes gap write lock.
         if (gap_lock_ptr_->HasWriteLock())
         {
-            ccshard->DeleteLockHoldingTx(gap_lock_ptr_->WriteLockTx(), this);
+            ccshard->DeleteLockHoldingTx(
+                gap_lock_ptr_->WriteLockTx(), this, parent_map_->cc_ng_id_);
         }
 
         // Deletes gap write intent.
         if (gap_lock_ptr_->HasWriteIntent())
         {
-            ccshard->DeleteLockHoldingTx(gap_lock_ptr_->WriteIntentTx(), this);
+            ccshard->DeleteLockHoldingTx(
+                gap_lock_ptr_->WriteIntentTx(), this, parent_map_->cc_ng_id_);
         }
 
         // Deletes gap read locks.
@@ -60,12 +64,12 @@ LruEntry::~LruEntry()
             gap_lock_ptr_->ReadLocks();
         for (const TxNumber &txn : gap_read_locks)
         {
-            ccshard->DeleteLockHoldingTx(txn, this);
+            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
         }
 
         for (const TxNumber &txn : gap_lock_ptr_->ReadIntents())
         {
-            ccshard->DeleteLockHoldingTx(txn, this);
+            ccshard->DeleteLockHoldingTx(txn, this, parent_map_->cc_ng_id_);
         }
 
         // reset lock entry in ccshard lock array to make it reusable.

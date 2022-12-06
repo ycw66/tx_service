@@ -154,10 +154,12 @@ public:
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
             acquired_lock =
-                LockHandleForResumedRequest(&req,
-                                            req.TxTerm(),
-                                            cce_ptr,
+                LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
+                                            &req,
+                                            req.NodeGroupId(),
+                                            ng_term,
+                                            req.TxTerm(),
                                             CcOperation::Write,
                                             req.Isolation(),
                                             req.Protocol());
@@ -475,7 +477,7 @@ public:
 
             req.Result()->SetFinished();
             // The insert places a write lock on the prior cc entry's gap.
-            ReleaseCceGapLock(&prior_cce, txn);
+            ReleaseCceGapLock(&prior_cce, txn, req.NodeGroupId());
             return true;
         }
         else
@@ -568,7 +570,7 @@ public:
             }
 
             req.Result()->SetFinished();
-            ReleaseCceKeyLock(&cce, txn);
+            ReleaseCceKeyLock(&cce, txn, cce_addr.NodeGroupId());
             return true;
         }
     }
@@ -624,10 +626,12 @@ public:
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             acquired_lock =
-                LockHandleForResumedRequest(&req,
-                                            req.TxTerm(),
-                                            cce_ptr,
+                LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
+                                            &req,
+                                            ng_id,
+                                            ng_term,
+                                            req.TxTerm(),
                                             req.CcOp(),
                                             req.Isolation(),
                                             req.Protocol());
@@ -988,7 +992,7 @@ public:
             if (req.CommitType() != PostWriteType::PrepareCommit)
             {
                 // The insert places a write lock on the prior cc entry's gap.
-                ReleaseCceGapLock(cce_ptr, txn);
+                ReleaseCceGapLock(cce_ptr, txn, req.NodeGroupId());
             }
 
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
@@ -1049,7 +1053,7 @@ public:
                 {
                     // For prepare commit, the request installs the value,
                     // but does not release the write intent/lock.
-                    ReleaseCceKeyLock(cce_ptr, txn);
+                    ReleaseCceKeyLock(cce_ptr, txn, req.NodeGroupId());
                 }
                 else if (req.CommitType() == PostWriteType::PrepareCommit)
                 {
@@ -1233,8 +1237,8 @@ public:
         // example, select for update would acquire write intent. As a
         // result, we should also release the corresponding lock/intent as
         // well.
-        ReleaseCceKeyLock(&cc_entry, txn);
-        ReleaseCceGapLock(&cc_entry, txn);
+        ReleaseCceKeyLock(&cc_entry, txn, cce_addr.NodeGroupId());
+        ReleaseCceGapLock(&cc_entry, txn, cce_addr.NodeGroupId());
 
         return true;
     }
@@ -1321,10 +1325,12 @@ public:
                 else
                 {
                     acquired_lock =
-                        LockHandleForResumedRequest(&req,
-                                                    req.TxTerm(),
-                                                    cce,
+                        LockHandleForResumedRequest(cce,
                                                     cce->payload_status_,
+                                                    &req,
+                                                    req.TxTerm(),
+                                                    ng_id,
+                                                    ng_term,
                                                     cc_op,
                                                     iso_lvl,
                                                     cc_proto);
@@ -1870,10 +1876,12 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(&req,
-                                        tx_term,
-                                        cce,
+            LockHandleForResumedRequest(cce,
                                         cce->payload_status_,
+                                        &req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
                                         cc_op,
                                         iso_lvl,
                                         cc_proto);
@@ -2102,10 +2110,12 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(&req,
-                                        tx_term,
-                                        prior_cce,
+            LockHandleForResumedRequest(prior_cce,
                                         prior_cce->payload_status_,
+                                        &req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
                                         cc_op,
                                         iso_lvl,
                                         cc_proto);
@@ -2371,10 +2381,12 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(&req,
-                                        tx_term,
-                                        cce,
+            LockHandleForResumedRequest(cce,
                                         cce->payload_status_,
+                                        &req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
                                         cc_op,
                                         iso_lvl,
                                         cc_proto);
@@ -2610,10 +2622,12 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(&req,
-                                        tx_term,
-                                        prior_cce,
+            LockHandleForResumedRequest(prior_cce,
                                         prior_cce->payload_status_,
+                                        &req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
                                         cc_op,
                                         iso_lvl,
                                         cc_proto);
@@ -2850,10 +2864,12 @@ public:
             req.SetCceScanType(ScanType::ScanUnknow, core_id);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(&req,
-                                        tx_term,
-                                        cce,
+            LockHandleForResumedRequest(cce,
                                         cce->payload_status_,
+                                        &req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
                                         cc_op,
                                         iso_lvl,
                                         req.Protocol());
@@ -3406,7 +3422,7 @@ public:
                     // TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
                     TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
-                    ReleaseCceKeyLock(cce, txn);
+                    ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
                 }
             }
         }

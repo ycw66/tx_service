@@ -68,8 +68,11 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
 
         if (lock_type != LockType::NoLock)
         {
-            shard_->UpsertLockHoldingTx(
-                tx_number, tx_term, cce, lock_type == LockType::WriteLock);
+            shard_->UpsertLockHoldingTx(tx_number,
+                                        tx_term,
+                                        cce,
+                                        lock_type == LockType::WriteLock,
+                                        ng_id);
         }
 
         if (cce->key_lock_ptr_ != nullptr &&
@@ -126,10 +129,12 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
     return std::pair<LockType, LockOpStatus>(lock_type, lock_op_status);
 }
 
-LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
-                                            int64_t tx_term,
-                                            LruEntry *cce,
+LockType CcMap::LockHandleForResumedRequest(LruEntry *cce,
                                             RecordStatus cce_payload_status,
+                                            CcRequestBase *req,
+                                            uint32_t ng_id,
+                                            int64_t ng_term,
+                                            int64_t tx_term,
                                             CcOperation cc_op,
                                             IsolationLevel iso_level,
                                             CcProtocol protocol)
@@ -147,13 +152,16 @@ LockType CcMap::LockHandleForResumedRequest(CcRequestBase *req,
         acquired_lock = LockType::NoLock;
         // Here "DeleteLockHoldingTx" is required. For, this may be a retried
         // request and the prior blocked request may has upsert tx's lock info.
-        shard_->DeleteLockHoldingTx(tx_number, cce);
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
     }
     else
     {
         assert(acquired_lock != LockType::NoLock);
-        shard_->UpsertLockHoldingTx(
-            tx_number, tx_term, cce, acquired_lock == LockType::WriteLock);
+        shard_->UpsertLockHoldingTx(tx_number,
+                                    tx_term,
+                                    cce,
+                                    acquired_lock == LockType::WriteLock,
+                                    ng_id);
     }
 
     return acquired_lock;
@@ -231,14 +239,14 @@ void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
     cce->key_lock_ptr_->DowngradeWriteLock(tx_number, shard_);
 }
 
-void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
+void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id)
 {
     if (cce != nullptr && cce->key_lock_ptr_ != nullptr)
     {
         bool is_write_lock = (cce->key_lock_ptr_->HasWriteLock() &&
                               cce->key_lock_ptr_->WriteLockTx() == tx_number);
         cce->key_lock_ptr_->ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce);
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
         if (is_write_lock)
         {
             cce->key_lock_ptr_->SetWLockTs(0);
@@ -247,14 +255,14 @@ void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number)
     }
 }
 
-void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number)
+void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id)
 {
     if (cce != nullptr && cce->gap_lock_ptr_ != nullptr)
     {
         bool is_write_lock = (cce->gap_lock_ptr_->HasWriteLock() &&
                               cce->gap_lock_ptr_->WriteLockTx() == tx_number);
         cce->gap_lock_ptr_->ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce);
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
         if (is_write_lock)
         {
             cce->gap_lock_ptr_->SetWLockTs(0);

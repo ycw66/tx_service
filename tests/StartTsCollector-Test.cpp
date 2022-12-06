@@ -38,6 +38,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
         std::pair<std::string, uint32_t>("core_num", core_num));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("checkpointer_interval", 10));
+    tx_service_conf.insert(std::pair<std::string, uint32_t>(
+        "collect_active_tx_ts_interval_seconds", 2));
 
     uint16_t log_server_port = 8602;
     std::vector<uint16_t> log_instance_ports = ports;
