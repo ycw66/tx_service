@@ -101,9 +101,7 @@ void Checkpointer::Ckpt()
     }
 
     LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
-              << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
-              << " KB"
-              << ". The log usage of node is: " << ckpt_req.GetLogUsage()
+              << ". The ccshard memory usage is: " << ckpt_req.GetMemUsage()
               << "KB.";
 
     std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
