@@ -1195,7 +1195,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             for (size_t nid = 0; nid < upload_cnt_; ++nid)
             {
                 CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[nid];
-                if (hd_result.ErrorCode() == -1)
+                if (hd_result.IsError())
                 {
                     if (retry_num_ == 0)
                     {
