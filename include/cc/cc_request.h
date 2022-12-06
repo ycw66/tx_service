@@ -1560,6 +1560,11 @@ public:
           shard_cnt_(shard_cnt),
           cc_ng_id_(ng_id)
     {
+        for (size_t i = 0; i < shard_cnt_; i++)
+        {
+            memory_usage_kb_vec_.emplace_back(0);
+            log_usage_kb_vec_.emplace_back(0);
+        }
     }
 
     CkptTsCc() = delete;
