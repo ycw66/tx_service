@@ -79,7 +79,8 @@ struct FetchTableRangesCc : public FetchCc
 public:
     FetchTableRangesCc(const TableName &range_table_name,
                        const Schema *key_schema,
-                       CcShard &ccs);
+                       CcShard &ccs,
+                       NodeGroupId ng_id);
 
     bool Execute(CcShard &ccs) override;
     void SetFinish(std::vector<InitRangeEntry> &&ranges, int err);
@@ -89,6 +90,7 @@ public:
     const Schema *key_schema_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
+    NodeGroupId ng_id_;
 };
 
 /**

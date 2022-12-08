@@ -1,8 +1,12 @@
 #pragma once
 
+#include <algorithm>
+#include <map>
 #include <memory>  // make_shared
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "../log_service/include/log_type.h"
 #include "../log_service/proto/raft_log.pb.h"
@@ -74,14 +78,24 @@ public:
         }
         else
         {
-            assert(req.KeyStr() != nullptr);
-
-            std::unique_ptr<CatalogKey> decoded_key =
-                std::make_unique<CatalogKey>();
-            size_t offset = 0;
-            decoded_key->Deserialize(req.KeyStr()->data(), offset, nullptr);
-            table_key = decoded_key.get();
-            req.SetDecodedKey(std::move(decoded_key));
+            switch (*req.KeyStrType())
+            {
+            case KeyType::NegativeInf:
+            case KeyType::PositiveInf:
+                // For catalog, key type can't be Inf
+                assert(false);
+                break;
+            case KeyType::Normal:
+                const std::string *key_str = req.KeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<CatalogKey> decoded_key =
+                    std::make_unique<CatalogKey>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                table_key = decoded_key.get();
+                req.SetDecodedKey(std::move(decoded_key));
+                break;
+            }
         }
 
         if (req.CommitTs() == 0)
@@ -285,41 +299,35 @@ public:
                     std::vector<TableName> old_index_names =
                         old_schema->IndexNames();
 
-                    bool found = false;
                     for (const TableName &old_index_name : old_index_names)
                     {
-                        found = false;
-                        for (const TableName &new_index_name : new_index_names)
+                        if (std::find(new_index_names.begin(),
+                                      new_index_names.end(),
+                                      old_index_name) != new_index_names.end())
                         {
-                            if (!new_index_name.String().compare(
-                                    old_index_name.String()))
+                            // Update current sk cc map using new schema.
+                            shard_->CreateOrUpdateSkCcMap(
+                                old_index_name,
+                                new_schema,
+                                req.NodeGroupId(),
+                                catalog_entry->DirtyVersion(),
+                                false);
+#ifdef RANGE_PARTITION_ENABLED
+                            // Update current sk range table if exist.
+                            std::map<int32_t, TableRangeEntryWithShade>
+                                *ranges = shard_->GetTableRangesForATable(
+                                    old_index_name, req.NodeGroupId());
+                            if (ranges != nullptr)
                             {
-                                found = true;
-                                // Update current sk cc map using new schema.
-                                shard_->CreateOrUpdateSkCcMap(
+                                shard_->CreateOrUpdateRangeCcMap(
                                     old_index_name,
                                     new_schema,
                                     req.NodeGroupId(),
-                                    catalog_entry->DirtyVersion(),
-                                    false);
-#ifdef RANGE_PARTITION_ENABLED
-                                // Update current sk range table if exist.
-                                std::map<int32_t, TableRangeEntryWithShade> *
-                                    ranges = shard_->GetAllTableRangesForATable(
-                                        old_index_name);
-                                if (ranges != nullptr)
-                                {
-                                    shard_->CreateOrUpdateRangeCcMap(
-                                        old_index_name,
-                                        new_schema,
-                                        req.NodeGroupId(),
-                                        catalog_entry->DirtyVersion());
-                                }
-#endif
-                                break;
+                                    catalog_entry->DirtyVersion());
                             }
+#endif
                         }
-                        if (!found)
+                        else
                         {
                             // Remove sk cc map for dropped index.
                             shard_->DropCcm(old_index_name, req.NodeGroupId());
@@ -423,7 +431,8 @@ public:
 
                 TableName range_table_name(table_name_view,
                                            TableType::RangePartition);
-                shard_->InitTableRanges(range_table_name, range_init_vec);
+                shard_->InitTableRanges(
+                    range_table_name, range_init_vec, req.NodeGroupId());
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
                 for (const TableName &index_name : index_names)
@@ -439,7 +448,33 @@ public:
                     range_init_vec.emplace_back(
                         nullptr, init_partition_id, req.CommitTs());
                     shard_->InitTableRanges(index_range_table_name,
-                                            range_init_vec);
+                                            range_init_vec,
+                                            req.NodeGroupId());
+                }
+            }
+            else if (old_schema != nullptr && new_schema != nullptr)
+            {
+                if (req.OpType() == OperationType::AddIndex ||
+                    req.OpType() == OperationType::DropIndex)
+                {
+                    std::vector<TableName> new_index_names =
+                        new_schema->IndexNames();
+                    std::vector<TableName> old_index_names =
+                        old_schema->IndexNames();
+                    for (const TableName &old_index_name : old_index_names)
+                    {
+                        // Drop old index range table if not exist any more
+                        if (std::find(new_index_names.begin(),
+                                      new_index_names.end(),
+                                      old_index_name) == new_index_names.end())
+                        {
+                            TableName old_index_range_table_name{
+                                old_index_name.StringView(),
+                                TableType::RangePartition};
+                            shard_->CleanTableRange(old_index_range_table_name,
+                                                    req.NodeGroupId());
+                        }
+                    }
                 }
             }
 #endif
@@ -463,99 +498,45 @@ public:
                     .append(std::to_string(req.TxTerm()));
             });
         TX_TRACE_DUMP(&req);
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+
+        assert(req.IsLocal());
+
+        uint32_t ng_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        if (req.IsInRecovering())
+        {
+            ng_term = ng_term > 0
+                          ? ng_term
+                          : Sharder::Instance().CandidateLeaderTerm(ng_id);
+        }
+
         CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_ReadCc", {
             LOG(INFO) << "FaultInject  term_CatalogCcMap_Execute_ReadCc";
             ng_term = -1;
             FaultInject::Instance().InjectFault(
                 "term_CatalogCcMap_Execute_ReadCc", "remove");
         });
+
         if (ng_term < 0)
         {
             req.Result()->SetError(-1);
             return true;
         }
 
-        const CcEntryAddr &cce_addr = req.Result()->Value().cce_addr_;
-        const CatalogKey *table_key = nullptr;
-        CatalogRecord *schema_rec = static_cast<CatalogRecord *>(req.Record());
+        const CatalogKey *table_key =
+            static_cast<const CatalogKey *>(req.Key());
+        CcEntry<CatalogKey, CatalogRecord> *cce = FindEmplace(*table_key);
 
-        if (cce_addr.CcePtr() != 0)
-        {
-            const CcEntry<CatalogKey, CatalogRecord> *cce =
-                reinterpret_cast<const CcEntry<CatalogKey, CatalogRecord> *>(
-                    cce_addr.CcePtr());
-            table_key = cce->key_;
-        }
-        else
-        {
-            // A read request toward a table's catalog is always dispatched to
-            // the local shard to which the sending tx is bound.
-            assert(req.Key() != nullptr);
-            table_key = static_cast<const CatalogKey *>(req.Key());
-        }
-
-        if (req.Type() == ReadType::OutsideNormal)
+        if (cce->payload_status_ == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
-            if (catalog_entry == nullptr)
-            {
-                assert(schema_rec->SchemaImage().size() > 0);
-
-                auto [success, new_catalog_entry] =
-                    shard_->CreateCatalog(table_key->Name(),
-                                          req.NodeGroupId(),
-                                          schema_rec->SchemaImage(),
-                                          schema_rec->StatisticsBinary(),
-                                          req.ReadTimestamp());
-                if (!success)
-                {
-                    LOG(INFO) << "create catalog entry fails, table name: "
-                              << table_key->Name().StringView()
-                              << ", catalog entry of the same or higher "
-                                 "version exists";
-                }
-                catalog_entry = new_catalog_entry;
-            }
-            schema_rec->Set(catalog_entry->schema_.get(),
-                            catalog_entry->dirty_schema_.get(),
-                            catalog_entry->Version());
-
-            const TableSchema *curr_schema = catalog_entry->schema_.get();
-            if (curr_schema != nullptr)
-            {
-                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
-                                              curr_schema,
-                                              req.NodeGroupId(),
-                                              catalog_entry->Version());
-
-                std::vector<TableName> index_names = curr_schema->IndexNames();
-                for (const TableName &index_name : index_names)
-                {
-                    shard_->CreateOrUpdateSkCcMap(index_name,
-                                                  curr_schema,
-                                                  req.NodeGroupId(),
-                                                  catalog_entry->Version());
-                }
-            }
-        }
-
-        bool ret = TemplateCcMap::Execute(req);
-
-        ReadKeyResult &read_result = req.Result()->Value();
-        if (ret && req.Type() == ReadType::Inside &&
-            read_result.rec_status_ == RecordStatus::Unknown)
-        {
-            const CatalogEntry *catalog_entry =
-                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-
-            // If the read toward the catalog cc entry acquires the read lock
-            // but the cc entry does not contain the value, checks if the
-            // catalog has been constructed at this node. If so, turns this
-            // request into a read-outside request that installs the value in
-            // the cc entry.
+            // If the read toward the catalog cc entry acquires the read
+            // lock but the cc entry does not contain the value, checks if
+            // the catalog has been constructed at this node. If so, turns
+            // this request into a read-outside request that installs the
+            // value in the cc entry.
             if (catalog_entry != nullptr)
             {
                 if (catalog_entry->schema_ != nullptr)
@@ -576,37 +557,29 @@ public:
                             catalog_entry->Version());
                     }
 
-                    req.SetReadType(ReadType::OutsideNormal);
-                    // the catalog ccentry's commit ts should equals to
-                    // catalog_entry version. since we convert read type from
-                    // ReadInside to OutsideNormal, the old ReadInside
-                    // ReadTimestamp is transaction start_ts, which cannot be
-                    // used as ccentry commit_ts.
-                    req.SetReadTimestamp(catalog_entry->Version());
-                    read_result.rec_status_ = RecordStatus::Normal;
+                    // upload catalog record
+                    cce->payload_ = std::make_unique<CatalogRecord>();
+                    cce->payload_->Set(catalog_entry->schema_.get(),
+                                       catalog_entry->dirty_schema_.get(),
+                                       catalog_entry->Version());
+                    cce->payload_status_ = RecordStatus::Normal;
+                    cce->commit_ts_ = catalog_entry->Version();
                 }
                 else
                 {
-                    req.SetReadType(ReadType::OutsideDeleted);
-                    // when we convert read type from ReadInside to
-                    // OutsideDeleted, we also need to use the catalog_entry
-                    // version (the timestamp when it is deleted) to replace
-                    // transaction start_ts.
-                    req.SetReadTimestamp(catalog_entry->Version());
-                    read_result.rec_status_ = RecordStatus::Deleted;
+                    cce->payload_status_ = RecordStatus::Deleted;
+                    cce->commit_ts_ = catalog_entry->Version();
                 }
-
-                schema_rec->Set(catalog_entry->schema_.get(),
-                                catalog_entry->dirty_schema_.get(),
-                                catalog_entry->Version());
-                read_result.ts_ = catalog_entry->Version();
-
-                TemplateCcMap::Execute(req);
-                req.SetReadType(ReadType::Inside);
+            }
+            else
+            {
+                shard_->FetchCatalog(
+                    table_key->Name(), req.NodeGroupId(), &req);
+                return false;
             }
         }
 
-        return ret;
+        return TemplateCcMap::Execute(req);
     }
 
     bool Execute(ReplayLogCc &req) override
@@ -720,8 +693,7 @@ public:
         }
 
         CatalogKey table_key(table_name);
-        CcEntry<CatalogKey, CatalogRecord> *cce =
-            FindEmplace(table_key, req.CommitTs());
+        CcEntry<CatalogKey, CatalogRecord> *cce = FindEmplace(table_key);
 
         if (cce == nullptr)
         {

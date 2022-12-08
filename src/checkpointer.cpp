@@ -430,10 +430,7 @@ void Checkpointer::Run()
                 [this] { return status_ != Status::Active || request_ckpt_; });
         }
 
-        CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
-            LOG(INFO) << "FaultInject  checkpointer_skip_ckpt";
-            continue;
-        });
+        CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", { continue; });
 
         lk.unlock();
         Ckpt();
@@ -568,7 +565,8 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                 }
 
                 // The current ckpt key falls into a new range. Finds the range.
-                curr_range = local_shards_.FindRange(table_name, ckpt_key);
+                curr_range = local_shards_.FindRange(
+                    table_name, node_group_id, ckpt_key);
                 if (curr_range == nullptr)
                 {
                     LOG(ERROR)

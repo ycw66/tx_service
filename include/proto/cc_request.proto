@@ -154,11 +154,16 @@ message AcquireAllRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
 	CcTableType table_type = 3;
-	bytes key = 4;
-	uint32 node_group_id = 5;
-	bool insert = 6;
-	CcProtocolType protocol = 7;
-	CcOperationType cc_op = 8;
+  oneof acq_all_key
+  {
+	  bytes key = 4;
+    bool neg_inf = 5;
+    bool pos_inf = 6;
+  }
+	uint32 node_group_id = 7;
+	bool insert = 8;
+	CcProtocolType protocol = 9;
+	CcOperationType cc_op = 10;
 }
 
 message AcquireAllResponse {
@@ -252,11 +257,16 @@ message PostWriteAllRequest {
 	string table_name_str = 2;
 	CcTableType table_type = 3;
 	uint32 node_group_id = 4;
-	bytes key = 5;
-	uint64 commit_ts = 6;
-	bytes record = 7;
-	uint32 operation_type = 8;
-	CommitType commit_type = 9;
+  oneof post_write_key
+  {
+	  bytes key = 5;
+    bool neg_inf = 6;
+    bool pos_inf = 7;
+  }
+	uint64 commit_ts = 8;
+	bytes record = 9;
+	uint32 operation_type = 10;
+	CommitType commit_type = 11;
 }
 
 message ScanTuple_msg {

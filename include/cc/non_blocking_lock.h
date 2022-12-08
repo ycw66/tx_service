@@ -2,6 +2,7 @@
 
 #include <butil/logging.h>
 
+#include <string>
 #include <unordered_set>
 #include <utility>
 
@@ -190,6 +191,43 @@ public:
         mem_size_ += sizeof(wlock_ts_);
 
         return mem_size_;
+    }
+
+    std::string DebugInfo()
+    {
+        std::string debug_string = "read_intentions: ";
+        for (auto it = read_intentions_.begin(); it != read_intentions_.end();
+             it++)
+        {
+            debug_string.append(std::to_string(*it));
+        }
+
+        debug_string.append(" ,read_locks: ");
+        for (auto it = read_locks_.begin(); it != read_locks_.end(); it++)
+        {
+            debug_string.append(std::to_string(*it));
+            debug_string.append(",");
+        }
+
+        debug_string.append(" ,write_lock: ");
+        if (!is_write_lock_empty_)
+        {
+            debug_string.append(std::to_string(write_lock_tx_));
+            debug_string.append(",");
+        }
+        debug_string.append(" ,is_write_lock_empty_ ");
+        debug_string.append(std::to_string(is_write_lock_empty_));
+
+        debug_string.append(" ,write_intent: ");
+        if (!is_write_intent_empty_)
+        {
+            debug_string.append(std::to_string(write_intent_tx_));
+        }
+
+        debug_string.append(" ,is_write_intent_empty_: ");
+        debug_string.append(std::to_string(is_write_intent_empty_));
+
+        return debug_string;
     }
 
 private:

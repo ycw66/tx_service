@@ -151,7 +151,8 @@ public:
         uint32_t new_partition_id,
         uint64_t txn,
         int64_t tx_term,
-        uint64_t commit_ts);
+        uint64_t commit_ts,
+        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry);
 
     std::string GetErrorMessage() const;
 
@@ -259,6 +260,9 @@ private:
 
     void Process(DsSplitRangeOp &ds_split_range_op);
     void PostProcess(DsSplitRangeOp &ds_split_range_op);
+
+    void Process(PostReadOperation &post_read_operation);
+    void PostProcess(PostReadOperation &post_read_operation);
 
     void Process(NoOp &no_op);
     void PostProcess(NoOp &no_op);
@@ -456,13 +460,10 @@ private:
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;
     friend struct DsSplitRangeOp;
-    friend struct DsCopyRangeDataOp;
-    friend struct DsFindRangeMedianKeyOp;
-    friend struct DsDeleteOutOfRangeDataOp;
-    friend struct DsUpsertRangeOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct DsOp;
+    friend struct PostReadOperation;
     friend class TxProcessor;
 };
 }  // namespace txservice

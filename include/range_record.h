@@ -1,12 +1,17 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "butil/logging.h"
 #include "range_slice.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "tx_serialize.h"
 
 namespace txservice
 {
@@ -72,14 +77,6 @@ struct TableRangeEntry
     bool IsDirty()
     {
         return (new_key_ != nullptr) && (new_partition_id_ != 0);
-    }
-
-    void Serialize(std::string &str)
-    {
-    }
-
-    void Deserialize(const char *buf, size_t &offset)
-    {
     }
 
     // TODO(Xiao Ji): Replace unique_ptr with shared_ptr, so we can make sure
@@ -192,7 +189,8 @@ struct RangeRecord : public TxRecord
 {
 public:
     RangeRecord() = default;
-    RangeRecord(const RangeRecord &rhs) : range_entry_(rhs.range_entry_)
+    RangeRecord(const RangeRecord &rhs)
+        : range_entry_(rhs.range_entry_), end_key_(rhs.end_key_)
     {
     }
 
@@ -200,14 +198,19 @@ public:
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {
+        assert(false);
     }
 
     void Serialize(std::string &str) const override
     {
+        range_entry_->new_key_->Serialize(str);
+        serialize_to_str(&range_entry_->partition_id_, str);
+        serialize_to_str(&range_entry_->new_partition_id_, str);
     }
 
     void Deserialize(const char *buf, size_t &offset) override
     {
+        assert(false);
     }
 
     TxRecord::Uptr Clone() const override

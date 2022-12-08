@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <shared_mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catalog_factory.h"

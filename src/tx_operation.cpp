@@ -248,6 +248,32 @@ void ReadOperation::Forward(TransactionExecution *txm)
     // tx to cancel if the remote node is unresponsive.
 }
 
+PostReadOperation::PostReadOperation(TransactionExecution *txm)
+    : hd_result_(txm)
+{
+}
+
+void PostReadOperation::Reset(
+    std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry)
+{
+    cce_entry_ = cce_entry;
+    hd_result_.Reset();
+}
+
+void PostReadOperation::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+}
+
 AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
@@ -1214,6 +1240,10 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         hd_result.Value();
                     const CcEntryAddr &cce_addr =
                         acquire_all_result.local_cce_addr_;
+                    DLOG(INFO)
+                        << "rwset.DedupRead tx_numer: " << txm->TxNumber()
+                        << " ,cce_addr: " << std::hex << cce_addr.CcePtr()
+                        << " ,ErrorCode: " << (int32_t) hd_result.ErrorCode();
                     uint64_t read_version = txm->rw_set_.DedupRead(cce_addr);
                     if (read_version > 0 &&
                         read_version != acquire_all_result.commit_ts_)
@@ -2054,8 +2084,14 @@ void DsOp<ResultType>::Forward(TransactionExecution *txm)
                     .append(",\"term\":")
                     .append(std::to_string(txm->TxTerm()));
             });
-        hd_result_.ForceError();
-        txm->PostProcess(*this);
+        // Not necessary to have timeout for ds operation, you don't estimate
+        // the proper op time out secs, and the dsop will finished anyway
+
+        // bool succ = hd_result_.ForceError();
+        // if (succ)
+        //{
+        // txm->PostProcess(*this);
+        //}
     }
 }
 
@@ -2104,7 +2140,8 @@ DsSplitRangeOp::DsSplitRangeOp(
     const TableSchema *table_schema,
     const TxKey *range_key,
     std::unique_ptr<RangeRecord> splitting_range_record,
-    TransactionExecution *txm)
+    TransactionExecution *txm,
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
     : CompositeTransactionOperation(),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
@@ -2117,6 +2154,8 @@ DsSplitRangeOp::DsSplitRangeOp(
       old_range_record_(std::move(splitting_range_record)),
       upload_range_entry_(nullptr),
       upload_range_record_(nullptr),
+      new_partition_id_{-1},
+      catalog_cc_entry_(std::move(catalog_cc_entry)),
       acquire_all_intent_for_update_old_range_op_(txm),
       ds_find_median_key_for_old_range_op_(txm),
       acquire_all_lock_for_update_old_range_op_(txm),
@@ -2130,7 +2169,8 @@ DsSplitRangeOp::DsSplitRangeOp(
       ds_upsert_new_range_op_(txm),
       delete_out_of_old_range_data_log_op_(txm),
       delete_out_of_old_range_data_op_(txm),
-      clean_log_op_(txm)
+      clean_log_op_(txm),
+      catalog_post_read_op_(txm)
 {
     DLOG(INFO) << "DsSplitRangeOp table_name_: " << table_name_.String();
     DLOG(INFO) << "DsSplitRangeOp range_table_name_: "
@@ -2143,10 +2183,11 @@ DsSplitRangeOp::DsSplitRangeOp(
     // prepare acquire_all_intent_for_update_old_range_op_
     acquire_all_intent_for_update_old_range_op_.table_name_ =
         &range_table_name_;
+    DLOG(INFO) << "range_key: " << std::to_string((uint8_t) range_key_->Type());
     acquire_all_intent_for_update_old_range_op_.key_ = range_key_;
     acquire_all_intent_for_update_old_range_op_.cc_op_ =
         CcOperation::ReadForWrite;
-    acquire_all_intent_for_update_old_range_op_.protocol_ = CcProtocol::Locking;
+    acquire_all_intent_for_update_old_range_op_.protocol_ = CcProtocol::OccRead;
 
     // prepare acquire_all_lock_for_update_old_range_op_
     acquire_all_lock_for_update_old_range_op_.table_name_ = &range_table_name_;
@@ -2282,6 +2323,17 @@ void DsSplitRangeOp::ForceToFinish(TransactionExecution *txm)
     Forward(txm);
 }
 
+void DsSplitRangeOp::PrepareUploadRangeRecord()
+{
+    upload_range_entry_ = old_range_record_->RangeEntry()->Clone();
+    upload_range_entry_->new_key_ =
+        new_range_key_ != nullptr ? new_range_key_->Clone() : nullptr;
+    upload_range_entry_->new_partition_id_ = new_partition_id_;
+
+    upload_range_record_ = std::make_unique<RangeRecord>();
+    upload_range_record_->range_entry_ = upload_range_entry_.get();
+}
+
 void DsSplitRangeOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
@@ -2301,6 +2353,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
 
         ACTION_FAULT_INJECTOR("af_split_range_acquire_write_intent");
 
+        DLOG(INFO) << "acquire_all_intent_for_update_old_range_op_";
         ForwardToSubOperation(txm,
                               &acquire_all_intent_for_update_old_range_op_);
     }
@@ -2316,6 +2369,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             DLOG(ERROR) << "DsSplitRangeOp failed: "
                            "SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL";
             txm->MarkFailed();
+            PrepareUploadRangeRecord();
+            post_write_all_for_dirty_old_range_op_.rec_ =
+                upload_range_record_.get();
             ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
         }
         else
@@ -2399,6 +2455,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         {
             DLOG(ERROR) << "DsSplitRangeOp failed: DATA_STORE_READ_ERR";
             txm->MarkFailed();
+            PrepareUploadRangeRecord();
+            post_write_all_for_dirty_old_range_op_.rec_ =
+                upload_range_record_.get();
             ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
         }
         else
@@ -2436,6 +2495,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             DLOG(ERROR)
                 << "DsSplitRangeOp failed: SPLIT_RANGE_ACQUIRE_WRITE_LOCK_FAIL";
             txm->MarkFailed();
+            PrepareUploadRangeRecord();
+            post_write_all_for_dirty_old_range_op_.rec_ =
+                upload_range_record_.get();
             ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
         }
         else
@@ -2469,8 +2531,35 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         {
             DLOG(ERROR) << "DsSplitRangeOp failed: "
                            "SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL";
-            txm->MarkFailed();
-            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
+            int8_t error_code =
+                prepare_log_for_update_old_range_op_.hd_result_.ErrorCode();
+            if (error_code == (int8_t) HandlerResultErrorType::Unknown)
+            {
+                // prepare log result unknown, keep retrying until getting a
+                // clear response, either success or failure, or the coordinator
+                // itself is no longer leader
+                if (!CheckLeaderTerm(
+                        txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+                {
+                    uint32_t node_group_id = txm->TxCcNodeId();
+                    Sharder::Instance().UnpinNodeGroupData(node_group_id);
+                    ForceToFinish(txm);
+                }
+                else
+                {
+                    RetrySubOperation(txm,
+                                      &prepare_log_for_update_old_range_op_);
+                }
+            }
+            else
+            {
+                txm->MarkFailed();
+                PrepareUploadRangeRecord();
+                post_write_all_for_dirty_old_range_op_.rec_ =
+                    upload_range_record_.get();
+                ForwardToSubOperation(txm,
+                                      &post_write_all_for_dirty_old_range_op_);
+            }
         }
         else
         {
@@ -2487,10 +2576,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
 
                 // Going to update the old range with new key and new partition
                 // id as the splitting key and the old range became dirty
-                upload_range_entry_->new_key_ = new_range_key_->Clone();
-                upload_range_entry_->new_partition_id_ = new_partition_id_;
-
-                upload_range_record_->range_entry_ = upload_range_entry_.get();
+                DLOG(INFO) << "post_all_lock_for_update_old_range_op_";
+                PrepareUploadRangeRecord();
                 post_all_lock_for_update_old_range_op_.rec_ =
                     upload_range_record_.get();
                 ForwardToSubOperation(txm,
@@ -2537,6 +2624,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                           ds_copy_old_range_data_finished_log_op_,
                           TxLogType::DATA,
                           ::txlog::SplitRangeOpMessage::CopingOldRangeData);
+                DLOG(INFO) << "ds_copy_old_range_data_finished_log_op_";
                 ForwardToSubOperation(txm,
                                       &ds_copy_old_range_data_finished_log_op_);
             }
@@ -2735,6 +2823,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
 
                 // Restore the dirty range record to the old one,
                 // and fork the new range
+                PrepareUploadRangeRecord();
                 post_write_all_for_dirty_old_range_op_.rec_ =
                     upload_range_record_.get();
                 ForwardToSubOperation(txm,
@@ -2752,6 +2841,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
             if (CheckLeaderTerm(
                     txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
             {
+                PrepareUploadRangeRecord();
+                post_write_all_for_dirty_old_range_op_.rec_ =
+                    upload_range_record_.get();
                 RetrySubOperation(txm, &post_write_all_for_dirty_old_range_op_);
             }
             else
@@ -2833,6 +2925,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                             });
                     };
 
+                    DLOG(INFO) << "ds_upsert_new_range_op_";
                     ForwardToSubOperation(txm, &ds_upsert_new_range_op_);
                 }
             }
@@ -2874,6 +2967,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                           delete_out_of_old_range_data_log_op_,
                           TxLogType::DATA,
                           ::txlog::SplitRangeOpMessage::DeletingOldRangeData);
+                DLOG(INFO) << "delete_out_of_old_range_data_log_op_";
                 ForwardToSubOperation(txm,
                                       &delete_out_of_old_range_data_log_op_);
             }
@@ -2964,6 +3058,49 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                     txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
             {
                 RetrySubOperation(txm, &delete_out_of_old_range_data_op_);
+            }
+            else
+            {
+                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
+                               "TRANSACTION_NODE_NOT_LEADER";
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            if (!CheckLeaderTerm(
+                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+            {
+                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
+                               "TRANSACTION_NODE_NOT_LEADER";
+                ForceToFinish(txm);
+            }
+            else if (txm->tx_status_ == TxnStatus::Recovering)
+            {
+                assert(catalog_cc_entry_ != std::nullopt);
+                catalog_post_read_op_.Reset(std::make_pair(
+                    &catalog_cc_entry_->first, &catalog_cc_entry_->second));
+                ForwardToSubOperation(txm, &catalog_post_read_op_);
+            }
+            else
+            {
+                ACTION_FAULT_INJECTOR("af_clean_log");
+
+                FillTxLogForCleanLog(txm);
+                ForwardToSubOperation(txm, &clean_log_op_);
+            }
+        }
+    }
+    else if (op_ == &catalog_post_read_op_)
+    {
+        if (FAULT_INJECTOR_CONDITION_WRAP(
+                "cw_catalog_post_read_op",
+                catalog_post_read_op_.hd_result_.IsError()))
+        {
+            if (CheckLeaderTerm(
+                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+            {
+                RetrySubOperation(txm, &catalog_post_read_op_);
             }
             else
             {

@@ -1048,7 +1048,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::CcEntryAddr *r)
     {
         return outs << "{}";
     }
-    outs << "{cce_ptr_:" << r->CcePtr() << ",insert_ptr_:" << r->InsertPtr()
+    outs << "{cce_ptr_:" << FMT_POINTER_TO_UINT64T(r->CcePtr())
+         << ",insert_ptr_:" << r->InsertPtr()
          << ",node_group_id_:" << r->NodeGroupId() << ",term_:" << r->Term()
          << "}";
     return outs;
@@ -1059,7 +1060,8 @@ std::ostream &operator<<(std::ostream &outs, const txservice::CcEntryAddr *r)
     {
         return outs << "{}";
     }
-    outs << "{cce_ptr_:" << r->CcePtr() << ",insert_ptr_:" << r->InsertPtr()
+    outs << "{cce_ptr_:" << FMT_POINTER_TO_UINT64T(r->CcePtr())
+         << ",insert_ptr_:" << r->InsertPtr()
          << ",node_group_id_:" << r->NodeGroupId() << ",term_:" << r->Term()
          << "}";
     return outs;
@@ -1534,7 +1536,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireCc *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr()) << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
@@ -1554,7 +1556,7 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->Ts()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
 };
@@ -1573,8 +1575,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::AcquireAllCc *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"cc_op_\":\"" << r->CcOp()
-         << "\""
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr())
+         << ",\"cc_op_\":\"" << r->CcOp() << "\""
          << "}";
     return outs;
 };
@@ -1594,8 +1596,8 @@ std::ostream &operator<<(std::ostream &outs,
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm()
          << ",\"is_insert_\":" << r->IsInsert()
-         << ",\"cce_ptr_\":" << r->CcePtr() << ",\"cc_op_\":\"" << r->CcOp()
-         << "\""
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr())
+         << ",\"cc_op_\":\"" << r->CcOp() << "\""
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
 };
@@ -1613,8 +1615,8 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteCc *r)
          << ",\"commit_ts_\":" << r->CommitTs()
          << ",\"payload_\":" << FMT_POINTER_TO_UINT64T(r->Payload())
          << ",\"payload_str_\":" << FMT_POINTER_TO_UINT64T(r->PayloadStr())
-         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"operation_type_\":" << r->GetOperationType() << "}";
+         << ",\"operation_type_\":" << r->GetOperationType() << "}"
+         << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result()) << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
@@ -1726,15 +1728,19 @@ std::ostream &operator<<(std::ostream &outs, txservice::ReadCc *r)
     outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r)
+         << "\""
+         //<< ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_\":"
+         << (r->Key() != nullptr ? r->Key()->ToString() : "")
+         //<< ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"key_str_\":" << (r->KeyBlob() != nullptr ? *r->KeyBlob() : "")
          << ",\"key_shard_code\":" << r->KeyShardCode()
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
          << ",\"type_\":\"" << r->Type() << "\""
          << ",\"is_for_write_\":\"" << r->IsForWrite() << "\""
-         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr()) << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs, txservice::remote::RemoteRead *r)
@@ -1746,15 +1752,19 @@ std::ostream &operator<<(std::ostream &outs, txservice::remote::RemoteRead *r)
     outs << "{\"tx_number_\":" << r->Txn() << "\"isolation_level\":\""
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
-         << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
-         << ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"table_name_\":\"" << GET_TABLE_NAME(r)
+         << "\""
+         //<< ",\"key_\":" << FMT_POINTER_TO_UINT64T(r->Key())
+         << ",\"key_\":"
+         << (r->Key() != nullptr ? r->Key()->ToString() : "")
+         //<< ",\"key_str_\":" << FMT_POINTER_TO_UINT64T(r->KeyBlob())
+         << ",\"key_str_\":" << (r->KeyBlob() != nullptr ? *r->KeyBlob() : "")
          << ",\"key_shard_code\":" << r->KeyShardCode()
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term\":" << r->TxTerm() << ",\"ts_\":" << r->ReadTimestamp()
          << ",\"type_\":\"" << r->Type() << "\""
          << ",\"is_for_write_\":\"" << r->IsForWrite() << "\""
-         << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
 };
@@ -1782,8 +1792,11 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenBatchCc *r)
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
          << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"index_type_\":\"" << r->index_type_ << "\""
-         << ",\"start_key_\":" << FMT_POINTER_TO_UINT64T(r->start_key_)
+         << ",\"index_type_\":\"" << r->index_type_
+         << "\""
+         //<< ",\"start_key_\":" << FMT_POINTER_TO_UINT64T(r->start_key_)
+         << ",\"start_key_\":"
+         << (r->start_key_ != nullptr ? r->start_key_->ToString() : "")
          << ",\"inclusive_\":" << r->inclusive_ << ",\"direct_\":\""
          << r->direct_ << "\""
          << ",\"ts_\":" << r->ts_
@@ -1793,7 +1806,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanOpenBatchCc *r)
          << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
          << ",\"is_include_floor_cce_\":" << r->is_include_floor_cce_
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
-         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr()) << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
@@ -1807,7 +1820,8 @@ std::ostream &operator<<(std::ostream &outs,
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
          << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr(0)
+         << ",\"tx_term\":" << r->TxTerm()
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr(0))
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;
@@ -1827,7 +1841,7 @@ std::ostream &operator<<(std::ostream &outs, txservice::ScanNextBatchCc *r)
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"tx_term_\":" << r->tx_term_
          << ",\"is_ckpt_delta_\":" << r->is_ckpt_delta_
-         << ",\"cce_ptr_\":" << r->CcePtr() << "}";
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr()) << "}";
     return outs;
 };
 std::ostream &operator<<(std::ostream &outs,
@@ -1841,7 +1855,8 @@ std::ostream &operator<<(std::ostream &outs,
          << r->Isolation() << "\""
          << ",\"proto_\":\"" << r->Protocol() << "\""
          << ",\"table_name_\":\"" << GET_TABLE_NAME(r) << "\""
-         << ",\"tx_term\":" << r->TxTerm() << ",\"cce_ptr_\":" << r->CcePtr()
+         << ",\"tx_term\":" << r->TxTerm()
+         << ",\"cce_ptr_\":" << FMT_POINTER_TO_UINT64T(r->CcePtr())
          << ",\"res_\":" << FMT_POINTER_TO_UINT64T(r->Result())
          << ",\"handler_addr\":" << fmt_hex(r->handler_addr()) << "}";
     return outs;

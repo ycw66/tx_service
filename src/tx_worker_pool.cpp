@@ -46,28 +46,35 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
 
 size_t TxWorkerPool::WorkQueueSize()
 {
-    std::unique_lock lk(work_queue_mutex_);
+    std::unique_lock<std::mutex> lk(work_queue_mutex_);
     return work_queue_.size();
 }
 
 void TxWorkerPool::SubmitWork(std::function<void()> work)
 {
-    std::unique_lock lk(work_queue_mutex_);
+    std::unique_lock<std::mutex> lk(work_queue_mutex_);
     work_queue_.push_back(work);
+    if (shutdown_indicator_.load(std::memory_order_acquire))
+    {
+        return;
+    }
     work_queue_cv_.notify_one();
 }
 
 void TxWorkerPool::Shutdown()
 {
     {
-        std::unique_lock lk(work_queue_mutex_);
+        std::unique_lock<std::mutex> lk(work_queue_mutex_);
         shutdown_indicator_.store(true, std::memory_order_release);
         work_queue_cv_.notify_all();
     }
 
     for (std::thread &worker : workers_)
     {
-        worker.join();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
     }
 }
 }  // namespace txservice

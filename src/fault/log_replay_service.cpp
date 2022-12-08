@@ -291,6 +291,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 {
     std::vector<::txlog::ReplayMessage> msg_vec(size);
     std::vector<std::unique_ptr<ReplayLogCc>> cc_req_vec;
+    std::vector<std::unique_ptr<ReadCc>> catalog_read_cc_req_vec;
 
     std::mutex mux;
     std::condition_variable cv;
@@ -347,9 +348,66 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 split_range_op_blob.data() + blob_offset);
             blob_offset += sizeof(uint8_t);
 
+            const uint64_t txn = split_range_msg.txn();
+            const uint64_t ts = split_range_msg.commit_ts();
+            const uint32_t shard_code = txn >> 32L;
+
             // Table name string
             std::string_view table_name_view(
                 split_range_op_blob.data() + blob_offset, table_name_len);
+
+            // Add read lock on catalog
+            uint32_t tx_node_id = (txn >> 32L) >> 10;
+            int64_t tx_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+            TableName table_name{table_name_view,
+                                 TableName::Type(table_name_view)};
+            CatalogKey catalog_key(table_name);
+            CatalogRecord catalog_rec;
+            CcHandlerResult<ReadKeyResult> catalog_read_cc_result(nullptr);
+            std::mutex read_mux;
+            std::condition_variable read_cv;
+            bool finished = false;
+            catalog_read_cc_result.post_lambda_ =
+                [&](CcHandlerResult<ReadKeyResult> *hd)
+            {
+                std::unique_lock<std::mutex> lk(read_mux);
+                finished = true;
+                read_cv.notify_one();
+            };
+
+            // Add read lock on catalog at the first
+            ReadCc read_cc;
+            read_cc.Reset(&catalog_ccm_name,
+                          &catalog_key,
+                          shard_code,
+                          &catalog_rec,
+                          ReadType::Inside,
+                          txn,
+                          tx_candidate_term,
+                          ts,
+                          &catalog_read_cc_result,
+                          IsolationLevel::RepeatableRead,
+                          CcProtocol::Locking,
+                          false,
+                          nullptr,
+                          true);
+            local_shards_.EnqueueCcRequest(0, &read_cc);
+
+            {
+                std::unique_lock<std::mutex> lk(read_mux);
+                read_cv.wait(lk, [&] { return finished; });
+            }
+
+            CcEntryAddr catalog_cce_addr =
+                catalog_read_cc_result.Value().cce_addr_;
+            LockType catalog_lock_type =
+                catalog_read_cc_result.Value().lock_type_;
+            uint64_t catalog_version_ts = catalog_read_cc_result.Value().ts_;
+            ReadSetEntry catalog_read_set_entry = ReadSetEntry(
+                catalog_version_ts, CcProtocol::Locking, catalog_lock_type);
+
+            // Replay Split
             blob_offset += table_name_len;
             std::unique_ptr<ReplayLogCc> &cc_req =
                 cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
@@ -359,15 +417,16 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     std::string_view(
                         split_range_op_blob.data() + blob_offset,
                         split_range_op_blob.length() - blob_offset),
-                    split_range_msg.commit_ts(),
-                    split_range_msg.txn(),
+                    ts,
+                    txn,
                     mux,
                     cv,
                     finish_log_cnt,
                     recovery_error));
+            cc_req->SetCatalogCcEntry(catalog_cce_addr, catalog_read_set_entry);
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());
-            // wait for this schema operation to be recovered at all shards
+            // wait for this range split operation to be recovered at all shards
             // before processing next
             WaitAndClearRequests(
                 stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);

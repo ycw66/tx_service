@@ -33,6 +33,19 @@ class RemoteCcHandler;
 class Checkpointer;
 class TxService;
 
+struct RangesByKey
+{
+    RangesByKey() = delete;
+
+    RangesByKey(int32_t first_partition_id)
+        : first_partition_id_(first_partition_id)
+    {
+    }
+
+    int32_t first_partition_id_;
+    std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> ranges_by_key_;
+};
+
 class LocalCcShards
 {
 public:
@@ -308,13 +321,21 @@ public:
         uint32_t node_group_id,
         uint64_t txn,
         int64_t tx_term,
-        uint64_t commit_ts);
+        uint64_t commit_ts,
+        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry);
 
     void InitTableRanges(const TableName &range_table_name,
-                         std::vector<InitRangeEntry> &init_ranges);
+                         std::vector<InitRangeEntry> &init_ranges,
+                         const NodeGroupId ng_id);
 
-    std::map<int32_t, TableRangeEntryWithShade> *GetAllTableRangesForATable(
-        const TableName &range_table_name);
+    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id);
+
+    RangesByKey *GetRangesByKey(const TableName &range_table_name,
+                                const NodeGroupId ng_id);
+
+    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesForATable(
+        const TableName &range_table_name, const NodeGroupId ng_id);
 
     /**
      * @brief Create the dirty range, and return the shade of the dirty range
@@ -324,32 +345,42 @@ public:
         int32_t partition_id,
         std::unique_ptr<TxKey> new_key,
         int32_t new_partition_id,
-        uint64_t commit_ts);
+        uint64_t commit_ts,
+        const NodeGroupId ng_id);
 
     /**
      * @brief Commit dirty range and return both the old and new range entries
      */
     const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
-        const TableName &table_name, int32_t partition_id, uint64_t commit_ts);
+        const TableName &table_name,
+        int32_t partition_id,
+        uint64_t commit_ts,
+        const NodeGroupId ng_id);
 
     /**
      * @brief Clear the shade of the dirty range after dirty range committed
      */
     void PostCommitDirtyTableRange(const TableName &table_name,
-                                   int32_t partition_id);
+                                   int32_t partition_id,
+                                   const NodeGroupId ng_id);
 
     /**
      * @brief Clean range table
      */
-    void CleanTableRange(const TableName &table_name, uint32_t ng_id);
+    void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
     const TableRangeEntry *GetTableEffectiveRangeEntry(
-        const TableName &table_name, int32_t partition_id);
+        const TableName &table_name,
+        int32_t partition_id,
+        const NodeGroupId ng_id);
 
     const TableRangeEntryWithShade *GetTableRangeWithShade(
-        const TableName &table_name, int32_t partition_id);
+        const TableName &table_name,
+        int32_t partition_id,
+        const NodeGroupId ng_id);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const NodeGroupId ng_id,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,
@@ -361,7 +392,9 @@ public:
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status);
 
-    StoreRange *FindRange(const TableName &table_name, const TxKey &key);
+    StoreRange *FindRange(const TableName &table_name,
+                          const NodeGroupId ng_id,
+                          const TxKey &key);
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
@@ -403,7 +436,9 @@ public:
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
-    bool KickoutRangeSlice(const TableName &tbl_name, const TxKey &key);
+    bool KickoutRangeSlice(const TableName &tbl_name,
+                           const NodeGroupId ng_id,
+                           const TxKey &key);
 
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
@@ -411,6 +446,7 @@ public:
 private:
     void TimerRun();
     uint32_t FindRangePartitionId(const TableName &range_tbl_name,
+                                  const NodeGroupId ng_id,
                                   const TxKey &key);
 
     const uint32_t node_id_;
@@ -442,23 +478,14 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
         table_catalogs_;  // string owner
 
-    std::unordered_map<TableName, std::map<int32_t, TableRangeEntryWithShade>>
+    std::unordered_map<
+        TableName,
+        std::unordered_map<NodeGroupId,
+                           std::map<int32_t, TableRangeEntryWithShade>>>
         table_ranges_;  // string owner
 
-    struct RangesByKey
-    {
-        RangesByKey() = delete;
-
-        RangesByKey(uint32_t first_partition_id)
-            : first_partition_id_(first_partition_id)
-        {
-        }
-
-        uint32_t first_partition_id_;
-        std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> ranges_by_key_;
-    };
-
-    std::unordered_map<TableName, RangesByKey> table_range_maps_;
+    std::unordered_map<TableName, std::unordered_map<NodeGroupId, RangesByKey>>
+        table_range_maps_;
     std::shared_mutex catalog_mux_;
 
     TxService *tx_service_;
@@ -468,5 +495,6 @@ private:
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
+    friend class txservice::fault::ReplayService;
 };
 }  // namespace txservice

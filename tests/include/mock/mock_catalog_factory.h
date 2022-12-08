@@ -127,6 +127,10 @@ public:
     {
         assert(false);
     }
+    size_t IndexesSize()
+    {
+        return indexes_.size();
+    }
 
 private:
     std::unordered_map<uint, std::pair<TableName, MockKeySchema>>

@@ -86,16 +86,18 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 
 FetchTableRangesCc::FetchTableRangesCc(const TableName &range_table_name,
                                        const Schema *key_schema,
-                                       CcShard &ccs)
+                                       CcShard &ccs,
+                                       NodeGroupId ng_id)
     : FetchCc(ccs, 0),
       range_table_name_(range_table_name),
-      key_schema_(key_schema)
+      key_schema_(key_schema),
+      ng_id_(ng_id)
 {
 }
 
 bool FetchTableRangesCc::Execute(CcShard &ccs)
 {
-    ccs.InitTableRanges(range_table_name_, ranges_vec_);
+    ccs.InitTableRanges(range_table_name_, ranges_vec_, ng_id_);
 
     for (CcRequestBase *&req : requesters_)
     {

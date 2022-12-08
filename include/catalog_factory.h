@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "cc/cc_map.h"
 #include "schema.h"
@@ -39,6 +41,7 @@ struct TableSchema
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
     virtual std::vector<TableName> IndexNames() const = 0;
+    virtual size_t IndexesSize() const = 0;
     virtual const SecondaryKeySchema *IndexKeySchema(
         const TableName &index_name) const = 0;
 };
@@ -75,7 +78,7 @@ public:
                                        const TableSchema *table_schema,
                                        uint64_t schema_ts,
                                        CcShard *shard,
-                                       NodeGroupId cc_ng_id) = 0;
+                                       NodeGroupId ng_id) = 0;
 
     virtual std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const Schema *key_schema) = 0;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catalog_key_record.h"
@@ -38,6 +40,13 @@ struct TransactionOperation
     {
     }
     virtual ~TransactionOperation() = default;
+    /**
+     * @brief Called by txm->Forward() for determining the how
+     * this operation will be processed, e.g. calling txm->Process(this) if this
+     * operation has not been processed, or calling txm->PostProcess(this) if
+     * the result has been set finished, or rerun this operation if the result
+     * is set error.
+     */
     virtual void Forward(TransactionExecution *txm) = 0;
 
     /**
@@ -95,6 +104,19 @@ public:
     CcHandlerResult<ReadKeyResult> lock_range_result_;
     CcHandlerResult<PostProcessResult> unlock_range_result_;
 #endif
+};
+
+struct PostReadOperation : TransactionOperation
+{
+public:
+    explicit PostReadOperation(TransactionExecution *txm);
+
+    void Reset(std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry);
+
+    void Forward(TransactionExecution *txm) override;
+
+    std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry_;
+    CcHandlerResult<PostProcessResult> hd_result_;
 };
 
 struct SetCommitTsOperation : TransactionOperation
@@ -603,7 +625,9 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
                    const TableSchema *table_schema,
                    const TxKey *range_key,
                    std::unique_ptr<RangeRecord> splitting_range_record,
-                   TransactionExecution *txm);
+                   TransactionExecution *txm,
+                   std::optional<std::pair<CcEntryAddr, ReadSetEntry>>
+                       catalog_cc_entry = std::nullopt);
 
     void FillTxLog(TransactionExecution *txm,
                    WriteToLogOp &log_op,
@@ -612,6 +636,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     void FillTxLogForCleanLog(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
+    void PrepareUploadRangeRecord();
 
     TableName table_name_{empty_sv, TableType::Primary};
     TableName range_table_name_{empty_sv, TableType::RangePartition};
@@ -624,6 +649,9 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     std::unique_ptr<TableRangeEntry> upload_range_entry_{nullptr};
     std::unique_ptr<RangeRecord> upload_range_record_{nullptr};
     int32_t new_partition_id_{-1};
+    // Store the catalog read lock information, only effect for recovering
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
+        std::nullopt};
 
     /**
      * @brief Acquire write intents on the range to split at all shards. This is
@@ -701,5 +729,9 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      */
     // WriteToLogOp clean_log_op_;
     WriteToLogOp clean_log_op_;
+    /**
+     * @brief Post read if acquired catalog read lock in recovery scenario
+     */
+    PostReadOperation catalog_post_read_op_;
 };
 }  // namespace txservice

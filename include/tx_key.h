@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -9,9 +10,9 @@
 
 namespace txservice
 {
-enum class KeyType
+enum class KeyType : uint8_t
 {
-    NegativeInf,
+    NegativeInf = 0,
     PositiveInf,
     Normal
 };

@@ -284,7 +284,12 @@ struct TableName
 
     bool IsBase() const
     {
-        size_t pos = this->StringView().find(INDEX_NAME_PREFIX);
+        return TableName::IsBase(this->StringView());
+    }
+
+    static bool IsBase(const std::string_view &table_name_sv)
+    {
+        size_t pos = table_name_sv.find(INDEX_NAME_PREFIX);
         return (pos == std::string_view::npos) ? true : false;
     }
 
@@ -296,6 +301,14 @@ struct TableName
     const TableType &Type() const
     {
         return type_;
+    }
+
+    // @brief Get table type base on table name, only return Primary and
+    // Secondary
+    static TableType Type(const std::string_view &table_name_sv)
+    {
+        return TableName::IsBase(table_name_sv) ? TableType::Primary
+                                                : TableType::Secondary;
     }
 
 private:
@@ -343,7 +356,11 @@ enum struct ReadType
      * when scanning backward.
      *
      */
-    RangeRightExclusive
+    RangeRightExclusive,
+    /**
+     * @breif Read in recovering status.
+     */
+    RecoveringRead
 };
 
 enum class PostWriteType

@@ -51,21 +51,6 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
 
     if (lock_op_status == LockOpStatus::Successful)
     {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            req,
-            "AcquireCcEntryKeyLock.Successful",
-            cce,
-            (
-                [&req, &cce]() -> std::string
-                {
-                    return std::string(",\"tx_number\":")
-                        .append(std::to_string(req->Txn()))
-                        .append(",\"CcEntry\":")
-                        .append(FMT_POINTER_TO_UINT64T(cce))
-                        .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
-                }));
-
         if (lock_type != LockType::NoLock)
         {
             shard_->UpsertLockHoldingTx(tx_number,
@@ -82,27 +67,47 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
             shard_->CheckRecoverTx(
                 cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
         }
-    }
-    else if (lock_op_status == LockOpStatus::Failed)
-    {
         TX_TRACE_ACTION_WITH_CONTEXT(
             req,
-            "AcquireCcEntryKeyLock.Failed",
+            "AcquireCcEntryKeyLock.Successful",
             cce,
             (
-                [&req, &cce]() -> std::string
+                [&req, &cce, &lock_type, &cce_payload_status]() -> std::string
                 {
                     return std::string(",\"tx_number\":")
                         .append(std::to_string(req->Txn()))
                         .append(",\"CcEntry\":")
                         .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"LockType\":")
+                        .append(std::to_string((uint8_t) lock_type))
+                        .append(",\"cce_payload_status\":")
+                        .append(std::to_string((uint8_t) cce_payload_status))
                         .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
+                        .append(cce->GetKeyLock().DebugInfo());
                 }));
-
+    }
+    else if (lock_op_status == LockOpStatus::Failed)
+    {
         // check and recover conflicted transactions.
-        RecoverTxForLockConfilct(
-            *(cce->key_lock_ptr_), lock_type, ng_id, ng_term);
+        RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            req,
+            "AcquireCcEntryKeyLock.Failed",
+            cce,
+            (
+                [&req, &cce, &lock_type, &cce_payload_status]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(req->Txn()))
+                        .append(",\"CcEntry\":")
+                        .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"LockType\":")
+                        .append(std::to_string((uint8_t) lock_type))
+                        .append(",\"cce_payload_status\":")
+                        .append(std::to_string((uint8_t) cce_payload_status))
+                        .append(",\"CcEntry.key_lock_\":")
+                        .append(cce->GetKeyLock().DebugInfo());
+                }));
     }
     else
     {
@@ -111,14 +116,18 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
             "AcquireCcEntryKeyLock.Blocked",
             cce,
             (
-                [&req, &cce]() -> std::string
+                [&req, &cce, &lock_type, &cce_payload_status]() -> std::string
                 {
                     return std::string(",\"tx_number\":")
                         .append(std::to_string(req->Txn()))
                         .append(",\"CcEntry\":")
                         .append(FMT_POINTER_TO_UINT64T(cce))
+                        .append(",\"LockType\":")
+                        .append(std::to_string((uint8_t) lock_type))
+                        .append(",\"cce_payload_status\":")
+                        .append(std::to_string((uint8_t) cce_payload_status))
                         .append(",\"CcEntry.key_lock_\":")
-                        .append(FMT_POINTER_TO_UINT64T(cce->key_lock_ptr_));
+                        .append(cce->GetKeyLock().DebugInfo());
                 }));
 
         // check and recover conflicted transactions.

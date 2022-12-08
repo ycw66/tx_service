@@ -196,7 +196,8 @@ void TransactionExecution::RecoverSplitRangeTx(
     uint32_t new_partition_id,
     uint64_t txn,
     int64_t tx_term,
-    uint64_t commit_ts)
+    uint64_t commit_ts,
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
 {
     tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
     tx_number_.store(txn, std::memory_order_relaxed);
@@ -230,6 +231,7 @@ void TransactionExecution::RecoverSplitRangeTx(
 
     split_range_op->new_range_key_ = std::move(new_range_key);
     split_range_op->new_partition_id_ = new_partition_id;
+    split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
 
     if (stage >= ::txlog::SplitRangeOpMessage::CopingOldRangeData)
     {
@@ -613,8 +615,6 @@ void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
     bool_resp_ = &req.tx_result_;
     bool_resp_->Reset();
 
-    DLOG(INFO) << "SplitRangeTxRequest table_name_: "
-               << req.table_name_.String();
     ds_split_range_op_ =
         std::make_unique<DsSplitRangeOp>(req.table_name_,
                                          req.table_schema_,
@@ -3085,6 +3085,29 @@ void TransactionExecution::PostProcess(NoOp &no_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(PostReadOperation &post_read_operation)
+{
+    post_read_operation.is_running_ = true;
+    CcEntryAddr *cce_addr = post_read_operation.cce_entry_.first;
+    ReadSetEntry *read_set_entry = post_read_operation.cce_entry_.second;
+    handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                      this->tx_term_,
+                      command_id_.load(std::memory_order_relaxed),
+                      read_set_entry->version_ts_,
+                      0,
+                      commit_ts_,
+                      *cce_addr,
+                      post_read_operation.hd_result_,
+                      read_set_entry->protocol_,
+                      read_set_entry->lock_type_);
+}
+
+void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
+{
     state_stack_.pop_back();
     Forward();
 }

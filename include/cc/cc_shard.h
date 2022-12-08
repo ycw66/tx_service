@@ -352,31 +352,41 @@ public:
                                    NodeGroupId cc_ng_id);
 
     void InitTableRanges(const TableName &table_name,
-                         std::vector<InitRangeEntry> &init_ranges);
+                         std::vector<InitRangeEntry> &init_ranges,
+                         const NodeGroupId ng_id);
 
-    std::map<int32_t, TableRangeEntryWithShade> *GetAllTableRangesForATable(
-        const TableName &range_table_name);
+    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesForATable(
+        const TableName &range_table_name, const NodeGroupId ng_id);
 
     const TableRangeEntryWithShade *CreateDirtyTableRange(
         const TableName &table_name,
         int32_t partition_id,
         std::unique_ptr<TxKey> new_key,
         int32_t new_partition_id,
-        uint64_t commit_ts);
+        uint64_t commit_ts,
+        const NodeGroupId ng_id);
 
     const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
-        const TableName &table_name, int32_t partition_id, uint64_t commit_ts);
+        const TableName &table_name,
+        int32_t partition_id,
+        uint64_t commit_ts,
+        const NodeGroupId ng_id);
 
     const TableRangeEntry *GetTableEffectiveRangeEntry(
-        const TableName &table_name, int32_t partition_id);
+        const TableName &table_name,
+        int32_t partition_id,
+        const NodeGroupId ng_id);
 
     const TableRangeEntryWithShade *GetTableRangeWithShade(
-        const TableName &table_name, int32_t partition_id);
+        const TableName &table_name,
+        int32_t partition_id,
+        const NodeGroupId ng_id);
 
     void PostCommitDirtyTableRange(const TableName &table_name,
-                                   int32_t partition_id);
+                                   int32_t partition_id,
+                                   const NodeGroupId ng_id);
 
-    void CleanTableRange(const TableName &table_name, uint32_t ng_id);
+    void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
     /**
      * @brief Fetches the table's catalog from the data store and
@@ -396,7 +406,8 @@ public:
     void FetchTableRanges(const TableName &range_table_name,
                           const Schema *key_schema,
                           const KVCatalogInfo *kv_info,
-                          CcRequestBase *requester);
+                          CcRequestBase *requester,
+                          NodeGroupId ng_id);
 
     void RemoveFetchRequest(const TableName &table_name);
 
@@ -444,6 +455,7 @@ public:
         const TxKey *slice_end);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const NodeGroupId ng_id,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,

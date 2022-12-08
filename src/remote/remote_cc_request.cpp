@@ -175,8 +175,23 @@ void txservice::remote::RemoteAcquireAll::Reset(
     remote_table_name_ = TableName(
         table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
 
+    if (req.acq_all_key_case() == AcquireAllRequest::AcqAllKeyCase::kNegInf)
+    {
+        key_type_ = KeyType::NegativeInf;
+    }
+    else if (req.acq_all_key_case() ==
+             AcquireAllRequest::AcqAllKeyCase::kPosInf)
+    {
+        key_type_ = KeyType::PositiveInf;
+    }
+    else
+    {
+        key_type_ = KeyType::Normal;
+    }
+
     AcquireAllCc::Reset(&remote_table_name_,
                         &req.key(),
+                        &key_type_,
                         req.node_group_id(),
                         input_msg->tx_number(),
                         input_msg->tx_term(),
@@ -546,8 +561,24 @@ void txservice::remote::RemotePostWriteAll::Reset(
 
     int64_t tx_term = input_msg->tx_term();
 
+    if (post_write_all.post_write_key_case() ==
+        PostWriteAllRequest::PostWriteKeyCase::kNegInf)
+    {
+        key_type_ = KeyType::NegativeInf;
+    }
+    else if (post_write_all.post_write_key_case() ==
+             PostWriteAllRequest::PostWriteKeyCase::kPosInf)
+    {
+        key_type_ = KeyType::PositiveInf;
+    }
+    else
+    {
+        key_type_ = KeyType::Normal;
+    }
+
     PostWriteAllCc::Reset(&remote_table_name_,
                           &post_write_all.key(),
+                          &key_type_,
                           post_write_all.node_group_id(),
                           input_msg->tx_number(),
                           commit_ts,

@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -77,6 +79,11 @@ public:
 
     void SetRefCnt(uint32_t cnt)
     {
+        if (cnt <= 0)
+        {
+            ClearRefCnt();
+            return;
+        }
         ref_cnted_ = true;
         ref_cnt_.store(cnt, std::memory_order_release);
     }

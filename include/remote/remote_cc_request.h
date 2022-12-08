@@ -78,6 +78,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
+    KeyType key_type_{KeyType::Normal};
 
     CcHandlerResult<AcquireAllResult> cc_res_{nullptr};
 };
@@ -246,6 +247,7 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
+    KeyType key_type_{KeyType::Normal};
 
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
 };

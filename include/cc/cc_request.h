@@ -7,8 +7,10 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../../log_service/include/fault_inject.h"
@@ -22,6 +24,7 @@
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "proto/cc_request.pb.h"
+#include "read_write_set.h"
 #include "scan.h"
 #include "sharder.h"
 #include "tx_operation_result.h"
@@ -48,10 +51,22 @@ public:
 
     virtual ~TemplatedCcRequest() = default;
 
-    bool Execute(CcShard &ccs) override
+    virtual bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (cc_ng_term < 0)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
         {
             res_->SetError(-1);
             return true;
@@ -70,15 +85,9 @@ public:
             {
                 if (table_name_->Type() == TableType::RangePartition)
                 {
-                    DLOG(INFO)
-                        << "ccrequest table_name: " << table_name_->String()
-                        << " Type: " << (int16_t) table_name_->Type();
                     // Get original table name for the range table name
                     const TableName base_table_name{
                         table_name_->GetBaseTableNameSV(), TableType::Primary};
-                    DLOG(INFO)
-                        << " base_table_name: " << base_table_name.String()
-                        << " ng_id: " << node_group_id_;
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     // When a tx sends a request toward a table's range
@@ -89,14 +98,21 @@ public:
                     // data. Initialization of the table's cc map needs to
                     // instantiate the schema instance. So, the table's
                     // schema should never be null.
-                    assert(catalog_entry != nullptr &&
-                           catalog_entry->schema_ != nullptr);
+                    // assert(catalog_entry != nullptr &&
+                    // catalog_entry->schema_ != nullptr);
+                    if (catalog_entry == nullptr ||
+                        catalog_entry->schema_ == nullptr)
+                    {
+                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
+                        return false;
+                    }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
                     std::map<int32_t, TableRangeEntryWithShade> *ranges =
-                        ccs.GetAllTableRangesForATable(*table_name_);
+                        ccs.GetTableRangesForATable(*table_name_,
+                                                    node_group_id_);
                     if (ranges != nullptr)
                     {
                         ccs.CreateOrUpdateRangeCcMap(*table_name_,
@@ -116,7 +132,8 @@ public:
                         ccs.FetchTableRanges(*table_name_,
                                              table_schema->KeySchema(),
                                              table_schema->GetKVCatalogInfo(),
-                                             this);
+                                             this,
+                                             node_group_id_);
                         return false;
                     }
                 }
@@ -178,6 +195,7 @@ public:
                     }
                 }
             }
+
             if (!parallel_req_)
             {
                 ccm_ = ccm;
@@ -409,6 +427,7 @@ public:
 
         key_ = key;
         key_str_ = nullptr;
+        key_str_type_ = nullptr;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
@@ -419,6 +438,7 @@ public:
 
     void Reset(const TableName *tname,
                const std::string *key_str,
+               const KeyType *key_str_type,
                uint32_t node_group_id,
                TxNumber tx_number,
                int64_t tx_term,
@@ -433,6 +453,7 @@ public:
 
         key_ = nullptr;
         key_str_ = key_str;
+        key_str_type_ = key_str_type;
         tx_term_ = tx_term;
         is_insert_ = is_insert;
         decoded_key_ = nullptr;
@@ -449,6 +470,11 @@ public:
     const std::string *KeyStr() const
     {
         return key_str_;
+    }
+
+    const KeyType *KeyStrType() const
+    {
+        return key_str_type_;
     }
 
     int64_t TxTerm() const
@@ -505,6 +531,7 @@ public:
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
+    const KeyType *key_str_type_{nullptr};
     std::unique_ptr<TxKey> decoded_key_{nullptr};
     int64_t tx_term_{-1};
     bool is_insert_{false};
@@ -516,6 +543,7 @@ private:
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
+    KeyType key_type_{KeyType::Normal};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
@@ -661,6 +689,7 @@ public:
 
         key_ = key;
         key_str_ = nullptr;
+        key_str_type_ = nullptr;
         decoded_key_ = nullptr;
         commit_ts_ = ts;
         payload_ = rec;
@@ -686,6 +715,7 @@ public:
             tname, res, node_group_id, tx_number, CcProtocol::OCC);
 
         key_ = key;
+        key_str_type_ = nullptr;
         key_str_ = nullptr;
         decoded_key_ = nullptr;
         commit_ts_ = ts;
@@ -699,6 +729,7 @@ public:
 
     void Reset(const TableName *tname,
                const std::string *key_str,
+               KeyType *key_str_type,
                uint32_t node_group_id,
                uint64_t tx_number,
                uint64_t ts,
@@ -713,6 +744,7 @@ public:
 
         key_ = nullptr;
         key_str_ = key_str;
+        key_str_type_ = key_str_type;
         decoded_key_ = nullptr;
         commit_ts_ = ts;
         payload_ = nullptr;
@@ -758,6 +790,11 @@ public:
         return key_str_;
     }
 
+    const KeyType *KeyStrType() const
+    {
+        return key_str_type_;
+    }
+
     const TxKey *DecodedKey() const
     {
         return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
@@ -798,6 +835,7 @@ public:
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
+    const KeyType *key_str_type_{nullptr};
     std::unique_ptr<TxKey> decoded_key_{nullptr};
     uint64_t commit_ts_{0};
     TxRecord *payload_{nullptr};
@@ -903,6 +941,27 @@ public:
     ReadCc(const ReadCc &rhs) = delete;
     ReadCc(ReadCc &&rhs) = delete;
 
+    bool ValidTermCheck() override
+    {
+        if (!is_in_recovering_)
+        {
+            return TemplatedCcRequest<ReadCc, ReadKeyResult>::ValidTermCheck();
+        }
+        else
+        {
+            int64_t cterm =
+                Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+            if (cterm < 0)
+            {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+    }
+
     void Reset(const TableName *tn,
                const TxKey *key,
                uint32_t key_shard_code,
@@ -915,7 +974,8 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                bool is_for_write = false,
-               std::vector<VersionTxRecord> *archives = nullptr)
+               std::vector<VersionTxRecord> *archives = nullptr,
+               bool is_in_recovering = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -934,6 +994,7 @@ public:
         archives_ = archives;
         is_local_ = true;
         is_wait_for_post_write_ = false;
+        is_in_recovering_ = is_in_recovering;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -981,6 +1042,7 @@ public:
         archives_ = archives;
         is_local_ = false;
         is_wait_for_post_write_ = false;
+        is_in_recovering_ = false;
 
         const CcEntryAddr &cce_addr = res->Value().cce_addr_;
         if (cce_addr.CcePtr() != 0)
@@ -1104,6 +1166,11 @@ public:
         blocking_type_ = type;
     }
 
+    bool IsInRecovering() const
+    {
+        return is_in_recovering_;
+    }
+
 private:
     const TxKey *key_;
     const std::string *key_str_;
@@ -1136,6 +1203,8 @@ private:
     // "PkReadCorrespondingSk" or "SnapshotRead", there must be a PostWriteCc
     // request has not done, then, this read should wait until it is completed.
     bool is_wait_for_post_write_{false};
+    // Is issued in a recovering process
+    bool is_in_recovering_{false};
 
     BlockingType blocking_type_;
 
@@ -2050,7 +2119,8 @@ public:
 
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
-                    auto ranges = ccs.GetAllTableRangesForATable(*table_name_);
+                    auto ranges = ccs.GetTableRangesForATable(*table_name_,
+                                                              node_group_id_);
                     if (ranges != nullptr)
                     {
                         ccs.CreateOrUpdateRangeCcMap(*table_name_,
@@ -2070,7 +2140,8 @@ public:
                         ccs.FetchTableRanges(*table_name_,
                                              table_schema_->KeySchema(),
                                              table_schema_->GetKVCatalogInfo(),
-                                             this);
+                                             this,
+                                             node_group_id_);
                         return false;
                     }
                 }
@@ -2165,6 +2236,27 @@ public:
         return table_schema_;
     }
 
+    void SetCatalogCcEntry(CcEntryAddr catalog_cc_entry_addr,
+                           ReadSetEntry read_set_entry)
+    {
+        catalog_cc_entry_ = std::optional<std::pair<CcEntryAddr, ReadSetEntry>>{
+            std::make_pair(catalog_cc_entry_addr, read_set_entry)};
+    }
+
+    const std::optional<std::pair<CcEntryAddr, ReadSetEntry>>
+    GetCatalogCcEntry()
+    {
+        if (catalog_cc_entry_ == std::nullopt)
+        {
+            return std::nullopt;
+        }
+        CcEntryAddr cce_addr = catalog_cc_entry_->first;
+        ReadSetEntry read_set_entry = catalog_cc_entry_->second;
+
+        return std::optional<std::pair<CcEntryAddr, ReadSetEntry>>{
+            std::make_pair(cce_addr, read_set_entry)};
+    }
+
 private:
     TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
@@ -2175,6 +2267,8 @@ private:
     uint32_t &finish_cnt_;
     bool &recovery_error_;
     const struct TableSchema *table_schema_{nullptr};
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
+        std::nullopt};
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);

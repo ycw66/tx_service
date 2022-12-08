@@ -467,6 +467,8 @@ public:
     // tx runs shared by all the clients of tx_service. It is used to balance
     // workloads between TxProcessors.
     std::atomic<uint32_t> tx_runs_{0};
+
+    friend class txservice::fault::ReplayService;
 };
 
 }  // namespace txservice

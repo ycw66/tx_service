@@ -10,6 +10,7 @@
 #include "cc_request.h"
 #include "range_record.h"
 #include "template_cc_map.h"
+#include "tx_serialize.h"
 
 namespace txservice
 {
@@ -48,6 +49,9 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::ccm_;
     using TemplateCcMap<KeyT, RangeRecord>::neg_inf_;
     using TemplateCcMap<KeyT, RangeRecord>::pos_inf_;
+    using TemplateCcMap<KeyT, RangeRecord>::table_schema_;
+    using TemplateCcMap<KeyT, RangeRecord>::KeySchema;
+    using TemplateCcMap<KeyT, RangeRecord>::Find;
 
     /**
      * @brief Construct a new range cc map object. The range cc map has no
@@ -60,12 +64,12 @@ public:
                const txservice::TableSchema *table_schema,
                uint64_t schema_ts,
                CcShard *shard,
-               txservice::NodeGroupId cc_ng_id)
+               NodeGroupId ng_id)
         : TemplateCcMap<KeyT, RangeRecord>(
-              shard, cc_ng_id, range_table_name, schema_ts, table_schema, false)
+              shard, ng_id, range_table_name, schema_ts, table_schema, false)
     {
         std::map<int32_t, TableRangeEntryWithShade> *ranges =
-            CcMap::shard_->GetAllTableRangesForATable(range_table_name);
+            CcMap::shard_->GetTableRangesForATable(range_table_name, ng_id);
         assert(ranges != nullptr);
 
         for (auto &[partition_id, table_range_with_shade] : *ranges)
@@ -91,8 +95,7 @@ public:
             }
 
             CcEntry<KeyT, RangeRecord> *cce =
-                TemplateCcMap<KeyT, RangeRecord>::FindEmplace(
-                    *start_key, table_range->version_ts_);
+                TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
             cce->commit_ts_ = table_range->version_ts_;
             cce->payload_.get()->range_entry_ = table_range;
             cce->payload_status_ = RecordStatus::Normal;
@@ -142,6 +145,9 @@ public:
                     .append(std::to_string(req.TxTerm()));
             });
         TX_TRACE_DUMP(&req);
+
+        assert(req.IsLocal());
+
         CcHandlerResult<ReadKeyResult> *hd_result = req.Result();
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
@@ -259,28 +265,36 @@ public:
             return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
         }
 
-        // Prepare RangeRecord
-        RangeRecord *upload_range_rec = nullptr;
-        if (req.Payload() != nullptr)
+        const KeyT *target_key = nullptr;
+        const TxKey *req_key = req.Key();
+        if (req_key != nullptr)
         {
-            // When the request comes from a tx in the same node, the
-            // request references a schema record in the tx's space.
-            upload_range_rec = static_cast<RangeRecord *>(req.Payload());
+            target_key = static_cast<const KeyT *>(req_key);
         }
         else
         {
-            assert(req.PayloadStr() != nullptr);
-            std::unique_ptr<RangeRecord> decoded_rec =
-                std::make_unique<RangeRecord>();
-            size_t offset = 0;
-            decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
-            upload_range_rec = decoded_rec.get();
-            req.SetDecodedPayload(std::move(decoded_rec));
+            switch (*req.KeyStrType())
+            {
+            case KeyType::NegativeInf:
+                target_key = neg_inf_.key_;
+                break;
+            case KeyType::PositiveInf:
+                target_key = pos_inf_.key_;
+                break;
+            case KeyType::Normal:
+                const std::string *key_str = req.KeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                target_key = decoded_key.get();
+                req.SetDecodedKey(std::move(decoded_key));
+                break;
+            }
         }
 
-        const TableRangeEntry *range_entry = upload_range_rec->RangeEntry();
-        int32_t partition_id = range_entry->partition_id_;
-        int32_t new_partition_id = range_entry->new_partition_id_;
+        RangeRecord *upload_range_rec = nullptr;
+        const NodeGroupId ng_id = req.NodeGroupId();
 
         if (req.CommitType() == PostWriteType::PrepareCommit)
         {
@@ -288,16 +302,60 @@ public:
             // is 0
             if (shard_->core_id_ == 0)
             {
-                TableRangeEntry *range_entry_vo = const_cast<TableRangeEntry *>(
-                    upload_range_rec->RangeEntry());
+                std::unique_ptr<TxKey> new_key = nullptr;
+                int32_t partition_id = -1;
+                int32_t new_partition_id = -1;
+
+                // Prepare RangeRecord
+                if (req.Payload() != nullptr)
+                {
+                    DLOG(INFO) << "req.payload() " << ng_id;
+                    // When the request comes from a tx in the same node, the
+                    // request references a schema record in the tx's space.
+                    upload_range_rec =
+                        static_cast<RangeRecord *>(req.Payload());
+                    TableRangeEntry *upload_range_entry =
+                        const_cast<TableRangeEntry *>(
+                            upload_range_rec->range_entry_);
+
+                    // prepare new_key, partition_id, new_partition_id
+                    std::unique_ptr<TxKey> new_key_clone =
+                        upload_range_entry->new_key_->Clone();
+                    new_key = std::move(new_key_clone);
+                    partition_id = upload_range_entry->partition_id_;
+                    new_partition_id = upload_range_entry->new_partition_id_;
+                }
+                else
+                {
+                    DLOG(INFO) << "req.payload_str() " << ng_id;
+                    std::unique_ptr<RangeRecord> decoded_rec =
+                        std::make_unique<RangeRecord>();
+                    req.SetDecodedPayload(std::move(decoded_rec));
+                    upload_range_rec =
+                        reinterpret_cast<RangeRecord *>(req.Payload());
+
+                    const std::string *payload_str = req.PayloadStr();
+                    assert(payload_str != nullptr);
+
+                    new_key = std::make_unique<KeyT>();
+                    size_t offset = 0;
+                    new_key->Deserialize(
+                        payload_str->data(), offset, KeySchema());
+
+                    deserialize_from(
+                        payload_str->data(), offset, &partition_id);
+                    deserialize_from(
+                        payload_str->data(), offset, &new_partition_id);
+                }
+
                 // upload the dirty range attributes to local cc shards
                 const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->CreateDirtyTableRange(
-                        this->table_name_,
-                        range_entry_vo->partition_id_,
-                        std::move(range_entry_vo->new_key_),
-                        range_entry_vo->new_partition_id_,
-                        req.CommitTs());
+                    shard_->CreateDirtyTableRange(this->table_name_,
+                                                  partition_id,
+                                                  std::move(new_key),
+                                                  new_partition_id,
+                                                  req.CommitTs(),
+                                                  ng_id);
 
                 // point the range rec to the dirty range_entry_shade for range
                 // cc map rec
@@ -308,21 +366,41 @@ public:
             {
                 // simply reset the binary_value_ to the local shards dirty
                 // table range, and update the cc map
+                upload_range_rec = static_cast<RangeRecord *>(req.Payload());
+                TableRangeEntry *range_entry_vo = const_cast<TableRangeEntry *>(
+                    upload_range_rec->RangeEntry());
                 upload_range_rec->range_entry_ =
-                    shard_->GetTableEffectiveRangeEntry(this->table_name_,
-                                                        partition_id);
+                    shard_->GetTableEffectiveRangeEntry(
+                        this->table_name_,
+                        range_entry_vo->partition_id_,
+                        ng_id);
             }
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
+            // prepare the upload record
+            std::unique_ptr<RangeRecord> range_rec =
+                std::make_unique<RangeRecord>();
+            req.SetDecodedPayload(std::move(range_rec));
+            upload_range_rec = reinterpret_cast<RangeRecord *>(req.Payload());
+
             const TableRangeEntry *old_range_entry = nullptr;
             const TableRangeEntry *new_range_entry = nullptr;
+
+            // Get dirty range entry from range cc map
+            CcEntry<KeyT, RangeRecord> *range_cce = Find(*target_key);
+            assert(range_cce != nullptr);
+            const TableRangeEntry *dirty_range_entry =
+                range_cce->payload_->range_entry_;
+            int32_t partition_id = dirty_range_entry->partition_id_;
+            int32_t new_partition_id = dirty_range_entry->new_partition_id_;
+
             if (shard_->core_id_ == 0)
             {
                 // commit dirty range, old_range_entry switch back to shader
                 std::pair<TableRangeEntry *, TableRangeEntry *> entries =
                     shard_->CommitDirtyTableRange(
-                        this->table_name_, partition_id, req.CommitTs());
+                        this->table_name_, partition_id, req.CommitTs(), ng_id);
                 old_range_entry = entries.first;
                 new_range_entry = entries.second;
             }
@@ -330,14 +408,14 @@ public:
             {
                 // switch old range rec pointer from shade_ to shader_
                 old_range_entry = shard_->GetTableEffectiveRangeEntry(
-                    this->table_name_, partition_id);
+                    this->table_name_, partition_id, ng_id);
                 // get the new range entry added by shard 0
 
                 // TODO(XiaoJi):
                 // upload_range_rec->RangeEntry()->new_partition_id_ has been
                 // reset to -1 when shard#0 CommitDirtyTableRange
                 new_range_entry = shard_->GetTableEffectiveRangeEntry(
-                    this->table_name_, new_partition_id);
+                    this->table_name_, new_partition_id, ng_id);
                 assert(new_range_entry != nullptr);
             }
 
@@ -350,8 +428,7 @@ public:
                 static_cast<const KeyT *>(new_range_entry->start_key_.get());
 
             CcEntry<KeyT, RangeRecord> *cce =
-                TemplateCcMap<KeyT, RangeRecord>::FindEmplace(
-                    *start_key, new_range_entry->version_ts_);
+                TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
 
             cce->commit_ts_ = new_range_entry->version_ts_;
             cce->payload_.get()->range_entry_ = new_range_entry;
@@ -361,8 +438,8 @@ public:
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
                 // clear shade_ on old partition
-                shard_->PostCommitDirtyTableRange(this->table_name_,
-                                                  partition_id);
+                shard_->PostCommitDirtyTableRange(
+                    this->table_name_, partition_id, ng_id);
             }
         }
 
@@ -421,8 +498,8 @@ public:
             if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
             {
                 const TableRangeEntryWithShade *range_entry_shade =
-                    shard_->GetTableRangeWithShade(CcMap::table_name_,
-                                                   partition_id);
+                    shard_->GetTableRangeWithShade(
+                        CcMap::table_name_, partition_id, req.NodeGroupId());
                 old_table_range_entry = range_entry_shade->shader_.get();
             }
 
@@ -435,7 +512,8 @@ public:
                                                   partition_id,
                                                   std::move(new_range_key),
                                                   new_partition_id,
-                                                  req.CommitTs());
+                                                  req.CommitTs(),
+                                                  req.NodeGroupId());
                 old_table_range_entry = range_entry_shade->shade_.get();
             }
 
@@ -444,8 +522,10 @@ public:
             {
                 // commit dirty range, old_range_entry switch back to shader
                 std::pair<TableRangeEntry *, TableRangeEntry *> entries =
-                    shard_->CommitDirtyTableRange(
-                        CcMap::table_name_, partition_id, req.CommitTs());
+                    shard_->CommitDirtyTableRange(CcMap::table_name_,
+                                                  partition_id,
+                                                  req.CommitTs(),
+                                                  group_id);
                 old_table_range_entry = entries.first;
             }
         }
@@ -455,8 +535,8 @@ public:
                 stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
             {
                 const TableRangeEntryWithShade *table_range_entry_with_shard =
-                    shard_->GetTableRangeWithShade(CcMap::table_name_,
-                                                   partition_id);
+                    shard_->GetTableRangeWithShade(
+                        CcMap::table_name_, partition_id, group_id);
                 old_table_range_entry =
                     table_range_entry_with_shard->shade_.get();
             }
@@ -465,8 +545,8 @@ public:
             {
                 const TableRangeEntryWithShade
                     *old_table_range_entry_with_shard =
-                        shard_->GetTableRangeWithShade(CcMap::table_name_,
-                                                       partition_id);
+                        shard_->GetTableRangeWithShade(
+                            CcMap::table_name_, partition_id, group_id);
                 old_table_range_entry =
                     old_table_range_entry_with_shard->shader_.get();
             }
@@ -485,6 +565,7 @@ public:
         }
         else
         {
+            offset = 0;
             std::unique_ptr<KeyT> range_tx_key = std::make_unique<KeyT>();
             range_tx_key->Deserialize(
                 const_cast<char *>(
@@ -544,7 +625,8 @@ public:
                     tx_node_id,
                     req.Txn(),
                     tx_candidate_term,
-                    req.CommitTs());
+                    req.CommitTs(),
+                    std::move(req.GetCatalogCcEntry()));
             }
 
             req.SetFinish();

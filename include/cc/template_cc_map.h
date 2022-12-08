@@ -231,7 +231,7 @@ public:
             }
             else
             {
-                cce_ptr = FindEmplace(*target_key, req.Ts());
+                cce_ptr = FindEmplace(*target_key);
 
                 if (cce_ptr == nullptr)
                 {
@@ -441,8 +441,7 @@ public:
             }
             else
             {
-                CcEntry<KeyT, ValueT> *new_cce =
-                    Emplace(insert_entry.key_, commit_ts);
+                CcEntry<KeyT, ValueT> *new_cce = Emplace(insert_entry.key_);
 
                 if (new_cce == nullptr)
                 {
@@ -686,13 +685,26 @@ public:
             }
             else
             {
-                const std::string *key_str = req.KeyStr();
-                assert(key_str != nullptr);
-                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
-                size_t offset = 0;
-                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
-                target_key = decoded_key.get();
-                req.SetDecodedKey(std::move(decoded_key));
+                switch (*req.KeyStrType())
+                {
+                case KeyType::NegativeInf:
+                    target_key = neg_inf_.key_;
+                    break;
+                case KeyType::PositiveInf:
+                    target_key = pos_inf_.key_;
+                    break;
+                case KeyType::Normal:
+                    const std::string *key_str = req.KeyStr();
+                    assert(key_str != nullptr);
+                    std::unique_ptr<KeyT> decoded_key =
+                        std::make_unique<KeyT>();
+                    size_t offset = 0;
+                    decoded_key->Deserialize(
+                        key_str->data(), offset, KeySchema());
+                    target_key = decoded_key.get();
+                    req.SetDecodedKey(std::move(decoded_key));
+                    break;
+                }
             }
 
             if (req.IsInsert())
@@ -728,7 +740,7 @@ public:
             }
             else
             {
-                cce_ptr = FindEmplace(*target_key, 0);
+                cce_ptr = FindEmplace(*target_key);
 
                 if (cce_ptr == nullptr)
                 {
@@ -922,13 +934,24 @@ public:
         }
         else
         {
-            const std::string *key_str = req.KeyStr();
-            assert(key_str != nullptr);
-            std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
-            size_t offset = 0;
-            decoded_key->Deserialize(key_str->data(), offset, KeySchema());
-            target_key = decoded_key.get();
-            req.SetDecodedKey(std::move(decoded_key));
+            switch (*req.KeyStrType())
+            {
+            case KeyType::NegativeInf:
+                target_key = NegativeInfinity<KeyT>::Instance();
+                break;
+            case KeyType::PositiveInf:
+                target_key = PositiveInfinity<KeyT>::Instance();
+                break;
+            case KeyType::Normal:
+                const std::string *key_str = req.KeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<KeyT> decoded_key = std::make_unique<KeyT>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                target_key = decoded_key.get();
+                req.SetDecodedKey(std::move(decoded_key));
+                break;
+            }
         }
 
         const ValueT *payload = nullptr;
@@ -941,13 +964,21 @@ public:
         // phase), we have nothing to upload, only need to release write intent.
         else if (req.CommitTs() > 0)
         {
-            const std::string *payload_str = req.PayloadStr();
-            assert(payload_str != nullptr);
-            std::unique_ptr<ValueT> decoded_rec = std::make_unique<ValueT>();
-            size_t offset = 0;
-            decoded_rec->Deserialize(payload_str->data(), offset);
-            payload = decoded_rec.get();
-            req.SetDecodedPayload(std::move(decoded_rec));
+            if (req.DecodedPayload() == nullptr)
+            {
+                const std::string *payload_str = req.PayloadStr();
+                assert(payload_str != nullptr);
+                std::unique_ptr<ValueT> decoded_rec =
+                    std::make_unique<ValueT>();
+                size_t offset = 0;
+                decoded_rec->Deserialize(payload_str->data(), offset);
+                payload = decoded_rec.get();
+                req.SetDecodedPayload(std::move(decoded_rec));
+            }
+            else
+            {
+                payload = static_cast<const ValueT *>(req.DecodedPayload());
+            }
         }
 
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
@@ -957,7 +988,7 @@ public:
         }
         else
         {
-            cce_ptr = FindEmplace(*target_key, 0);
+            cce_ptr = FindEmplace(*target_key);
         }
 
         if (cce_ptr == nullptr)
@@ -989,7 +1020,7 @@ public:
                 else
                 {
                     CcEntry<KeyT, ValueT> *new_cce =
-                        Emplace(insert_it->second->key_, commit_ts);
+                        Emplace(insert_it->second->key_);
 
                     if (new_cce == nullptr)
                     {
@@ -1118,6 +1149,10 @@ public:
 
     bool Execute(PostReadCc &req) override
     {
+        const CcEntryAddr &cce_addr = *req.CceAddr();
+        CcEntry<KeyT, ValueT> &cc_entry =
+            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1145,7 +1180,6 @@ public:
                 }
             });
 
-        const CcEntryAddr &cce_addr = *req.CceAddr();
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
@@ -1160,9 +1194,6 @@ public:
         uint64_t gap_ts = req.GapTs();
         uint64_t commit_ts = req.CommitTs();
         TxNumber txn = req.Txn();
-
-        CcEntry<KeyT, ValueT> &cc_entry =
-            *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
 
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
@@ -1306,7 +1337,16 @@ public:
         });
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t ng_term = -1;
+        if (req.IsInRecovering())
+        {
+            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+        }
+        else
+        {
+            ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        }
+
         if (ng_term < 0)
         {
             LOG(INFO) << "ReadCc, node_group(#" << ng_id
@@ -1382,6 +1422,7 @@ public:
                 if (req.Key() != nullptr)
                 {
                     look_key = static_cast<const KeyT *>(req.Key());
+                    cce = FindEmplace(*look_key);
                 }
                 else
                 {
@@ -1402,6 +1443,7 @@ public:
                         uint32_t range_id = req.KeyShardCode() >> 10;
                         RangeSliceId slice_id = shard_->PinRangeSlice(
                             table_name_,
+                            cc_ng_id_,
                             KeySchema(),
                             RecordSchema(),
                             schema_ts_,
@@ -1441,11 +1483,11 @@ public:
                     }
                     else
                     {
-                        cce = FindEmplace(*look_key, req.ReadTimestamp());
+                        cce = FindEmplace(*look_key);
                     }
                 }
 #else
-                cce = FindEmplace(*look_key, req.ReadTimestamp());
+                cce = FindEmplace(*look_key);
 
                 // The read request accesses a new key not in the cc map. But
                 // the cc map is full and cannot allocates a new entry.
@@ -1516,8 +1558,7 @@ public:
                 return false;
             }
             }  //-- end: switch
-
-        }  //-- end: read insde
+        }      //-- end: read insde
         else
         {
             // For the read-outside request whose goal is to bring in a
@@ -1905,7 +1946,6 @@ public:
         if (req.CcePtr() != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            DLOG(INFO) << "This is for debug, Reacquire lock for cce: " << cce;
             const KeyT *continue_look_key = cce->key_;
             ScanType scan_type = req.CcePtrScanType();
 
@@ -2857,6 +2897,7 @@ public:
             // request is dispatched to other cores to scan in parallel.
             RangeSliceOpStatus pin_status;
             slice_id = shard_->PinRangeSlice(table_name_,
+                                             req.NodeGroupId(),
                                              KeySchema(),
                                              RecordSchema(),
                                              schema_ts_,
@@ -3393,7 +3434,7 @@ public:
                 continue;
             }
 
-            CcEntry<KeyT, ValueT> *cce = FindEmplace(key, req.CommitTs());
+            CcEntry<KeyT, ValueT> *cce = FindEmplace(key);
 
             if (cce == nullptr)
             {
@@ -3540,7 +3581,7 @@ public:
             const ValueT *record =
                 static_cast<const ValueT *>(data_item.record_.get());
 
-            CcEntry<KeyT, ValueT> *cce = FindEmplace(*key, 0);
+            CcEntry<KeyT, ValueT> *cce = FindEmplace(*key);
             if (cce == nullptr)
             {
                 // Memory reaches capacity while bringing a range slice into
@@ -3782,7 +3823,7 @@ public:
 
 #ifdef RANGE_PARTITIONED
         bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
-            table_name_, *cc_entry->key_);
+            table_name_, cc_ng_id_, *cc_entry->key_);
         if (!kick_ret)
         {
             return;
@@ -3907,15 +3948,13 @@ public:
     }
 
 protected:
-    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, uint64_t ts)
+    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key)
     {
         bool emplace;
-        return FindEmplace(key, ts, emplace);
+        return FindEmplace(key, emplace);
     }
 
-    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key,
-                                       uint64_t ts,
-                                       bool &emplace)
+    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, bool &emplace)
     {
         emplace = false;
 
@@ -4041,7 +4080,7 @@ protected:
         }
     }
 
-    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key, uint64_t ts)
+    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key)
     {
         // catalog ccmap bypass shard memory limit. since checkpointer may
         // emplace ccentry into ccmap.

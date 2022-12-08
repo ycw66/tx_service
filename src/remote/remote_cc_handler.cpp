@@ -92,8 +92,21 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_src_node_id(src_node_id);
     acq_all->set_table_name_str(table_name.String());
     acq_all->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
-    acq_all->clear_key();
-    key.Serialize(*acq_all->mutable_key());
+    switch (key.Type())
+    {
+    case KeyType::NegativeInf:
+        acq_all->set_neg_inf(true);
+        break;
+    case KeyType::PositiveInf:
+        acq_all->set_pos_inf(true);
+        break;
+    case KeyType::Normal:
+        acq_all->clear_key();
+        key.Serialize(*acq_all->mutable_key());
+        break;
+    default:
+        assert(false);
+    }
 
     acq_all->set_node_group_id(node_group_id);
     acq_all->set_insert(is_insert);
@@ -188,8 +201,22 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
     post_write_all->set_node_group_id(ng_id);
-    post_write_all->clear_key();
-    key.Serialize(*post_write_all->mutable_key());
+
+    switch (key.Type())
+    {
+    case KeyType::NegativeInf:
+        post_write_all->set_neg_inf(true);
+        break;
+    case KeyType::PositiveInf:
+        post_write_all->set_pos_inf(true);
+        break;
+    case KeyType::Normal:
+        post_write_all->clear_key();
+        key.Serialize(*post_write_all->mutable_key());
+        break;
+    default:
+        assert(false);
+    }
 
     post_write_all->set_commit_ts(commit_ts);
 
