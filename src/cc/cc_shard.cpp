@@ -450,7 +450,7 @@ void CcShard::ClearTx(TxNumber txn)
         auto tx_it = ng_pair.second.find(txn);
         if (tx_it == ng_pair.second.end())
         {
-            return;
+            continue;
         }
 
         TxLockInfo &lk_info = tx_it->second;

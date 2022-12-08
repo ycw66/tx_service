@@ -1365,9 +1365,9 @@ public:
                         LockHandleForResumedRequest(cce,
                                                     cce->payload_status_,
                                                     &req,
-                                                    req.TxTerm(),
                                                     ng_id,
                                                     ng_term,
+                                                    req.TxTerm(),
                                                     cc_op,
                                                     iso_lvl,
                                                     cc_proto);
