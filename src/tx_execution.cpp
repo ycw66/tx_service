@@ -60,7 +60,8 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       write_log_(this),
       sleep_op_(this),
       fault_inject_op_(this),
-      clean_entry_op_(this)
+      clean_entry_op_(this),
+      abundant_lock_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, handler);
 }
@@ -485,7 +486,9 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
     void_resp_ = &scan_close_req.tx_result_;
     void_resp_->Reset();
 
-    ScanClose(scan_close_req.alias_,
+    ScanClose(scan_close_req.scan_batch_,
+              scan_close_req.scan_batch_idx_,
+              scan_close_req.alias_,
               *scan_close_req.end_key_,
               scan_close_req.table_name_);
 }
@@ -1090,13 +1093,17 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         if (scan_open_.hd_result_.Value().scanner_ != nullptr)
         {
             const TableName &table_name = *scan_open_.tx_req_->tab_name_;
-            CcScanner &scanner = *(scan_open_.hd_result_.Value().scanner_);
-
-            // Add remaining ScanTuple into rset, so their lock can be released
-            // when transaction been committed
-            DrainOutScanCache(table_name, scanner);
+            CcScanner *scanner = scan_open_.hd_result_.Value().scanner_.get();
+            abundant_lock_op_.Reset(
+                nullptr, 0, &table_name, scanner, uint64_resp_, nullptr);
+            PushOperation(&abundant_lock_op_);
+            Process(abundant_lock_op_);
         }
-        uint64_resp_->FinishError();
+        else
+        {
+            uint64_resp_->FinishError();
+        }
+
         return;
     }
 
@@ -1474,7 +1481,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     cc_scan_tuple->Record(),
                                                     RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_,
+                                                    scan_tuple_lock_type);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -1484,7 +1493,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     nullptr,
                                                     cc_scan_tuple->rec_status_,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_,
+                                                    scan_tuple_lock_type);
                         }
                     }
 
@@ -1662,7 +1673,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     cc_scan_tuple->Record(),
                                                     RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_,
+                                                    scan_tuple_lock_type);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -1672,7 +1685,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     nullptr,
                                                     cc_scan_tuple->rec_status_,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_,
+                                                    scan_tuple_lock_type);
                         }
                     }
 
@@ -1750,96 +1765,33 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     void_resp_->Finish(void_);
 }
 
-void TransactionExecution::ScanClose(size_t alias,
+void TransactionExecution::ScanClose(std::vector<ScanBatchTuple> *scan_batch,
+                                     size_t scan_batch_idx,
+                                     size_t alias,
                                      const TxKey &end_key,
                                      const TableName &table_name)
 {
+    CcScanner *scanner = nullptr;
     auto scan_it = scans_.find(alias);
     if (scan_it == scans_.end())
     {
-        void_resp_->Finish(void_);
-        return;
+        if (scan_batch == nullptr)
+        {
+            void_resp_->Finish(void_);
+            return;
+        }
     }
-    CcScanner &scanner = *scan_it->second.scanner_;
+    else
+    {
+        scanner = scan_it->second.scanner_.get();
+    }
 
-    // Add remaining ScanTuple into rset, so their lock can be released when
-    // transaction been committed
-    DrainOutScanCache(table_name, scanner);
-
+    abundant_lock_op_.Reset(
+        scan_batch, scan_batch_idx, &table_name, scanner, nullptr, void_resp_);
+    PushOperation(&abundant_lock_op_);
+    Process(abundant_lock_op_);
     handler->ScanClose(alias, end_key, false);
     scans_.erase(scan_it);
-    void_resp_->Finish(void_);
-}
-
-// drain out scan cache and move ScanTuple into readset
-void TransactionExecution::DrainOutScanCache(const TableName &table_name,
-                                             CcScanner &scanner)
-{
-    // Add remaining ScanTuple into rset, so their lock can be released when
-    // transaction been committed
-
-    // drain out the scan tuple in the scan cache
-    scanner.SetDrainCacheMode(true);
-    const ScanTuple *cc_scan_tuple = scanner.Current();
-    // In case the scan status is blocked before
-    if (cc_scan_tuple == nullptr && scanner.Status() == ScannerStatus::Blocked)
-    {
-        scanner.MoveNext();
-        cc_scan_tuple = scanner.Current();
-    }
-
-    while (cc_scan_tuple != nullptr)
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-            &rw_set_,
-            (
-                [this, cc_scan_tuple]() -> std::string
-                {
-                    return std::string("\"tx_number\":")
-                        .append(std::to_string(this->TxNumber()))
-                        .append(",\"tx_term\":")
-                        .append(std::to_string(this->tx_term_))
-                        .append(",\"cce_ptr\":")
-                        .append(
-                            std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
-                }));
-
-        LockType scan_tuple_lock_type =
-            scanner.DeduceScanTupleLockType(cc_scan_tuple);
-        // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
-        // not used when do scan operation.
-        if (scan_tuple_lock_type != LockType::NoLock &&
-            cc_scan_tuple->key_ts_ != 0)
-        {
-            bool add_res;
-            if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
-            {
-                // Only used to release lock.
-                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                          0,
-                                          scanner.protocol_,
-                                          scan_tuple_lock_type,
-                                          &table_name);
-            }
-            else
-            {
-                add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                          cc_scan_tuple->key_ts_,
-                                          scanner.protocol_,
-                                          scan_tuple_lock_type,
-                                          &table_name);
-            }
-            if (!add_res)
-            {
-                continue;
-            }
-        }
-        scanner.MoveNext();
-        cc_scan_tuple = scanner.Current();
-        scan_tuple_lock_type = scanner.DeduceScanTupleLockType(cc_scan_tuple);
-    }
 }
 
 void TransactionExecution::Update(const TableName &table_name,
@@ -3111,4 +3063,166 @@ void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
     state_stack_.pop_back();
     Forward();
 }
+
+void TransactionExecution::Process(ReleaseScanExtraLockOp &lock_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &lock_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    lock_op.is_running_ = true;
+    StartTiming();
+
+    drain_batch_.clear();
+    if (lock_op.scan_batch_ != nullptr)
+    {
+        for (size_t i = lock_op.scan_batch_idx_;
+             i < lock_op.scan_batch_->size();
+             i++)
+        {
+            ScanBatchTuple &tpl = (*lock_op.scan_batch_)[i];
+            if (tpl.cce_addr_.Empty())
+            {
+                continue;
+            }
+
+            if (rw_set_.FindReadSet(*lock_op.table_name_, tpl.cce_addr_) ==
+                ReadEntryResult::INSERT_REPEAT)
+            {
+                continue;
+            }
+
+            drain_batch_.push_back(tpl);
+            rw_set_.DedupRead(tpl.cce_addr_);
+        }
+    }
+    // Add remaining ScanTuple into batch, and release their lock
+
+    if (lock_op.scanner_ != nullptr)
+    {
+        // drain out the scan tuple in the scan cache
+        lock_op.scanner_->SetDrainCacheMode(true);
+        const ScanTuple *cc_scan_tuple = lock_op.scanner_->Current();
+        // In case the scan status is blocked before
+        if (cc_scan_tuple == nullptr &&
+            lock_op.scanner_->Status() == ScannerStatus::Blocked)
+        {
+            lock_op.scanner_->MoveNext();
+            cc_scan_tuple = lock_op.scanner_->Current();
+        }
+
+        while (cc_scan_tuple != nullptr)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                &rw_set_,
+                (
+                    [this, cc_scan_tuple]() -> std::string
+                    {
+                        return std::string("\"tx_number\":")
+                            .append(std::to_string(this->TxNumber()))
+                            .append(",\"tx_term\":")
+                            .append(std::to_string(this->tx_term_))
+                            .append(",\"cce_ptr\":")
+                            .append(std::to_string(
+                                cc_scan_tuple->cce_addr_.CcePtr()));
+                    }));
+
+            LockType scan_tuple_lock_type =
+                lock_op.scanner_->DeduceScanTupleLockType(cc_scan_tuple);
+            // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
+            // not used when do scan operation.
+            if (scan_tuple_lock_type != LockType::NoLock &&
+                cc_scan_tuple->key_ts_ != 0 &&
+                rw_set_.FindReadSet(*lock_op.table_name_,
+                                    cc_scan_tuple->cce_addr_) ==
+                    ReadEntryResult::NO_INSERT)
+            {
+                if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+                {
+                    // Only used to release lock.
+                    drain_batch_.emplace_back(cc_scan_tuple->Key(),
+                                              cc_scan_tuple->Record(),
+                                              RecordStatus::Normal,
+                                              0,
+                                              cc_scan_tuple->cce_addr_,
+                                              scan_tuple_lock_type);
+                }
+                else
+                {
+                    drain_batch_.emplace_back(cc_scan_tuple->Key(),
+                                              cc_scan_tuple->Record(),
+                                              RecordStatus::Normal,
+                                              cc_scan_tuple->key_ts_,
+                                              cc_scan_tuple->cce_addr_,
+                                              scan_tuple_lock_type);
+                }
+            }
+            lock_op.scanner_->MoveNext();
+            cc_scan_tuple = lock_op.scanner_->Current();
+        }
+    }
+
+    if (drain_batch_.size() == 0)
+    {
+        lock_op.hd_result_.SetFinished();
+    }
+    else
+    {
+        lock_op.hd_result_.SetRefCnt((uint32_t) drain_batch_.size());
+    }
+
+    for (ScanBatchTuple &tpl : drain_batch_)
+    {
+        handler->PostRead(tx_number_.load(std::memory_order_relaxed),
+                          tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
+                          tpl.version_ts_,
+                          0,
+                          commit_ts_,
+                          tpl.cce_addr_,
+                          lock_op.hd_result_,
+                          lock_op.scanner_->protocol_,
+                          tpl.lock_type_);
+    }
+}
+
+void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &lock_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    // The lock_op step is optional. Only pops the stack if the last step
+    // is the validation step.
+    if (!state_stack_.empty())
+    {
+        assert(state_stack_.back() == &lock_op);
+        state_stack_.pop_back();
+    }
+
+    if (lock_op.scan_open_tx_result_ != nullptr)
+    {
+        lock_op.scan_open_tx_result_->FinishError();
+    }
+    else if (lock_op.scan_close_tx_result_ != nullptr)
+    {
+        lock_op.scan_close_tx_result_->Finish(void_);
+    }
+}
+
 }  // namespace txservice

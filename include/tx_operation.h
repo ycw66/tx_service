@@ -23,6 +23,7 @@ struct ReadTxRequest;
 struct ReadOutsideTxRequest;
 struct ScanOpenTxRequest;
 struct ScanBatchTxRequest;
+struct ScanBatchTuple;
 
 #define RETRY_NUM 5
 
@@ -734,4 +735,26 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
      */
     PostReadOperation catalog_post_read_op_;
 };
+
+// To remove remainder records' lock when scan close
+struct ReleaseScanExtraLockOp : TransactionOperation
+{
+    explicit ReleaseScanExtraLockOp(TransactionExecution *txm);
+    void Reset(std::vector<ScanBatchTuple> *scan_batch,
+               size_t scan_batch_idx,
+               const TableName *table_name,
+               CcScanner *scanner,
+               TxResult<size_t> *scan_open_tx_result,
+               TxResult<Void> *scan_close_tx_result);
+    void Forward(TransactionExecution *txm) override;
+
+    CcHandlerResult<PostProcessResult> hd_result_;
+    TxResult<size_t> *scan_open_tx_result_;
+    TxResult<Void> *scan_close_tx_result_;
+    std::vector<ScanBatchTuple> *scan_batch_;
+    size_t scan_batch_idx_;
+    const TableName *table_name_;
+    CcScanner *scanner_;
+};
+
 }  // namespace txservice

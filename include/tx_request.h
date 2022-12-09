@@ -239,7 +239,6 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 struct ScanBatchTuple
 {
     ScanBatchTuple() = default;
-
     ScanBatchTuple(const TxKey *key,
                    const TxRecord *rec,
                    RecordStatus status,
@@ -248,11 +247,28 @@ struct ScanBatchTuple
     {
     }
 
-    ScanBatchTuple(ScanBatchTuple &&rhs)
+    ScanBatchTuple(const TxKey *key,
+                   const TxRecord *rec,
+                   RecordStatus status,
+                   uint64_t version,
+                   const CcEntryAddr cce_addr,
+                   LockType lock_type)
+        : key_(key),
+          record_(rec),
+          status_(status),
+          version_ts_(version),
+          cce_addr_(cce_addr),
+          lock_type_(lock_type)
+    {
+    }
+
+    ScanBatchTuple(const ScanBatchTuple &rhs)
         : key_(rhs.key_),
           record_(rhs.record_),
           status_(rhs.status_),
-          version_ts_(rhs.version_ts_)
+          version_ts_(rhs.version_ts_),
+          cce_addr_(rhs.cce_addr_),
+          lock_type_(rhs.lock_type_)
     {
     }
 
@@ -260,6 +276,8 @@ struct ScanBatchTuple
     const TxRecord *record_{nullptr};
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
+    const CcEntryAddr cce_addr_;
+    LockType lock_type_{LockType::NoLock};
 };
 
 struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
@@ -281,15 +299,22 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
 
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
-    ScanCloseTxRequest(size_t alias,
+    ScanCloseTxRequest(std::vector<txservice::ScanBatchTuple> *scan_batch,
+                       size_t scan_batch_idx,
+                       size_t alias,
                        TxKey *end_key,
                        const TableName &table_name)
-        : alias_(alias),
+        : scan_batch_(scan_batch),
+          scan_batch_idx_(scan_batch_idx),
+          alias_(alias),
           end_key_(end_key),
           //   lock_type_(lock_type),
           table_name_(table_name)
     {
     }
+
+    std::vector<txservice::ScanBatchTuple> *scan_batch_;
+    size_t scan_batch_idx_;
 
     size_t alias_;
     TxKey *end_key_;

@@ -3159,4 +3159,56 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         }
     }
 }
+
+ReleaseScanExtraLockOp::ReleaseScanExtraLockOp(TransactionExecution *txm)
+    : hd_result_(txm),
+      scan_open_tx_result_(nullptr),
+      scan_close_tx_result_(nullptr)
+{
+}
+
+void ReleaseScanExtraLockOp::Reset(std::vector<ScanBatchTuple> *scan_batch,
+                                   size_t scan_batch_idx,
+                                   const TableName *table_name,
+                                   CcScanner *scanner,
+                                   TxResult<size_t> *scan_open_tx_result,
+                                   TxResult<Void> *scan_close_tx_result)
+{
+    hd_result_.Reset();
+    hd_result_.Value().Clear();
+    scan_open_tx_result_ = scan_open_tx_result;
+    scan_close_tx_result_ = scan_close_tx_result;
+    scan_batch_ = scan_batch;
+    scan_batch_idx_ = scan_batch_idx;
+    table_name_ = table_name;
+    scanner_ = scanner;
+}
+
+void ReleaseScanExtraLockOp::Forward(TransactionExecution *txm)
+{
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeout",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
+        {
+            txm->PostProcess(*this);
+        }
+    }
+}
 }  // namespace txservice

@@ -73,6 +73,8 @@ struct ReadSetEntry
     CcProtocol protocol_;
     // TODO: compact protocol and lock type to save memory.
     LockType lock_type_;
+    // To save if the entry has been locked twice or more times
+    bool is_relock = false;
 };
 
 struct ScanSetEntry

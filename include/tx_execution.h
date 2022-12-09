@@ -39,6 +39,7 @@ struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
 struct SplitRangeTxRequest;
+struct ScanBatchTuple;
 
 class TxProcessor;
 
@@ -272,14 +273,16 @@ private:
     template <typename ResultType>
     void PostProcess(DsOp<ResultType> &ds_op);
 
+    void Process(ReleaseScanExtraLockOp &lock_op);
+    void PostProcess(ReleaseScanExtraLockOp &lock_op);
+
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(size_t alias,
+    void ScanClose(std::vector<ScanBatchTuple> *scan_batch,
+                   size_t scan_batch_idx,
+                   size_t alias,
                    const TxKey &end_key,
                    const TableName &table_name);
-
-    // drain out scan cache and move ScanTuple into readset
-    void DrainOutScanCache(const TableName &table_name, CcScanner &scanner);
 
     void Update(const TableName &table_name,
                 TxKey::Uptr key,
@@ -411,7 +414,9 @@ private:
     ReadOperation read_;
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
-
+    // Tempory save scan tuple when drain out the remainder scan tiples.
+    // To avoid ccentry address to be save in stack
+    std::vector<ScanBatchTuple> drain_batch_;
 // Committing phase.
 #ifdef RANGE_PARTITIONED
     LockWriteRangesOp lock_write_ranges_;
@@ -430,6 +435,7 @@ private:
     // clean archives
     CleanCcEntryForTestOp clean_entry_op_;
 
+    ReleaseScanExtraLockOp abundant_lock_op_;
 #ifdef METRICS_COLLECTOR_ENABLE
     metrics::MetricsNaming post_process_total = {
         "tx_post_process_total",
@@ -465,5 +471,6 @@ private:
     friend struct DsOp;
     friend struct PostReadOperation;
     friend class TxProcessor;
+    friend class ReleaseScanExtraLockOp;
 };
 }  // namespace txservice

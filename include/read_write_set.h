@@ -13,6 +13,13 @@ namespace txservice
 using TableWriteSet =
     std::map<const TxKey *, WriteSetEntry, PtrLessThan<TxKey>>;
 
+enum class ReadEntryResult : uint8_t
+{
+    NO_INSERT = 0,
+    INSERT_ONE,
+    INSERT_REPEAT
+};
+
 class ReadWriteSet
 {
     static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
@@ -134,6 +141,8 @@ public:
                 it->second.lock_type_ = lock_type;
                 it->second.protocol_ = proto;
             }
+
+            it->second.is_relock = true;
         }
         else if (!(*table_name == catalog_ccm_name))
         {
@@ -411,6 +420,27 @@ public:
             rset_.erase(tbl_it);
         }
 #endif
+    }
+
+    // To find if a ccentry has been inserted into readset and if repeated to
+    // inserted into it.
+    ReadEntryResult FindReadSet(const TableName &tname,
+                                const CcEntryAddr &ety_addr)
+    {
+        auto iter = rset_.find(tname);
+        if (iter == rset_.end())
+        {
+            return ReadEntryResult::NO_INSERT;
+        }
+
+        auto it_addr = iter->second.find(ety_addr);
+        if (it_addr == iter->second.end())
+        {
+            return ReadEntryResult::NO_INSERT;
+        }
+
+        return (it_addr->second.is_relock ? ReadEntryResult::INSERT_REPEAT
+                                          : ReadEntryResult::INSERT_ONE);
     }
 
 private:
