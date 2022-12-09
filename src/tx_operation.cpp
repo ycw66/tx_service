@@ -1396,7 +1396,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.key_ = &table_key_;
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
-    acquire_all_intent_op_.protocol_ = CcProtocol::OccRead;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
 
     post_all_intent_op_.table_name_ = &catalog_ccm_name;
     post_all_intent_op_.key_ = &table_key_;

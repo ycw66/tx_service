@@ -127,7 +127,7 @@ public:
     {
         assert(false);
     }
-    size_t IndexesSize()
+    size_t IndexesSize() const override
     {
         return indexes_.size();
     }

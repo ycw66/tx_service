@@ -424,7 +424,7 @@ struct AcquireAllOp : public TransactionOperation
     const TxKey *key_{nullptr};
 
     CcOperation cc_op_{CcOperation::ReadForWrite};
-    CcProtocol protocol_{CcProtocol::OccRead};
+    CcProtocol protocol_{CcProtocol::OCC};
 };
 
 struct PostWriteAllOp : public TransactionOperation

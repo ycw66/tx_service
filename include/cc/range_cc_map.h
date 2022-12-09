@@ -175,7 +175,7 @@ public:
 
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
-            acquired_lock =
+            std::tie(acquired_lock, lock_op_status) =
                 LockHandleForResumedRequest(floor_cce,
                                             floor_cce->payload_status_,
                                             &req,
@@ -184,8 +184,8 @@ public:
                                             req.TxTerm(),
                                             cc_op,
                                             req.Isolation(),
-                                            req.Protocol());
-            lock_op_status = LockOpStatus::Successful;
+                                            req.Protocol(),
+                                            req.ReadTimestamp());
         }
         else
         {
@@ -211,7 +211,8 @@ public:
                                   tx_term,
                                   cc_op,
                                   iso_lvl,
-                                  cc_proto);
+                                  cc_proto,
+                                  req.ReadTimestamp());
         }
 
         // after acquiring lock

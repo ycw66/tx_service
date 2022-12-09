@@ -2,6 +2,8 @@
 
 #include <cassert>  // assert
 
+#include "tx_record.h"  // RecordStatus
+
 namespace txservice
 {
 
@@ -11,9 +13,10 @@ namespace txservice
  *
  * - "Pessimistic Read" : ReadLock. Conflict: block and wait.
  *
- * - "Optimistic Write" : WriteLock. Confilict: back off and retry.
+ * - "Optimistic Write" : WriteLock and WriteIntent. Confilict: back off and
+ * retry.
  *
- * - "Pessimistic Write" : WriteLock. Confilict: block and wait.
+ * - "Pessimistic Write" : WriteLock and WriteIntent. Confilict: block and wait.
  *
  */
 enum class CcProtocol
@@ -87,18 +90,7 @@ public:
         }
         else if (cc_op == CcOperation::ReadForWrite)
         {
-            if (cc_protocol == CcProtocol::OCC)
-            {
-                if (iso_level >= IsolationLevel::RepeatableRead)
-                {
-                    return LockType::ReadIntent;
-                }
-                return LockType::NoLock;
-            }
-            else
-            {
-                return LockType::WriteIntent;
-            }
+            return LockType::WriteIntent;
         }
         else if (cc_op == CcOperation::Write)
         {

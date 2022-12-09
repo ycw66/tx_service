@@ -98,19 +98,26 @@ enum class CcOperation
 |----------------|------------|----------------------------------------------|-------------------------------|---------------------------------|-------------|
 |                |            | Read                                         | Write                         | ReadForWrite                    | ReadSkIndex |
 |----------------|------------|----------------------------------------------|-------------------------------|---------------------------------|-------------|
-| ReadCommitted  | OCC        | NoLock                                       | WriteLock( conflict: backoff) | No WriteIntent                  | ReadLock    |
-|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: backoff) | ReadLock    |
+| ReadCommitted  | OCC        | NoLock                                       | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
+|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
 |                | Locking    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-| Snapshot       | OCC        | NoLock                                       | WriteLock( conflict: backoff) | No WriteIntent                  | No ReadLock |
-|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: backoff) | No ReadLock |
-| RepeatableRead | OCC        | ReadIntent (Commit: validate)                | WriteLock( conflict: backoff) | No WriteIntent                  | ReadLock    |
-|                | OccRead    | ReadIntent (Commit: validate)                | WriteLock( conflict: block)   | WriteIntent( conflict: backoff) | ReadLock    |
+| Snapshot       | OCC        | NoLock                                       | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | No ReadLock |
+|                | OccRead    | NoLock                                       | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | No ReadLock |
+| RepeatableRead | OCC        | ReadIntent (Commit: validate)                | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
+|                | OccRead    | ReadIntent (Commit: validate)                | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
 |                | Locking    | ReadLock                                     | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
-| Serializable   | OCC        | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: backoff) | No WriteIntent                  | ReadLock    |
-|                | OccRead    | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: block)   | WriteIntent( conflict: backoff) | ReadLock    |
+| Serializable   | OCC        | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: backoff) | WriteIntent( conflict: backoff) | ReadLock    |
+|                | OccRead    | ReadIntent on key and gap (Commit: validate) | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
 |                | Locking    | ReadLock on key and gap                      | WriteLock( conflict: block)   | WriteIntent( conflict: block)   | ReadLock    |
 
-*Notice: the request is always blocked if failed to acquire ReadLock.*
+*Notice:*
+- The request is always blocked if failed to acquire ReadLock.
+
+- Under Snapshot Isolation level, when update a record, we should validate whether the fetched version by snapshot read based transaction's start timestamp is the latest version.
+>**Snapshot Isolation** is a guarantee that all reads made in a transaction will see a consistent snapshot of the database (in practice it reads the last committed values that existed at the time it started), and the transaction itself will successfully commit only if no updates it has made conflict with any concurrent updates made since that snapshot. *(cited from [wiki](https://en.wikipedia.org/wiki/Snapshot_isolation))*  
+
+- Under Repeatable Read isolation level, no matter the fetched version is through "Read" or "ReadForWrite", we should always promise the record can not be changed by other transactions before committing the transaction.
+(*this is different from general read under Snapshot Isolation*)
 
 (2) How to handle `Select...Lock In Share Mode`?  
 

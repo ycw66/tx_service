@@ -172,7 +172,7 @@ public:
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-            acquired_lock =
+            std::tie(acquired_lock, lock_op_status) =
                 LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
                                             &req,
@@ -181,8 +181,8 @@ public:
                                             req.TxTerm(),
                                             CcOperation::Write,
                                             req.Isolation(),
-                                            req.Protocol());
-            lock_op_status = LockOpStatus::Successful;
+                                            req.Protocol(),
+                                            0);
         }
         else
         {
@@ -307,7 +307,8 @@ public:
                                       req.TxTerm(),
                                       CcOperation::Write,
                                       req.Isolation(),
-                                      req.Protocol());
+                                      req.Protocol(),
+                                      0);
             }
 
             if (lock_op_status == LockOpStatus::Successful)
@@ -661,7 +662,7 @@ public:
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            acquired_lock =
+            std::tie(acquired_lock, lock_op_status) =
                 LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
                                             &req,
@@ -670,8 +671,8 @@ public:
                                             req.TxTerm(),
                                             req.CcOp(),
                                             req.Isolation(),
-                                            req.Protocol());
-            lock_op_status = LockOpStatus::Successful;
+                                            req.Protocol(),
+                                            0);
         }
         else
         {
@@ -815,7 +816,8 @@ public:
                                       tx_term,
                                       cc_op,
                                       iso_lvl,
-                                      cc_proto);
+                                      cc_proto,
+                                      0);
             }
 
             switch (lock_op_status)
@@ -1398,10 +1400,11 @@ public:
                     cce->key_lock_ptr_->ReleaseLock(
                         req.Txn(), shard_, LockType::ReadLock);
                     acquired_lock = LockType::NoLock;
+                    lock_op_status = LockOpStatus::Successful;
                 }
                 else
                 {
-                    acquired_lock =
+                    std::tie(acquired_lock, lock_op_status) =
                         LockHandleForResumedRequest(cce,
                                                     cce->payload_status_,
                                                     &req,
@@ -1410,9 +1413,9 @@ public:
                                                     req.TxTerm(),
                                                     cc_op,
                                                     iso_lvl,
-                                                    cc_proto);
+                                                    cc_proto,
+                                                    req.ReadTimestamp());
                 }
-                lock_op_status = LockOpStatus::Successful;
             }
             else
             {
@@ -1525,7 +1528,8 @@ public:
                                       tx_term,
                                       cc_op,
                                       iso_lvl,
-                                      cc_proto);
+                                      cc_proto,
+                                      req.ReadTimestamp());
             }
 
             // After acquiring lock
@@ -1635,7 +1639,6 @@ public:
             }
         }
 
-        // If 'req.IsForWrite()' is true, should read latest version;
         if (is_read_snapshot)
         {
             assert(req.Type() == ReadType::Inside);
@@ -1953,15 +1956,22 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(cce,
-                                        cce->payload_status_,
-                                        &req,
-                                        ng_id,
-                                        ng_term,
-                                        tx_term,
-                                        cc_op,
-                                        iso_lvl,
-                                        cc_proto);
+            auto lock_pair = LockHandleForResumedRequest(cce,
+                                                         cce->payload_status_,
+                                                         &req,
+                                                         ng_id,
+                                                         ng_term,
+                                                         tx_term,
+                                                         cc_op,
+                                                         iso_lvl,
+                                                         cc_proto,
+                                                         req.ReadTimestamp());
+
+            if (lock_pair.second == LockOpStatus::Failed)
+            {
+                req.Result()->SetError(1);
+                return true;
+            }
 
             AddScanTuple(cce,
                          typed_cache,
@@ -2009,7 +2019,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2057,7 +2068,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2101,7 +2113,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2187,15 +2200,22 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(prior_cce,
-                                        prior_cce->payload_status_,
-                                        &req,
-                                        ng_id,
-                                        ng_term,
-                                        tx_term,
-                                        cc_op,
-                                        iso_lvl,
-                                        cc_proto);
+            auto lock_pair =
+                LockHandleForResumedRequest(prior_cce,
+                                            prior_cce->payload_status_,
+                                            &req,
+                                            ng_id,
+                                            ng_term,
+                                            tx_term,
+                                            cc_op,
+                                            iso_lvl,
+                                            cc_proto,
+                                            req.ReadTimestamp());
+            if (lock_pair.second == LockOpStatus::Failed)
+            {
+                req.Result()->SetError(1);
+                return true;
+            }
 
             AddScanTuple(prior_cce,
                          typed_cache,
@@ -2239,7 +2259,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2289,6 +2310,15 @@ public:
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
+                    if (iso_lvl == IsolationLevel::Snapshot &&
+                        cc_op == CcOperation::ReadForWrite &&
+                        req.ReadTimestamp() < cce->commit_ts_)
+                    {
+                        // ReadForWrite under SnapshotIsolation, should
+                        // validate the snapshot read version is latest version;
+                        req.Result()->SetError(1);
+                        return true;
+                    }
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
@@ -2297,7 +2327,8 @@ public:
                                                        tx_term,
                                                        cc_op,
                                                        iso_lvl,
-                                                       cc_proto);
+                                                       cc_proto,
+                                                       req.ReadTimestamp());
                     if (lock_pair.second == LockOpStatus::Failed)
                     {
                         // lock confilct: back off and retry.
@@ -2458,15 +2489,21 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(cce,
-                                        cce->payload_status_,
-                                        &req,
-                                        ng_id,
-                                        ng_term,
-                                        tx_term,
-                                        cc_op,
-                                        iso_lvl,
-                                        cc_proto);
+            auto lock_pair = LockHandleForResumedRequest(cce,
+                                                         cce->payload_status_,
+                                                         &req,
+                                                         ng_id,
+                                                         ng_term,
+                                                         tx_term,
+                                                         cc_op,
+                                                         iso_lvl,
+                                                         cc_proto,
+                                                         req.ReadTimestamp());
+            if (lock_pair.second == LockOpStatus::Failed)
+            {
+                req.Result()->SetError(1);
+                return true;
+            }
 
             AddScanTupleMsg(cce,
                             cache,
@@ -2501,7 +2538,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2561,7 +2599,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2615,7 +2654,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2699,15 +2739,23 @@ public:
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(prior_cce,
-                                        prior_cce->payload_status_,
-                                        &req,
-                                        ng_id,
-                                        ng_term,
-                                        tx_term,
-                                        cc_op,
-                                        iso_lvl,
-                                        cc_proto);
+            auto lock_pair =
+                LockHandleForResumedRequest(prior_cce,
+                                            prior_cce->payload_status_,
+                                            &req,
+                                            ng_id,
+                                            ng_term,
+                                            tx_term,
+                                            cc_op,
+                                            iso_lvl,
+                                            cc_proto,
+                                            req.ReadTimestamp());
+
+            if (lock_pair.second == LockOpStatus::Failed)
+            {
+                req.Result()->SetError(1);
+                return true;
+            }
 
             AddScanTupleMsg(prior_cce,
                             req.scan_cache_,
@@ -2749,7 +2797,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -2801,6 +2850,15 @@ public:
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
+                    if (iso_lvl == IsolationLevel::Snapshot &&
+                        cc_op == CcOperation::ReadForWrite &&
+                        req.ReadTimestamp() < cce->commit_ts_)
+                    {
+                        // ReadForWrite under SnapshotIsolation, should
+                        // validate the snapshot read version is latest version;
+                        req.Result()->SetError(1);
+                        return true;
+                    }
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
@@ -2809,7 +2867,8 @@ public:
                                                        tx_term,
                                                        cc_op,
                                                        iso_lvl,
-                                                       cc_proto);
+                                                       cc_proto,
+                                                       req.ReadTimestamp());
                     if (lock_pair.second == LockOpStatus::Failed)
                     {
                         // lock confilct: back off and retry.
@@ -2942,15 +3001,22 @@ public:
             req.SetCceScanType(ScanType::ScanUnknow, core_id);
 
             // Lock has been acquired, UpsertLockHoldingTx
-            LockHandleForResumedRequest(cce,
-                                        cce->payload_status_,
-                                        &req,
-                                        ng_id,
-                                        ng_term,
-                                        tx_term,
-                                        cc_op,
-                                        iso_lvl,
-                                        req.Protocol());
+            auto lock_pair = LockHandleForResumedRequest(cce,
+                                                         cce->payload_status_,
+                                                         &req,
+                                                         ng_id,
+                                                         ng_term,
+                                                         tx_term,
+                                                         cc_op,
+                                                         iso_lvl,
+                                                         req.Protocol(),
+                                                         req.ReadTimestamp());
+
+            if (lock_pair.second == LockOpStatus::Failed)
+            {
+                req.Result()->SetError(1);
+                return true;
+            }
 
             AddScanTuple(cce,
                          scan_cache,
@@ -2992,7 +3058,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -3051,7 +3118,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
@@ -3156,7 +3224,8 @@ public:
                                                    tx_term,
                                                    cc_op,
                                                    iso_lvl,
-                                                   cc_proto);
+                                                   cc_proto,
+                                                   req.ReadTimestamp());
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.

@@ -177,7 +177,10 @@ protected:
      * @param protocol
      * @param is_resume If true, it means that the request is restored from
      * lock blocking queue, that is, the request just acquired the lock.
-     * @return std::pair<LockType, LockOpStatus>
+     * @return std::pair<LockType, LockOpStatus> : the first arg of the pair is
+     * the lock that the request will acquire, the second is the result of
+     * acquire lock operation. If the latest version of ccentry does't fit read
+     * timestamp for ReadForWrite under SI, the result will be <NoLock, Failed>.
      */
     std::pair<LockType, LockOpStatus> AcquireCceKeyLock(
         LruEntry *cce,
@@ -188,17 +191,27 @@ protected:
         int64_t tx_term,
         CcOperation cc_op,
         IsolationLevel iso_level,
-        CcProtocol protocol);
+        CcProtocol protocol,
+        uint64_t read_ts);
 
-    LockType LockHandleForResumedRequest(LruEntry *cce,
-                                         RecordStatus cce_payload_status,
-                                         CcRequestBase *req,
-                                         uint32_t ng_id,
-                                         int64_t ng_term,
-                                         int64_t tx_term,
-                                         CcOperation cc_op,
-                                         IsolationLevel iso_level,
-                                         CcProtocol protocol);
+    /**
+     * @brief do check after request is resumed from lock blocking queue.
+     * @return std::pair<LockType, LockOpStatus> : the first arg of the pair is
+     * the lock that the request will acquire, the second is the result of
+     * acquire lock operation. If the latest version of ccentry does't fit read
+     * timestamp for ReadForWrite under SI, the result will be <NoLock, Failed>.
+     */
+    std::pair<LockType, LockOpStatus> LockHandleForResumedRequest(
+        LruEntry *cce,
+        RecordStatus cce_payload_status,
+        CcRequestBase *req,
+        uint32_t ng_id,
+        int64_t ng_term,
+        int64_t tx_term,
+        CcOperation cc_op,
+        IsolationLevel iso_level,
+        CcProtocol protocol,
+        uint64_t read_ts);
 
     void RecoverTxForLockConfilct(NonBlockingLock &lock,
                                   LockType lock_type,

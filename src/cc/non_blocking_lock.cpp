@@ -158,13 +158,13 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     }
     case LockType::WriteIntent:
     {
-        if (cc_protocol == CcProtocol::OccRead)
+        if (cc_protocol == CcProtocol::OCC)
         {
             bool success = AcquireWriteIntent(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Failed;
         }
-        else if (cc_protocol == CcProtocol::Locking)
+        else
         {
             bool success = AcquireWriteIntent(cc_req, cc_protocol);
             lock_status =
@@ -380,9 +380,9 @@ void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
  * LOCKING protocol, put the request into blocking queue.
  *
  * @param cc_req: lock request.
- * @param protocol: OccRead or LOCKING.
+ * @param protocol: OCC, OccRead or LOCKING.
  * @return true: lock succeeds.
- * @return false: lock failed, push request into blocking for LOCKING
+ * @return false: lock failed, push request into blocking for OccRead or LOCKING
  * protocol. return directly for OCC protocol.
  */
 bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
@@ -409,7 +409,7 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
     // lock fails case.
     else
     {
-        if (protocol == CcProtocol::Locking)
+        if (protocol != CcProtocol::OCC)
         {
             // block the request by putting it into the blocking queue.
             blocking_queue_.Enqueue(

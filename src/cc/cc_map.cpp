@@ -25,8 +25,22 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
     int64_t tx_term,
     CcOperation cc_op,
     IsolationLevel iso_level,
-    CcProtocol protocol)
+    CcProtocol protocol,
+    uint64_t read_ts)
 {
+    if (iso_level == IsolationLevel::Snapshot &&
+        cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+    {
+        LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
+                        "timestamp. tx:"
+                     << req->Txn();
+        // For ReadForWrite under Snapshot Isolation,  we will return the
+        // latest version, only if the latest version fits the read's timestamp.
+        // Otherwise, we will return an error to abort the tx.
+        return std::pair<LockType, LockOpStatus>(LockType::NoLock,
+                                                 LockOpStatus::Failed);
+    }
+
     // deduce the lock type to acquire
     LockType lock_type =
         LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
@@ -138,23 +152,41 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
     return std::pair<LockType, LockOpStatus>(lock_type, lock_op_status);
 }
 
-LockType CcMap::LockHandleForResumedRequest(LruEntry *cce,
-                                            RecordStatus cce_payload_status,
-                                            CcRequestBase *req,
-                                            uint32_t ng_id,
-                                            int64_t ng_term,
-                                            int64_t tx_term,
-                                            CcOperation cc_op,
-                                            IsolationLevel iso_level,
-                                            CcProtocol protocol)
+std::pair<LockType, LockOpStatus> CcMap::LockHandleForResumedRequest(
+    LruEntry *cce,
+    RecordStatus cce_payload_status,
+    CcRequestBase *req,
+    uint32_t ng_id,
+    int64_t ng_term,
+    int64_t tx_term,
+    CcOperation cc_op,
+    IsolationLevel iso_level,
+    CcProtocol protocol,
+    uint64_t read_ts)
 {
     TxNumber tx_number = req->Txn();
     LockType acquired_lock =
         LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
+    LockOpStatus lock_op_status = LockOpStatus::Successful;
 
-    if (cce_payload_status == RecordStatus::Deleted &&
-        acquired_lock != LockType::WriteLock &&
-        acquired_lock != LockType::WriteIntent)
+    bool should_release_lock = (cce_payload_status == RecordStatus::Deleted &&
+                                acquired_lock != LockType::WriteLock &&
+                                acquired_lock != LockType::WriteIntent);
+
+    if (iso_level == IsolationLevel::Snapshot &&
+        cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+    {
+        LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
+                        "timestamp. tx:"
+                     << req->Txn();
+        // For ReadForWrite under Snapshot Isolation,  we will return the
+        // latest version, only if the latest version fits the read's timestamp.
+        // Otherwise, we will return an error to abort the tx.
+        lock_op_status = LockOpStatus::Failed;
+        should_release_lock = true;
+    }
+
+    if (should_release_lock)
     {
         cce->key_lock_ptr_->ReleaseLock(tx_number, shard_, acquired_lock);
         cce->RecycleKeyLock();
@@ -173,7 +205,7 @@ LockType CcMap::LockHandleForResumedRequest(LruEntry *cce,
                                     ng_id);
     }
 
-    return acquired_lock;
+    return std::pair<LockType, LockOpStatus>(acquired_lock, lock_op_status);
 }
 
 void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
