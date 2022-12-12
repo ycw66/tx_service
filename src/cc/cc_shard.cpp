@@ -700,14 +700,6 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                       bool is_create,
                                       bool ccm_has_full_entries)
 {
-    uint32_t shard_code =
-        Sharder::Instance().ShardCode(std::hash<TableName>{}(table_name));
-    uint32_t shard_id = shard_code >> 10;
-    uint16_t core_id = (shard_code & 0x3FF) % core_cnt_;
-    // The rule is same with LocalCcShards::EnqueueCcRequest to avoid
-    // statistics race.
-    bool maintain_statistics = (shard_id == ng_id) && (core_id == core_id_);
-
     if (ng_id == node_id_)
     {
         auto ccm_it = native_ccms_.try_emplace(
@@ -716,7 +708,6 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             table_schema,
                                             schema_ts,
                                             ccm_has_full_entries,
-                                            maintain_statistics,
                                             this,
                                             ng_id));
         // update table schema for alter table command.
@@ -741,7 +732,6 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             table_schema,
                                             schema_ts,
                                             ccm_has_full_entries,
-                                            maintain_statistics,
                                             this,
                                             ng_id));
         // update table schema for alter table command.
@@ -762,26 +752,12 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
                                       uint64_t schema_ts,
                                       bool is_create)
 {
-    const TableName base_table_name{index_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
-    uint32_t shard_code =
-        Sharder::Instance().ShardCode(std::hash<TableName>{}(base_table_name));
-    uint32_t shard_id = shard_code >> 10;
-    uint16_t core_id = (shard_code & 0x3FF) % core_cnt_;
-    // The rule is same with LocalCcShards::EnqueueCcRequest to avoid
-    // statistics race.
-    bool maintain_statistics = (shard_id == ng_id) && (core_id == core_id_);
-
     if (ng_id == node_id_)
     {
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
-            catalog_factory_->CreateSkCcMap(index_name,
-                                            table_schema,
-                                            schema_ts,
-                                            maintain_statistics,
-                                            this,
-                                            ng_id));
+            catalog_factory_->CreateSkCcMap(
+                index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create)
         {
@@ -799,12 +775,8 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
             fail_ccm_it->second;
         auto ccm_it = ccms.try_emplace(
             ng_id,
-            catalog_factory_->CreateSkCcMap(index_name,
-                                            table_schema,
-                                            schema_ts,
-                                            maintain_statistics,
-                                            this,
-                                            ng_id));
+            catalog_factory_->CreateSkCcMap(
+                index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create)
         {

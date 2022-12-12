@@ -50,7 +50,6 @@ public:
                   uint64_t schema_ts,
                   const TableSchema *table_schema = nullptr,
                   bool ccm_has_full_entries = false,
-                  bool maintain_statistics = false,
                   bool is_catalog_cc_map = false)
         : CcMap(shard,
                 cc_ng_id,
@@ -62,7 +61,8 @@ public:
           neg_inf_(this),
           pos_inf_(this),
           is_catalog_cc_map_(is_catalog_cc_map),
-          maintain_statistics_(maintain_statistics)
+          maintain_statistics_(false),
+          shard_profile_(nullptr)
     {
         neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
         pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
@@ -77,19 +77,27 @@ public:
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
 
-        if (maintain_statistics && table_schema)
+        if (!is_catalog_cc_map)
         {
-            assert(table_schema->StatisticsObject());
-            ShardProfile *shard_profile = table_schema->StatisticsObject()
-                                              ->GetShardProfile(table_name)
-                                              .get();
-            assert(shard_profile);
-            shard_profile_ =
-                static_cast<TypedShardProfile<KeyT> *>(shard_profile);
-        }
-        else
-        {
-            shard_profile_ = nullptr;
+            uint32_t shard_code = Sharder::Instance().ShardCode(
+                std::hash<std::string_view>{}(table_name.GetBaseTableNameSV()));
+            NodeGroupId shard_id =
+                Sharder::Instance().ShardToCcNodeGroup(shard_code);
+            uint16_t core_id = (shard_code & 0x3FF) %
+                               Sharder::Instance().GetLocalCcShards()->Count();
+            maintain_statistics_ =
+                (shard_id == cc_ng_id) && (core_id == shard->LocalCoreId());
+
+            if (maintain_statistics_ && table_schema)
+            {
+                assert(table_schema->StatisticsObject());
+                ShardProfile *shard_profile = table_schema->StatisticsObject()
+                                                  ->GetShardProfile(table_name)
+                                                  .get();
+                assert(shard_profile);
+                shard_profile_ =
+                    static_cast<TypedShardProfile<KeyT> *>(shard_profile);
+            }
         }
 
         TX_TRACE_ASSOCIATE_WITH_CONTEXT(
@@ -4824,9 +4832,9 @@ protected:
     bool is_catalog_cc_map_;
 
     // When maintain_statistics_ is true, shard_profile_ is valid.
-    bool maintain_statistics_{false};
+    bool maintain_statistics_;
 
     // shard_profile_ points to TypedShardProfile in TableSchema.
-    TypedShardProfile<KeyT> *shard_profile_{nullptr};
+    TypedShardProfile<KeyT> *shard_profile_;
 };
 }  // namespace txservice

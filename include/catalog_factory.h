@@ -63,14 +63,12 @@ public:
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
                                       bool ccm_has_full_entries,
-                                      bool maintain_statistics,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       uint64_t schema_ts,
-                                      bool maintain_statistics,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 

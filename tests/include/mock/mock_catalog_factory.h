@@ -55,8 +55,8 @@ public:
                       table_name.StringView().size(),
                       table_name.Type()),
           schema_image_(catalog_image),
-          statistics_binary_(statistics_binary),
-          version_(version)
+          version_(version),
+          statistics_binary_(statistics_binary)
     {
         statistics_ = std::make_unique<TypedStatistics<CompositeKey<int>>>(
             this, statistics_binary);
@@ -167,7 +167,6 @@ public:
                               const TableSchema *table_schema,
                               uint64_t schema_ts,
                               bool ccm_has_full_entries,
-                              bool maintain_statistics,
                               CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {
@@ -184,7 +183,6 @@ public:
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,
                               const txservice::TableSchema *table_schema,
                               uint64_t schema_ts,
-                              bool maintain_statistics,
                               txservice::CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {
