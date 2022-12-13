@@ -20,23 +20,30 @@ struct LoadRangeSliceRequest;
 
 namespace store
 {
+enum class DataStoreDataType
+{
+    Blob,
+    Numeric,
+    String
+};
+
 struct DataStoreSearchCond
 {
     DataStoreSearchCond(std::string field_name,
                         std::string op,
                         std::string val_str,
-                        bool is_numeric)
+                        DataStoreDataType data_type)
         : field_name_(field_name),
           op_(op),
           val_str_(val_str),
-          is_numeric_(is_numeric)
+          data_type_(data_type)
     {
     }
 
     std::string field_name_;
     std::string op_;
     std::string val_str_;
-    bool is_numeric_;
+    DataStoreDataType data_type_;
 };
 
 class DataStoreHandler
