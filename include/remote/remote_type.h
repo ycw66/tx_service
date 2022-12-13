@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cassert>  //assert
+
 #include "cc_protocol.h"
 #include "proto/cc_request.pb.h"
 #include "tx_record.h"  // RecordStatus;
@@ -144,6 +146,11 @@ public:
             return CcTableType::Primary;
         }
     }
+
+    static int ConvertCcErrorCode(txservice::CcErrorCode error_code)
+    {
+        return static_cast<int>(error_code);
+    }
 };
 
 class ToLocalType
@@ -271,6 +278,13 @@ public:
         default:
             return TableType::RangePartition;
         }
+    }
+
+    static txservice::CcErrorCode ConvertCcErrorCode(int error_code)
+    {
+        assert(error_code >= 0 &&
+               error_code < static_cast<int>(CcErrorCode::LAST_ERROR_CODE));
+        return txservice::CcErrorCode(error_code);
     }
 };
 

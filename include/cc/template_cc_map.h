@@ -14,6 +14,7 @@
 #include "cc_req_misc.h"
 #include "cc_request.h"
 #include "cc_shard.h"
+#include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
@@ -168,7 +169,7 @@ public:
         });
         if (ng_term < 0)
         {
-            hd_res->SetError(-1);
+            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -230,7 +231,7 @@ public:
                     else
                     {
                         // Inserts a duplicate key.
-                        hd_res->SetError(1);
+                        hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
                         return true;
                     }
                 }
@@ -282,7 +283,7 @@ public:
                     // If the same key is already in the insert intention set,
                     // and its tx ID does not matches the request's, this is a
                     // duplicate insert. Aborts the tx.
-                    hd_res->SetError(1);
+                    hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
                     return true;
                 }
             }
@@ -343,7 +344,7 @@ public:
             else if (lock_op_status == LockOpStatus::Failed)
             {
                 // lock confilct: back off and retry.
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
             else
@@ -400,7 +401,7 @@ public:
             {
                 LOG(INFO) << "FaultInject  "
                              "term_TemplateCcMap_Execute_PostWriteCc";
-                req.Result()->SetError(-1);
+                req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
                 return true;
             }
         });
@@ -408,7 +409,7 @@ public:
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -649,7 +650,7 @@ public:
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
             LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
-            hd_res->SetError(-1);
+            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         });
 
@@ -657,7 +658,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         if (ng_term < 0)
         {
-            hd_res->SetError(-1);
+            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -730,7 +731,7 @@ public:
                     if (cce_ptr->payload_status_ != RecordStatus::Deleted)
                     {
                         // Inserts a duplicate key.
-                        hd_res->SetError(1);
+                        hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
                         return true;
                     }
                     else
@@ -784,7 +785,7 @@ public:
                     // If the same key is already in the insert intention set,
                     // and its tx ID does not matches the request's, this is a
                     // duplicate insert. Aborts the tx.
-                    hd_res->SetError(1);
+                    hd_res->SetError(CcErrorCode::DUPLICATE_INSERT_ERR);
                     return true;
                 }
             }
@@ -883,7 +884,7 @@ public:
             case LockOpStatus::Failed:
             {
                 // lock confilct: back off and retry.
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
             case LockOpStatus::Blocked:
@@ -932,7 +933,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1185,7 +1186,7 @@ public:
                 {
                     LOG(INFO)
                         << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
-                    hd_res->SetError(-1);
+                    hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
                     return true;
                 }
             });
@@ -1196,7 +1197,7 @@ public:
             LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn() << " ,cce: "
                       << reinterpret_cast<void *>(cce_addr.CcePtr());
-            hd_res->SetError(-1);
+            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1217,7 +1218,9 @@ public:
             // for OCC/OccRead protocol validating version stability.
             assert(req.Protocol() == CcProtocol::OCC ||
                    req.Protocol() == CcProtocol::OccRead);
-            hd_res->SetError(1);  // broken repeatable read, set error.
+            // broken repeatable read, set error.
+            hd_res->SetError(
+                CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
             DLOG_IF(INFO, TRACE_OCC_ERR)
                 << "PostReadCc, occ_err, txn:" << txn << " ,cce: " << &cc_entry
                 << " ,payload_status: "
@@ -1341,7 +1344,7 @@ public:
             if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
             {
                 LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ReadCc";
-                hd_res->SetError(-1);
+                hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
                 return true;
             }
         });
@@ -1361,7 +1364,7 @@ public:
         {
             LOG(INFO) << "ReadCc, node_group(#" << ng_id
                       << ") term < 0, tx:" << req.Txn();
-            hd_res->SetError(-1);
+            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1488,7 +1491,8 @@ public:
                         {
                             // If the pin operation returns an error, the data
                             // store is inaccessible.
-                            hd_res->SetError(1);
+                            hd_res->SetError(
+                                CcErrorCode::PIN_RANGE_SLICE_FAILED);
                             return true;
                         }
                     }
@@ -1551,7 +1555,7 @@ public:
             case LockOpStatus::Failed:
             {
                 // lock confilct: back off and retry.
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
             case LockOpStatus::Blocked:
@@ -1676,7 +1680,8 @@ public:
             {
                 LOG(INFO) << "ReadCc, tx(" << req.Txn()
                           << ") read snapshot version error";
-                hd_res->SetError(1);  // Not Found, return error.
+                // Not Found, return error.
+                hd_res->SetError(CcErrorCode::MVCC_READ_MUST_WAIT_WRITE);
             }
             return true;
         }
@@ -1926,7 +1931,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1977,7 +1982,7 @@ public:
 
             if (lock_pair.second == LockOpStatus::Failed)
             {
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
 
@@ -2032,7 +2037,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2081,7 +2087,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2126,7 +2133,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2171,7 +2179,7 @@ public:
         int64_t tx_term = req.TxTerm();
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return false;
         }
         req.Result()->Value().term_ = ng_term;
@@ -2221,7 +2229,7 @@ public:
                                             req.ReadTimestamp());
             if (lock_pair.second == LockOpStatus::Failed)
             {
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
 
@@ -2272,7 +2280,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2324,7 +2333,8 @@ public:
                     {
                         // ReadForWrite under SnapshotIsolation, should
                         // validate the snapshot read version is latest version;
-                        req.Result()->SetError(1);
+                        req.Result()->SetError(
+                            CcErrorCode::MVCC_READ_FOR_WRITE_NEED_LATEST);
                         return true;
                     }
                     auto lock_pair = AcquireCceKeyLock(cce,
@@ -2340,7 +2350,8 @@ public:
                     if (lock_pair.second == LockOpStatus::Failed)
                     {
                         // lock confilct: back off and retry.
-                        req.Result()->SetError(1);
+                        req.Result()->SetError(
+                            CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                         return true;
                     }
                     else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2440,7 +2451,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -2509,7 +2520,7 @@ public:
                                                          req.ReadTimestamp());
             if (lock_pair.second == LockOpStatus::Failed)
             {
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
 
@@ -2551,7 +2562,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2612,7 +2624,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2667,7 +2680,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2714,7 +2728,7 @@ public:
         int64_t tx_term = req.TxTerm();
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -2761,7 +2775,7 @@ public:
 
             if (lock_pair.second == LockOpStatus::Failed)
             {
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
 
@@ -2810,7 +2824,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2864,7 +2879,8 @@ public:
                     {
                         // ReadForWrite under SnapshotIsolation, should
                         // validate the snapshot read version is latest version;
-                        req.Result()->SetError(1);
+                        req.Result()->SetError(
+                            CcErrorCode::MVCC_READ_FOR_WRITE_NEED_LATEST);
                         return true;
                     }
                     auto lock_pair = AcquireCceKeyLock(cce,
@@ -2880,7 +2896,8 @@ public:
                     if (lock_pair.second == LockOpStatus::Failed)
                     {
                         // lock confilct: back off and retry.
-                        req.Result()->SetError(1);
+                        req.Result()->SetError(
+                            CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                         return true;
                     }
                     else if (lock_pair.second == LockOpStatus::Blocked)
@@ -2915,7 +2932,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return req.SetFinish();
         }
 
@@ -2983,7 +3000,7 @@ public:
             {
                 // If the pin operation returns an error, the data store
                 // is inaccessible.
-                hd_res->SetError(1);
+                hd_res->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
                 return req.SetFinish();
             }
 
@@ -3022,7 +3039,7 @@ public:
 
             if (lock_pair.second == LockOpStatus::Failed)
             {
-                req.Result()->SetError(1);
+                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                 return true;
             }
 
@@ -3071,7 +3088,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -3131,7 +3149,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)
@@ -3237,7 +3256,8 @@ public:
                 if (lock_pair.second == LockOpStatus::Failed)
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(1);
+                    req.Result()->SetError(
+                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
                     return true;
                 }
                 else if (lock_pair.second == LockOpStatus::Blocked)

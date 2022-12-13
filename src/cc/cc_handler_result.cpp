@@ -68,11 +68,11 @@ void CcHandlerResult<T>::SetFinished()
 };
 
 template <typename T>
-void CcHandlerResult<T>::SetError(int8_t err_code)
+void CcHandlerResult<T>::SetError(CcErrorCode err_code)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        err_code,
+        (int8_t) err_code,
         [this]() -> std::string
         {
             if (this->txm_ == nullptr)
@@ -87,7 +87,7 @@ void CcHandlerResult<T>::SetError(int8_t err_code)
                     .append(std::to_string(this->txm_->TxTerm()));
             }
         });
-    int8_t no_error = 0;
+    CcErrorCode no_error = CcErrorCode::NO_ERROR;
     error_code_.compare_exchange_strong(
         no_error, err_code, std::memory_order_acq_rel);
     SetFinished();
@@ -119,9 +119,9 @@ bool CcHandlerResult<T>::ForceError()
 
     if (success)
     {
-        int8_t no_error = 0;
+        CcErrorCode no_error = CcErrorCode::NO_ERROR;
         error_code_.compare_exchange_strong(
-            no_error, -2, std::memory_order_acq_rel);
+            no_error, CcErrorCode::FORCE_FAIL, std::memory_order_acq_rel);
 
         if (post_lambda_)
         {

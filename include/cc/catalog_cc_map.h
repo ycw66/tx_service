@@ -13,6 +13,7 @@
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_request.h"
+#include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
 #include "local_cc_shards.h"
 #include "non_blocking_lock.h"
@@ -67,7 +68,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -519,7 +520,7 @@ public:
 
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -602,7 +603,7 @@ public:
         {
             LOG(INFO) << "ReplayLogCc, node_group(#" << req.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn();
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return false;
         }
 

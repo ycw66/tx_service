@@ -6,6 +6,7 @@
 
 #include "../log_service/proto/raft_log.pb.h"
 #include "cc/cc_handler_result.h"
+#include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
 #include "type.h"
 
@@ -38,7 +39,7 @@ public:
     void Run() override
     {
         CODE_FAULT_INJECTOR("log_closure_result_unknown", {
-            hd_result_->SetError((int8_t) HandlerResultErrorType::Unknown);
+            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR);
             return;
         });
         // rpc fails including timeout indicates the status of log request is
@@ -46,7 +47,7 @@ public:
         if (cntl_.Failed() || response_.response_status() ==
                                   ::txlog::LogResponse_ResponseStatus_Unknown)
         {
-            hd_result_->SetError((int8_t) HandlerResultErrorType::Unknown);
+            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR);
         }
         else if (response_.response_status() ==
                  ::txlog::LogResponse_ResponseStatus_Success)
@@ -55,7 +56,7 @@ public:
         }
         else
         {
-            hd_result_->SetError((int8_t) HandlerResultErrorType::Error);
+            hd_result_->SetError(CcErrorCode::UNDEFINED_ERR);
         }
     }
 

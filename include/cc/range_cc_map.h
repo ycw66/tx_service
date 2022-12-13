@@ -8,6 +8,7 @@
 #include "cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_request.h"
+#include "error_messages.h"  //CcErrorCode
 #include "range_record.h"
 #include "template_cc_map.h"
 #include "tx_serialize.h"
@@ -152,7 +153,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            hd_result->SetError(-1);
+            hd_result->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -256,7 +257,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
         }
 
         // When the commit ts is 0, the request commits nothing and only
@@ -453,7 +454,7 @@ public:
         int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
         if (ng_term < 0)
         {
-            req.Result()->SetError(-1);
+            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return false;
         }
 

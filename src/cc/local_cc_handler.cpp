@@ -3,6 +3,7 @@
 #include <chrono>
 #include <string>
 
+#include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
@@ -282,7 +283,7 @@ void txservice::LocalCcHandler::PostRead(
             // Term mismatch means this PostRead is failovered to the current
             // node, and locks are already lost during failover hence validation
             // can only return error and transaction needs to be aborted.
-            hres.SetError(-1);
+            hres.SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return;
         }
 
@@ -480,7 +481,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // the leader. Since a read local request is dispatched to the same
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
-        hres.SetError(-1);
+        hres.SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
         return;
     }
 
@@ -540,7 +541,7 @@ void txservice::LocalCcHandler::ScanOpen(
 
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
-            hd_res.SetError(1);
+            hd_res.SetError(CcErrorCode::REQUESTED_TABLE_DROPPED);
             return;
         }
 
@@ -548,7 +549,7 @@ void txservice::LocalCcHandler::ScanOpen(
             catalog_entry->schema_->IndexKeySchema(table_name);
         if (index_key_schema == nullptr)
         {
-            hd_res.SetError(1);
+            hd_res.SetError(CcErrorCode::REQUESTED_TABLE_INDEX_DROPPED);
             return;
         }
 
@@ -562,7 +563,7 @@ void txservice::LocalCcHandler::ScanOpen(
 
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
-            hd_res.SetError(1);
+            hd_res.SetError(CcErrorCode::REQUESTED_TABLE_DROPPED);
             return;
         }
 
@@ -612,7 +613,7 @@ void txservice::LocalCcHandler::ScanOpen(
                     // The cc handler is set to be errored multiple times (i.e.,
                     // #core-count times), because the cc handler result's
                     // reference count includes the local core count.
-                    hd_res.SetError(-1);
+                    hd_res.SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
                 }
                 continue;
             }
@@ -697,7 +698,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         // the leader. Since a read local request is dispatched to the same
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
-        hd_res.SetError(-1);
+        hd_res.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
         return;
     }
 
@@ -748,7 +749,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     if (ccm_scanner == nullptr)
     {
-        hd_res.SetError(1);
+        hd_res.SetError(CcErrorCode::CRATE_CCM_SCANNER_FAILED);
         return;
     }
 
@@ -974,7 +975,7 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // preferred leader of that cc node group, it is very likely
         // that that leader will be transferred soon. For simplicity, we stop
         // creating new tx's if the native node is not the leader for now.
-        hres.SetError(-1);
+        hres.SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
     }
 }
 

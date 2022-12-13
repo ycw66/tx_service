@@ -8,6 +8,7 @@
 #include <string>
 
 #include "cc_protocol.h"
+#include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "scan.h"
 #include "sharder.h"
@@ -2266,7 +2267,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                     // failure. The tx must abort because the write
                     // intention obtained  the failure have been
                     // invalidated.
-                    write_log.hd_result_.SetError(1);
+                    write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
                     return;
                 }
             }
@@ -2413,7 +2414,7 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
         else
         {
             if (log_op->hd_result_.ErrorCode() ==
-                (int8_t) HandlerResultErrorType::Unknown)
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
             {
                 bool_resp_->SetErrorCode(TxErrorCode::LOG_SERVICE_UNREACHABLE);
                 tx_status_.store(TxnStatus::Unknown, std::memory_order_release);

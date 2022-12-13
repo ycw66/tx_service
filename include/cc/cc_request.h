@@ -21,6 +21,7 @@
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "constants.h"
+#include "error_messages.h"  // CcErrorCode
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "proto/cc_request.pb.h"
@@ -68,7 +69,7 @@ public:
     {
         if (!ValidTermCheck())
         {
-            res_->SetError(-1);
+            res_->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
             return true;
         }
 
@@ -179,7 +180,8 @@ public:
                             // The local node (LocalCcShards) contains a schema
                             // instance, which indicates that the table has been
                             // dropped. Returns the request with an error.
-                            res_->SetError(100);
+                            res_->SetError(
+                                CcErrorCode::REQUESTED_TABLE_DROPPED);
                             return true;
                         }
                     }
@@ -1864,7 +1866,7 @@ public:
             // The conflicting tx has finished and the tx entry has been
             // recycled. The status of the conflicting tx is unknown and
             // negotiation is impossible.
-            res_->SetError(1);
+            res_->SetError(CcErrorCode::NEGOTIATED_TX_UNKNOWN);
             return true;
         }
 
@@ -1888,7 +1890,7 @@ public:
         }
         else
         {
-            res_->SetError(1);
+            res_->SetError(CcErrorCode::NEGOTIATE_TX_ERR);
         }
 
         return true;

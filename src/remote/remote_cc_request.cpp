@@ -3,8 +3,9 @@
 #include <string_view>
 
 #include "cc/ccm_scanner.h"
+#include "error_messages.h"  //CcErrorCode
 #include "remote/remote_cc_handler.h"
-#include "remote/remote_type.h"
+#include "remote/remote_type.h"  //ToRemoteType
 #include "sharder.h"
 
 txservice::remote::RemoteAcquire::RemoteAcquire()
@@ -25,7 +26,8 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
         const AcquireRequest &acquire_req = input_msg_->acquire_req();
         AcquireResponse *resp = output_msg_.mutable_acquire_resp();
         resp->set_is_ack(false);
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
         resp->set_vec_idx(acquire_req.vec_idx());
 
         if (!cc_res_.IsError())
@@ -106,7 +108,8 @@ void txservice::remote::RemoteAcquire::Acknowledge()
     const AcquireRequest &acquire_req = input_msg_->acquire_req();
     AcquireResponse *acquire_resp = output_msg_.mutable_acquire_resp();
     acquire_resp->set_is_ack(true);
-    acquire_resp->set_error_code(0);
+    acquire_resp->set_error_code(
+        ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
     acquire_resp->set_vec_idx(acquire_req.vec_idx());
 
     CceAddr_msg *resp_addr = acquire_resp->mutable_cce_addr();
@@ -141,7 +144,8 @@ txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
         output_msg_.set_command_id(input_msg_->command_id());
 
         AcquireAllResponse *resp = output_msg_.mutable_acquire_all_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
         resp->set_is_ack(false);
 
         if (!cc_res_.IsError())
@@ -218,7 +222,8 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
     AcquireAllResponse *acquire_all_resp =
         output_msg_.mutable_acquire_all_resp();
     acquire_all_resp->set_is_ack(true);
-    acquire_all_resp->set_error_code(0);
+    acquire_all_resp->set_error_code(
+        ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
     acquire_all_resp->set_node_term(cc_res_.Value().node_term_);
 
     const AcquireAllRequest &req = input_msg_->acquire_all_req();
@@ -240,7 +245,8 @@ txservice::remote::RemotePostRead::RemotePostRead()
         output_msg_.set_command_id(input_msg_->command_id());
 
         ValidateResponse *resp = output_msg_.mutable_validate_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         if (!res->IsError())
         {
@@ -310,7 +316,8 @@ txservice::remote::RemoteRead::RemoteRead()
         const ReadKeyResult &read_result = res->Value();
         ReadResponse *resp = output_msg_.mutable_read_resp();
         resp->set_is_ack(false);
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         if (!res->IsError())
         {
@@ -420,7 +427,8 @@ void txservice::remote::RemoteRead::Acknowledge()
 
     ReadResponse *read_resp = output_msg_.mutable_read_resp();
     read_resp->set_is_ack(true);
-    read_resp->set_error_code(0);
+    read_resp->set_error_code(
+        ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
 
     CceAddr_msg *resp_addr = read_resp->mutable_cce_addr();
     const CcEntryAddr &addr = cc_res_.Value().cce_addr_;
@@ -454,7 +462,8 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
         output_msg_.set_command_id(input_msg_->command_id());
 
         PostprocessResponse *resp = output_msg_.mutable_post_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const PostCommitRequest &req = input_msg_->postcommit_req();
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -525,7 +534,8 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
         output_msg_.set_command_id(input_msg_->command_id());
 
         PostprocessResponse *resp = output_msg_.mutable_post_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const PostWriteAllRequest &req = input_msg_->post_write_all_req();
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -612,7 +622,8 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
 
         ScanOpenResponse *scan_open = output_msg_.mutable_scan_open_resp();
 
-        scan_open->set_error_code(cc_res_.ErrorCode());
+        scan_open->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(cc_res_.ErrorCode()));
 
         if (!cc_res_.IsError())
         {
@@ -802,7 +813,8 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 
         ScanNextResponse *scan_next = output_msg_.mutable_scan_next_resp();
         const ScanNextRequest &req = input_msg_->scan_next_req();
-        scan_next->set_error_code(res->ErrorCode());
+        scan_next->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         if (!res->IsError())
         {
@@ -942,7 +954,8 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
         output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         FaultInjectResponse *resp = output_msg_.mutable_fault_inject_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const FaultInjectRequest &req = input_msg_->fault_inject_req();
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -990,7 +1003,8 @@ txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
 
         CleanCcEntryForTestResponse *resp =
             output_msg_.mutable_clean_cc_entry_resp();
-        resp->set_error_code(res->ErrorCode());
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const CleanCcEntryForTestRequest &req =
             input_msg_->clean_cc_entry_req();

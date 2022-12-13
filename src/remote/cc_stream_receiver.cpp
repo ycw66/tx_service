@@ -3,6 +3,7 @@
 #include <brpc/controller.h>
 
 #include "cc/local_cc_shards.h"
+#include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "tx_execution.h"
@@ -199,7 +200,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
@@ -287,7 +289,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
@@ -384,7 +387,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
@@ -395,7 +399,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             else
             {
                 // Does not perform tx negotiations so far.
-                hd_res->SetError(1);
+                hd_res->SetError(
+                    CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS);
             }
         }
         msg_pool_.enqueue(std::move(msg));
@@ -435,7 +440,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(cc_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
@@ -508,7 +514,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (read_res.error_code() != 0)
         {
-            hd_res->SetError(read_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(read_res.error_code()));
         }
         else
         {
@@ -706,7 +713,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_open_res.error_code() != 0)
         {
-            hd_res->SetError(scan_open_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(scan_open_res.error_code()));
         }
         else
         {
@@ -794,7 +802,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_next_res.error_code() != 0)
         {
-            hd_res->SetError(scan_next_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
         }
         else
         {
@@ -834,7 +843,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (fi_res.error_code() != 0)
         {
-            hd_res->SetError(fi_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(fi_res.error_code()));
         }
         else
         {
@@ -877,7 +887,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (clean_res.error_code() != 0)
         {
-            hd_res->SetError(clean_res.error_code());
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(clean_res.error_code()));
         }
         else
         {

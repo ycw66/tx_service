@@ -457,6 +457,7 @@ private:
     friend struct PostProcessOp;
     friend struct ScanOpenOperation;
     friend struct ScanNextOperation;
+    friend struct ReleaseScanExtraLockOp;
     friend struct FaultInjectOp;
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;
@@ -471,6 +472,5 @@ private:
     friend struct DsOp;
     friend struct PostReadOperation;
     friend class TxProcessor;
-    friend class ReleaseScanExtraLockOp;
 };
 }  // namespace txservice

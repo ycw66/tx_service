@@ -6,6 +6,7 @@
 
 #include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
+#include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
 #include "range_record.h"
@@ -113,7 +114,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the input key's range. The
                 // read operation is set to be errored.
-                hd_result_.SetError((int8_t) CcErrorCode::GET_RANGE_ID_ERR);
+                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
             }
             else
             {
@@ -149,7 +150,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == -1 && retry_num_ >= 0)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER &&
+            retry_num_ >= 0)
         {
             // The read request was directed to a non-leader node. Updates
             // the leader cache. Sine UpdateLeader() is a sync call, we only
@@ -354,7 +356,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == -1)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -559,7 +561,7 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
         // participants ccnodes will do the PostProcess individually via orphan
         // lock recovery mechanism.
         if (hd_result_.ErrorCode() ==
-                (int8_t) HandlerResultErrorType::Unknown &&
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR &&
             log_type_ == TxLogType::DATA &&
             Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
         {
@@ -777,7 +779,8 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
     if (hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == -1 && retry_num_ > 0)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER &&
+            retry_num_ > 0)
         {
             if (retry_num_ == 0)
             {
@@ -875,7 +878,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the next range's lock and ID.
                 // The scan next operation is set to be errored.
-                hd_result_.SetError((int8_t) CcErrorCode::GET_RANGE_ID_ERR);
+                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
                 unlock_range_result_.SetFinished();
             }
             else
@@ -909,7 +912,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == -1)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -932,7 +935,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
              slice_hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == -1)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -1160,7 +1163,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     {
                         ++force_error_cnt;
                     }
-                    else if (hd_result.ErrorCode() == -1)
+                    else if (hd_result.ErrorCode() ==
+                             CcErrorCode::REQUEST_NODE_NOT_LEADER)
                     {
                         if (retry_num_ == 0)
                         {
@@ -1488,7 +1492,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (prepare_log_op_.hd_result_.IsError())
         {
             if (prepare_log_op_.hd_result_.ErrorCode() ==
-                (int8_t) HandlerResultErrorType::Unknown)
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
             {
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the coordinator
@@ -2423,7 +2427,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                 DLOG(INFO) << "FindRangeMedianKey failed: "
                                            << table_name.String() << " "
                                            << partition_id;
-                                hd_res.SetError(-1);
+                                hd_res.SetError(
+                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
                             }
                             else
                             {
@@ -2436,7 +2441,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                 }
                                 else
                                 {
-                                    hd_res.SetError(-1);
+                                    hd_res.SetError(
+                                        CcErrorCode::REQUEST_NODE_NOT_LEADER);
                                 }
                             }
                         });
@@ -2531,9 +2537,9 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
         {
             DLOG(ERROR) << "DsSplitRangeOp failed: "
                            "SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL";
-            int8_t error_code =
-                prepare_log_for_update_old_range_op_.hd_result_.ErrorCode();
-            if (error_code == (int8_t) HandlerResultErrorType::Unknown)
+
+            if (prepare_log_for_update_old_range_op_.hd_result_.ErrorCode() ==
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
             {
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the coordinator
@@ -2701,7 +2707,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                             }
                             else
                             {
-                                hd_res.SetError(-1);
+                                hd_res.SetError(
+                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
                             }
                         });
                 };
@@ -2920,7 +2927,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                 }
                                 else
                                 {
-                                    hd_res.SetError(-1);
+                                    hd_res.SetError(
+                                        CcErrorCode::REQUEST_NODE_NOT_LEADER);
                                 }
                             });
                     };
@@ -3037,7 +3045,8 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                             }
                             else
                             {
-                                hd_res.SetError(-1);
+                                hd_res.SetError(
+                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
                             }
                         });
                 };

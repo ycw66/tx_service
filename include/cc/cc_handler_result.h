@@ -11,6 +11,8 @@
 #include <utility>
 #include <variant>
 
+#include "error_messages.h"  // CcErrorCode
+
 namespace txservice
 {
 class TransactionExecution;
@@ -34,7 +36,7 @@ class CcHandlerResultBase
 {
 public:
     virtual ~CcHandlerResultBase() = default;
-    virtual void SetError(int8_t err_code) = 0;
+    virtual void SetError(CcErrorCode err_code) = 0;
     virtual void SetFinished() = 0;
     virtual bool IsFinished() const = 0;
     virtual bool ForceError() = 0;
@@ -69,10 +71,11 @@ public:
 
     bool IsError() const override
     {
-        return error_code_.load(std::memory_order_acquire) != 0;
+        return error_code_.load(std::memory_order_acquire) !=
+               CcErrorCode::NO_ERROR;
     }
 
-    int8_t ErrorCode() const
+    CcErrorCode ErrorCode() const
     {
         return error_code_.load(std::memory_order_acquire);
     }
@@ -117,7 +120,7 @@ public:
     }
 
     void SetFinished() override;
-    void SetError(int8_t err_code) override;
+    void SetError(CcErrorCode err_code) override;
     /**
      * @brief Forces the handler result to an error state.
      *
@@ -144,7 +147,7 @@ public:
     void Reset()
     {
         is_finished_.store(false, std::memory_order_release);
-        error_code_.store(0, std::memory_order_release);
+        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_release);
         ClearRefCnt();
     }
 
@@ -156,7 +159,8 @@ public:
 private:
     T result_;
     std::atomic<bool> is_finished_{false};
-    std::atomic<int8_t> error_code_{0};
+    // std::atomic<int8_t> error_code_{0};
+    std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
     bool ref_cnted_{false};
     std::atomic<uint32_t> ref_cnt_;
     // The parent tx state machine who sends a cc request and waits on this

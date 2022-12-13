@@ -42,6 +42,7 @@ enum struct TxErrorCode
     SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL,
     SPLIT_RANGE_ACQUIRE_WRITE_LOCK_FAIL,
     SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL,
+    WRITE_SET_BYTES_COUNT_EXCEED_ERR,
 
     // Under MVCC protocol, if write transaction has acquired the write
     // lock, then it will generate its commit_ts without knowing the later
@@ -49,13 +50,46 @@ enum struct TxErrorCode
     // snapshot_ts which will break the snapshot isolation level.
     CC_ERR_MVCC_READ_MUST_WAIT_WRITE,
     CC_ERR_MVCC_VERSION_PREMATURELY_KICKED,
-    WRITE_SET_BYTES_COUNT_EXCEED_ERR
 };
 
 enum struct CcErrorCode
 {
     NO_ERROR = 0,
-    GET_RANGE_ID_ERR
+    UNDEFINED_ERR,
+
+    FORCE_FAIL,
+    NG_TERM_CHANGED,
+    REQUEST_NODE_NOT_LEADER,
+    TX_NODE_NOT_LEADER,
+
+    NEGOTIATED_TX_UNKNOWN,
+    NEGOTIATE_TX_ERR,
+
+    REQUESTED_TABLE_DROPPED,
+    REQUESTED_TABLE_INDEX_DROPPED,
+    CRATE_CCM_SCANNER_FAILED,
+
+    DUPLICATE_INSERT_ERR,
+    ACQUIRE_KEY_LOCK_FAILED,
+    ACQUIRE_GAP_LOCK_FAILED,
+    VALIDATION_FAILED_FOR_VERSION_MISMATCH,
+    VALIDATION_FAILED_FOR_CONFILICTED_TXS,
+    MVCC_READ_MUST_WAIT_WRITE,
+    MVCC_READ_FOR_WRITE_NEED_LATEST,
+
+    // range
+    GET_RANGE_ID_ERR,
+    PIN_RANGE_SLICE_FAILED,
+
+    // data store handler
+    DATA_STORE_UPSERT_TABLE_ERR,
+
+    // log service
+    LOG_CLOSURE_RESULT_UNKOWN_ERR,
+
+    // NOTICE: please keep this variable at tail.
+    LAST_ERROR_CODE,
+
 };
 
 static const std::map<TxErrorCode, std::string> error_messages{

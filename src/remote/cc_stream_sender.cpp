@@ -68,7 +68,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         // SendMessage error return -1 to indicate the request needs retry.
         if (res != nullptr)
         {
-            res->SetError(-1);
+            res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
         }
 
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
@@ -84,7 +84,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         // SendMessage error return -1 to indicate the request needs retry.
         if (res != nullptr)
         {
-            res->SetError(-1);
+            res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
         }
         return false;
     }
@@ -113,7 +113,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 // retry.
                 if (res != nullptr)
                 {
-                    res->SetError(-1);
+                    res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
                 }
                 break;
             }
