@@ -181,6 +181,6 @@ private:
     std::vector<typename std::unordered_map<KeyT, size_t>::iterator>
         sample_pool_vec_;
 
-    std::mt19937 random_dev_;
+    std::mt19937_64 random_dev_;
 };
 }  // namespace txservice
