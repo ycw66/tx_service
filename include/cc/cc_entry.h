@@ -3,7 +3,7 @@
 #include <algorithm>  // std::max
 #include <atomic>
 #include <cassert>
-#include <deque>
+#include <list>
 #include <map>
 #include <memory>  // std::make_unique
 #include <unordered_set>
@@ -444,7 +444,7 @@ public:
     CcEntry<KeyT, ValueT> *map_next_;
 
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
-    std::unique_ptr<std::deque<VersionRecord<ValueT>>> archives_;
+    std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_;
 
     /**
      * @brief Move(not copy) the current version (payload, payload_status,
@@ -459,7 +459,8 @@ public:
      */
     size_t ArchiveBeforeUpdate(TableType tbl_type)
     {
-        if (payload_status_ == RecordStatus::Unknown)
+        if (payload_status_ == RecordStatus::Unknown ||
+            (commit_ts_ == 1U && payload_status_ == RecordStatus::Deleted))
         {
             return 0;
         }
@@ -467,7 +468,7 @@ public:
         size_t mem_usage = 0;
         if (archives_ == nullptr)
         {
-            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
             mem_usage += sizeof(*archives_);
         }
 
@@ -505,7 +506,7 @@ public:
         size_t mem_usage = 0U;
         if (archives_ == nullptr)
         {
-            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
             mem_usage += sizeof(*archives_);
         }
 
@@ -538,10 +539,14 @@ public:
                             RecordStatus payload_status,
                             uint64_t commit_ts)
     {
+        if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
+        {
+            return 0;
+        }
         size_t mem_usage = 0U;
         if (archives_ == nullptr)
         {
-            archives_ = std::make_unique<std::deque<VersionRecord<ValueT>>>();
+            archives_ = std::make_unique<std::list<VersionRecord<ValueT>>>();
             mem_usage += sizeof(*archives_);
         }
 

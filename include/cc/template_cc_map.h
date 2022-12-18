@@ -1678,10 +1678,17 @@ public:
             }
             else
             {
-                LOG(INFO) << "ReadCc, tx(" << req.Txn()
-                          << ") read snapshot version error";
-                // Not Found, return error.
-                hd_res->SetError(CcErrorCode::MVCC_READ_MUST_WAIT_WRITE);
+                req.SetIsWaitForPostWrite(true);
+                // Put the request to top of key lock's blocking queue with
+                // acquring readlock. And then should release the readlock
+                // before handling this requst when PostWriteCc finished.
+                cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                        LockType::ReadLock);
+                shard_->CheckRecoverTx(
+                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                // After inserting to blocking queue, the execution of current
+                // ReadCc request should stop.
+                return false;
             }
             return true;
         }
@@ -2327,16 +2334,6 @@ public:
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
-                    if (iso_lvl == IsolationLevel::Snapshot &&
-                        cc_op == CcOperation::ReadForWrite &&
-                        req.ReadTimestamp() < cce->commit_ts_)
-                    {
-                        // ReadForWrite under SnapshotIsolation, should
-                        // validate the snapshot read version is latest version;
-                        req.Result()->SetError(
-                            CcErrorCode::MVCC_READ_FOR_WRITE_NEED_LATEST);
-                        return true;
-                    }
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
@@ -2873,16 +2870,6 @@ public:
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
 
-                    if (iso_lvl == IsolationLevel::Snapshot &&
-                        cc_op == CcOperation::ReadForWrite &&
-                        req.ReadTimestamp() < cce->commit_ts_)
-                    {
-                        // ReadForWrite under SnapshotIsolation, should
-                        // validate the snapshot read version is latest version;
-                        req.Result()->SetError(
-                            CcErrorCode::MVCC_READ_FOR_WRITE_NEED_LATEST);
-                        return true;
-                    }
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
                                                        &req,
