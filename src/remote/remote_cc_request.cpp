@@ -1044,3 +1044,158 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
 }
+
+void txservice::remote::RemoteCheckDeadLockCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_dead_lock_request());
+
+    CheckDeadLockCc::Reset();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+    const DeadLockRequest &req = input_msg->dead_lock_request();
+    DeadLockCheck::UpdateCheckNodeId(req.src_node_id());
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
+{
+    ccs.CollectLockWaitingInfo(dead_lock_result_);
+
+    int16_t ii = dead_lock_result_.unfinish_count_.fetch_sub(
+        1, std::memory_order_acq_rel);
+    if (ii == 1)
+    {
+        output_msg_.set_type(
+            tr::CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse);
+        output_msg_.set_tx_number(0);
+        output_msg_.set_handler_addr(0);
+        output_msg_.set_tx_term(0);
+        output_msg_.set_command_id(0);
+
+        DeadLockResponse *resp = output_msg_.mutable_dead_lock_response();
+        resp->set_error_code(0);
+        resp->set_node_id(Sharder::Instance().NodeId());
+
+        for (size_t i = 0; i < dead_lock_result_.entry_lock_info_vec_.size();
+             i++)
+        {
+            auto &mapeti = dead_lock_result_.entry_lock_info_vec_[i];
+            for (auto iter : mapeti)
+            {
+                BlockEntry *be = resp->add_block_entry();
+                be->set_entry(iter.first);
+                be->set_core_id(i);
+                for (uint64_t txid : iter.second.lock_txids)
+                {
+                    be->add_locked_tids(txid);
+                }
+
+                for (uint64_t txid : iter.second.wait_txids)
+                {
+                    be->add_waited_tids(txid);
+                }
+            }
+        }
+
+        std::unordered_map<uint64_t, uint32_t> mte;
+        for (auto &vcttx : dead_lock_result_.txid_ety_lock_count_)
+        {
+            for (auto &iter : vcttx)
+            {
+                auto it = mte.try_emplace(iter.first, 0);
+                it.first->second += iter.second;
+            }
+        }
+
+        for (auto &iter : mte)
+        {
+            TxEntrys *te = resp->add_tx_etys();
+            te->set_txid(iter.first);
+            te->set_ety_count(iter.second);
+        }
+
+        const DeadLockRequest &req = input_msg_->dead_lock_request();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    }
+    return true;
+}
+
+void txservice::remote::RemoteAbortTransactionCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_abort_tran_req());
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+    const AbortTransactionRequest &req = input_msg->abort_tran_req();
+
+    std::vector<TxNumber> vct;
+    for (int i = 0; i < req.lock_txids_size(); i++)
+    {
+        vct.push_back(req.lock_txids(i));
+    }
+
+    AbortTransactionCc::Reset(req.entry(), vct, req.wait_txid());
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
+{
+    LruEntry *lru_entry = reinterpret_cast<LruEntry *>(entry_addr_);
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+        &ltxs = ccs.GetLockHoldingTxs();
+    int32_t err = 1;
+
+    for (TxNumber tx : tx_id_lock_vct_)
+    {
+        bool bfind = false;
+        for (auto it_ng = ltxs.begin(); it_ng != ltxs.end(); it_ng++)
+        {
+            auto it_info = it_ng->second.find(tx);
+            if (it_info->second.cce_list_.find(lru_entry) !=
+                it_info->second.cce_list_.end())
+            {
+                bfind = true;
+                break;
+            }
+        }
+        if (!bfind)
+        {
+            continue;
+        }
+
+        NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
+        key_lock->AbortQueueRequest(tx_id_wait_);
+        err = 0;
+        break;
+    }
+
+    output_msg_.set_type(tr::CcMessage::MessageType::
+                             CcMessage_MessageType_AbortTransactionResponse);
+    output_msg_.set_tx_number(0);
+    output_msg_.set_handler_addr(0);
+    output_msg_.set_tx_term(0);
+    output_msg_.set_command_id(0);
+
+    AbortTransactionResponse *resp = output_msg_.mutable_abort_tran_resp();
+    resp->set_error_code(err);
+
+    const AbortTransactionRequest &req = input_msg_->abort_tran_req();
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+    hd_->RecycleCcMsg(std::move(input_msg_));
+    return true;
+}

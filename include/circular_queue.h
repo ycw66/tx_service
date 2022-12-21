@@ -188,6 +188,26 @@ public:
         return (sizeof(CircularQueue) + capacity_ * sizeof(uint64_t));
     }
 
+    T &Get(size_t index) const
+    {
+        return vec_[(head_ + index) % capacity_];
+    }
+
+    void Erase(size_t index)
+    {
+        while (index < cnt_ - 1)
+        {
+            vec_[(head_ + index) % capacity_] =
+                vec_[(head_ + index + 1) % capacity_];
+            index++;
+        }
+        cnt_--;
+        if (cnt_ == 0)
+        {
+            head_ = 0;
+        }
+    }
+
 private:
     std::unique_ptr<T[]> vec_;
     size_t head_;

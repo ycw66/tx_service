@@ -574,4 +574,9 @@ void Sharder::SetCommandLineOptions()
     google::SetCommandLineOption("circuit_breaker_max_isolation_duration_ms",
                                  "4500");
 }
+
+size_t Sharder::GetLocalCcShardsCount()
+{
+    return local_shards_.Count();
+}
 }  // namespace txservice

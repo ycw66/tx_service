@@ -34,6 +34,7 @@ class SingleShardScanner;
 class CcMapScanner;
 class Checkpointer;
 class LocalCcShards;
+class CheckDeadLockResult;
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
 #define RESIZE_LOCK_LIMIT 3u
@@ -491,6 +492,15 @@ public:
     // supports persist log state machine to disk. Hence log_limit is a soft
     // limit.
     uint64_t log_limit_{0};
+
+    // Search lock_holding_txs_, find the entrys with waited transactions and
+    // save them into CheckDeadLockResult.
+    void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+        &GetLockHoldingTxs()
+    {
+        return lock_holding_txs_;
+    }
 
 private:
     /**

@@ -2529,6 +2529,7 @@ public:
                             req.ReadTimestamp(),
                             is_read_snapshot,
                             req.is_ckpt_delta_);
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
         }
         else
         {
@@ -2697,6 +2698,7 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
+                scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
             }
         }
         cache.resize(tuple_idx);

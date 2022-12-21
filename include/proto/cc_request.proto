@@ -367,6 +367,50 @@ message BroadcastStatisticsRequest {
 	bytes statistics_binary = 4;
 }
 
+message BlockEntry {
+  // The core id that own the ccentry below
+  uint32 core_id = 1;
+  // The address of the entry with waited transaction
+  uint64 entry = 2;
+  // The transactions that have locked the entry, include read lock, write lock
+  repeated uint64 locked_tids = 3;
+  // The transactions waited to lock the entry
+  repeated uint64 waited_tids = 4;
+}
+
+message TxEntrys {
+  //The transaction
+  uint64 txid = 1;
+  //The total number of entry locked by this transaction in this node
+  uint32 ety_count = 2;
+}
+	
+message DeadLockRequest {
+  uint32 src_node_id = 1;
+}
+	
+message DeadLockResponse {
+  // The source node id
+  uint32 node_id = 1;
+  // error code
+  int32 error_code = 2;
+  repeated BlockEntry block_entry = 3;
+  repeated TxEntrys tx_etys = 4;
+}
+
+message AbortTransactionRequest {
+  uint32 src_node_id = 1;
+  uint32 core_id = 2;
+  uint64 entry = 3;
+  uint64 wait_txid = 4;
+  repeated uint64 lock_txids = 5;
+}
+
+
+message AbortTransactionResponse {
+  int32 error_code = 1;
+}
+
 message CcMessage {
 	enum MessageType {
 		Shutdown = 0;
@@ -393,6 +437,10 @@ message CcMessage {
 		RecoverStateCheckRequest = 34;
 		RecoverStateCheckResponse = 35;
 		BroadcastStatisticsRequest = 36;
+		DeadLockRequest = 37;
+		DeadLockResponse = 38;
+		AbortTransactionRequest = 39;
+		AbortTransactionResponse = 40;
 	}
 
 	MessageType type = 1;
@@ -425,5 +473,9 @@ message CcMessage {
 		RecoverStateCheckRequest recover_state_check_req = 42;
 		RecoverStateCheckResponse recover_state_check_resp = 43;
 		BroadcastStatisticsRequest broadcast_statistics_req = 44;
+		DeadLockRequest dead_lock_request = 45;
+		DeadLockResponse dead_lock_response = 46;
+		AbortTransactionRequest abort_tran_req = 47;
+		AbortTransactionResponse abort_tran_resp = 48;
 	}
 }

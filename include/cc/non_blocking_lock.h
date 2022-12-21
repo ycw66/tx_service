@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "cc_protocol.h"
 #include "cc_req_base.h"
@@ -229,6 +230,8 @@ public:
 
         return debug_string;
     }
+    std::vector<TxNumber> GetBlockTxIds();
+    void AbortQueueRequest(TxNumber txid);
 
 private:
     struct LockQueueEntry

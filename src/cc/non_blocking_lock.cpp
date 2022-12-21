@@ -531,4 +531,30 @@ const std::unordered_set<TxNumber> &NonBlockingLock::ReadIntents() const
 {
     return read_intentions_;
 }
+
+std::vector<TxNumber> NonBlockingLock::GetBlockTxIds()
+{
+    std::vector<uint64_t> vct;
+    for (size_t i = 0; i < blocking_queue_.Size(); i++)
+    {
+        LockQueueEntry &lqe = blocking_queue_.Get(i);
+        vct.push_back(lqe.req_->Txn());
+    }
+
+    return vct;
+}
+
+void NonBlockingLock::AbortQueueRequest(TxNumber txid)
+{
+    for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)
+    {
+        const LockQueueEntry &ety = blocking_queue_.Get(i);
+        if (ety.req_->Txn() == txid)
+        {
+            ety.req_->AbortCcRequest();
+            blocking_queue_.Erase(i);
+            i--;
+        }
+    }
+}
 }  // namespace txservice

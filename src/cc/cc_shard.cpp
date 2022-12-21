@@ -1105,4 +1105,40 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        this,
                                        pin_status);
 }
+
+void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
+{
+    std::unordered_map<uint64_t, CheckDeadLockResult::EntryLockInfo>
+        &entry_lock_info_map = dlr.entry_lock_info_vec_[core_id_];
+
+    for (auto it_ng = lock_holding_txs_.begin();
+         it_ng != lock_holding_txs_.end();
+         it_ng++)
+    {
+        for (auto iter = it_ng->second.begin(); iter != it_ng->second.end();
+             iter++)
+        {
+            dlr.txid_ety_lock_count_[core_id_].insert(
+                {iter->first, iter->second.cce_list_.size()});
+            for (auto itset = iter->second.cce_list_.begin();
+                 itset != iter->second.cce_list_.end();
+                 itset++)
+            {
+                std::vector<uint64_t> vct =
+                    (*itset)->GetKeyLock().GetBlockTxIds();
+                if (vct.size() == 0)
+                    continue;
+
+                auto itet =
+                    entry_lock_info_map.try_emplace((uint64_t) (*itset));
+                itet.first->second.lock_txids.insert(iter->first);
+
+                for (uint64_t id : vct)
+                {
+                    itet.first->second.wait_txids.insert(id);
+                }
+            }
+        }
+    }
+}
 }  // namespace txservice

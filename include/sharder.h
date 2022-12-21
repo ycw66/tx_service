@@ -302,6 +302,8 @@ public:
         return tx_worker_pool_.get();
     }
 
+    size_t GetLocalCcShardsCount();
+
 private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,

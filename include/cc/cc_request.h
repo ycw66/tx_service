@@ -10,6 +10,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -21,6 +23,7 @@
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "constants.h"
+#include "dead_lock_check.h"
 #include "error_messages.h"  // CcErrorCode
 #include "fault/fault_inject.h"
 #include "log_closure.h"
@@ -249,6 +252,11 @@ public:
         tx_number_ = tx_number;
         proto_ = proto;
         isolation_level_ = iso_level;
+    }
+
+    void AbortCcRequest() override
+    {
+        res_->SetError(CcErrorCode::DEAD_LOCK_ABORT);
     }
 
 protected:
@@ -2396,4 +2404,170 @@ private:
     bool flush_;
 };
 
+struct CheckDeadLockResult
+{
+    /**
+     * Record the transactions which are holding or waiting lock on this
+     * ccentry.
+     */
+    struct EntryLockInfo
+    {
+        // The txids that locked the ccentry
+        std::unordered_set<uint64_t> lock_txids;
+        // The txids that waited the ccentry
+        std::unordered_set<uint64_t> wait_txids;
+    };
+
+    CheckDeadLockResult() : unfinish_count_(0)
+    {
+    }
+
+    void Reset()
+    {
+        entry_lock_info_vec_.resize(
+            Sharder::Instance().GetLocalCcShardsCount());
+        for (size_t i = 0; i < entry_lock_info_vec_.size(); i++)
+        {
+            entry_lock_info_vec_[i].clear();
+        }
+
+        txid_ety_lock_count_.resize(
+            Sharder::Instance().GetLocalCcShardsCount());
+        for (size_t i = 0; i < txid_ety_lock_count_.size(); i++)
+        {
+            txid_ety_lock_count_[i].clear();
+        }
+
+        unfinish_count_.store((int16_t) entry_lock_info_vec_.size(),
+                              std::memory_order_relaxed);
+    }
+
+    // Every vector element corresponding to a core, the element is the map
+    // between the ccentry's address and its locked and waited txids.
+    std::vector<std::unordered_map<uint64_t, EntryLockInfo>>
+        entry_lock_info_vec_;
+    // Every vector element corresponding to a core, the element is the map
+    // between txid and its locked entrys
+    std::vector<std::unordered_map<uint64_t, uint32_t>> txid_ety_lock_count_;
+    std::atomic_int16_t unfinish_count_;
+};
+
+struct CheckDeadLockCc : public CcRequestBase
+{
+public:
+    CheckDeadLockCc()
+    {
+    }
+
+    virtual ~CheckDeadLockCc() = default;
+    CheckDeadLockCc(const CheckDeadLockCc &rhs) = delete;
+    CheckDeadLockCc(CheckDeadLockCc &&rhs) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        ccs.CollectLockWaitingInfo(dead_lock_result_);
+
+        int16_t count = dead_lock_result_.unfinish_count_.fetch_sub(
+            1, std::memory_order_acq_rel);
+        if (count == 1)
+        {
+            DeadLockCheck::MergeLocalWaitingLockInfo(dead_lock_result_);
+        }
+        return true;
+    }
+
+    void Reset()
+    {
+        dead_lock_result_.Reset();
+    }
+
+    void Free() override
+    {
+        if (dead_lock_result_.unfinish_count_.load(std::memory_order_relaxed) ==
+            0)
+        {
+            CcRequestBase::Free();
+        }
+    }
+
+    CheckDeadLockResult &GetDeadLockResult()
+    {
+        return dead_lock_result_;
+    }
+
+protected:
+    CheckDeadLockResult dead_lock_result_;
+};
+
+struct AbortTransactionCc : public CcRequestBase
+{
+public:
+    AbortTransactionCc() : entry_addr_(0), tx_id_wait_(0)
+    {
+    }
+
+    virtual ~AbortTransactionCc() = default;
+    AbortTransactionCc(const AbortTransactionCc &rhs) = delete;
+    AbortTransactionCc(AbortTransactionCc &&rhs) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        LruEntry *lru_entry = reinterpret_cast<LruEntry *>(entry_addr_);
+        std::unordered_map<NodeGroupId,
+                           std::unordered_map<TxNumber, TxLockInfo>> &ltxs =
+            ccs.GetLockHoldingTxs();
+
+        for (TxNumber tx : tx_id_lock_vct_)
+        {
+            bool bfind = false;
+            for (auto it_ng = ltxs.begin(); it_ng != ltxs.end(); it_ng++)
+            {
+                auto it_info = it_ng->second.find(tx);
+                if (it_info->second.cce_list_.find(lru_entry) !=
+                    it_info->second.cce_list_.end())
+                {
+                    bfind = true;
+                    break;
+                }
+            }
+            if (!bfind)
+            {
+                continue;
+            }
+
+            NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
+            key_lock->AbortQueueRequest(tx_id_wait_);
+            break;
+        }
+
+        return true;
+    }
+
+    void Reset(uint64_t entry_addr,
+               std::vector<TxNumber> &tx_id_lock_vct,
+               TxNumber tx_id_wait)
+    {
+        entry_addr_ = entry_addr;
+        tx_id_lock_vct_.swap(tx_id_lock_vct);
+        tx_id_wait_ = tx_id_wait;
+    }
+
+    uint64_t GetEntryAddr()
+    {
+        return entry_addr_;
+    }
+    TxNumber GetWaitTxId()
+    {
+        return tx_id_wait_;
+    }
+    const std::vector<TxNumber> &GetTxIdLock()
+    {
+        return tx_id_lock_vct_;
+    }
+
+protected:
+    uint64_t entry_addr_;
+    std::vector<TxNumber> tx_id_lock_vct_;
+    TxNumber tx_id_wait_;
+};
 }  // namespace txservice

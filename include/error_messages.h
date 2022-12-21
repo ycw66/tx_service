@@ -50,6 +50,8 @@ enum struct TxErrorCode
     // snapshot_ts which will break the snapshot isolation level.
     CC_ERR_MVCC_READ_MUST_WAIT_WRITE,
     CC_ERR_MVCC_VERSION_PREMATURELY_KICKED,
+    // Detect dead lock and abort the transaction
+    DEAD_LOCK_ABORT
 };
 
 enum struct CcErrorCode
@@ -87,6 +89,9 @@ enum struct CcErrorCode
     // log service
     LOG_CLOSURE_RESULT_UNKOWN_ERR,
 
+    // Detect dead lock and abort the transaction
+    DEAD_LOCK_ABORT,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -108,6 +113,7 @@ static const std::map<TxErrorCode, std::string> error_messages{
     {TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR,
      "Transaction failed due to write set bytes count too large."},
     {TxErrorCode::WRITE_WRITE_CONFLICT,
-     "Transaction failed due to write-write conflicts."}};
+     "Transaction failed due to write-write conflicts."},
+    {TxErrorCode::DEAD_LOCK_ABORT, "Abort the transaction due to dead lock."}};
 
 }  // namespace txservice

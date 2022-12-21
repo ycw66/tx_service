@@ -16,6 +16,7 @@
 #include "catalog.h"
 #include "catalog_factory.h"
 #include "checkpointer.h"
+#include "dead_lock_check.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "metrics/metrics.h"
@@ -355,6 +356,7 @@ public:
         TxStartTsCollector::Instance(
             &local_cc_shards_,
             conf.find("collect_active_tx_ts_interval_seconds")->second);
+        DeadLockCheck::Init(local_cc_shards_);
     }
 
     TxService(const std::string &local_path,
@@ -402,6 +404,7 @@ public:
 
     ~TxService()
     {
+        DeadLockCheck::SetStop();
         ckpt_.Terminate();
         ckpt_.Join();
         if (local_cc_shards_.EnableMvcc())

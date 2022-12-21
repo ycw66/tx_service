@@ -26,6 +26,8 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
+thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
+thread_local CcRequestPool<RemoteAbortTransactionCc> abort_tran_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -925,7 +927,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
             req.src_node_id(), send_msg);
-
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -938,6 +940,27 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             Sharder::Instance().RemoteNodeFinishRecovery(resp.node_group_id());
         }
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_DeadLockRequest:
+    {
+        RemoteCheckDeadLockCc *dead_lock_req = dead_lock_pool_.NextRequest();
+        dead_lock_req->Reset(std::move(msg));
+
+        for (size_t i = 0; i < local_shards_.Count(); i++)
+        {
+            local_shards_.EnqueueCcRequest(i, dead_lock_req);
+        }
+
+        LOG(INFO) << "Receive DeadLockRequest";
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse:
+    {
+        const DeadLockResponse &rsp = msg->dead_lock_response();
+        DeadLockCheck::MergeRemoteWaitingLockInfo(&rsp);
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -955,6 +978,20 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             catalog_entry->schema_->StatisticsObject()->Reset(statistics_binary,
                                                               true);
         }
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionRequest:
+    {
+        uint32_t core_id = msg->abort_tran_req().core_id();
+        RemoteAbortTransactionCc *req = abort_tran_pool_.NextRequest();
+        req->Reset(std::move(msg));
+
+        local_shards_.EnqueueCcRequest(core_id, req);
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionResponse:
+    {
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     default:

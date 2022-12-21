@@ -504,5 +504,42 @@ private:
     friend class RemoteCcHandler;
 };
 
+struct RemoteCheckDeadLockCc : public CheckDeadLockCc
+{
+public:
+    RemoteCheckDeadLockCc()
+    {
+    }
+
+    virtual ~RemoteCheckDeadLockCc() = default;
+    RemoteCheckDeadLockCc(const RemoteCheckDeadLockCc &rhs) = delete;
+    RemoteCheckDeadLockCc(RemoteCheckDeadLockCc &&rhs) = delete;
+
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    bool Execute(CcShard &ccs) override;
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+};
+
+struct RemoteAbortTransactionCc : public AbortTransactionCc
+{
+public:
+    RemoteAbortTransactionCc()
+    {
+    }
+    virtual ~RemoteAbortTransactionCc() = default;
+    RemoteAbortTransactionCc(const RemoteAbortTransactionCc &rhs) = delete;
+    RemoteAbortTransactionCc(RemoteAbortTransactionCc &&rhs) = delete;
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    bool Execute(CcShard &ccs) override;
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+};
 }  // namespace remote
 }  // namespace txservice

@@ -58,6 +58,10 @@ public:
         return isolation_level_;
     }
 
+    virtual void AbortCcRequest()
+    {
+    }
+
     // The previous time to run it. The interval time is const variable array.
     // It will be 16 times of previous interval.
     uint64_t prev_exec_ts_;

@@ -908,7 +908,10 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
     if (read_.hd_result_.IsError())
     {
-        rec_resp_->FinishError();
+        rec_resp_->FinishError(read_.hd_result_.ErrorCode() ==
+                                       CcErrorCode::DEAD_LOCK_ABORT
+                                   ? TxErrorCode::DEAD_LOCK_ABORT
+                                   : TxErrorCode::UNDEFINED_ERR);
     }
     else
     {
@@ -1102,7 +1105,10 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         }
         else
         {
-            uint64_resp_->FinishError();
+            uint64_resp_->FinishError(scan_open_.hd_result_.ErrorCode() ==
+                                              CcErrorCode::DEAD_LOCK_ABORT
+                                          ? TxErrorCode::DEAD_LOCK_ABORT
+                                          : TxErrorCode::UNDEFINED_ERR);
         }
 
         return;
@@ -1360,7 +1366,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #endif
     )
     {
-        void_resp_->FinishError();
+        void_resp_->FinishError(scan_next.hd_result_.ErrorCode() ==
+                                        CcErrorCode::DEAD_LOCK_ABORT
+                                    ? TxErrorCode::DEAD_LOCK_ABORT
+                                    : TxErrorCode::UNDEFINED_ERR);
         return;
     }
 
