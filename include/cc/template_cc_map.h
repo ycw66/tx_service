@@ -78,7 +78,8 @@ public:
         pos_inf_.ckpt_prev_ = &neg_inf_;
         pos_inf_.ckpt_next_ = nullptr;
 
-        if (!is_catalog_cc_map)
+        if (table_name.Type() == TableType::Primary ||
+            table_name.Type() == TableType::Secondary)
         {
             uint32_t shard_code = Sharder::Instance().ShardCode(
                 std::hash<std::string_view>{}(table_name.GetBaseTableNameSV()));
