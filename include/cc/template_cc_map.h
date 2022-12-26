@@ -617,7 +617,7 @@ public:
             }
 
             req.Result()->SetFinished();
-            ReleaseCceKeyLock(&cce, txn, cce_addr.NodeGroupId());
+            ReleaseCceKeyLock(&cce, txn, req.NodeGroupId());
             return true;
         }
     }
@@ -1319,8 +1319,8 @@ public:
         // example, select for update would acquire write intent. As a
         // result, we should also release the corresponding lock/intent as
         // well.
-        ReleaseCceKeyLock(&cc_entry, txn, cce_addr.NodeGroupId());
-        ReleaseCceGapLock(&cc_entry, txn, cce_addr.NodeGroupId());
+        ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
+        ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
 
         return true;
     }
