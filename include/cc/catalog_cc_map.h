@@ -38,7 +38,7 @@ public:
                  NodeGroupId cc_ng_id,
                  const TableName &table_name)
         : TemplateCcMap<CatalogKey, CatalogRecord>(
-              shard, cc_ng_id, table_name, 1, nullptr, false, true)
+              shard, cc_ng_id, table_name, 1, nullptr, false)
     {
     }
 

@@ -84,12 +84,12 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
     ccs_.Enqueue(this);
 }
 
-FetchTableRangesCc::FetchTableRangesCc(const TableName &range_table_name,
+FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
                                        const Schema *key_schema,
                                        CcShard &ccs,
                                        NodeGroupId ng_id)
     : FetchCc(ccs, 0),
-      range_table_name_(range_table_name),
+      table_name_(table_name),
       key_schema_(key_schema),
       ng_id_(ng_id)
 {
@@ -97,14 +97,14 @@ FetchTableRangesCc::FetchTableRangesCc(const TableName &range_table_name,
 
 bool FetchTableRangesCc::Execute(CcShard &ccs)
 {
-    ccs.InitTableRanges(range_table_name_, ranges_vec_, ng_id_);
+    ccs.InitTableRanges(table_name_, ranges_vec_, ng_id_);
 
     for (CcRequestBase *&req : requesters_)
     {
         ccs.Enqueue(ccs.core_id_, req);
     }
 
-    ccs.RemoveFetchRequest(range_table_name_);
+    ccs.RemoveFetchRequest(table_name_);
     return false;
 }
 

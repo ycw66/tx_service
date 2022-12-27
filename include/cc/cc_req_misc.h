@@ -77,7 +77,7 @@ private:
 struct FetchTableRangesCc : public FetchCc
 {
 public:
-    FetchTableRangesCc(const TableName &range_table_name,
+    FetchTableRangesCc(const TableName &table_name,
                        const Schema *key_schema,
                        CcShard &ccs,
                        NodeGroupId ng_id);
@@ -86,7 +86,7 @@ public:
     void SetFinish(std::vector<InitRangeEntry> &&ranges, int err);
 
 public:
-    const TableName &range_table_name_;
+    const TableName &table_name_;
     const Schema *key_schema_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;

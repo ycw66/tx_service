@@ -50,8 +50,7 @@ public:
                   const TableName &table_name,
                   uint64_t schema_ts,
                   const TableSchema *table_schema = nullptr,
-                  bool ccm_has_full_entries = false,
-                  bool is_catalog_cc_map = false)
+                  bool ccm_has_full_entries = false)
         : CcMap(shard,
                 cc_ng_id,
                 table_name,
@@ -61,7 +60,6 @@ public:
           ccm_(),
           neg_inf_(this),
           pos_inf_(this),
-          is_catalog_cc_map_(is_catalog_cc_map),
           maintain_statistics_(false),
           shard_profile_(nullptr)
     {
@@ -4063,7 +4061,7 @@ protected:
 
         // catalog ccmap bypass shard memory limit. since checkpointer may
         // emplace ccentry into ccmap.
-        if (shard_->Full() && !is_catalog_cc_map_)
+        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
         {
             // The shard has reached the maximal capacity. Tries to clean cc
             // entries that have been checkpointed but are not being
@@ -4171,7 +4169,7 @@ protected:
     {
         // catalog ccmap bypass shard memory limit. since checkpointer may
         // emplace ccentry into ccmap.
-        if (shard_->Full() && !is_catalog_cc_map_)
+        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
         {
             // The shard has reached the maximal capacity. Try cleaning cc
             // entries that has been checkpointed and is not accessed by
@@ -4839,7 +4837,6 @@ protected:
 
     std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
-    bool is_catalog_cc_map_;
 
     // When maintain_statistics_ is true, shard_profile_ is valid.
     bool maintain_statistics_;

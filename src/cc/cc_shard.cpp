@@ -615,19 +615,27 @@ void CcShard::FetchCatalog(const TableName &table_name,
     }
 }
 
-void CcShard::FetchTableRanges(const TableName &range_table_name,
+void CcShard::FetchTableRanges(const TableName &table_name,
                                const Schema *key_schema,
                                const KVCatalogInfo *kv_info,
                                CcRequestBase *requester,
                                NodeGroupId ng_id)
 {
-    auto table_it = fetch_reqs_.try_emplace(
-        range_table_name,
-        std::make_unique<FetchTableRangesCc>(
-            range_table_name, key_schema, *this, ng_id));
-
-    FetchTableRangesCc *fetch_req =
-        static_cast<FetchTableRangesCc *>(table_it.first->second.get());
+    FetchTableRangesCc *fetch_req = nullptr;
+    auto find_it = fetch_reqs_.find(table_name);
+    if (find_it != fetch_reqs_.end())
+    {
+        fetch_req = static_cast<FetchTableRangesCc *>(find_it->second.get());
+    }
+    else
+    {
+        auto emplace_it =
+            fetch_reqs_.emplace(table_name,
+                                std::make_unique<FetchTableRangesCc>(
+                                    table_name, key_schema, *this, ng_id));
+        fetch_req =
+            static_cast<FetchTableRangesCc *>(emplace_it.first->second.get());
+    }
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
