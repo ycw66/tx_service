@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "tx_key.h"
+
 namespace txservice
 {
 template <typename KeyT>
@@ -28,9 +30,10 @@ public:
     };
 
 public:
-    RandomPairing(int32_t capacity) : capacity_(capacity)
+    explicit RandomPairing(int32_t capacity) : capacity_(capacity)
     {
-        assert(capacity_ > 0);
+        assert(capacity > 0);
+        sample_pool_map_.reserve(capacity + 1);
     }
 
     template <typename Iterator>
@@ -38,6 +41,9 @@ public:
         int32_t capacity, int32_t c1, int32_t c2, Iterator begin, Iterator end)
         : capacity_(capacity), c1_(c1), c2_(c2)
     {
+        assert(capacity > 0);
+        sample_pool_map_.reserve(capacity + 1);
+
         for (Iterator iter = begin; iter != end; ++iter)
         {
             Insert(*iter);
@@ -59,9 +65,12 @@ public:
                 int64_t random = random_dis(random_dev_);
                 if (random < capacity_)
                 {
-                    sample_pool_map_.erase(sample_pool_vec_[random]);
                     auto [iter, insert] = sample_pool_map_.emplace(key, random);
-                    sample_pool_vec_[random] = iter;
+                    if (insert)
+                    {
+                        sample_pool_map_.erase(sample_pool_vec_[random]);
+                        sample_pool_vec_[random] = iter;
+                    }
                 }
             }
         }
@@ -96,8 +105,9 @@ public:
 
             std::swap(sample_pool_vec_[index], sample_pool_vec_.back());
             sample_pool_vec_.resize(sample_pool_vec_.size() - 1);
-
             sample_pool_map_.erase(iter);
+
+            sample_pool_vec_[index]->second = index;
         }
         else
         {
@@ -123,13 +133,13 @@ public:
 
     void Clear()
     {
-        capacity_ = 0;
         c1_ = 0;
         c2_ = 0;
 
         sample_pool_vec_.clear();
         sample_pool_vec_.reserve(0);
         sample_pool_map_.clear();
+        sample_pool_map_.reserve(capacity_ + 1);
     }
 
     int32_t Capacity() const
@@ -161,7 +171,10 @@ private:
         // distinguish between insert and update. So for system table, key may
         // be inserted multiple times.
 
-        sample_pool_vec_.push_back(iter);
+        if (insert)
+        {
+            sample_pool_vec_.push_back(iter);
+        }
     }
 
 private:
@@ -178,7 +191,7 @@ private:
     std::unordered_map<KeyT, size_t, Hash> sample_pool_map_;
 
     // for random discard one key
-    std::vector<typename std::unordered_map<KeyT, size_t>::iterator>
+    std::vector<typename std::unordered_map<KeyT, size_t, Hash>::iterator>
         sample_pool_vec_;
 
     std::mt19937_64 random_dev_;
