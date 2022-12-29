@@ -104,10 +104,11 @@ public:
             size_t index = iter->second;
 
             std::swap(sample_pool_vec_[index], sample_pool_vec_.back());
-            sample_pool_vec_.resize(sample_pool_vec_.size() - 1);
-            sample_pool_map_.erase(iter);
 
             sample_pool_vec_[index]->second = index;
+            sample_pool_vec_.resize(sample_pool_vec_.size() - 1);
+
+            sample_pool_map_.erase(iter);
         }
         else
         {
