@@ -12,6 +12,12 @@
 #include "tx_worker_pool.h"
 #include "txlog.h"
 
+// gflags 2.1.1 missing GFLAGS_NAMESPACE. This is a workaround to handle gflags
+// ABI issue.
+#ifdef OVERRIDE_GFLAGS_NAMESPACE
+namespace GFLAGS_NAMESPACE = gflags;
+#endif
+
 namespace txservice
 {
 Sharder::Sharder(uint32_t node_id,
