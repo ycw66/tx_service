@@ -571,8 +571,8 @@ void Sharder::SetCommandLineOptions()
     // set brpc circuit_breaker max isolation duration smaller than election
     // timeout so that restarted node will join raft group before trying to
     // start a new vote
-    google::SetCommandLineOption("circuit_breaker_max_isolation_duration_ms",
-                                 "4500");
+    GFLAGS_NAMESPACE::SetCommandLineOption(
+        "circuit_breaker_max_isolation_duration_ms", "4500");
 }
 
 size_t Sharder::GetLocalCcShardsCount()
