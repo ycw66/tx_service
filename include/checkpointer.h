@@ -29,7 +29,7 @@ public:
 
     ~Checkpointer();
 
-    void Ckpt();
+    void Ckpt(bool is_last_ckpt = false);
 
     /**
      * @brief Checkpoint one Entry to KvStore synchronously.
@@ -80,6 +80,7 @@ private:
         uint64_t ckpt_ts_;
         uint64_t last_ckpt_ts_;
         TableName table_name_;
+        bool is_last_ckpt_;
     };
 
     LocalCcShards &local_shards_;

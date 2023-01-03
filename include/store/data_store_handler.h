@@ -66,7 +66,8 @@ public:
     virtual bool PutAll(std::vector<txservice::FlushRecord> &batch,
                         const txservice::TableName &table_name,
                         const txservice::TableSchema *table_schema,
-                        uint32_t node_group) = 0;
+                        uint32_t node_group,
+                        bool is_last_ckpt = false) = 0;
 
     virtual void UpsertTable(
         const TableSchema *table_schema,

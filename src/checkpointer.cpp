@@ -57,7 +57,7 @@ Checkpointer::~Checkpointer()
     }*/
 }
 
-void Checkpointer::Ckpt()
+void Checkpointer::Ckpt(bool is_last_ckpt)
 {
     if (local_shards_.Count() == 0 || store_hd_ == nullptr)
     {
@@ -151,8 +151,12 @@ void Checkpointer::Ckpt()
             {
                 continue;
             }
-            pending_work_.push_back(CkptrWorkData{
-                node_group, leader_term, ckpt_ts, last_ckpt_ts, table_name});
+            pending_work_.push_back(CkptrWorkData{node_group,
+                                                  leader_term,
+                                                  ckpt_ts,
+                                                  last_ckpt_ts,
+                                                  table_name,
+                                                  is_last_ckpt});
         }
 
         if (pending_work_.size() != 0 || active_workers_ != 0)
@@ -228,6 +232,7 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
         uint32_t node_group = cur_work.node_group_;
         int64_t leader_term = cur_work.term_;
         uint64_t ckpt_ts = cur_work.ckpt_ts_;
+        bool is_last_ckpt = cur_work.is_last_ckpt_;
         // uint64_t last_ckpt_ts = cur_work.last_ckpt_ts_;
         TableName table_name = cur_work.table_name_;
         ckptr->pending_work_.erase(ckptr->pending_work_.begin());
@@ -327,8 +332,11 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
 
             if (ckpt_ret && !ckpt_vec.empty())
             {
-                ckpt_ret = ckptr->store_hd_->PutAll(
-                    ckpt_vec, table_name, catalog_rec.Schema(), node_group);
+                ckpt_ret = ckptr->store_hd_->PutAll(ckpt_vec,
+                                                    table_name,
+                                                    catalog_rec.Schema(),
+                                                    node_group,
+                                                    is_last_ckpt);
                 if (!ckpt_ret)
                 {
                     LOG(INFO) << "checkpointer PutAll flush to kv "
@@ -442,7 +450,7 @@ void Checkpointer::Run()
     // ensure normal shutdown execute checkpoint since we could receive
     // terminating request during the last checkpoint.
     lk.unlock();
-    Ckpt();
+    Ckpt(true);
     lk.lock();
     status_ = Status::Terminated;
     lk.unlock();

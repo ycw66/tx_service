@@ -37,7 +37,8 @@ public:
     bool PutAll(std::vector<txservice::FlushRecord> &batch,
                 const txservice::TableName &table_name,
                 const txservice::TableSchema *table_schema,
-                uint32_t node_group) override
+                uint32_t node_group,
+                bool is_last_ckpt) override
     {
         for (const auto &ref : batch)
         {
