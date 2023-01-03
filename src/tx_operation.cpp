@@ -2191,7 +2191,7 @@ DsSplitRangeOp::DsSplitRangeOp(
     acquire_all_intent_for_update_old_range_op_.key_ = range_key_;
     acquire_all_intent_for_update_old_range_op_.cc_op_ =
         CcOperation::ReadForWrite;
-    acquire_all_intent_for_update_old_range_op_.protocol_ = CcProtocol::OccRead;
+    acquire_all_intent_for_update_old_range_op_.protocol_ = CcProtocol::OCC;
 
     // prepare acquire_all_lock_for_update_old_range_op_
     acquire_all_lock_for_update_old_range_op_.table_name_ = &range_table_name_;
