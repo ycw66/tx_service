@@ -50,6 +50,11 @@ public:
 
     bool IsTerminated();
 
+    /**
+     * @brief When TxService is stopping, this function will be called and
+     * triggers checkpoint to flush data to KvStore.
+     *
+     */
     void Terminate();
 
     void Join()

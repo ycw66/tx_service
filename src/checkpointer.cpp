@@ -97,7 +97,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         uint64_t ckpt_ts = UINT64_MAX;
         ckpt_ts = ckpt_req.GetCkptTs();
 
-        if (local_shards_.EnableMvcc())
+        if (local_shards_.EnableMvcc() && !is_last_ckpt)
         {
             uint64_t min_si_tx_ts =
                 TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
