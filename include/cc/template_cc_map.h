@@ -567,7 +567,12 @@ public:
                 // for mvcc
                 if (shard_->EnableMvcc())
                 {
-                    uint64_t recycle_ts = shard_->GlobalMinSiTxStartTs();
+                    // Archives whose version are bigger than ccentry's ckpt_ts_
+                    // may be in use by checkpointer and must not be deleted
+                    // here. These expired archives will be deleted at next
+                    // checkpoint.
+                    uint64_t recycle_ts = std::min(
+                        shard_->GlobalMinSiTxStartTs(), cce.ckpt_ts_.load());
                     shard_->DecrementMemory(
                         cce.KickOutArchiveRecords(recycle_ts));
                     size_t added_mem_usage = cce.ArchiveBeforeUpdate(Type());
