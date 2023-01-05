@@ -712,7 +712,7 @@ StoreRange *LocalCcShards::FindRange(const TableName &table_name,
         FindRangePartitionId(range_table_name, ng_id, key);
 
     std::map<int32_t, TableRangeEntryWithShade> *ranges =
-        GetTableRangesInternal(table_name, ng_id);
+        GetTableRangesInternal(range_table_name, ng_id);
     if (ranges == nullptr)
     {
         LOG(ERROR) << " The range table of " << table_name.StringView()
