@@ -3943,6 +3943,7 @@ public:
         shard_->DecrementMemory(cc_entry->GetCcEntryMemUsage());
 
         ccm_.erase(*cc_entry->key_);
+        ccm_has_full_entries_ = false;
     }
 
     void Clean() override
