@@ -3109,8 +3109,12 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &lock_op)
                 continue;
             }
 
-            drain_batch_.push_back(tpl);
-            rw_set_.DedupRead(tpl.cce_addr_);
+            if (rw_set_.FindReadSet(*lock_op.table_name_, tpl.cce_addr_) !=
+                ReadEntryResult::NO_INSERT)
+            {
+                drain_batch_.push_back(tpl);
+                rw_set_.DedupRead(tpl.cce_addr_);
+            }
         }
     }
     // Add remaining ScanTuple into batch, and release their lock
