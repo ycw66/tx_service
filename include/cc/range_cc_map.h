@@ -153,7 +153,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            hd_result->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_result->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -166,7 +166,7 @@ public:
         CcEntry<KeyT, RangeRecord> *floor_cce = nullptr;
 
         LockType acquired_lock;
-        LockOpStatus lock_op_status;
+        CcErrorCode err_code;
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before. This is execution resumption
@@ -176,7 +176,7 @@ public:
 
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
-            std::tie(acquired_lock, lock_op_status) =
+            std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(floor_cce,
                                             floor_cce->payload_status_,
                                             &req,
@@ -203,7 +203,7 @@ public:
             CcProtocol cc_proto = req.Protocol();
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
-            std::tie(acquired_lock, lock_op_status) =
+            std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(floor_cce,
                                   floor_cce->payload_status_,
                                   &req,
@@ -217,9 +217,9 @@ public:
         }
 
         // after acquiring lock
-        switch (lock_op_status)
+        switch (err_code)
         {
-        case LockOpStatus::Successful:
+        case CcErrorCode::NO_ERROR:
         {
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
             cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
@@ -234,15 +234,15 @@ public:
             hd_result->SetFinished();
             return true;
         }
-        case LockOpStatus::Failed:
-        {
-            return true;
-        }
-        case LockOpStatus::Blocked:
+        case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
         {
             // You don't need a remote acknowledge here, since range read is
             // a local read anyway
             return false;
+        }
+        default:
+        {
+            return true;
         }
         }  //-- end: switch
 
@@ -257,7 +257,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         // When the commit ts is 0, the request commits nothing and only
@@ -454,7 +454,7 @@ public:
         int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
 

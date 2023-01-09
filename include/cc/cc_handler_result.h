@@ -80,6 +80,16 @@ public:
         return error_code_.load(std::memory_order_acquire);
     }
 
+    const std::string ErrorMsg() const
+    {
+        auto it = cc_error_messages.find(ErrorCode());
+        if (it != cc_error_messages.end())
+        {
+            return it->second;
+        }
+        return "CcErrorCode:" + std::to_string(static_cast<int>(ErrorCode()));
+    }
+
     void SetRefCnt(uint32_t cnt)
     {
         if (cnt <= 0)

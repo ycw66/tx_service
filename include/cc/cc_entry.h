@@ -639,35 +639,22 @@ public:
     /**
      * @brief Gets the visible version according to read timestamp.
      *
-     * @return true : if find the record; false: not found or has write_lock
+     * @param ts - snapshot read timestamp
+     * @param tbl_type - type of table
+     * @param rec - variable to store result
      */
-    bool MvccGet(uint64_t ts,
-                 VersionResultRecord<ValueT> &rec,
-                 TableType tbl_type)
+    void MvccGet(uint64_t ts,
+                 TableType tbl_type,
+                 VersionResultRecord<ValueT> &rec)
     {
         if (payload_status_ == RecordStatus::Unknown)
         {
             rec.payload_status_ = RecordStatus::Unknown;
             rec.commit_ts_ = commit_ts_;
-            return true;
+            return;
         }
         if (commit_ts_ <= ts)
         {
-            if (key_lock_ptr_ != nullptr && key_lock_ptr_->HasWriteLock() &&
-                key_lock_ptr_->WLockTs() < ts)
-            {
-                // Having write lock means the ccentry will be updated soon.
-                // If wlock_ts_ < ts, the future 'commit_ts' is may also less
-                // than the 'read timestamp', then should return the future
-                // version.
-                // There are two choice: (1)wait until the future version is
-                // committed; (2) abort read transcation.
-
-                // TODO(lzx): return error code and use retry mechanism instead
-                // of abort immediately.
-                return false;
-            }
-
             // MVCC update last_read_ts_ of lastest ccentry to tell later
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
@@ -679,7 +666,7 @@ public:
             }
             rec.commit_ts_ = commit_ts_;
             rec.payload_status_ = payload_status_;
-            return true;
+            return;
         }
 
         if (archives_ != nullptr)
@@ -702,7 +689,7 @@ public:
                     }
                     rec.commit_ts_ = it->commit_ts_;
                     rec.payload_status_ = it->payload_status_;
-                    return true;
+                    return;
                 }
             }
         }
@@ -724,7 +711,6 @@ public:
                 rec.payload_status_ = RecordStatus::VersionUnknown;
             }
         }
-        return true;
     }
 
     bool HasVisibleVersion(uint64_t ts) const

@@ -7,6 +7,7 @@
 #include "cc/cc_req_base.h"
 #include "cc_protocol.h"
 #include "ccm_scanner.h"
+#include "error_messages.h"  // CcErrorCode
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "type.h"  // LockType, LockOpStatus
@@ -177,12 +178,10 @@ protected:
      * @param protocol
      * @param is_resume If true, it means that the request is restored from
      * lock blocking queue, that is, the request just acquired the lock.
-     * @return std::pair<LockType, LockOpStatus> : the first arg of the pair is
-     * the lock that the request will acquire, the second is the result of
-     * acquire lock operation. If the latest version of ccentry does't fit read
-     * timestamp for ReadForWrite under SI, the result will be <NoLock, Failed>.
+     * @return std::pair<LockType,CcErrorCode> : the first arg of the pair is
+     * the lock that the request will acquire, the second is the error code.
      */
-    std::pair<LockType, LockOpStatus> AcquireCceKeyLock(
+    std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
@@ -196,12 +195,10 @@ protected:
 
     /**
      * @brief do check after request is resumed from lock blocking queue.
-     * @return std::pair<LockType, LockOpStatus> : the first arg of the pair is
-     * the lock that the request will acquire, the second is the result of
-     * acquire lock operation. If the latest version of ccentry does't fit read
-     * timestamp for ReadForWrite under SI, the result will be <NoLock, Failed>.
+     * @return  std::pair<LockType,CcErrorCode> : the first arg of the pair is
+     * the lock that the request will acquire, the second is the error code.
      */
-    std::pair<LockType, LockOpStatus> LockHandleForResumedRequest(
+    std::pair<LockType, CcErrorCode> LockHandleForResumedRequest(
         LruEntry *cce,
         RecordStatus cce_payload_status,
         CcRequestBase *req,

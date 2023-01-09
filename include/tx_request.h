@@ -57,8 +57,8 @@ struct TemplateTxRequest : TxRequest
 
     std::string ErrorMsg() const
     {
-        auto it = error_messages.find(ErrorCode());
-        if (it != error_messages.end())
+        auto it = tx_error_messages.find(ErrorCode());
+        if (it != tx_error_messages.end())
         {
             return it->second;
         }

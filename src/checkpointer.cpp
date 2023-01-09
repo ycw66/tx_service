@@ -419,8 +419,6 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
 
 void Checkpointer::Run()
 {
-    using namespace std::chrono_literals;
-
     // Starts checkpointer worker threads
     for (int id = 0; id < checkpointer_worker_num_; id++)
     {

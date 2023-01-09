@@ -168,19 +168,19 @@ public:
         });
         if (ng_term < 0)
         {
-            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
-        LockType acquired_lock;
-        LockOpStatus lock_op_status;
+        LockType acquired_lock = LockType::NoLock;
+        CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-            std::tie(acquired_lock, lock_op_status) =
+            std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
                                             &req,
@@ -306,7 +306,7 @@ public:
         {
             if (!resume)
             {
-                std::tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
                                       cc_entry.payload_status_,
                                       &req,
@@ -319,7 +319,7 @@ public:
                                       0);
             }
 
-            if (lock_op_status == LockOpStatus::Successful)
+            if (err_code == CcErrorCode::NO_ERROR)
             {
                 assert(acquired_lock == LockType::WriteLock);
                 // for mvcc
@@ -340,13 +340,7 @@ public:
 
                 hd_res->SetFinished();
             }
-            else if (lock_op_status == LockOpStatus::Failed)
-            {
-                // lock confilct: back off and retry.
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
-            }
-            else
+            else if (err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED)
             {
                 // For 2PL, a conflict blocks the tx by putting it into the
                 // lock's blocking queue.
@@ -363,6 +357,12 @@ public:
                 }
 
                 return false;
+            }
+            else
+            {
+                // lock confilct: back off and retry.
+                req.Result()->SetError(err_code);
+                return true;
             }
         }
 
@@ -400,7 +400,7 @@ public:
             {
                 LOG(INFO) << "FaultInject  "
                              "term_TemplateCcMap_Execute_PostWriteCc";
-                req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return true;
             }
         });
@@ -408,7 +408,7 @@ public:
         if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
                                                  cce_addr.Term()))
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -508,9 +508,9 @@ public:
                 }
             }
 
-            req.Result()->SetFinished();
             // The insert places a write lock on the prior cc entry's gap.
             ReleaseCceGapLock(&prior_cce, txn, req.NodeGroupId());
+            req.Result()->SetFinished();
             return true;
         }
         else
@@ -619,8 +619,8 @@ public:
                 }
             }
 
-            req.Result()->SetFinished();
             ReleaseCceKeyLock(&cce, txn, req.NodeGroupId());
+            req.Result()->SetFinished();
             return true;
         }
     }
@@ -654,7 +654,7 @@ public:
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
             LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
-            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         });
 
@@ -662,20 +662,20 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         if (ng_term < 0)
         {
-            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
-        LockType acquired_lock;
-        LockOpStatus lock_op_status;
+        LockType acquired_lock = LockType::NoLock;
+        CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (req.CcePtr() != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
             cce_ptr = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            std::tie(acquired_lock, lock_op_status) =
+            std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
                                             cce_ptr->payload_status_,
                                             &req,
@@ -820,7 +820,7 @@ public:
             // being unblocked.
             if (!resume)
             {
-                std::tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(&cc_entry,
                                       cc_entry.payload_status_,
                                       &req,
@@ -833,9 +833,9 @@ public:
                                       0);
             }
 
-            switch (lock_op_status)
+            switch (err_code)
             {
-            case LockOpStatus::Successful:
+            case CcErrorCode::NO_ERROR:
             {
                 if (cc_entry.payload_status_ != RecordStatus::Deleted)
                 {
@@ -885,13 +885,7 @@ public:
                 }
                 break;
             }
-            case LockOpStatus::Failed:
-            {
-                // lock confilct: back off and retry.
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
-            }
-            case LockOpStatus::Blocked:
+            case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
             {
                 // If the request comes from a remote node, sends
                 // acknowledgement to the sender when the request is
@@ -906,6 +900,12 @@ public:
                 }
 
                 return false;
+            }
+            default:
+            {
+                // lock confilct: back off and retry.
+                req.Result()->SetError(err_code);
+                return true;
             }
             }  //-- end: switch
         }      //-- end: acquire lock
@@ -937,7 +937,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1190,7 +1190,7 @@ public:
                 {
                     LOG(INFO)
                         << "FaultInject  term_TemplateCcMap_Execute_PostReadCc";
-                    hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                    hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                     return true;
                 }
             });
@@ -1201,7 +1201,7 @@ public:
             LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn() << " ,cce: "
                       << reinterpret_cast<void *>(cce_addr.CcePtr());
-            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1222,6 +1222,9 @@ public:
             // for OCC/OccRead protocol validating version stability.
             assert(req.Protocol() == CcProtocol::OCC ||
                    req.Protocol() == CcProtocol::OccRead);
+
+            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
+            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
             // broken repeatable read, set error.
             hd_res->SetError(
                 CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
@@ -1282,7 +1285,18 @@ public:
                 }
             }
 
-            hd_res->SetFinished();
+            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
+            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
+            if (conflicting_txs.Size() > 0)
+            {
+                // Does not perform tx negotiations so far.
+                hd_res->SetError(
+                    CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS);
+            }
+            else
+            {
+                hd_res->SetFinished();
+            }
         }
         else if (req.Protocol() == CcProtocol::Locking)
         {
@@ -1309,21 +1323,10 @@ public:
                     std::max(cc_entry.last_read_ts_, commit_ts);
             }
 
-            // For 2PL, releasing read locks may spend extra cycles to
-            // process unblocked requests. Sets the handler's finish signal
-            // before releasing read locks, so that if blocking requests come
-            // from a different core or a remote node, their tx's can move
-            // forward immediately.
-
+            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
+            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
             hd_res->SetFinished();
         }
-
-        // ReadCc may use different lock type when acquiring the lock, for
-        // example, select for update would acquire write intent. As a
-        // result, we should also release the corresponding lock/intent as
-        // well.
-        ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
-        ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
 
         return true;
     }
@@ -1348,7 +1351,7 @@ public:
             if (strstr(typeid(*this).name(), "CatalogCcMap") == nullptr)
             {
                 LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ReadCc";
-                hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return true;
             }
         });
@@ -1368,7 +1371,7 @@ public:
         {
             LOG(INFO) << "ReadCc, node_group(#" << ng_id
                       << ") term < 0, tx:" << req.Txn();
-            hd_res->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1395,8 +1398,8 @@ public:
 
         if (req.Type() == ReadType::Inside)
         {
-            LockType acquired_lock;
-            LockOpStatus lock_op_status;
+            LockType acquired_lock = LockType::NoLock;
+            CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
             if (req.CcePtr() != nullptr)
             {
@@ -1415,11 +1418,11 @@ public:
                     cce->key_lock_ptr_->ReleaseLock(
                         req.Txn(), shard_, LockType::ReadLock);
                     acquired_lock = LockType::NoLock;
-                    lock_op_status = LockOpStatus::Successful;
+                    err_code = CcErrorCode::NO_ERROR;
                 }
                 else
                 {
-                    std::tie(acquired_lock, lock_op_status) =
+                    std::tie(acquired_lock, err_code) =
                         LockHandleForResumedRequest(cce,
                                                     cce->payload_status_,
                                                     &req,
@@ -1535,7 +1538,7 @@ public:
                                 req.NodeGroupId());
 
                 // Try to acquire lock
-                std::tie(acquired_lock, lock_op_status) =
+                std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       cce->payload_status_,
                                       &req,
@@ -1549,20 +1552,28 @@ public:
             }
 
             // After acquiring lock
-            switch (lock_op_status)
+            switch (err_code)
             {
-            case LockOpStatus::Successful:
+            case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+            {
+                req.SetIsWaitForPostWrite(true);
+                // Put the request to top of key lock's blocking queue with
+                // acquring readlock. And then should release the readlock
+                // before handling this requst when PostWriteCc finished.
+                cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                        LockType::ReadLock);
+                shard_->CheckRecoverTx(
+                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                // After inserting to blocking queue, the execution of current
+                // ReadCc request should stop.
+                return false;
+            }
+            case CcErrorCode::NO_ERROR:
             {
                 hd_res->Value().lock_type_ = acquired_lock;
                 break;
             }
-            case LockOpStatus::Failed:
-            {
-                // lock confilct: back off and retry.
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
-            }
-            case LockOpStatus::Blocked:
+            case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
             {
                 // If the read request comes from a remote node, sends
                 // acknowledgement to the sender when the request is
@@ -1576,6 +1587,12 @@ public:
                 // ReadLock fail should stop the execution of current
                 // ReadCc request since it's already in blocking queue.
                 return false;
+            }
+            default:
+            {
+                // lock confilct: back off and retry.
+                req.Result()->SetError(err_code);
+                return true;
             }
             }  //-- end: switch
         }      //-- end: read insde
@@ -1660,40 +1677,23 @@ public:
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(req.ReadTimestamp(), v_rec, Type());
-            if (res)  // Finds a visible version.
+            cce->MvccGet(req.ReadTimestamp(), Type(), v_rec);
+            if (v_rec.payload_status_ == RecordStatus::Normal)
             {
-                if (v_rec.payload_status_ == RecordStatus::Normal)
+                if (req.Record() != nullptr)
                 {
-                    if (req.Record() != nullptr)
-                    {
-                        ValueT *typed_rec = static_cast<ValueT *>(req.Record());
-                        *typed_rec = *(v_rec.payload_ptr_);
-                    }
-                    else
-                    {
-                        assert(req.RecordBlob() != nullptr);
-                        v_rec.payload_ptr_->Serialize(*req.RecordBlob());
-                    }
+                    ValueT *typed_rec = static_cast<ValueT *>(req.Record());
+                    *typed_rec = *(v_rec.payload_ptr_);
                 }
-                hd_res->Value().ts_ = v_rec.commit_ts_;
-                hd_res->Value().rec_status_ = v_rec.payload_status_;
-                hd_res->SetFinished();
+                else
+                {
+                    assert(req.RecordBlob() != nullptr);
+                    v_rec.payload_ptr_->Serialize(*req.RecordBlob());
+                }
             }
-            else
-            {
-                req.SetIsWaitForPostWrite(true);
-                // Put the request to top of key lock's blocking queue with
-                // acquring readlock. And then should release the readlock
-                // before handling this requst when PostWriteCc finished.
-                cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                        LockType::ReadLock);
-                shard_->CheckRecoverTx(
-                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                // After inserting to blocking queue, the execution of current
-                // ReadCc request should stop.
-                return false;
-            }
+            hd_res->Value().ts_ = v_rec.commit_ts_;
+            hd_res->Value().rec_status_ = v_rec.payload_status_;
+            hd_res->SetFinished();
             return true;
         }
         else if (cce->payload_status_ == RecordStatus::Normal &&
@@ -1942,7 +1942,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -1979,22 +1979,33 @@ public:
             req.SetCcePtr(nullptr);
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
-            // Lock has been acquired, UpsertLockHoldingTx
-            auto lock_pair = LockHandleForResumedRequest(cce,
-                                                         cce->payload_status_,
-                                                         &req,
-                                                         ng_id,
-                                                         ng_term,
-                                                         tx_term,
-                                                         cc_op,
-                                                         iso_lvl,
-                                                         cc_proto,
-                                                         req.ReadTimestamp());
-
-            if (lock_pair.second == LockOpStatus::Failed)
+            if (req.IsWaitForPostWrite())
             {
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
+                req.SetIsWaitForPostWrite(false);
+                cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
+            else
+            {
+                // Lock has been acquired, UpsertLockHoldingTx
+                auto lock_pair =
+                    LockHandleForResumedRequest(cce,
+                                                cce->payload_status_,
+                                                &req,
+                                                ng_id,
+                                                ng_term,
+                                                tx_term,
+                                                cc_op,
+                                                iso_lvl,
+                                                cc_proto,
+                                                req.ReadTimestamp());
+                if (lock_pair.second != CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_pair.second ==
+                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
             }
 
             AddScanTuple(cce,
@@ -2045,19 +2056,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
             }
             else
             {
@@ -2095,19 +2124,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              typed_cache,
@@ -2141,19 +2188,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              typed_cache,
@@ -2190,7 +2255,7 @@ public:
         int64_t tx_term = req.TxTerm();
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
         req.Result()->Value().term_ = ng_term;
@@ -2226,22 +2291,33 @@ public:
             req.SetCcePtr(nullptr);
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
-            // Lock has been acquired, UpsertLockHoldingTx
-            auto lock_pair =
-                LockHandleForResumedRequest(prior_cce,
-                                            prior_cce->payload_status_,
-                                            &req,
-                                            ng_id,
-                                            ng_term,
-                                            tx_term,
-                                            cc_op,
-                                            iso_lvl,
-                                            cc_proto,
-                                            req.ReadTimestamp());
-            if (lock_pair.second == LockOpStatus::Failed)
+            if (req.IsWaitForPostWrite())
             {
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
+                req.SetIsWaitForPostWrite(false);
+                prior_cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
+            else
+            {
+                // Lock has been acquired, UpsertLockHoldingTx
+                auto lock_pair =
+                    LockHandleForResumedRequest(prior_cce,
+                                                prior_cce->payload_status_,
+                                                &req,
+                                                ng_id,
+                                                ng_term,
+                                                tx_term,
+                                                cc_op,
+                                                iso_lvl,
+                                                cc_proto,
+                                                req.ReadTimestamp());
+                if (lock_pair.second != CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_pair.second ==
+                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
             }
 
             AddScanTuple(prior_cce,
@@ -2288,19 +2364,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              typed_cache,
@@ -2348,19 +2442,38 @@ public:
                                                        iso_lvl,
                                                        cc_proto,
                                                        req.ReadTimestamp());
-                    if (lock_pair.second == LockOpStatus::Failed)
+                    switch (lock_pair.second)
                     {
-                        // lock confilct: back off and retry.
-                        req.Result()->SetError(
-                            CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                        return true;
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetIsWaitForPostWrite(true);
+                        // Put the request to top of key lock's blocking queue
+                        // with acquring readlock. And then should release the
+                        // readlock before handling this requst when PostWriteCc
+                        // finished.
+                        cce->key_lock_ptr_->InsertBlockingQueue(
+                            &req, LockType::ReadLock);
+                        shard_->CheckRecoverTx(
+                            cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                        // After inserting to blocking queue, the execution of
+                        // current ReadCc request should stop.
+                        return false;
                     }
-                    else if (lock_pair.second == LockOpStatus::Blocked)
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                     {
                         // Lock fail should stop the execution of current
                         // CC request since it's already in blocking queue.
                         return false;
                     }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+                    }  //-- end: switch
 
                     AddScanTuple(cce,
                                  typed_cache,
@@ -2452,7 +2565,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -2508,21 +2621,33 @@ public:
             req.SetCcePtr(nullptr, shard_->LocalCoreId());
             req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
 
-            // Lock has been acquired, UpsertLockHoldingTx
-            auto lock_pair = LockHandleForResumedRequest(cce,
-                                                         cce->payload_status_,
-                                                         &req,
-                                                         ng_id,
-                                                         ng_term,
-                                                         tx_term,
-                                                         cc_op,
-                                                         iso_lvl,
-                                                         cc_proto,
-                                                         req.ReadTimestamp());
-            if (lock_pair.second == LockOpStatus::Failed)
+            if (req.IsWaitForPostWrite())
             {
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
+                req.SetIsWaitForPostWrite(false);
+                cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
+            else
+            {
+                // Lock has been acquired, UpsertLockHoldingTx
+                auto lock_pair =
+                    LockHandleForResumedRequest(cce,
+                                                cce->payload_status_,
+                                                &req,
+                                                ng_id,
+                                                ng_term,
+                                                tx_term,
+                                                cc_op,
+                                                iso_lvl,
+                                                cc_proto,
+                                                req.ReadTimestamp());
+                if (lock_pair.second != CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_pair.second ==
+                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
             }
 
             AddScanTupleMsg(cce,
@@ -2561,21 +2686,39 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue
+                    // with acquring readlock. And then should release the
+                    // readlock before handling this requst when PostWriteCc
+                    // finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
-
                     // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
             }
             else
             {
@@ -2623,20 +2766,39 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue
+                    // with acquring readlock. And then should release the
+                    // readlock before handling this requst when PostWriteCc
+                    // finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTupleMsg(cce,
                                 cache,
@@ -2679,20 +2841,39 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue
+                    // with acquring readlock. And then should release the
+                    // readlock before handling this requst when PostWriteCc
+                    // finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTupleMsg(cce,
                                 cache,
@@ -2731,7 +2912,7 @@ public:
         int64_t tx_term = req.TxTerm();
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -2763,23 +2944,34 @@ public:
             req.SetCcePtr(nullptr);
             req.SetCcePtrScanType(ScanType::ScanUnknow);
 
-            // Lock has been acquired, UpsertLockHoldingTx
-            auto lock_pair =
-                LockHandleForResumedRequest(prior_cce,
-                                            prior_cce->payload_status_,
-                                            &req,
-                                            ng_id,
-                                            ng_term,
-                                            tx_term,
-                                            cc_op,
-                                            iso_lvl,
-                                            cc_proto,
-                                            req.ReadTimestamp());
-
-            if (lock_pair.second == LockOpStatus::Failed)
+            if (req.IsWaitForPostWrite())
             {
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
+                req.SetIsWaitForPostWrite(false);
+                prior_cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
+            else
+            {
+                // Lock has been acquired, UpsertLockHoldingTx
+                auto lock_pair =
+                    LockHandleForResumedRequest(prior_cce,
+                                                prior_cce->payload_status_,
+                                                &req,
+                                                ng_id,
+                                                ng_term,
+                                                tx_term,
+                                                cc_op,
+                                                iso_lvl,
+                                                cc_proto,
+                                                req.ReadTimestamp());
+
+                if (lock_pair.second != CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_pair.second ==
+                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
             }
 
             AddScanTupleMsg(prior_cce,
@@ -2824,19 +3016,39 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue
+                    // with acquring readlock. And then should release the
+                    // readlock before handling this requst when PostWriteCc
+                    // finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
+                    // TODO(lzx): Add remote acknowlege when lock fail
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTupleMsg(cce,
                                 req.scan_cache_,
@@ -2886,21 +3098,39 @@ public:
                                                        iso_lvl,
                                                        cc_proto,
                                                        req.ReadTimestamp());
-                    if (lock_pair.second == LockOpStatus::Failed)
+                    switch (lock_pair.second)
                     {
-                        // lock confilct: back off and retry.
-                        req.Result()->SetError(
-                            CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                        return true;
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetIsWaitForPostWrite(true);
+                        // Put the request to top of key lock's blocking queue
+                        // with acquring readlock. And then should release the
+                        // readlock before handling this requst when PostWriteCc
+                        // finished.
+                        cce->key_lock_ptr_->InsertBlockingQueue(
+                            &req, LockType::ReadLock);
+                        shard_->CheckRecoverTx(
+                            cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                        // After inserting to blocking queue, the execution of
+                        // current ReadCc request should stop.
+                        return false;
                     }
-                    else if (lock_pair.second == LockOpStatus::Blocked)
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                     {
                         // Lock fail should stop the execution of current
                         // CC request since it's already in blocking queue.
-
                         // TODO(lzx): Add remote acknowlege when lock fail
                         return false;
                     }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+                    }  //-- end: switch
 
                     AddScanTupleMsg(cce,
                                     req.scan_cache_,
@@ -2925,7 +3155,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return req.SetFinish();
         }
 
@@ -3018,22 +3248,34 @@ public:
             req.SetCcePtr(nullptr, core_id);
             req.SetCceScanType(ScanType::ScanUnknow, core_id);
 
-            // Lock has been acquired, UpsertLockHoldingTx
-            auto lock_pair = LockHandleForResumedRequest(cce,
-                                                         cce->payload_status_,
-                                                         &req,
-                                                         ng_id,
-                                                         ng_term,
-                                                         tx_term,
-                                                         cc_op,
-                                                         iso_lvl,
-                                                         req.Protocol(),
-                                                         req.ReadTimestamp());
-
-            if (lock_pair.second == LockOpStatus::Failed)
+            if (req.IsWaitForPostWrite())
             {
-                req.Result()->SetError(CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                return true;
+                req.SetIsWaitForPostWrite(false);
+                cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
+            else
+            {
+                // Lock has been acquired, UpsertLockHoldingTx
+                auto lock_pair =
+                    LockHandleForResumedRequest(cce,
+                                                cce->payload_status_,
+                                                &req,
+                                                ng_id,
+                                                ng_term,
+                                                tx_term,
+                                                cc_op,
+                                                iso_lvl,
+                                                req.Protocol(),
+                                                req.ReadTimestamp());
+
+                if (lock_pair.second != CcErrorCode::NO_ERROR)
+                {
+                    assert(lock_pair.second ==
+                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
             }
 
             AddScanTuple(cce,
@@ -3078,19 +3320,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              scan_cache,
@@ -3139,19 +3399,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              scan_cache,
@@ -3246,19 +3524,37 @@ public:
                                                    iso_lvl,
                                                    cc_proto,
                                                    req.ReadTimestamp());
-                if (lock_pair.second == LockOpStatus::Failed)
+                switch (lock_pair.second)
                 {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(
-                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED);
-                    return true;
+                case CcErrorCode::NO_ERROR:
+                    break;
+                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                {
+                    req.SetIsWaitForPostWrite(true);
+                    // Put the request to top of key lock's blocking queue with
+                    // acquring readlock. And then should release the readlock
+                    // before handling this requst when PostWriteCc finished.
+                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
+                                                            LockType::ReadLock);
+                    shard_->CheckRecoverTx(
+                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+                    // After inserting to blocking queue, the execution of
+                    // current ReadCc request should stop.
+                    return false;
                 }
-                else if (lock_pair.second == LockOpStatus::Blocked)
+                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     // Lock fail should stop the execution of current
                     // CC request since it's already in blocking queue.
                     return false;
                 }
+                default:
+                {
+                    // lock confilct: back off and retry.
+                    req.Result()->SetError(lock_pair.second);
+                    return true;
+                }
+                }  //-- end: switch
 
                 AddScanTuple(cce,
                              scan_cache,
@@ -4687,12 +4983,7 @@ protected:
         if (is_read_snapshot)
         {
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(read_ts, v_rec, Type());
-            if (!res)
-            {
-                // TODO(lzx): to handle this error.
-                // return error.
-            }
+            cce->MvccGet(read_ts, Type(), v_rec);
 
 #ifdef RANGE_PARTITIONED
             if (v_rec.payload_status_ == RecordStatus::Normal)
@@ -4769,11 +5060,7 @@ protected:
         if (is_read_snapshot)
         {
             VersionResultRecord<ValueT> v_rec;
-            bool res = cce->MvccGet(read_ts, v_rec, Type());
-            if (!res)
-            {
-                // return error.
-            }
+            cce->MvccGet(read_ts, Type(), v_rec);
             if (v_rec.payload_status_ == RecordStatus::Normal ||
                 (is_ckpt_delta &&
                  v_rec.payload_status_ == RecordStatus::Deleted))

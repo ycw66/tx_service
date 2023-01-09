@@ -137,6 +137,45 @@ TxnStatus TransactionExecution::TxStatus() const
     return tx_status_.load(std::memory_order_relaxed);
 }
 
+TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
+{
+    switch (error)
+    {
+    case CcErrorCode::NO_ERROR:
+        return TxErrorCode::NO_ERROR;
+
+    case CcErrorCode::FORCE_FAIL:
+        return TxErrorCode::INTERNAL_ERR_TIMEOUT;
+
+    case CcErrorCode::REQUESTED_NODE_NOT_LEADER:
+        return TxErrorCode::CC_REQ_FOLLOWER;
+
+    case CcErrorCode::UNDEFINED_ERR:
+    default:
+        return TxErrorCode::UNDEFINED_ERR;
+
+    case CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH:
+    case CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS:
+        return TxErrorCode::OCC_BREAK_REPEATABLE_READ;
+
+    case CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT:
+        return TxErrorCode::SI_R4W_ERR_KEY_WAS_UPDATED;
+
+    case CcErrorCode::DEAD_LOCK_ABORT:
+        return TxErrorCode::DEAD_LOCK_ABORT;
+
+    case CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT:
+        return TxErrorCode::READ_WRITE_CONFLICT;
+
+    case CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT:
+    case CcErrorCode::ACQUIRE_GAP_LOCK_FAILED:
+        return TxErrorCode::WRITE_WRITE_CONFLICT;
+
+    case CcErrorCode::DUPLICATE_INSERT_ERR:
+        return TxErrorCode::DUPLICATE_KEY;
+    }
+}
+
 void TransactionExecution::RecoverSchemaTx(
     const ::txlog::SchemaOpMessage &schema_op,
     uint64_t txn,
@@ -669,6 +708,8 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
         });
     if (init_txn.hd_result_.IsError())
     {
+        DLOG(ERROR) << "InitTxnOperation failed for cc error:"
+                    << init_txn.hd_result_.ErrorMsg();
         state_stack_.clear();
         uint64_resp_->FinishError();
         // transaction can be recycled and put into free list.
@@ -908,10 +949,9 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
     if (read_.hd_result_.IsError())
     {
-        rec_resp_->FinishError(read_.hd_result_.ErrorCode() ==
-                                       CcErrorCode::DEAD_LOCK_ABORT
-                                   ? TxErrorCode::DEAD_LOCK_ABORT
-                                   : TxErrorCode::UNDEFINED_ERR);
+        DLOG(ERROR) << "ReadOperation failed for cc error:"
+                    << read_.hd_result_.ErrorMsg();
+        rec_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
     }
     else
     {
@@ -1094,8 +1134,12 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     if (scan_open_.hd_result_.IsError())
     {
+        DLOG(ERROR) << "ScanOpenOperation failed for cc error:"
+                    << scan_open_.hd_result_.ErrorMsg();
         if (scan_open_.hd_result_.Value().scanner_ != nullptr)
         {
+            uint64_resp_->SetErrorCode(
+                ConvertCcError(scan_open_.hd_result_.ErrorCode()));
             const TableName &table_name = *scan_open_.tx_req_->tab_name_;
             CcScanner *scanner = scan_open_.hd_result_.Value().scanner_.get();
             abundant_lock_op_.Reset(
@@ -1105,10 +1149,10 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         }
         else
         {
-            uint64_resp_->FinishError(scan_open_.hd_result_.ErrorCode() ==
-                                              CcErrorCode::DEAD_LOCK_ABORT
-                                          ? TxErrorCode::DEAD_LOCK_ABORT
-                                          : TxErrorCode::UNDEFINED_ERR);
+            DLOG(ERROR) << "ScanOpenOperation failed for cc error:"
+                        << scan_open_.hd_result_.ErrorMsg();
+            uint64_resp_->FinishError(
+                ConvertCcError(scan_open_.hd_result_.ErrorCode()));
         }
 
         return;
@@ -1366,10 +1410,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #endif
     )
     {
-        void_resp_->FinishError(scan_next.hd_result_.ErrorCode() ==
-                                        CcErrorCode::DEAD_LOCK_ABORT
-                                    ? TxErrorCode::DEAD_LOCK_ABORT
-                                    : TxErrorCode::UNDEFINED_ERR);
+        DLOG(ERROR) << "ScanNextOperation failed for cc error:"
+                    << scan_next.hd_result_.ErrorMsg();
+        void_resp_->FinishError();
+
         return;
     }
 
@@ -1912,6 +1956,8 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
 {
     if (lock_write_ranges.lock_range_result_.IsError())
     {
+        DLOG(ERROR) << "LockWriteRangesOp failed for cc error:"
+                    << lock_write_ranges.lock_range_result_.ErrorMsg();
         Abort();
         return;
     }
@@ -2022,7 +2068,17 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 
     if (acquire_write.hd_result_.IsError() || acquire_write.rset_has_expired_)
     {
-        bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
+        if (acquire_write.rset_has_expired_)
+        {
+            bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
+        }
+        else
+        {
+            DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
+                        << acquire_write.hd_result_.ErrorMsg();
+            bool_resp_->SetErrorCode(
+                ConvertCcError(acquire_write.hd_result_.ErrorCode()));
+        }
         Abort();
     }
     else
@@ -2091,6 +2147,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
 
     if (set_ts.hd_result_.IsError())
     {
+        DLOG(ERROR) << "SetCommitTsOperation failed for cc error:"
+                    << set_ts.hd_result_.ErrorMsg();
         SetErrorMessage("Transaction abort: failed to set commit timestamp.");
         Abort();
     }
@@ -2193,7 +2251,12 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             << " ,hd_result_.IsError():"
             << static_cast<int>(validate.hd_result_.ErrorCode())
             << " ,conflict_tx size:" << validate.hd_result_.Value().Size();
-        bool_resp_->SetErrorCode(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+
+        DLOG(ERROR) << "ValidateOperation failed for cc error:"
+                    << validate.hd_result_.ErrorMsg();
+        bool_resp_->SetErrorCode(
+            ConvertCcError(validate.hd_result_.ErrorCode()));
+
         Abort();
     }
     else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
@@ -2430,6 +2493,8 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
             }
             else
             {
+                DLOG(ERROR) << "WriteToLogOp failed for cc error:"
+                            << log_op->hd_result_.ErrorMsg();
                 bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
@@ -3231,7 +3296,15 @@ void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
 
     if (lock_op.scan_open_tx_result_ != nullptr)
     {
-        lock_op.scan_open_tx_result_->FinishError();
+        if (lock_op.scan_open_tx_result_->ErrorCode() != TxErrorCode::NO_ERROR)
+        {
+            lock_op.scan_open_tx_result_->FinishError(
+                lock_op.scan_open_tx_result_->ErrorCode());
+        }
+        else
+        {
+            lock_op.scan_open_tx_result_->FinishError();
+        }
     }
     else if (lock_op.scan_close_tx_result_ != nullptr)
     {

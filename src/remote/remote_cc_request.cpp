@@ -248,7 +248,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
-        if (!res->IsError())
+        if (res->IsError())
         {
             // RemotePostRead at the remote node accesses one key, which locates
             // in a single shard. Hence, there are no concurrent modifications

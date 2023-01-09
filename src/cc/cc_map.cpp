@@ -16,7 +16,7 @@ void CcMap::MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id)
         shard_->core_id_, target_core_id, cc_req);
 }
 
-std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
+std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     LruEntry *cce,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
@@ -28,17 +28,41 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
     CcProtocol protocol,
     uint64_t read_ts)
 {
-    if (iso_level == IsolationLevel::Snapshot &&
-        cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+    if (iso_level == IsolationLevel::Snapshot)
     {
-        LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
-                        "timestamp. tx:"
-                     << req->Txn();
-        // For ReadForWrite under Snapshot Isolation,  we will return the
-        // latest version, only if the latest version fits the read's timestamp.
-        // Otherwise, we will return an error to abort the tx.
-        return std::pair<LockType, LockOpStatus>(LockType::NoLock,
-                                                 LockOpStatus::Failed);
+        if (cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+        {
+            LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
+                            "timestamp. tx:"
+                         << req->Txn();
+            // For ReadForWrite under Snapshot Isolation,  we will return the
+            // latest version, only if the latest version fits the read's
+            // timestamp. Otherwise, we will return an error to abort the tx.
+            // Because, snapshot isolation is a guarantee that all reads made in
+            // a transaction will see a consistent snapshot of the database, and
+            // the transaction itself will successfully commit only if no
+            // updates it has made conflict with any concurrent updates made
+            // since that snapshot.
+            return std::pair<LockType, CcErrorCode>(
+                LockType::NoLock, CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+        }
+        else if (cc_op == CcOperation::Read ||
+                 cc_op == CcOperation::ReadSkIndex)
+        {
+            if (cce->key_lock_ptr_ != nullptr &&
+                cce->key_lock_ptr_->HasWriteLock() &&
+                cce->key_lock_ptr_->WLockTs() < read_ts)
+            {
+                // Having write lock means the ccentry will be updated soon.
+                // If wlock_ts_ < ts, the future 'commit_ts' is may also less
+                // than the 'read timestamp', then should return the future
+                // version.
+                // There are two choice: (1)wait until the future version is
+                // committed; (2) abort read transcation.
+                return std::pair<LockType, CcErrorCode>(
+                    LockType::NoLock, CcErrorCode::MVCC_READ_MUST_WAIT_WRITE);
+            }
+        }
     }
 
     // deduce the lock type to acquire
@@ -47,6 +71,7 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
 
     TxNumber tx_number = req->Txn();
     LockOpStatus lock_op_status = LockOpStatus::Successful;
+    CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
     if (lock_type != LockType::NoLock)
     {
@@ -104,6 +129,17 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
     {
         // check and recover conflicted transactions.
         RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
+        if (lock_type == LockType::WriteLock &&
+            !cce->GetKeyLock().HasWriteLock() &&
+            !cce->GetKeyLock().HasWriteIntent())
+        {
+            err_code = CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT;
+        }
+        else
+        {
+            err_code = CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT;
+        }
+
         TX_TRACE_ACTION_WITH_CONTEXT(
             req,
             "AcquireCcEntryKeyLock.Failed",
@@ -147,12 +183,13 @@ std::pair<LockType, LockOpStatus> CcMap::AcquireCceKeyLock(
         // check and recover conflicted transactions.
         RecoverTxForLockConfilct(
             *(cce->key_lock_ptr_), lock_type, ng_id, ng_term);
+        err_code = CcErrorCode::ACQUIRE_LOCK_BLOCKED;
     }
 
-    return std::pair<LockType, LockOpStatus>(lock_type, lock_op_status);
+    return std::pair<LockType, CcErrorCode>(lock_type, err_code);
 }
 
-std::pair<LockType, LockOpStatus> CcMap::LockHandleForResumedRequest(
+std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     LruEntry *cce,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
@@ -167,7 +204,7 @@ std::pair<LockType, LockOpStatus> CcMap::LockHandleForResumedRequest(
     TxNumber tx_number = req->Txn();
     LockType acquired_lock =
         LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
-    LockOpStatus lock_op_status = LockOpStatus::Successful;
+    CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
     bool should_release_lock = (cce_payload_status == RecordStatus::Deleted &&
                                 acquired_lock != LockType::WriteLock &&
@@ -182,8 +219,12 @@ std::pair<LockType, LockOpStatus> CcMap::LockHandleForResumedRequest(
         // For ReadForWrite under Snapshot Isolation,  we will return the
         // latest version, only if the latest version fits the read's timestamp.
         // Otherwise, we will return an error to abort the tx.
-        lock_op_status = LockOpStatus::Failed;
+        // Because, snapshot isolation is a guarantee that all reads made in a
+        // transaction will see a consistent snapshot of the database, and the
+        // transaction itself will successfully commit only if no updates it has
+        // made conflict with any concurrent updates made since that snapshot.
         should_release_lock = true;
+        err_code = CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT;
     }
 
     if (should_release_lock)
@@ -205,7 +246,7 @@ std::pair<LockType, LockOpStatus> CcMap::LockHandleForResumedRequest(
                                     ng_id);
     }
 
-    return std::pair<LockType, LockOpStatus>(acquired_lock, lock_op_status);
+    return std::pair<LockType, CcErrorCode>(acquired_lock, err_code);
 }
 
 void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,

@@ -387,6 +387,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const ValidateResponse &cc_res = msg->validate_resp();
 
+        PostProcessResult &conflicting_txs = hd_res->Value();
+        for (int i = 0; i < cc_res.txs_size(); i++)
+        {
+            conflicting_txs.AddConflictingTx(cc_res.txs(i));
+        }
+
         if (cc_res.error_code() != 0)
         {
             hd_res->SetError(
@@ -394,16 +400,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            if (cc_res.txs_size() == 0)
-            {
-                hd_res->SetFinished();
-            }
-            else
-            {
-                // Does not perform tx negotiations so far.
-                hd_res->SetError(
-                    CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS);
-            }
+            hd_res->SetFinished();
         }
         msg_pool_.enqueue(std::move(msg));
         break;

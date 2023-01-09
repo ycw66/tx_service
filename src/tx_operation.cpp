@@ -150,7 +150,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER &&
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
             retry_num_ >= 0)
         {
             // The read request was directed to a non-leader node. Updates
@@ -356,7 +356,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -779,7 +779,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
     if (hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER &&
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
             retry_num_ > 0)
         {
             if (retry_num_ == 0)
@@ -912,7 +912,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -935,7 +935,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
              slice_hd_result_.IsFinished())
     {
         // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUEST_NODE_NOT_LEADER)
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
             {
@@ -1164,7 +1164,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         ++force_error_cnt;
                     }
                     else if (hd_result.ErrorCode() ==
-                             CcErrorCode::REQUEST_NODE_NOT_LEADER)
+                             CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
                         if (retry_num_ == 0)
                         {
@@ -2428,7 +2428,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                            << table_name.String() << " "
                                            << partition_id;
                                 hd_res.SetError(
-                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                             }
                             else
                             {
@@ -2442,7 +2442,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                 else
                                 {
                                     hd_res.SetError(
-                                        CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                                 }
                             }
                         });
@@ -2708,7 +2708,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                             else
                             {
                                 hd_res.SetError(
-                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                             }
                         });
                 };
@@ -2928,7 +2928,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                                 else
                                 {
                                     hd_res.SetError(
-                                        CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                                 }
                             });
                     };
@@ -3046,7 +3046,7 @@ void DsSplitRangeOp::Forward(TransactionExecution *txm)
                             else
                             {
                                 hd_res.SetError(
-                                    CcErrorCode::REQUEST_NODE_NOT_LEADER);
+                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                             }
                         });
                 };

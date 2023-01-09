@@ -72,7 +72,7 @@ public:
     {
         if (!ValidTermCheck())
         {
-            res_->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            res_->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -184,7 +184,7 @@ public:
                             // instance, which indicates that the table has been
                             // dropped. Returns the request with an error.
                             res_->SetError(
-                                CcErrorCode::REQUESTED_TABLE_DROPPED);
+                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
                             return true;
                         }
                     }
@@ -1296,6 +1296,16 @@ public:
         cce_ptr_scan_type_ = scan_type;
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
     const TxKey *start_key_{nullptr};
@@ -1317,6 +1327,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+
+    bool is_wait_for_post_write_{false};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -1402,6 +1414,16 @@ public:
         cce_ptr_scan_type_ = scan_type;
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
@@ -1418,6 +1440,8 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
+
+    bool is_wait_for_post_write_{false};
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -1604,6 +1628,16 @@ public:
         return blocked_scan_types_[core_id];
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     uint32_t range_id_;
     const TxKey *start_key_{nullptr};
@@ -1612,6 +1646,7 @@ private:
     uint64_t ts_{0};
     int64_t tx_term_{-1};
     bool read_for_write_{false};
+    bool is_wait_for_post_write_{false};
 
     union
     {

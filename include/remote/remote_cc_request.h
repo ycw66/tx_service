@@ -311,6 +311,16 @@ public:
         cce_ptr_scan_type_[core_id] = scan_type;
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -331,6 +341,7 @@ private:
     bool is_for_write_{false};
 
     uint64_t snapshot_ts_{0};
+    bool is_wait_for_post_write_{false};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -404,6 +415,16 @@ public:
         cce_ptr_scan_type_ = scan_type;
     }
 
+    void SetIsWaitForPostWrite(bool is_wait)
+    {
+        is_wait_for_post_write_ = is_wait;
+    }
+
+    bool IsWaitForPostWrite() const
+    {
+        return is_wait_for_post_write_;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -419,6 +440,7 @@ private:
     int64_t tx_term_{0};
     bool is_for_write_{false};
     uint64_t snapshot_ts_{0};
+    bool is_wait_for_post_write_{false};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is

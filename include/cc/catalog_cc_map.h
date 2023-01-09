@@ -68,7 +68,7 @@ public:
         });
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -520,7 +520,7 @@ public:
 
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
@@ -603,7 +603,7 @@ public:
         {
             LOG(INFO) << "ReplayLogCc, node_group(#" << req.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn();
-            req.Result()->SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
 
@@ -728,7 +728,7 @@ public:
             // When a cc node recovers, no one should be holding read locks. So,
             // the acquire operation should always succeed.
             assert(lock_pair.first == LockType::WriteLock &&
-                   lock_pair.second == LockOpStatus::Successful);
+                   lock_pair.second == CcErrorCode::NO_ERROR);
         }
 
         if (cce->payload_ == nullptr)

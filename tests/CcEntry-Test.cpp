@@ -315,8 +315,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
@@ -330,8 +329,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
@@ -341,8 +339,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
     }
 
@@ -352,8 +349,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
 
@@ -363,8 +359,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
@@ -389,8 +384,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 1;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
     }
@@ -401,8 +395,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 2;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -415,8 +408,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 6;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
                 static_cast<int>(target));
@@ -429,93 +421,11 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
         uint64_t target = 12;
         VersionResultRecord<CompositeRecord<int>> rec;
 
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
+        entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
         REQUIRE(rec.payload_ptr_ == nullptr);
         REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
     }
 }
 
-TEST_CASE("CcEntry MvccGet hasWriteLock", "[cc-entry]")
-{
-    CcEntry<CompositeKey<int>, CompositeRecord<int>> entry(nullptr);
-    entry.commit_ts_ = 12U;
-    entry.payload_status_ = RecordStatus::Deleted;
-    entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
-    std::unique_ptr<NonBlockingLock> lock = std::make_unique<NonBlockingLock>();
-    entry.key_lock_ptr_ = lock.get();
-
-    // [10,9,8,6,3,2]
-    std::vector<VersionTxRecord> records;  // desc order
-    std::vector<int> nums{10, 9, 8, 6, 3, 2};
-    for (auto n : nums)
-    {
-        auto &ref = records.emplace_back();
-        ref.commit_ts_ = n;
-        ref.record_ = std::make_unique<CompositeRecord<int>>(n);
-        ref.record_status_ = RecordStatus::Normal;
-    }
-    entry.AddArchiveRecords(records);
-    REQUIRE(entry.ArchiveRecordsCount() == nums.size());
-
-    // required write lock, lock_ts = 13
-    AcquireCc req;
-    TxId txid;
-    txid.Reset(1, 1, 1);
-    std::string tbl_str{"tbl"};
-    TableName tbl{tbl_str.data(), tbl_str.size(), TableType::Primary};
-    std::string key_str = "1";
-    req.Reset(&tbl,
-              &key_str,
-              0,
-              txid.TxNumber(),
-              1,
-              1,
-              false,
-              nullptr,
-              0,
-              CcProtocol::Locking,
-              IsolationLevel::Snapshot);
-    entry.key_lock_ptr_->AcquireWriteLock(&req, CcProtocol::Locking);
-    entry.key_lock_ptr_->SetWLockTs(13);
-
-    // (read_ts: 9)->... => 9
-    {
-        uint64_t ts = 9;
-        uint64_t target = 9;
-        VersionResultRecord<CompositeRecord<int>> rec;
-
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
-        REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        REQUIRE(std::get<0>(rec.payload_ptr_->Tuple()) ==
-                static_cast<int>(target));
-        REQUIRE(rec.payload_status_ == RecordStatus::Normal);
-    }
-
-    // (read_ts: 13)->... => 12 (latest version)
-    {
-        uint64_t ts = 13;
-        uint64_t target = 12;
-        VersionResultRecord<CompositeRecord<int>> rec;
-
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE(res);
-        REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        REQUIRE(rec.payload_ptr_ == nullptr);
-        REQUIRE(rec.payload_status_ == RecordStatus::Deleted);
-    }
-
-    // (read_ts: 15)->... => false
-    {
-        uint64_t ts = 15;
-        VersionResultRecord<CompositeRecord<int>> rec;
-
-        bool res = entry.MvccGet(ts, rec, TableType::Primary);
-        REQUIRE_FALSE(res);
-    }
-
-    entry.key_lock_ptr_->ReleaseWriteLock(req.Txn(), nullptr);
-}
 }  // namespace txservice

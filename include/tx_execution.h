@@ -309,6 +309,8 @@ private:
 
     void ReleaseCatalogLock(CcHandlerResult<PostProcessResult> &hd_result);
 
+    TxErrorCode ConvertCcError(CcErrorCode error);
+
     enum struct TxType
     {
         Data = 0,

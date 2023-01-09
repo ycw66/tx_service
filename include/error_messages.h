@@ -10,48 +10,71 @@ enum struct TxErrorCode
 {
     NO_ERROR = 0,
     UNDEFINED_ERR,
-    // Fails to acquire write locks due to write-Write conflicts.
-    WRITE_WRITE_CONFLICT,
-    // Acquairing write locks times out.
-    ACQUIRE_WRITE_TIMEOUT,
-    // Read validations fail.
-    VALIDATION_FAIL,
-    // Read validations time out.
-    VALIDATION_TIMEOUT,
-    // Flushing the data log is unsuccessful.
-    DATA_LOG_FAIL,
-    // Fail to flush the prepare commit log.
-    PREPARE_LOG_FAIL,
-    // Fail to flush the post commit log.
-    POST_LOG_FAIL,
-    // A cc request's target cc map does not exist.
-    CCM_NOT_FOUND,
+    INTERNAL_ERR_TIMEOUT,
     // A cc request is directed to a follower of the target cc node group.
     CC_REQ_FOLLOWER,
-    // The tx state machine is bound to a follower of a cc node group.
-    TX_BOUND_FOLLOWER,
+
+    //-- ReadOperation
+    OCC_BREAK_REPEATABLE_READ,
+    SI_R4W_ERR_KEY_WAS_UPDATED,
+
+    //-- Upsert
+    WRITE_SET_BYTES_COUNT_EXCEED_ERR,
+
+    //-- AcquireWriteOp, AcquireAllOp
+    // Fails to acquire write locks due to write-Write conflicts.
+    WRITE_WRITE_CONFLICT,
+    READ_WRITE_CONFLICT,
+    DUPLICATE_KEY,
+
+    //-- WriteToLogOp
+    LOG_SERVICE_UNREACHABLE,
+    WRITE_LOG_FAIL,
+
     DATA_STORE_READ_ERR,
     DATA_STORE_WRITE_ERR,
     DATA_STORE_CONNECT_ERR,
-    OCC_BREAK_REPEATABLE_READ,
-    LOG_SERVICE_UNREACHABLE,
-    WRITE_LOG_FAIL,
     UPSERT_TABLE_PREPARE_FAIL,
     TRANSACTION_NODE_NOT_LEADER,
     UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
     SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL,
     SPLIT_RANGE_ACQUIRE_WRITE_LOCK_FAIL,
     SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL,
-    WRITE_SET_BYTES_COUNT_EXCEED_ERR,
 
-    // Under MVCC protocol, if write transaction has acquired the write
-    // lock, then it will generate its commit_ts without knowing the later
-    // read. Hence the writer's commit_ts may be smaller than the reader's
-    // snapshot_ts which will break the snapshot isolation level.
-    CC_ERR_MVCC_READ_MUST_WAIT_WRITE,
-    CC_ERR_MVCC_VERSION_PREMATURELY_KICKED,
     // Detect dead lock and abort the transaction
-    DEAD_LOCK_ABORT
+    DEAD_LOCK_ABORT,
+};
+
+static const std::map<TxErrorCode, std::string> tx_error_messages{
+    {TxErrorCode::UNDEFINED_ERR,
+     "Transaction failed due to an internal undefined error."},
+    {TxErrorCode::INTERNAL_ERR_TIMEOUT,
+     "Transaction failed due to internal request timeout."},
+    {TxErrorCode::CC_REQ_FOLLOWER,
+     "Transaction failed due to internal cc request is directed to a "
+     "follower."},
+    {TxErrorCode::OCC_BREAK_REPEATABLE_READ,
+     "OCC break repeatable read isolation level."},
+    {TxErrorCode::SI_R4W_ERR_KEY_WAS_UPDATED,
+     "Transaction failed due to record was changed and that breaks Snapshot "
+     "Isolation Level."},
+    {TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR,
+     "Transaction failed due to write set bytes count too large."},
+    {TxErrorCode::WRITE_WRITE_CONFLICT,
+     "Transaction failed due to write-write conflicts."},
+    {TxErrorCode::READ_WRITE_CONFLICT,
+     "Transaction failed due to read-write conflicts."},
+    {TxErrorCode::DUPLICATE_KEY, "Transaction failed due to duplicate key."},
+    {TxErrorCode::LOG_SERVICE_UNREACHABLE,
+     "Log service is unreachable, transaction status is unknown."},
+    {TxErrorCode::WRITE_LOG_FAIL, "Write Log fails."},
+    {TxErrorCode::UPSERT_TABLE_PREPARE_FAIL, "Failed at prepare phase."},
+    {TxErrorCode::TRANSACTION_NODE_NOT_LEADER,
+     "Transaction failed due to the transaction node is no longer the raft "
+     "leader."},
+    {TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
+     "Failed at acquire write intent."},
+    {TxErrorCode::DEAD_LOCK_ABORT, "Abort the transaction due to dead lock."},
 };
 
 enum struct CcErrorCode
@@ -59,25 +82,46 @@ enum struct CcErrorCode
     NO_ERROR = 0,
     UNDEFINED_ERR,
 
+    // TxOperation
     FORCE_FAIL,
+
+    // CcRequest Common
+    REQUESTED_NODE_NOT_LEADER,
+
+    // TemplatedCcRequest Common
+    REQUESTED_TABLE_NOT_EXISTS,
+    REQUESTED_INDEX_TABLE_NOT_EXISTS,
+
+    // TransactionExecution::FillDataLogRequest
     NG_TERM_CHANGED,
-    REQUEST_NODE_NOT_LEADER,
+
+    // ReadCc,ScanOpenBatchCc,ScanNextBatchCc,AcquireAllCc,AcquireCc,
+    ACQUIRE_LOCK_BLOCKED,  // (only used by CcMap).
+    // ACQUIRE_KEY_LOCK_FAILED,
+    ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT,
+    ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT,
+    ACQUIRE_GAP_LOCK_FAILED,
+
+    // ReadCc,ScanOpenBatchCc,ScanNextBatchCc
+    MVCC_READ_MUST_WAIT_WRITE,     // (only used by CcMap).
+    MVCC_READ_FOR_WRITE_CONFLICT,  // latest version not fits the read timestamp
+
+    // ReadLocal,ScanLocal
     TX_NODE_NOT_LEADER,
 
+    // NegotiateCc
     NEGOTIATED_TX_UNKNOWN,
     NEGOTIATE_TX_ERR,
 
-    REQUESTED_TABLE_DROPPED,
-    REQUESTED_TABLE_INDEX_DROPPED,
+    // Scan
     CRATE_CCM_SCANNER_FAILED,
 
+    // AcquireAllCc, AcquireCc
     DUPLICATE_INSERT_ERR,
-    ACQUIRE_KEY_LOCK_FAILED,
-    ACQUIRE_GAP_LOCK_FAILED,
+
+    // PostReadCc
     VALIDATION_FAILED_FOR_VERSION_MISMATCH,
     VALIDATION_FAILED_FOR_CONFILICTED_TXS,
-    MVCC_READ_MUST_WAIT_WRITE,
-    MVCC_READ_FOR_WRITE_NEED_LATEST,
 
     // range
     GET_RANGE_ID_ERR,
@@ -97,23 +141,53 @@ enum struct CcErrorCode
 
 };
 
-static const std::map<TxErrorCode, std::string> error_messages{
-    {TxErrorCode::UNDEFINED_ERR, "Undefined error."},
-    {TxErrorCode::OCC_BREAK_REPEATABLE_READ,
-     "OCC break repeatable read isolation level."},
-    {TxErrorCode::LOG_SERVICE_UNREACHABLE,
-     "Log service is unreachable, transaction status is unknown."},
-    {TxErrorCode::WRITE_LOG_FAIL, "Write Log fails."},
-    {TxErrorCode::UPSERT_TABLE_PREPARE_FAIL, "Failed at prepare phase."},
-    {TxErrorCode::TRANSACTION_NODE_NOT_LEADER,
-     "Transaction failed due to the transaction node is no longer the raft "
-     "leader."},
-    {TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
-     "Failed at acquire write intent."},
-    {TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR,
-     "Transaction failed due to write set bytes count too large."},
-    {TxErrorCode::WRITE_WRITE_CONFLICT,
-     "Transaction failed due to write-write conflicts."},
-    {TxErrorCode::DEAD_LOCK_ABORT, "Abort the transaction due to dead lock."}};
+static const std::map<CcErrorCode, std::string> cc_error_messages{
+    {CcErrorCode::NO_ERROR, "NO_ERROR"},
+    {CcErrorCode::UNDEFINED_ERR, "UNDEFINED_CC_ERR"},
+
+    {CcErrorCode::FORCE_FAIL, "FORCE_FAIL"},
+    {CcErrorCode::NG_TERM_CHANGED, "NG_TERM_CHANGED"},
+    {CcErrorCode::REQUESTED_NODE_NOT_LEADER, "REQUESTED_NODE_NOT_LEADER"},
+    {CcErrorCode::TX_NODE_NOT_LEADER, "TX_NODE_NOT_LEADER"},
+
+    {CcErrorCode::NEGOTIATED_TX_UNKNOWN, "NEGOTIATED_TX_UNKNOWN"},
+    {CcErrorCode::NEGOTIATE_TX_ERR, "NEGOTIATE_TX_ERR"},
+
+    {CcErrorCode::REQUESTED_TABLE_NOT_EXISTS, "REQUESTED_TABLE_NOT_EXISTS"},
+    {CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS,
+     "REQUESTED_INDEX_TABLE_NOT_EXISTS"},
+    {CcErrorCode::CRATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
+
+    {CcErrorCode::DUPLICATE_INSERT_ERR, "DUPLICATE_INSERT_ERR"},
+    {CcErrorCode::ACQUIRE_LOCK_BLOCKED, "ACQUIRE_LOCK_BLOCKED"},
+    {CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT,
+     "ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT"},
+    {CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT,
+     "ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT"},
+    {CcErrorCode::ACQUIRE_GAP_LOCK_FAILED, "ACQUIRE_GAP_LOCK_FAILED"},
+    {CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH,
+     "VALIDATION_FAILED_FOR_VERSION_MISMATCH"},
+    {CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS,
+     "VALIDATION_FAILED_FOR_CONFILICTED_TXS"},
+    {CcErrorCode::MVCC_READ_MUST_WAIT_WRITE, "MVCC_READ_MUST_WAIT_WRITE"},
+    {CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT, "MVCC_READ_FOR_WRITE_CONFLICT"},
+
+    // range
+    {CcErrorCode::GET_RANGE_ID_ERR, "GET_RANGE_ID_ERR"},
+    {CcErrorCode::PIN_RANGE_SLICE_FAILED, "PIN_RANGE_SLICE_FAILED"},
+
+    // data store handler
+    {CcErrorCode::DATA_STORE_UPSERT_TABLE_ERR, "DATA_STORE_UPSERT_TABLE_ERR"},
+
+    // log service
+    {CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR,
+     "LOG_CLOSURE_RESULT_UNKOWN_ERR"},
+
+    // detect dead lock
+    {CcErrorCode::DEAD_LOCK_ABORT, "DEAD_LOCK_ABORT"},
+
+    // NOTICE: please keep this variable at tail.
+    {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},
+};
 
 }  // namespace txservice
