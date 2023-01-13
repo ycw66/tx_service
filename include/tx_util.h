@@ -35,7 +35,7 @@ static inline bool InitTx(txservice::TransactionExecution *txm,
     return true;
 }
 
-static inline txservice::TransactionExecution *NewTxInit(
+static inline TransactionExecution *NewTxInit(
     txservice::TxService *tx_service,
     txservice::IsolationLevel level = txservice::IsolationLevel::ReadCommitted,
     txservice::CcProtocol proto = txservice::CcProtocol::Locking,
@@ -72,5 +72,52 @@ static inline txservice::TransactionExecution *NewTxInit(
         }
     }
     return txm;
+}
+
+static inline bool TxReadCatalog(TransactionExecution *txm,
+                                 const store::DataStoreHandler *storage_hd,
+                                 ReadTxRequest &read_tx_req,
+                                 bool &exists)
+{
+    assert(storage_hd != nullptr);
+    assert(txm != nullptr);
+
+    bool ok = true;
+
+    const CatalogKey *catalog_key =
+        static_cast<const CatalogKey *>(read_tx_req.key_);
+    CatalogRecord *catalog_rec = static_cast<CatalogRecord *>(read_tx_req.rec_);
+
+    txm->Execute(&read_tx_req);
+    read_tx_req.Wait();
+    assert(!read_tx_req.IsError());
+
+    const RecordStatus &rec_status = read_tx_req.Result();
+    if (rec_status == RecordStatus::Deleted)
+    {
+        exists = false;
+    }
+    else if (rec_status == RecordStatus::Unknown)
+    {
+        std::string schema_image;
+        uint64_t schema_ts = 0;
+        ok = storage_hd->FetchTable(
+            catalog_key->Name(), schema_image, exists, schema_ts);
+        if (ok)
+        {
+            catalog_rec->SetSchemaImage(std::move(schema_image));
+            ReadOutsideTxRequest read_outside(*catalog_rec, !exists, schema_ts);
+            txm->Execute(&read_outside);
+            read_outside.Wait();
+        }
+    }
+    else
+    {
+        assert(rec_status == RecordStatus::Normal);
+        exists = true;
+        catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
+    }
+
+    return ok;
 }
 }  // namespace txservice
