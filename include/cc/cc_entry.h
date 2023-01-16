@@ -376,42 +376,19 @@ public:
 
     size_t GetCcEntryMemUsage() const
     {
-        size_t mem_usage_ = 0;
-        size_t ptr_size = sizeof(nullptr);
+        size_t mem_usage = basic_mem_overhead_;
 
-        // LruEntry field members:
-        // size of lru_prev_, lru_next_, ckpt_prev_, ckpt_next_, parent_map_
-        mem_usage_ += 5 * ptr_size;
-        // size of commit_ts_, last_read_ts_, gap_commit_ts_, gap_last_read_ts_,
-        // ckpt_ts_
-        mem_usage_ += 5 * sizeof(uint64_t);
-
-        // size of key_lock_ptr_ and gap_lock_ptr_
-        mem_usage_ += 2 * sizeof(uint64_t);
-
-        // CcEntry field members:
-        // size of pointer and KeyT
-        mem_usage_ += ptr_size;
         if (key_ != nullptr)
         {
-            mem_usage_ += key_->MemUsage();
+            mem_usage += key_->MemUsage();
         }
-        // size of ValueT
-        mem_usage_ += PayloadMemUsage();
-        mem_usage_ += sizeof(RecordStatus);
+        mem_usage += PayloadMemUsage();
+        mem_usage += GetArchiveMemUsage();
+        // todo: insert_intention_set_ memory usage
 
-        // TODO size of insert_intention_set_, not used yet
-        // mem_usage_ += sizeof(insert_intention_set_) +
-        //               insert_intention_set_.size() * 2 * ptr_size;
+        // todo: calculate lock memory usage?
 
-        // size of map_prev_, map_next_
-        mem_usage_ += 2 * ptr_size;
-
-        // size of archives_ and its content
-        mem_usage_ += ptr_size;
-        mem_usage_ += GetArchiveMemUsage();
-
-        return mem_usage_;
+        return mem_usage;
     }
 
     size_t PayloadMemUsage() const
@@ -445,6 +422,11 @@ public:
 
     // save versions exclude the current version.(descending order,eg.[4,3,2,1])
     std::unique_ptr<std::list<VersionRecord<ValueT>>> archives_;
+
+    // CcEntry is stored in std::map RBT node with node key and node pointers
+    // (32 bytes), size of node key is not recorded here
+    inline static size_t basic_mem_overhead_ =
+        sizeof(CcEntry<KeyT, ValueT>) + 32;
 
     /**
      * @brief Move(not copy) the current version (payload, payload_status,

@@ -22,7 +22,7 @@ enum class ReadEntryResult : uint8_t
 
 class ReadWriteSet
 {
-    static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
+    static const uint32_t MaxWriteSetBytesCnt = 128 * 1024 * 1024;
 
 public:
     ReadWriteSet()

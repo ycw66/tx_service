@@ -24,7 +24,6 @@
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "range_slice.h"
-#include "secondary_key.h"
 #include "sharder.h"
 #include "tentry.h"
 
