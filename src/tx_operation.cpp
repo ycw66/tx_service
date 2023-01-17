@@ -599,6 +599,11 @@ void WriteToLogOp::Reset()
     log_closure_.Reset();
 }
 
+void WriteToLogOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
 UpdateTxnStatus::UpdateTxnStatus(TransactionExecution *txm) : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -1101,6 +1106,14 @@ void AcquireAllOp::Reset(size_t node_cnt)
     Resize(node_cnt);
 }
 
+void AcquireAllOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    for (size_t idx = 0; idx < hd_results_.size(); ++idx)
+    {
+        hd_results_.at(idx).ResetTxm(txm);
+    }
+}
+
 void AcquireAllOp::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
@@ -1290,6 +1303,11 @@ void PostWriteAllOp::Reset(uint32_t ng_cnt)
     hd_result_.SetRefCnt(ng_cnt);
 }
 
+void PostWriteAllOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
 void PostWriteAllOp::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
@@ -1341,6 +1359,11 @@ DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
 void DsUpsertTableOp::Reset()
 {
     hd_result_.Reset();
+}
+
+void DsUpsertTableOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
 }
 
 void DsUpsertTableOp::Forward(TransactionExecution *txm)
@@ -1455,7 +1478,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // the schema operation. Set the commit ts to 0 to signal that
             // the following post write operation releases all write
             // intents.
-            txm->commit_ts_ = 0;
+            txm->commit_ts_ = tx_op_failed_ts_;
             // Moves to the last operation that removes all write
             // intents/locks.
             op_ = &post_all_lock_op_;
@@ -1530,7 +1553,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     txm->bool_resp_->Finish(false);
                     txm->state_stack_.pop_back();
                     assert(txm->state_stack_.empty());
-                    txm->schema_op_ = nullptr;
+                    txm->handler->table_schema_op_pool_.emplace_back(
+                        std::move(txm->schema_op_));
                 }
             }
             else
@@ -1542,7 +1566,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // considered failed if the prepare log is not flushed. The
                 // commit ts is set to 0 to signal that the following post write
                 // operation releases all write intents.
-                txm->commit_ts_ = 0;
+                txm->commit_ts_ = tx_op_failed_ts_;
                 // Moves to the last operation that removes all write
                 // intents/locks.
                 op_ = &post_all_lock_op_;
@@ -1591,7 +1615,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // set catalog_rec_'s binary_value_ to image_str since it
                 // could be set to TableSchemaView pointer in localshard.
                 catalog_rec_.SetSchemaImage(image_str_);
-                txm->PushOperation(&post_all_intent_op_);
+                // Retry here does not need PushOperation in that we do not
+                // want to increase command_id.
                 txm->Process(post_all_intent_op_);
             }
             else
@@ -1643,8 +1668,30 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
             {
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
+                // Retry 5 times before issue flush schema error.
+                if (retry_num_ > 0)
+                {
+                    txm->PushOperation(&upsert_kv_table_op_);
+                    txm->Process(upsert_kv_table_op_);
+                    retry_num_--;
+                }
+                else if (retry_num_ == 0)
+                {
+                    DLOG(ERROR) << "flush schema error: can not create table "
+                                   "in kv store";
+
+                    if (txm->tx_status_ != TxnStatus::Recovering)
+                    {
+                        txm->bool_resp_->SetErrorCode(
+                            TxErrorCode::DATA_STORE_WRITE_ERR);
+                    }
+                    // Set txm->commit_ts_ to 0 to indicate there is a flush
+                    // error during upsert_kv_table_op_.
+                    txm->commit_ts_ = tx_op_failed_ts_;
+                    op_ = &acquire_all_lock_op_;
+                    txm->PushOperation(&acquire_all_lock_op_);
+                    txm->Process(acquire_all_lock_op_);
+                }
             }
             else
             {
@@ -1770,7 +1817,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         bool failed = post_all_lock_op_.hd_result_.IsError();
 
-        if (txm->commit_ts_ == 0)
+        if (txm->commit_ts_ == tx_op_failed_ts_ &&
+            post_all_lock_op_.write_type_ == PostWriteType::PrepareCommit)
         {
             // The schema operation failed without flushing the prepare log.
             // Do not retry post-processing (release write intents) even if
@@ -1780,7 +1828,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
-            txm->schema_op_ = nullptr;
+            txm->handler->table_schema_op_pool_.emplace_back(
+                std::move(txm->schema_op_));
         }
         else if (failed)
         {
@@ -1793,14 +1842,18 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             int64_t tx_node_term =
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
-            // After the prepare log is flushed, the schema op is guaranteed
-            // to succeed and can only roll forward. Retry this step to
-            // install the committed schema and remove write locks, if the
-            // tx node is still the leader or the tx is in the recovery mode
-            // and the cc node is a leader candidate.
-            if (tx_node_term >= 0 ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
+            // After the prepare log is flushed, if flush kv succeeds, the
+            // schema op is guaranteed to succeed and can only roll forward.
+            // Retry this step to install the committed schema and remove write
+            // locks, if the tx node is still the leader or the tx is in the
+            // recovery mode and the cc node is a leader candidate. However, if
+            // flush kv fails, this schema op has already been rolled back while
+            // processing this post_all_lock_op_, so here we only need to
+            // ForceToFinish.
+            if ((tx_node_term >= 0 ||
+                 (txm->tx_status_ == TxnStatus::Recovering &&
+                  tx_node_candid_term >= 0)) &&
+                txm->commit_ts_ != tx_op_failed_ts_)
             {
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);
@@ -1857,6 +1910,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // When the tx is in the recovery state, no external caller is
             // waiting for the response. So, txm->bool_resp_ is null.
 
+            txm->handler->table_schema_op_pool_.emplace_back(
+                std::move(txm->schema_op_));
             txm->Reset();
             // Setting the tx's status to finished signals that this tx
             // state machine can be recycled for a new tx.
@@ -1865,12 +1920,101 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            txm->bool_resp_->Finish(true);
+            if (txm->commit_ts_ == tx_op_failed_ts_ &&
+                post_all_lock_op_.write_type_ == PostWriteType::PostCommit)
+            {
+                // Flush kv error.
+                txm->bool_resp_->Finish(false);
+            }
+            else
+            {
+                assert(txm->commit_ts_ > 0 && post_all_lock_op_.write_type_ ==
+                                                  PostWriteType::PostCommit);
+                txm->bool_resp_->Finish(true);
+            }
+
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
-            txm->schema_op_ = nullptr;
+            txm->handler->table_schema_op_pool_.emplace_back(
+                std::move(txm->schema_op_));
         }
     }
+}
+
+void UpsertTableOp::Reset(const std::string_view table_name_str,
+                          const std::string &current_image,
+                          uint64_t curr_schema_ts,
+                          const std::string &dirty_image,
+                          OperationType op_type,
+                          TransactionExecution *txm,
+                          const std::string *alter_table_info_image)
+{
+    // reset TransactionOperation
+    retry_num_ = RETRY_NUM;
+    is_running_ = false;
+
+    // reset SchemaOp
+    table_key_.Name() = TableName(
+        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    catalog_rec_.SetSchemaImage(current_image);
+    catalog_rec_.SetDirtySchemaImage(dirty_image);
+    image_str_ = current_image;
+    dirty_image_str_ = dirty_image;
+    curr_schema_ts_ = curr_schema_ts;
+    alter_table_info_image_str_ = alter_table_info_image != nullptr
+                                      ? *alter_table_info_image
+                                      : std::string("");
+
+    // reset UpsertTableOp
+    op_type_ = op_type;
+    op_ = nullptr;
+
+    // reset op
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    acquire_all_intent_op_.Reset(node_group_cnt);
+    prepare_log_op_.Reset();
+    post_all_intent_op_.Reset(node_group_cnt);
+    upsert_kv_table_op_.Reset();
+    acquire_all_lock_op_.Reset(node_group_cnt);
+    commit_log_op_.Reset();
+    post_all_lock_op_.Reset(node_group_cnt);
+    clean_log_op_.Reset();
+
+    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_intent_op_.key_ = &table_key_;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OccRead;
+
+    post_all_intent_op_.table_name_ = &catalog_ccm_name;
+    post_all_intent_op_.key_ = &table_key_;
+    post_all_intent_op_.rec_ = &catalog_rec_;
+    post_all_intent_op_.op_type_ = op_type_;
+    post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
+
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+    upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+    upsert_kv_table_op_.op_type_ = op_type_;
+
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.key_ = &table_key_;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+
+    post_all_lock_op_.table_name_ = &catalog_ccm_name;
+    post_all_lock_op_.key_ = &table_key_;
+    post_all_lock_op_.rec_ = &catalog_rec_;
+    post_all_lock_op_.op_type_ = op_type_;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    // reset cc_handler_res txm
+    acquire_all_intent_op_.ResetHandlerTxm(txm);
+    prepare_log_op_.ResetHandlerTxm(txm);
+    post_all_intent_op_.ResetHandlerTxm(txm);
+    upsert_kv_table_op_.ResetHandlerTxm(txm);
+    acquire_all_lock_op_.ResetHandlerTxm(txm);
+    commit_log_op_.ResetHandlerTxm(txm);
+    post_all_lock_op_.ResetHandlerTxm(txm);
+    clean_log_op_.ResetHandlerTxm(txm);
 }
 
 void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
@@ -1919,10 +2063,20 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
 
     commit_log_rec->set_tx_term(txm->tx_term_);
     commit_log_rec->set_txn_number(txm->tx_number_);
-    commit_log_rec->set_commit_timestamp(txm->commit_ts_);
 
-    auto commit_schema_msg =
+    ::txlog::SchemaOpMessage *commit_schema_msg =
         commit_log_rec->mutable_log_content()->mutable_schema_log();
+
+    if (this->upsert_kv_table_op_.hd_result_.IsError())
+    {
+        // Serve as new catalog_ts. Set to 0 if flush kv fails.
+        commit_log_rec->set_commit_timestamp(tx_op_failed_ts_);
+    }
+    else
+    {
+        assert(txm->commit_ts_ != tx_op_failed_ts_);
+        commit_log_rec->set_commit_timestamp(txm->commit_ts_);
+    }
     commit_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
 
     // The prepare log keeps all cc nodes' terms and match them in the log

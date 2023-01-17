@@ -365,7 +365,7 @@ private:
     // can help us to locate the previous empty cc entry quickly.
     CcEntryAddr cache_miss_read_cce_addr_;
 
-    std::unique_ptr<SchemaOp> schema_op_;
+    std::unique_ptr<UpsertTableOp> schema_op_;
 
     std::unique_ptr<DsSplitRangeOp> ds_split_range_op_;
 

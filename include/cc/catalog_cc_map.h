@@ -58,6 +58,42 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
+
+        CODE_FAULT_INJECTOR("during_post_write_all", {
+            std::string &action = FaultInject::Instance()
+                                      .Entry("during_post_write_all")
+                                      ->vctAction_.front();
+            if ((req.CommitType() == PostWriteType::PrepareCommit &&
+                 action == "prepare_commit_panic") ||
+                (req.CommitType() == PostWriteType::PostCommit &&
+                 req.CommitTs() == TransactionOperation::tx_op_failed_ts_ &&
+                 action == "post_commit_panic"))
+            {
+                int retval;
+                sigset_t new_mask;
+                sigfillset(&new_mask);
+
+                retval = kill(getpid(), SIGKILL);
+                assert(retval == 0);
+                retval = sigsuspend(&new_mask);
+                fprintf(stderr,
+                        "sigsuspend returned %d errno %d \n",
+                        retval,
+                        errno);
+                assert(false); /* With full signal mask, we should never
+                                  return here. */
+            }
+            else if ((req.CommitType() == PostWriteType::PrepareCommit &&
+                      action == "prepare_commit_sleep") ||
+                     (req.CommitType() == PostWriteType::PostCommit &&
+                      req.CommitTs() ==
+                          TransactionOperation::tx_op_failed_ts_ &&
+                      action == "post_commit_sleep"))
+            {
+                sleep(10);
+            }
+        });
+
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_PostWriteAllCc", {
             LOG(INFO)
@@ -99,20 +135,20 @@ public:
             }
         }
 
-        if (req.CommitTs() == 0)
-        {
-            // When the commit ts is 0, the request commits nothing and only
-            // removes the write intents/locks acquired earlier.
-            return TemplateCcMap::Execute(req);
-        }
-
         CatalogRecord *schema_rec = nullptr;
-        const CatalogEntry *catalog_entry = nullptr;
+        CatalogEntry *catalog_entry = nullptr;
 
         switch (req.CommitType())
         {
         case PostWriteType::PrepareCommit:
         {
+            if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
+            {
+                // When the commit ts is 0, the request commits nothing and only
+                // removes the write intents/locks acquired earlier.
+                return TemplateCcMap::Execute(req);
+            }
+
             if (shard_->core_id_ == 0)
             {
                 // For prepare commit or commit, instantiates the dirty schema
@@ -151,7 +187,7 @@ public:
                                                schema_rec->StatisticsBinary(),
                                                req.CommitTs());
 
-                schema_rec->Set(catalog_entry->schema_.get(),
+                schema_rec->Set(catalog_entry->schema_,
                                 catalog_entry->dirty_schema_.get(),
                                 catalog_entry->Version());
             }
@@ -169,6 +205,22 @@ public:
         {
             catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            assert(catalog_entry != nullptr);
+
+            if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
+            {
+                // Flush kv fails, need to clear dirty CatalogEntry and dirty
+                // CatalogRecord.
+                catalog_entry->RejectDirtySchema();
+
+                CcEntry<CatalogKey, CatalogRecord> *cce =
+                    TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key);
+                assert(cce != nullptr);
+                cce->payload_->ClearDirtySchema();
+                cce->payload_->SetDirtySchemaImage("");
+
+                return TemplateCcMap::Execute(req);
+            }
 
             if (shard_->core_id_ == 0)
             {
@@ -191,7 +243,7 @@ public:
                     req.SetDecodedPayload(std::move(empty_rec));
                 }
 
-                schema_rec->Set(catalog_entry->dirty_schema_.get(),
+                schema_rec->Set(catalog_entry->dirty_schema_,
                                 nullptr,
                                 catalog_entry->DirtyVersion());
             }
@@ -560,7 +612,7 @@ public:
 
                     // upload catalog record
                     cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_.get(),
+                    cce->payload_->Set(catalog_entry->schema_,
                                        catalog_entry->dirty_schema_.get(),
                                        catalog_entry->Version());
                     cce->payload_status_ = RecordStatus::Normal;
@@ -619,20 +671,28 @@ public:
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
         TableName table_name{table_name_sv, table_type};
 
+        // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)
         {
             if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
                                              SchemaOpMessage_Stage_CommitSchema)
             {
                 uint64_t commit_ts = req.CommitTs();
-                assert(commit_ts > 0);
 
-                auto [success, new_catalog_entry] =
-                    shard_->CreateCatalog(table_name,
-                                          req.NodeGroupId(),
-                                          schema_op_msg.new_catalog_blob(),
-                                          Statistics::EMPTY_STATISTICS_BINARY,
-                                          commit_ts);
+                // If flush kv succeeds, create new catalog. If flush kv fails,
+                // restore old catalog. In theory, the flush error case does not
+                // need to restore CatalogEntry and set CatalogRecord in cc_map.
+                // Here, for readability and simplicity of the code, these steps
+                // are not skipped.
+                auto [success, new_catalog_entry] = shard_->CreateCatalog(
+                    table_name,
+                    req.NodeGroupId(),
+                    commit_ts > 0 ? schema_op_msg.new_catalog_blob()
+                                  : schema_op_msg.old_catalog_blob(),
+                    Statistics::EMPTY_STATISTICS_BINARY,
+                    commit_ts > 0 ? commit_ts : schema_op_msg.catalog_ts());
+
+                assert(new_catalog_entry != nullptr);
                 if (!success)
                 {
                     // create fail, the catalog to be created is out of date
@@ -668,6 +728,9 @@ public:
             }
             else
             {
+                assert(schema_op_msg.stage() ==
+                       ::txlog::SchemaOpMessage_Stage::
+                           SchemaOpMessage_Stage_PrepareSchema);
                 auto [success, new_catalog_entry] = shard_->CreateReplayCatalog(
                     table_name,
                     req.NodeGroupId(),
@@ -690,7 +753,9 @@ public:
         }
         else
         {
+            // other shards
             catalog_entry = shard_->GetCatalog(table_name, req.NodeGroupId());
+            assert(catalog_entry != nullptr);
         }
 
         CatalogKey table_key(table_name);
@@ -735,7 +800,7 @@ public:
         {
             cce->payload_ = std::make_unique<CatalogRecord>();
         }
-        cce->payload_->Set(catalog_entry->schema_.get(),
+        cce->payload_->Set(catalog_entry->schema_,
                            catalog_entry->dirty_schema_.get(),
                            catalog_entry->Version());
 

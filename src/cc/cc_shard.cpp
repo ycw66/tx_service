@@ -562,12 +562,11 @@ std::pair<bool, const CatalogEntry *> CcShard::CreateReplayCatalog(
                                              dirty_schema_ts);
 }
 
-const CatalogEntry *CcShard::CreateDirtyCatalog(
-    const TableName &table_name,
-    NodeGroupId cc_ng_id,
-    const std::string &catalog_image,
-    const std::string &statistics_binary,
-    uint64_t commit_ts)
+CatalogEntry *CcShard::CreateDirtyCatalog(const TableName &table_name,
+                                          NodeGroupId cc_ng_id,
+                                          const std::string &catalog_image,
+                                          const std::string &statistics_binary,
+                                          uint64_t commit_ts)
 {
     return local_shards_.CreateDirtyCatalog(
         table_name, cc_ng_id, catalog_image, statistics_binary, commit_ts);
@@ -579,8 +578,8 @@ void CcShard::CommitDirtyCatalog(const TableName &table_name,
     local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
 }
 
-const CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
-                                        NodeGroupId cc_ng_id)
+CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
+                                  NodeGroupId cc_ng_id)
 {
     return local_shards_.GetCatalog(table_name, cc_ng_id);
 }

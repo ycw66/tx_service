@@ -168,17 +168,6 @@ public:
 struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 {
     UpsertTxRequest(const TableName *tab_name,
-                    TxKey *key,
-                    TxRecord *rec,
-                    OperationType operation_type)
-        : tab_name_(tab_name),
-          key_(key),
-          rec_(rec),
-          operation_type_(operation_type)
-    {
-    }
-
-    UpsertTxRequest(const TableName *tab_name,
                     TxKey::Uptr key,
                     TxRecord::Uptr rec,
                     OperationType operation_type)

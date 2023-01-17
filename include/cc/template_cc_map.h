@@ -1081,6 +1081,7 @@ public:
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
                 req.Result()->SetFinished();
+                req.SetDecodedPayload(nullptr);
                 return true;
             }
             else
@@ -1138,9 +1139,12 @@ public:
                     // but does not release the write intent/lock.
                     ReleaseCceKeyLock(cce_ptr, txn, req.NodeGroupId());
                 }
-                else if (req.CommitType() == PostWriteType::PrepareCommit)
+                else
                 {
-                    // downgrade write lock to write intent
+                    // For prepare commit, the post-write-all request installs
+                    // the dirty value, and downgrades the write lock and to the
+                    // write intent.
+
                     if (lk_type == LockType::WriteLock)
                     {
                         DowngradeCceKeyWriteLock(cce_ptr, txn);
@@ -1151,6 +1155,7 @@ public:
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
                 req.Result()->SetFinished();
+                req.SetDecodedPayload(nullptr);
                 return true;
             }
             else

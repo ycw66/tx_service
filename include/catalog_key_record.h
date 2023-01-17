@@ -127,6 +127,12 @@ struct CatalogEntry
         dirty_schema_version_ = 0;
     }
 
+    void RejectDirtySchema()
+    {
+        dirty_schema_.reset();
+        dirty_schema_version_ = 0;
+    }
+
     /**
      * @brief The version of the schema, represented by the commit timestamp
      * when the schema is last modified. Timestamp being 0 means that the schema
@@ -180,8 +186,8 @@ public:
     void Copy(const TxRecord &rhs) override;
     std::string ToString() const override;
 
-    void Set(const TableSchema *schema,
-             const TableSchema *dirty_schema,
+    void Set(const std::shared_ptr<TableSchema> &schema,
+             TableSchema *dirty_schema,
              uint64_t schema_ts);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
@@ -190,8 +196,10 @@ public:
     void SetDirtySchemaImage(std::string &&schema_image);
     void SetDirtySchemaImage(const std::string &schema_image);
     const TableSchema *Schema() const;
-    uint64_t SchemaTs() const;
+    std::shared_ptr<const TableSchema> CopySchema();
     const TableSchema *DirtySchema() const;
+    void ClearDirtySchema();
+    uint64_t SchemaTs() const;
 
     const std::string &StatisticsBinary() const;
     void SetStatisticsBinary(const std::string &statistics_binary);
@@ -219,7 +227,7 @@ private:
      * dirty_schema_image_ is the binary image of the new schema.
      *
      */
-    const TableSchema *schema_{nullptr};
+    std::shared_ptr<const TableSchema> schema_{nullptr};
     const TableSchema *dirty_schema_{nullptr};
     uint64_t schema_ts_{0};
     std::string schema_image_{""};

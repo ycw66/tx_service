@@ -256,8 +256,8 @@ std::string CatalogRecord::ToString() const
     return std::string();
 }
 
-void CatalogRecord::Set(const TableSchema *schema,
-                        const TableSchema *dirty_schema,
+void CatalogRecord::Set(const std::shared_ptr<TableSchema> &schema,
+                        TableSchema *dirty_schema,
                         uint64_t schema_ts)
 {
     schema_ = schema;
@@ -297,12 +297,12 @@ void CatalogRecord::SetDirtySchemaImage(const std::string &schema_image)
 
 const TableSchema *CatalogRecord::Schema() const
 {
-    return schema_;
+    return schema_.get();
 }
 
-uint64_t CatalogRecord::SchemaTs() const
+std::shared_ptr<const TableSchema> CatalogRecord::CopySchema()
 {
-    return schema_ts_;
+    return schema_;
 }
 
 const TableSchema *CatalogRecord::DirtySchema() const
@@ -323,6 +323,16 @@ void CatalogRecord::SetStatisticsBinary(const std::string &statistics_binary)
 void CatalogRecord::SetStatisticsBinary(std::string &&statistics_binary)
 {
     statistics_binary_ = std::move(statistics_binary);
+}
+
+void CatalogRecord::ClearDirtySchema()
+{
+    dirty_schema_ = nullptr;
+}
+
+uint64_t CatalogRecord::SchemaTs() const
+{
+    return schema_ts_;
 }
 
 CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)

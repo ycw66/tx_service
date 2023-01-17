@@ -193,8 +193,10 @@ void TransactionExecution::RecoverSchemaTx(
     {
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
-        std::unique_ptr<UpsertTableOp> table_op =
-            std::make_unique<UpsertTableOp>(
+        if (handler->table_schema_op_pool_.empty())
+        {
+            std::unique_ptr<UpsertTableOp> table_op = nullptr;
+            table_op = std::make_unique<UpsertTableOp>(
                 schema_op.table_name_str(),
                 schema_op.old_catalog_blob(),
                 schema_op.catalog_ts(),
@@ -202,22 +204,37 @@ void TransactionExecution::RecoverSchemaTx(
                 static_cast<OperationType>(table_msg.op_type()),
                 this,
                 &(schema_op.alter_table_info_blob()));
+            schema_op_ = std::move(table_op);
+        }
+        else
+        {
+            assert(handler->table_schema_op_pool_.back() != nullptr);
+            schema_op_ = std::move(handler->table_schema_op_pool_.back());
+            handler->table_schema_op_pool_.pop_back();
+
+            schema_op_->Reset(schema_op.table_name_str(),
+                              schema_op.old_catalog_blob(),
+                              schema_op.catalog_ts(),
+                              schema_op.new_catalog_blob(),
+                              static_cast<OperationType>(table_msg.op_type()),
+                              this,
+                              &(schema_op.alter_table_info_blob()));
+        }
 
         if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
                                      SchemaOpMessage_Stage_PrepareSchema)
         {
-            table_op->prepare_log_op_.hd_result_.SetFinished();
-            table_op->op_ = &table_op->prepare_log_op_;
+            schema_op_->prepare_log_op_.hd_result_.SetFinished();
+            schema_op_->op_ = &schema_op_->prepare_log_op_;
         }
         else
         {
             assert(schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
                                             SchemaOpMessage_Stage_CommitSchema);
-            table_op->commit_log_op_.hd_result_.SetFinished();
-            table_op->op_ = &table_op->commit_log_op_;
+            schema_op_->commit_log_op_.hd_result_.SetFinished();
+            schema_op_->op_ = &schema_op_->commit_log_op_;
         }
 
-        schema_op_ = std::move(table_op);
         state_stack_.push_back(schema_op_.get());
         break;
     }
@@ -610,13 +627,34 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
-    schema_op_ = std::make_unique<UpsertTableOp>(req.table_name_->StringView(),
-                                                 *req.curr_image_,
-                                                 req.curr_schema_ts_,
-                                                 *req.dirty_image_,
-                                                 req.op_type_,
-                                                 this,
-                                                 req.alter_table_info_image_);
+    if (handler->table_schema_op_pool_.empty())
+    {
+        std::unique_ptr<UpsertTableOp> table_op = nullptr;
+        table_op =
+            std::make_unique<UpsertTableOp>(req.table_name_->StringView(),
+                                            *req.curr_image_,
+                                            req.curr_schema_ts_,
+                                            *req.dirty_image_,
+                                            req.op_type_,
+                                            this,
+                                            req.alter_table_info_image_);
+        schema_op_ = std::move(table_op);
+    }
+    else
+    {
+        assert(handler->table_schema_op_pool_.back() != nullptr);
+        schema_op_ = std::move(handler->table_schema_op_pool_.back());
+        handler->table_schema_op_pool_.pop_back();
+
+        schema_op_->Reset(req.table_name_->StringView(),
+                          *req.curr_image_,
+                          req.curr_schema_ts_,
+                          *req.dirty_image_,
+                          req.op_type_,
+                          this,
+                          req.alter_table_info_image_);
+    }
+
     PushOperation(schema_op_.get());
     Forward();
 }

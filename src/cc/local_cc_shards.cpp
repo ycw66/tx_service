@@ -218,7 +218,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     }
 }
 
-const CatalogEntry *LocalCcShards::CreateDirtyCatalog(
+CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
@@ -273,8 +273,8 @@ void LocalCcShards::CommitDirtyCatalog(const TableName &table_name,
     return;
 }
 
-const CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
-                                              NodeGroupId cc_ng_id)
+CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
+                                        NodeGroupId cc_ng_id)
 {
     std::shared_lock<std::shared_mutex> lk(catalog_mux_);
 

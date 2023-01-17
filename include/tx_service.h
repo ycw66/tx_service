@@ -416,6 +416,8 @@ public:
 
         for (size_t thd_idx = 0; thd_idx < thd_pool_.size(); ++thd_idx)
         {
+            // decrease use_count of share pointer to TableSchema
+            pool_[thd_idx]->cc_hd_ = nullptr;
             pool_[thd_idx]->terminated_.store(true, std::memory_order_relaxed);
         }
         for (auto &thd_idx : thd_pool_)

@@ -332,11 +332,11 @@ public:
         const std::string &statistics_binary,
         uint64_t commit_ts);
 
-    const CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
-                                           NodeGroupId cc_ng_id,
-                                           const std::string &catalog_image,
-                                           const std::string &statistics_binary,
-                                           uint64_t commit_ts);
+    CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
+                                     NodeGroupId cc_ng_id,
+                                     const std::string &catalog_image,
+                                     const std::string &statistics_binary,
+                                     uint64_t commit_ts);
 
     std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
         const TableName &table_name,
@@ -348,8 +348,7 @@ public:
 
     void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
-    const CatalogEntry *GetCatalog(const TableName &table_name,
-                                   NodeGroupId cc_ng_id);
+    CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     void InitTableRanges(const TableName &table_name,
                          std::vector<InitRangeEntry> &init_ranges,

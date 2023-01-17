@@ -161,6 +161,12 @@ public:
         ClearRefCnt();
     }
 
+    void ResetTxm(TransactionExecution *txm)
+    {
+        assert(txm != nullptr);
+        txm_ = txm;
+    }
+
     TransactionExecution *Txm()
     {
         return txm_;
@@ -177,7 +183,7 @@ private:
     // handler result. The handler result is bound to a fixed tx machine. The tx
     // machine, however, may be re-used repeatedly for different user-level
     // tx's.
-    TransactionExecution *const txm_;
+    TransactionExecution *txm_;
 
 public:
     std::function<void(CcHandlerResult<T> *)> post_lambda_;

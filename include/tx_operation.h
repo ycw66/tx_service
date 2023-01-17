@@ -60,6 +60,7 @@ struct TransactionOperation
 
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
+    static const uint64_t tx_op_failed_ts_ = 0;
 };
 
 struct CompositeTransactionOperation : TransactionOperation
@@ -232,6 +233,7 @@ struct WriteToLogOp : TransactionOperation
     WriteToLogOp(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
+    void ResetHandlerTxm(TransactionExecution *txm);
 
     TxLogType log_type_{TxLogType::DATA};
     uint32_t log_group_id_{0};
@@ -407,6 +409,7 @@ struct AcquireAllOp : public TransactionOperation
     AcquireAllOp(TransactionExecution *txm);
     void Resize(size_t new_size);
     void Reset(size_t node_cnt);
+    void ResetHandlerTxm(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     /**
      * @brief Get the max commit/validate ts of the all result
@@ -432,6 +435,7 @@ struct PostWriteAllOp : public TransactionOperation
 {
     PostWriteAllOp(TransactionExecution *txm);
     void Reset(uint32_t ng_cnt);
+    void ResetHandlerTxm(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     bool IsFailed();
 
@@ -452,13 +456,14 @@ struct DsUpsertTableOp : public TransactionOperation
                     TransactionExecution *txm);
 
     void Reset();
+    void ResetHandlerTxm(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{nullptr};
     const TableSchema *table_schema_{nullptr};
     OperationType op_type_{OperationType::Upsert};
     CcHandlerResult<Void> hd_result_;
-    const txservice::AlterTableInfo *alter_table_info_{nullptr};
+    txservice::AlterTableInfo *alter_table_info_{nullptr};
 };
 
 struct SchemaOp : public TransactionOperation
@@ -488,6 +493,14 @@ struct UpsertTableOp : public SchemaOp
                   OperationType op_type,
                   TransactionExecution *txm,
                   const std::string *alter_table_info_image);
+
+    void Reset(const std::string_view table_name_str,
+               const std::string &current_image,
+               uint64_t curr_schema_ts,
+               const std::string &dirty_image,
+               OperationType op_type,
+               TransactionExecution *txm,
+               const std::string *alter_table_info_image);
 
     void Forward(TransactionExecution *txm) override;
 

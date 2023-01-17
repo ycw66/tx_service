@@ -244,6 +244,7 @@ public:
         }
         else
         {
+            assert(commit_type == CommitType::PostCommit);
             return PostWriteType::PostCommit;
         }
     }

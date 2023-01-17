@@ -855,6 +855,10 @@ private:
      * request but dispatched to a non-native cc node group, decoded_payload_
      * owns a record on which the request is executed.
      *
+     * Need to set to nullptr after PostWriteAll is finished, in order to
+     * decrease the use count of TableSchema shared pointer inside
+     * CatalogRecord.
+     *
      */
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     OperationType op_type_{OperationType::Update};
