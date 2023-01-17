@@ -85,13 +85,9 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 }
 
 FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
-                                       const Schema *key_schema,
                                        CcShard &ccs,
                                        NodeGroupId ng_id)
-    : FetchCc(ccs, 0),
-      table_name_(table_name),
-      key_schema_(key_schema),
-      ng_id_(ng_id)
+    : FetchCc(ccs, 0), table_name_(table_name), ng_id_(ng_id)
 {
 }
 
@@ -320,12 +316,18 @@ GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
                                    NodeGroupId ng_id,
                                    StoreSlice *slice,
                                    StoreRange *range,
+                                   std::vector<FlushRecord> &ckpt_vec,
+                                   uint32_t slice_first_idx,
+                                   uint32_t slice_last_idx,
                                    uint64_t last_ckpt_ts,
                                    uint64_t ckpt_ts)
     : table_name_(table_name),
       cc_ng_id_(ng_id),
       slice_(slice),
       range_(range),
+      ckpt_vec_(ckpt_vec),
+      slice_first_idx_(slice_first_idx),
+      slice_last_idx_(slice_last_idx),
       last_ckpt_ts_(last_ckpt_ts),
       ckpt_ts_(ckpt_ts)
 {

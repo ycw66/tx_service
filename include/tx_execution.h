@@ -40,6 +40,8 @@ struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
 struct SplitRangeTxRequest;
 struct ScanBatchTuple;
+struct SplitFlushTxRequest;
+struct CkptScanTxRequest;
 
 class TxProcessor;
 
@@ -113,6 +115,8 @@ public:
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
     void ProcessTxRequest(SplitRangeTxRequest &range_split_req);
+    void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
+    void ProcessTxRequest(CkptScanTxRequest &ckpt_scan_req);
 
     /**
      * Interface for storage engine runtime.
@@ -265,6 +269,12 @@ private:
     void Process(PostReadOperation &post_read_operation);
     void PostProcess(PostReadOperation &post_read_operation);
 
+    void Process(CkptScanOp &scan_op);
+    void PostProcess(CkptScanOp &scan_op);
+
+    void Process(FlushDataOp &flush_op);
+    void PostProcess(FlushDataOp &flush_op);
+
     void Process(NoOp &no_op);
     void PostProcess(NoOp &no_op);
 
@@ -369,6 +379,10 @@ private:
 
     std::unique_ptr<DsSplitRangeOp> ds_split_range_op_;
 
+    std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
+
+    std::unique_ptr<CkptScanOp> ckpt_scan_op_;
+
     std::unordered_map<
         size_t,
         std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>>
@@ -420,7 +434,7 @@ private:
     // To avoid ccentry address to be save in stack
     std::vector<ScanBatchTuple> drain_batch_;
 // Committing phase.
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     LockWriteRangesOp lock_write_ranges_;
 #endif
     AcquireWriteOperation acquire_write_;
@@ -468,6 +482,10 @@ private:
     friend struct SleepOperation;
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;
+    friend struct SplitFlushRangeOp;
+    friend struct CkptScanOp;
+    friend struct FlushDataOp;
+    friend struct DsSplitOp;
     friend struct DsSplitRangeOp;
     friend struct NoOp;
     template <typename ResultType>

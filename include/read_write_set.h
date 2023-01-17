@@ -410,7 +410,7 @@ public:
             rset_.erase(tbl_it);
         }
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
         TableName range_tbl_name(table_name.StringView(),
                                  TableType::RangePartition);
         tbl_it = rset_.find(range_tbl_name);

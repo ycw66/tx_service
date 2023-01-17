@@ -583,7 +583,7 @@ void txservice::LocalCcHandler::ScanOpen(
     scanner_ptr->protocol_ = proto;
     scanner_ptr->read_local_ = false;
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     // For range-partitioned ccm scanners, adding the last shard implicitly
     // allocates scan cache for all cores.
     scanner_ptr->AddShard(cc_shards_.Count() - 1);
@@ -1127,6 +1127,31 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                        command_id,
                                        hres);
     }
+}
+
+void txservice::LocalCcHandler::CkptScan(const TableName &table_name,
+                                         uint64_t ckpt_ts,
+                                         uint64_t node_group,
+                                         std::vector<FlushRecord> &ckpt_vec,
+                                         std::vector<FlushRecord> &archive_vec,
+                                         std::vector<LruEntry *> &mv_vec,
+                                         CcHandlerResult<Void> &hres,
+                                         const TxKey *start_key,
+                                         const TxKey *end_key)
+{
+    CkptScanCc *req = ckpt_scan_pool.NextRequest();
+    req->Reset(table_name,
+               ckpt_ts,
+               ckpt_vec,
+               archive_vec,
+               mv_vec,
+               node_group,
+               &hres,
+               start_key,
+               end_key);
+    TX_TRACE_ACTION(this, req);
+    TX_TRACE_DUMP(req);
+    cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
 }
 
 /*

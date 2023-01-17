@@ -62,14 +62,60 @@ public:
         thd_.join();
     }
 
+    /**
+     * @brief Put the passed into data into pending_work_ and notify workers.
+     */
+    void FlushData(const TableName &table_name,
+                   const TableSchema *schema,
+                   uint64_t node_group,
+                   int64_t term,
+                   uint64_t ckpt_ts,
+                   std::vector<FlushRecord> *ckpt_vec,
+                   std::vector<FlushRecord> *archive_vec,
+                   std::vector<LruEntry *> *mv_vec,
+                   CcHandlerResult<Void> *res = nullptr);
+
 private:
+    /**
+     * @brief Called after checkpoint is done. Update data store slice size
+     * in memory and in data store.
+     */
     bool UpdateStoreSlice(const TableName &tbl_name,
                           const KVCatalogInfo *kv_info,
                           uint64_t schema_ts,
                           NodeGroupId node_group_id,
                           std::vector<FlushRecord> &flush_batch,
-                          uint64_t last_ckpt_ts,
                           uint64_t ckpt_ts);
+
+    /**
+     * @brief Called before checkpoint to calculate the storage slice size after
+     * checkpoint and decide if the slice needs to be updated(merge/split).
+     * Update slice info accordingly, but does not update the actual slice size
+     * since the data is not flushed yet.
+     * Also decide the range update plan based on the number of slices after the
+     * slice update.
+     */
+    bool UpdateSliceAndCalculateRangeUpdate(
+        const TableName &tbl_name,
+        const KVCatalogInfo *kv_info,
+        uint64_t schema_ts,
+        NodeGroupId node_group_id,
+        std::vector<FlushRecord> &flush_batch,
+        uint64_t last_ckpt_ts,
+        uint64_t ckpt_ts,
+        std::vector<std::pair<const StoreRange *, std::vector<const TxKey *>>>
+            &splitting_info);
+
+    /**
+     * @brief Worker thread that split the target range and flush the data into
+     * data store in their new partitions. This is called during checkpoint on a
+     * table, after this function returns, we can assume the splitting ranges
+     * are flushed too.
+     */
+    void SplitFlushRange(
+        const TableName &table_name,
+        NodeGroupId node_group,
+        std::pair<const StoreRange *, std::vector<const TxKey *>> split_info);
 
     enum struct Status
     {
@@ -78,14 +124,80 @@ private:
         Terminated
     };
 
-    struct CkptrWorkData
+    struct FlushDataWork
     {
+    public:
+        FlushDataWork(uint32_t node_group,
+                      int64_t term,
+                      uint64_t ckpt_ts,
+                      const TableName &table_name,
+                      const TableSchema *schema,
+                      std::unique_ptr<std::vector<FlushRecord>> &&ckpt_vec,
+                      std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
+                      std::unique_ptr<std::vector<LruEntry *>> &&mv_base_vec,
+                      uint16_t *work_done = nullptr,
+                      std::atomic_bool *fail = nullptr,
+                      CcHandlerResult<Void> *res = nullptr)
+            : node_group_(node_group),
+              term_(term),
+              ckpt_ts_(ckpt_ts),
+              table_name_(table_name),
+              schema_(schema),
+              ckpt_vec_(std::move(ckpt_vec)),
+              archive_vec_(std::move(archive_vec)),
+              mv_base_vec_(std::move(mv_base_vec)),
+              vec_owner_(true),
+              work_done_(work_done),
+              fail_(fail),
+              hand_res_(res)
+        {
+        }
+
+        FlushDataWork(uint32_t node_group,
+                      int64_t term,
+                      uint64_t ckpt_ts,
+                      const TableName &table_name,
+                      const TableSchema *schema,
+                      std::vector<FlushRecord> *ckpt_vec,
+                      std::vector<FlushRecord> *archive_vec,
+                      std::vector<LruEntry *> *mv_base_vec,
+                      uint16_t *work_done = nullptr,
+                      std::atomic_bool *fail = nullptr,
+                      CcHandlerResult<Void> *res = nullptr)
+            : node_group_(node_group),
+              term_(term),
+              ckpt_ts_(ckpt_ts),
+              table_name_(table_name),
+              schema_(schema),
+              ckpt_vec_ptr_(ckpt_vec),
+              archive_vec_ptr_(archive_vec),
+              mv_base_vec_ptr_(mv_base_vec),
+              vec_owner_(false),
+              work_done_(work_done),
+              fail_(fail),
+              hand_res_(res)
+        {
+        }
+
         uint32_t node_group_;
         int64_t term_;
         uint64_t ckpt_ts_;
-        uint64_t last_ckpt_ts_;
         TableName table_name_;
-        bool is_last_ckpt_;
+        const TableSchema *schema_;
+        std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_{nullptr};
+        std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
+        // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
+        std::unique_ptr<std::vector<LruEntry *>> mv_base_vec_{nullptr};
+        std::vector<FlushRecord> *ckpt_vec_ptr_{nullptr};
+        std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
+        std::vector<LruEntry *> *mv_base_vec_ptr_{nullptr};
+
+        bool vec_owner_{true};
+        // Increased by worker after finishing the retrieved work.
+        uint16_t *work_done_{nullptr};
+        // Set by worker to indicate flush data result
+        std::atomic_bool *fail_{nullptr};
+        CcHandlerResult<Void> *hand_res_{nullptr};
     };
 
     LocalCcShards &local_shards_;
@@ -101,18 +213,15 @@ private:
     uint32_t ckpt_delay_time_;  // unit: Microsecond
     TxService *tx_service_;
     TxLog *log_agent_;
-    // protects active_workers_ and pending_work
+    // Protects pending_work_ and worker_failed_.
     std::mutex worker_mux_;
     std::condition_variable worker_cv_;
-    std::vector<CkptrWorkData> pending_work_;
+    std::vector<FlushDataWork> pending_work_;
+    std::atomic_bool worker_failed_;
     std::vector<std::thread> worker_thds_;
-    int active_workers_{0};
-    std::atomic_bool worker_flushed_{true};
     static const int checkpointer_worker_num_ = 5;
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
-
-    static void CkptWorker(Checkpointer *ckptr);
 
     /**
      * @brief Flush statistics to storage and broadcast statistics to other
@@ -123,5 +232,6 @@ private:
                                uint32_t table_shard_code,
                                const TableSchema *table_schema,
                                uint64_t table_schema_ts);
+    void FlushDataWorker();
 };
 }  // namespace txservice

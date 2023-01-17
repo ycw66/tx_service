@@ -222,6 +222,17 @@ public:
         assert(false);
         return nullptr;
     }
+    const TxKey *NegativeInfKey() override
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    const TxKey *PositiveInfKey() override
+    {
+        assert(false);
+        return nullptr;
+    }
 };
 
 }  // namespace txservice

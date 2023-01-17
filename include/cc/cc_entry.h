@@ -71,7 +71,7 @@ struct FlushRecord
     PayloadPtr payload_{nullptr};
     uint64_t commit_ts_{1U};
     LruEntry *cce_;
-    int32_t delta_size_{0};
+    int32_t delta_size_{INT32_MAX};
 
     FlushRecord()
     {
@@ -108,6 +108,7 @@ struct FlushRecord
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         cce_ = rhs.cce_;
+        delta_size_ = rhs.delta_size_;
         return *this;
     }
 
@@ -126,6 +127,7 @@ struct FlushRecord
         }
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
+        delta_size_ = rhs.delta_size_;
         cce_ = rhs.cce_;
     }
 
@@ -167,7 +169,30 @@ struct FlushRecord
         return payload_.ptr_;
     }
 
+    size_t PayloadSize() const
+    {
+        return Payload() == nullptr ? 0 : Payload()->Size();
+    }
+
     const TxKey *Key() const;
+
+    /**
+     * @brief Size of the FlushRecord. 0 if the record is in Deleted status.
+     *
+     * @return size_t
+     */
+    size_t Size() const
+    {
+        if (payload_status_ == RecordStatus::Deleted)
+        {
+            return 0;
+        }
+        else
+        {
+            assert(Payload() != nullptr);
+            return Key()->Size() + Payload()->Size();
+        }
+    }
 };
 
 struct LruEntry
@@ -250,10 +275,13 @@ public:
     std::atomic<uint64_t> ckpt_ts_{0};
 
     /**
-     * @brief Accumulated size change since last checkpoint.
-     *
+     * @brief Size of this record in data store.
+     * INT32_MAX is a special value that means unknown size.
+     * Unkown size is used during log replay where the latest version
+     * is directly written into ccmap and we don't know the record size
+     * in KV storage.
      */
-    std::atomic<int32_t> delta_size_{INT32_MAX};
+    std::atomic<int32_t> data_store_size_{INT32_MAX};
 };
 
 /**
@@ -748,7 +776,25 @@ public:
             }
             ref.payload_status_ = payload_status_;
             ref.commit_ts_ = commit_ts_;
-            ref.delta_size_ = delta_size_;
+            int32_t data_store_size =
+                data_store_size_.load(std::memory_order_acquire);
+            if (data_store_size == INT32_MAX)
+            {
+                // Mark the delta as unknwon
+                ref.delta_size_ = INT32_MAX;
+            }
+            else
+            {
+                if (ref.payload_status_ == RecordStatus::Deleted)
+                {
+                    ref.delta_size_ = -data_store_size;
+                }
+                else
+                {
+                    ref.delta_size_ =
+                        key_->Size() + ref.PayloadSize() - data_store_size;
+                }
+            }
             exported_count++;
         }
 
@@ -783,7 +829,27 @@ public:
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
-                            ref.delta_size_ = delta_size_;
+                            int32_t data_store_size = data_store_size_.load(
+                                std::memory_order_acquire);
+                            if (data_store_size == INT32_MAX)
+                            {
+                                // Mark the delta as unknwon
+                                ref.delta_size_ = INT32_MAX;
+                            }
+                            else
+                            {
+                                if (ref.payload_status_ ==
+                                    RecordStatus::Deleted)
+                                {
+                                    ref.delta_size_ = -data_store_size;
+                                }
+                                else
+                                {
+                                    ref.delta_size_ = key_->Size() +
+                                                      ref.PayloadSize() -
+                                                      data_store_size;
+                                }
+                            }
                         }
                         else
                         {

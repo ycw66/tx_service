@@ -88,5 +88,8 @@ public:
         ScanDirection direction,
         const Schema *key_schema,
         const TableName &range_table_name) = 0;
+
+    virtual const TxKey *NegativeInfKey() = 0;
+    virtual const TxKey *PositiveInfKey() = 0;
 };
 }  // namespace txservice

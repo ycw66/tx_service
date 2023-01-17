@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "cc_req_base.h"
+#include "range_record.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -12,7 +13,6 @@ namespace txservice
 class CcMap;
 class CcShard;
 class LocalCcShards;
-struct InitRangeEntry;
 class StoreSlice;
 class StoreRange;
 struct RangeSliceId;
@@ -78,7 +78,6 @@ struct FetchTableRangesCc : public FetchCc
 {
 public:
     FetchTableRangesCc(const TableName &table_name,
-                       const Schema *key_schema,
                        CcShard &ccs,
                        NodeGroupId ng_id);
 
@@ -86,8 +85,7 @@ public:
     void SetFinish(std::vector<InitRangeEntry> &&ranges, int err);
 
 public:
-    const TableName &table_name_;
-    const Schema *key_schema_;
+    const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
     NodeGroupId ng_id_;
@@ -315,12 +313,16 @@ public:
                      NodeGroupId ng_id,
                      StoreSlice *slice,
                      StoreRange *range,
+                     std::vector<FlushRecord> &ckpt_vec,
+                     uint32_t first_slice_idx,
+                     uint32_t last_slice_idx,
                      uint64_t last_ckpt_ts,
                      uint64_t ckpt_ts);
 
     bool Execute(CcShard &ccs) override;
 
-    std::vector<std::pair<const TxKey *, uint32_t>> &SliceRecordCollection()
+    std::vector<std::tuple<const TxKey *, uint32_t, uint32_t>>
+        &SliceRecordCollection()
     {
         return slice_items_;
     }
@@ -335,6 +337,21 @@ public:
     uint64_t CkptTs() const
     {
         return ckpt_ts_;
+    }
+
+    uint32_t SliceFirstIdx() const
+    {
+        return slice_first_idx_;
+    }
+
+    uint32_t SliceLastIdx() const
+    {
+        return slice_last_idx_;
+    }
+
+    std::vector<FlushRecord> &CkptVec()
+    {
+        return ckpt_vec_;
     }
 
     void Wait()
@@ -375,14 +392,17 @@ private:
     NodeGroupId cc_ng_id_;
     StoreSlice *slice_;
     StoreRange *range_;
+    std::vector<FlushRecord> &ckpt_vec_;
+    uint32_t slice_first_idx_;
+    uint32_t slice_last_idx_;
     uint64_t last_ckpt_ts_;
     uint64_t ckpt_ts_;
     /**
-     * @brief A collection of keys and their record sizes in the slice in the
-     * data store after the specified checkpoint.
+     * @brief A collection of keys and their curr and post ckpt record sizes in
+     * the slice in the data store.
      *
      */
-    std::vector<std::pair<const TxKey *, uint32_t>> slice_items_;
+    std::vector<std::tuple<const TxKey *, uint32_t, uint32_t>> slice_items_;
 
     bool is_finished_{false};
     bool is_errored_{false};

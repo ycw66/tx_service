@@ -8,6 +8,7 @@
 #include "cc_shard.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
+#include "store/data_store_handler.h"
 
 namespace txservice
 {
@@ -130,7 +131,6 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
     }
     else
     {
-        slice_lk.unlock();
         bool load_success = LoadSlice(tbl_name,
                                       *slice,
                                       key_schema,
@@ -214,6 +214,19 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
         wait_cv_.notify_one();
     }
 }
+void StoreRange::UpdateRange(const TxKey *start_key,
+                             const TxKey *end_key,
+                             int32_t partition_id)
+{
+    range_start_key_ = start_key;
+    range_end_key_ = end_key;
+    partition_id_ = partition_id;
+    if (slices_.size())
+    {
+        slices_.front()->start_key_ = start_key;
+        slices_.back()->end_key_ = end_key;
+    }
+}
 
 void StoreRange::UpdateSlice(
     StoreSlice *slice,
@@ -266,24 +279,31 @@ void StoreRange::UpdateSlice(
         sub_slice->status_ = slice->status_;
         sub_slice->last_load_ts_ = slice->last_load_ts_;
 
-        if (idx == 0)
-        {
-            // Replaces the original slice with the first sub-slice.
-            slices_[slice_idx] = std::move(sub_slice);
-        }
-        else
-        {
-            // Inserts the new sub-slices following the first sub-slice.
-            slices_.emplace(slices_.begin() + slice_idx + idx,
-                            std::move(sub_slice));
+        // Inserts the new sub-slices following the first sub-slice.
+        slices_.emplace(slices_.begin() + slice_idx + idx,
+                        std::move(sub_slice));
 
-            // Inserts the new boundary keys.
-            boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
-                                   std::move(split_keys[idx].first));
-        }
+        // Inserts the new boundary keys.
+        boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
+                               std::move(split_keys[idx].first));
     }
 
     slice->to_alter_ = false;
+}
+
+bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
+                                          const KVCatalogInfo *kv_info,
+                                          uint64_t schema_ts,
+                                          bool update_slice_keys,
+                                          store::DataStoreHandler *store_hd)
+{
+    std::unique_lock<std::shared_mutex> range_lk(mux_);
+    return store_hd->UpdateRangeSlices(table_name,
+                                       kv_info,
+                                       schema_ts,
+                                       range_start_key_,
+                                       slices_,
+                                       update_slice_keys);
 }
 
 size_t StoreRange::LowerBound(
@@ -455,10 +475,14 @@ StoreSlice *StoreRange::FindSlice(const TxKey &key)
 void StoreRange::InitSlices(
     std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys)
 {
-    slices_[0]->start_key_ = range_start_key_;
-    slices_[0]->end_key_ =
+    slices_.clear();
+    boundary_keys_.clear();
+    std::unique_ptr<StoreSlice> slice = std::make_unique<StoreSlice>();
+    slice->start_key_ = range_start_key_;
+    slice->end_key_ =
         slice_keys.size() > 1 ? slice_keys[1].first.get() : range_end_key_;
-    slices_[0]->size_ = slice_keys.size() > 0 ? slice_keys[0].second : 0;
+    slice->size_ = slice_keys.size() > 0 ? slice_keys[0].second : 0;
+    slices_.emplace_back(std::move(slice));
 
     for (size_t idx = 1; idx < slice_keys.size(); ++idx)
     {

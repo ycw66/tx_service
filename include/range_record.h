@@ -15,118 +15,15 @@
 
 namespace txservice
 {
-struct TableRangeEntry
-{
-    TableRangeEntry() = delete;
-
-    TableRangeEntry(std::unique_ptr<TxKey> start_key,
-                    uint64_t version_ts,
-                    uint32_t partition_id,
-                    uint32_t next_partition_id)
-        : start_key_(std::move(start_key)),
-          version_ts_(version_ts),
-          partition_id_(partition_id),
-          next_partition_id_(next_partition_id),
-          new_key_(nullptr),
-          new_partition_id_(-1),
-          dirty_ts_(0)
-    {
-    }
-
-    std::unique_ptr<TableRangeEntry> Clone() const
-    {
-        std::unique_ptr<TxKey> start_key_clone =
-            start_key_ == nullptr ? nullptr : start_key_->Clone();
-        TableRangeEntry *that = new TableRangeEntry(std::move(start_key_clone),
-                                                    version_ts_,
-                                                    partition_id_,
-                                                    next_partition_id_);
-        if (new_key_ == nullptr)
-        {
-            that->new_key_ = nullptr;
-        }
-        else
-        {
-            std::unique_ptr<TxKey> new_key_clone = new_key_->Clone();
-            that->new_key_ = std::move(new_key_clone);
-        }
-        that->new_partition_id_ = new_partition_id_;
-        return std::unique_ptr<TableRangeEntry>(that);
-    }
-
-    void SetDirty(std::unique_ptr<TxKey> new_key,
-                  uint32_t new_partition_id,
-                  uint64_t dirty_ts)
-    {
-        new_key_ = std::move(new_key);
-        new_partition_id_ = new_partition_id;
-        dirty_ts_ = dirty_ts;
-    }
-
-    void ClearDirty(uint64_t commit_ts = 0)
-    {
-        new_key_ = nullptr;
-        new_partition_id_ = -1;
-        dirty_ts_ = 0;
-        if (commit_ts != 0)
-        {
-            version_ts_ = commit_ts;
-        }
-    }
-
-    bool IsDirty()
-    {
-        return (new_key_ != nullptr) && (new_partition_id_ != 0);
-    }
-
-    // TODO(Xiao Ji): Replace unique_ptr with shared_ptr, so we can make sure
-    // the TxKey pointer is still valid even when the range entry is is deleted
-    std::unique_ptr<TxKey> start_key_;
-    uint64_t version_ts_{1};
-    int32_t partition_id_{0};
-    int32_t next_partition_id_{0};
-
-    std::unique_ptr<TxKey> new_key_{nullptr};
-    int32_t new_partition_id_{-1};
-
-    uint64_t dirty_ts_{0};
-};
-
-struct TableRangeEntryWithShade
-{
-    TableRangeEntryWithShade(std::unique_ptr<TxKey> start_key,
-                             uint64_t version_ts,
-                             int32_t partition_id,
-                             int32_t next_partition_id,
-                             std::unique_ptr<StoreRange> slices = nullptr)
-        : shader_(std::make_unique<TableRangeEntry>(std::move(start_key),
-                                                    version_ts,
-                                                    partition_id,
-                                                    next_partition_id)),
-          shade_(std::unique_ptr<TableRangeEntry>(nullptr)),
-          range_slices_(std::move(slices)){};
-
-    std::unique_ptr<TableRangeEntry> shader_;
-    std::unique_ptr<TableRangeEntry> shade_;
-
-    std::unique_ptr<StoreRange> range_slices_{nullptr};
-};
-
+// struct that stores range related info that we read from
+// KV storage during table range initialization.
 struct InitRangeEntry
 {
     InitRangeEntry() : key_(nullptr), partition_id_(-1), version_ts_(-1)
     {
     }
 
-    InitRangeEntry(const InitRangeEntry &rhs)
-        : key_(nullptr),
-          partition_id_(rhs.partition_id_),
-          version_ts_(rhs.version_ts_)
-    {
-        std::unique_ptr<TxKey> key =
-            rhs.key_ == nullptr ? nullptr : rhs.key_->Clone();
-        key_ = std::move(key);
-    }
+    InitRangeEntry(const InitRangeEntry &rhs) = delete;
 
     InitRangeEntry(std::unique_ptr<TxKey> start_key,
                    int32_t partition_id,
@@ -137,7 +34,6 @@ struct InitRangeEntry
     {
     }
 
-#ifdef RANGE_PARTITIONED
     InitRangeEntry(
         std::unique_ptr<TxKey> start_key,
         int32_t partition_id,
@@ -149,16 +45,12 @@ struct InitRangeEntry
           slice_keys_(std::move(keys))
     {
     }
-#endif
 
     InitRangeEntry(InitRangeEntry &&rhs)
         : key_(std::move(rhs.key_)),
           partition_id_(rhs.partition_id_),
-          version_ts_(rhs.version_ts_)
-#ifdef RANGE_PARTITIONED
-          ,
+          version_ts_(rhs.version_ts_),
           slice_keys_(std::move(rhs.slice_keys_))
-#endif
     {
     }
 
@@ -180,17 +72,188 @@ struct InitRangeEntry
     std::unique_ptr<TxKey> key_{nullptr};
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
-#ifdef RANGE_PARTITIONED
     std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> slice_keys_;
-#endif
 };
 
+struct RangeInfo
+{
+    RangeInfo() = delete;
+    RangeInfo(std::unique_ptr<TxKey> start_key,
+              uint64_t version_ts,
+              uint32_t partition_id,
+              bool is_dirty = false)
+        : start_key_(std::move(start_key)),
+          version_ts_(version_ts),
+          partition_id_(partition_id),
+          dirty_ts_(0),
+          is_dirty_(is_dirty)
+    {
+    }
+
+    RangeInfo(const RangeInfo &other)
+        : version_ts_(other.version_ts_),
+          partition_id_(other.partition_id_),
+          new_partition_id_(other.new_partition_id_),
+          dirty_ts_(other.dirty_ts_),
+          is_dirty_(other.is_dirty_)
+    {
+        if (!other.start_key_)
+        {
+            start_key_ = nullptr;
+        }
+        else
+        {
+            start_key_ = other.start_key_->Clone();
+        }
+        for (auto &key : other.new_key_)
+        {
+            new_key_.push_back(key->Clone());
+        }
+    }
+
+    std::unique_ptr<RangeInfo> Clone() const
+    {
+        std::unique_ptr<TxKey> start_key_clone =
+            start_key_ == nullptr ? nullptr : start_key_->Clone();
+        RangeInfo *that = new RangeInfo(
+            std::move(start_key_clone), version_ts_, partition_id_);
+        for (auto &key : new_key_)
+        {
+            that->new_key_.push_back(key->Clone());
+        }
+        that->new_partition_id_ = new_partition_id_;
+        that->is_dirty_ = is_dirty_;
+        return std::unique_ptr<RangeInfo>(that);
+    }
+
+    void SetDirty(const std::vector<std::unique_ptr<TxKey>> &new_key,
+                  const std::vector<int32_t> &new_partition_id,
+                  uint64_t dirty_ts)
+    {
+        for (auto &key_uptr : new_key)
+        {
+            new_key_.push_back(key_uptr->Clone());
+        }
+        new_partition_id_ = new_partition_id;
+        dirty_ts_ = dirty_ts;
+        is_dirty_ = true;
+    }
+
+    void SetDirty(std::vector<std::unique_ptr<TxKey>> &&new_key,
+                  std::vector<int32_t> &&new_partition_id,
+                  uint64_t dirty_ts)
+    {
+        new_key_ = std::move(new_key);
+        new_partition_id_ = std::move(new_partition_id);
+        dirty_ts_ = dirty_ts;
+        is_dirty_ = true;
+    }
+
+    void CommitDirty()
+    {
+        if (dirty_ts_ > version_ts_)
+        {
+            version_ts_ = dirty_ts_;
+            is_dirty_ = false;
+        }
+    }
+
+    void ClearDirty(uint64_t commit_ts = 0)
+    {
+        new_key_.clear();
+        new_partition_id_.clear();
+        dirty_ts_ = 0;
+        if (commit_ts != 0)
+        {
+            version_ts_ = commit_ts;
+        }
+        is_dirty_ = false;
+    }
+
+    bool IsDirty() const
+    {
+        return is_dirty_;
+    }
+
+    // TODO(Xiao Ji): Replace unique_ptr with shared_ptr, so we can make sure
+    // the TxKey pointer is still valid even when the range entry is is deleted
+    std::unique_ptr<TxKey> start_key_;
+    uint64_t version_ts_{1};
+    int32_t partition_id_{0};
+
+    std::vector<std::unique_ptr<TxKey>> new_key_;
+    std::vector<int32_t> new_partition_id_;
+    uint64_t dirty_ts_{0};
+    // is_dirty_ means if the new key and partition ids are visible to regular
+    // requests. During post commit phase of range split, we have a short period
+    // where we need to keep the new partition info but make them invisible to
+    // regular range read request.
+    bool is_dirty_{false};
+};
+
+struct TableRangeEntry
+{
+public:
+    TableRangeEntry() = default;
+
+    TableRangeEntry(std::unique_ptr<TxKey> start_key,
+                    uint64_t version_ts,
+                    int64_t partition_id,
+                    std::unique_ptr<StoreRange> slices = nullptr)
+        : range_info_(std::make_unique<RangeInfo>(
+              std::move(start_key), version_ts, partition_id)),
+          range_slices_(std::move(slices))
+    {
+    }
+
+    /**
+     * @brief Set new table range info in range_info_.
+     */
+    void UploadNewRangeInfo(const std::vector<std::unique_ptr<TxKey>> &new_key,
+                            const std::vector<int32_t> &new_partition_id,
+                            uint64_t commit_ts)
+    {
+        assert(commit_ts >= range_info_->dirty_ts_);
+
+        range_info_->SetDirty(new_key, new_partition_id, commit_ts);
+    }
+
+    const RangeInfo *GetRangeInfo() const
+    {
+        return range_info_.get();
+    }
+
+    uint64_t Version() const
+    {
+        return range_info_->version_ts_;
+    }
+
+    uint64_t DirtyVersion() const
+    {
+        return range_info_->dirty_ts_;
+    }
+
+    StoreRange *RangeSlices()
+    {
+        return range_slices_.get();
+    }
+
+private:
+    std::unique_ptr<RangeInfo> range_info_{nullptr};
+    std::unique_ptr<StoreRange> range_slices_;
+    template <typename KeyT>
+    friend class RangeCcMap;
+};
 struct RangeRecord : public TxRecord
 {
 public:
     RangeRecord() = default;
     RangeRecord(const RangeRecord &rhs)
-        : range_entry_(rhs.range_entry_), end_key_(rhs.end_key_)
+        : range_info_(rhs.range_info_), end_key_(rhs.end_key_)
+    {
+    }
+    RangeRecord(const RangeInfo *info, const TxKey *end_key)
+        : range_info_(info), end_key_(end_key)
     {
     }
 
@@ -203,9 +266,10 @@ public:
 
     void Serialize(std::string &str) const override
     {
-        range_entry_->new_key_->Serialize(str);
-        serialize_to_str(&range_entry_->partition_id_, str);
-        serialize_to_str(&range_entry_->new_partition_id_, str);
+        // TODO{liunyl} : fix serialize for multiple new keys
+        // range_entry_->new_key_->Serialize(str);
+        // serialize_to_str(&range_entry_->partition_id_, str);
+        // serialize_to_str(&range_entry_->new_partition_id_, str);
     }
 
     void Deserialize(const char *buf, size_t &offset) override
@@ -221,7 +285,7 @@ public:
     void Copy(const TxRecord &rhs) override
     {
         const RangeRecord &that = static_cast<const RangeRecord &>(rhs);
-        range_entry_ = that.range_entry_;
+        range_info_ = that.range_info_;
     }
 
     std::string ToString() const override
@@ -235,13 +299,13 @@ public:
         {
             return *this;
         }
-        range_entry_ = rhs.range_entry_;
+        range_info_ = rhs.range_info_;
         return *this;
     }
 
-    const TableRangeEntry *RangeEntry() const
+    const RangeInfo *GetRangeInfo() const
     {
-        return range_entry_;
+        return range_info_;
     }
 
     size_t Size() const override
@@ -249,7 +313,7 @@ public:
         return 8 + 8;
     }
 
-    const TableRangeEntry *range_entry_{nullptr};
+    const RangeInfo *range_info_{nullptr};
     /**
      * @brief The exclusive end of the range, which is also the start of the
      * next range. Null, if this is the last range and end key points to

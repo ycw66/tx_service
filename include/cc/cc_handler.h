@@ -386,6 +386,16 @@ public:
                                      uint16_t command_id,
                                      CcHandlerResult<bool> &hres) = 0;
 
+    virtual void CkptScan(const TableName &table_name,
+                          uint64_t ckpt_ts,
+                          uint64_t node_group,
+                          std::vector<FlushRecord> &ckpt_vec,
+                          std::vector<FlushRecord> &archive_vec,
+                          std::vector<LruEntry *> &mv_vec,
+                          CcHandlerResult<Void> &hres,
+                          const TxKey *range_start_key = nullptr,
+                          const TxKey *range_end_key = nullptr) = 0;
+
     // table_schema_op_pool_ is introduced to ensure the CcHandlerResult pointer
     // validation: if failover didn't happen, the pointer receivied from remote
     // PostWriteAll response CcMessage should always be valid(memory not freed).

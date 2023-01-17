@@ -50,7 +50,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       read_(this),
       scan_open_(this),
       scan_next_(this),
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(this),
 #endif
       acquire_write_(this),
@@ -91,6 +91,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     protocol_ = proto;
     schema_op_ = nullptr;
     ds_split_range_op_ = nullptr;
+    split_flush_op_ = nullptr;
 }
 
 void TransactionExecution::Restart()
@@ -257,83 +258,83 @@ void TransactionExecution::RecoverSplitRangeTx(
     uint64_t commit_ts,
     std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
 {
-    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
-    tx_number_.store(txn, std::memory_order_relaxed);
-    tx_term_ = tx_term;
-    commit_ts_ = commit_ts;
+    // tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    // tx_number_.store(txn, std::memory_order_relaxed);
+    // tx_term_ = tx_term;
+    // commit_ts_ = commit_ts;
 
-    const TableName range_table_name = TableName{
-        ds_split_range_op_msg.table_name(), TableType::RangePartition};
-    const TableName base_table_name =
-        TableName{range_table_name.StringView(), TableType::Primary};
+    // const TableName range_table_name = TableName{
+    //     ds_split_range_op_msg.table_name(), TableType::RangePartition};
+    // const TableName base_table_name =
+    //     TableName{range_table_name.StringView(), TableType::Primary};
 
-    std::unique_ptr<DsSplitRangeOp> split_range_op =
-        std::make_unique<DsSplitRangeOp>(base_table_name,
-                                         table_schema,
-                                         range_key,
-                                         std::move(splitting_range_record),
-                                         this);
+    // std::unique_ptr<DsSplitRangeOp> split_range_op =
+    //     std::make_unique<DsSplitRangeOp>(base_table_name,
+    //                                      table_schema,
+    //                                      range_key,
+    //                                      std::move(splitting_range_record),
+    //                                      this);
 
-    const ::txlog::SplitRangeOpMessage::Stage stage =
-        ds_split_range_op_msg.stage();
+    // const ::txlog::SplitRangeOpMessage::Stage stage =
+    //     ds_split_range_op_msg.stage();
 
-    if (stage != ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
-        stage != ::txlog::SplitRangeOpMessage::CopingOldRangeData &&
-        stage != ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange &&
-        stage != ::txlog::SplitRangeOpMessage::DeletingOldRangeData &&
-        stage != ::txlog::SplitRangeOpMessage::CleanLog)
-    {
-        tx_status_.store(TxnStatus::Finished);
-        return;
-    }
+    // if (stage != ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
+    //     stage != ::txlog::SplitRangeOpMessage::CopingOldRangeData &&
+    //     stage != ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange &&
+    //     stage != ::txlog::SplitRangeOpMessage::DeletingOldRangeData &&
+    //     stage != ::txlog::SplitRangeOpMessage::CleanLog)
+    //{
+    //     tx_status_.store(TxnStatus::Finished);
+    //     return;
+    // }
 
-    split_range_op->new_range_key_ = std::move(new_range_key);
-    split_range_op->new_partition_id_ = new_partition_id;
-    split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
+    // split_range_op->new_range_key_ = std::move(new_range_key);
+    // split_range_op->new_partition_id_ = new_partition_id;
+    // split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
 
-    if (stage >= ::txlog::SplitRangeOpMessage::CopingOldRangeData)
-    {
-        split_range_op->upload_range_entry_->new_key_ =
-            split_range_op->new_range_key_->Clone();
-        split_range_op->upload_range_entry_->new_partition_id_ =
-            split_range_op->new_partition_id_;
-        split_range_op->upload_range_record_->range_entry_ =
-            split_range_op->upload_range_entry_.get();
-    }
+    // if (stage >= ::txlog::SplitRangeOpMessage::CopingOldRangeData)
+    //{
+    //     split_range_op->upload_range_entry_->new_key_ =
+    //         split_range_op->new_range_key_->Clone();
+    //     split_range_op->upload_range_entry_->new_partition_id_ =
+    //         split_range_op->new_partition_id_;
+    //     split_range_op->upload_range_record_->range_entry_ =
+    //         split_range_op->upload_range_entry_.get();
+    // }
 
-    switch (stage)
-    {
-    case ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange:
-        split_range_op->prepare_log_for_update_old_range_op_.hd_result_
-            .SetFinished();
-        split_range_op->op_ =
-            &split_range_op->prepare_log_for_update_old_range_op_;
-        break;
-    case ::txlog::SplitRangeOpMessage::CopingOldRangeData:
-        split_range_op->ds_copy_old_range_data_finished_log_op_.hd_result_
-            .SetFinished();
-        split_range_op->op_ =
-            &split_range_op->ds_copy_old_range_data_finished_log_op_;
-        break;
-    case ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange:
-        split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
-            .SetFinished();
-        split_range_op->op_ =
-            &split_range_op->commit_log_for_dirty_old_range_op_;
-        break;
-    case ::txlog::SplitRangeOpMessage::DeletingOldRangeData:
-        split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
-            .SetFinished();
-        split_range_op->op_ =
-            &split_range_op->delete_out_of_old_range_data_log_op_;
-        break;
-    case ::txlog::SplitRangeOpMessage::CleanLog:
-    default:
-        break;
-    }
+    // switch (stage)
+    //{
+    // case ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange:
+    //     split_range_op->prepare_log_for_update_old_range_op_.hd_result_
+    //         .SetFinished();
+    //     split_range_op->op_ =
+    //         &split_range_op->prepare_log_for_update_old_range_op_;
+    //     break;
+    // case ::txlog::SplitRangeOpMessage::CopingOldRangeData:
+    //     split_range_op->ds_copy_old_range_data_finished_log_op_.hd_result_
+    //         .SetFinished();
+    //     split_range_op->op_ =
+    //         &split_range_op->ds_copy_old_range_data_finished_log_op_;
+    //     break;
+    // case ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange:
+    //     split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
+    //         .SetFinished();
+    //     split_range_op->op_ =
+    //         &split_range_op->commit_log_for_dirty_old_range_op_;
+    //     break;
+    // case ::txlog::SplitRangeOpMessage::DeletingOldRangeData:
+    //     split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
+    //         .SetFinished();
+    //     split_range_op->op_ =
+    //         &split_range_op->delete_out_of_old_range_data_log_op_;
+    //     break;
+    // case ::txlog::SplitRangeOpMessage::CleanLog:
+    // default:
+    //     break;
+    // }
 
-    ds_split_range_op_ = std::move(split_range_op);
-    state_stack_.push_back(ds_split_range_op_.get());
+    // ds_split_range_op_ = std::move(split_range_op);
+    // state_stack_.push_back(ds_split_range_op_.get());
 }
 
 void TransactionExecution::Forward()
@@ -710,6 +711,63 @@ void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
     Forward();
 }
 
+void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    bool_resp_ = &req.tx_result_;
+    bool_resp_->Reset();
+
+    split_flush_op_ =
+        std::make_unique<SplitFlushRangeOp>(*req.table_name_,
+                                            req.schema_,
+                                            req.node_group_,
+                                            req.old_start_key_,
+                                            req.old_end_key_,
+                                            req.old_range_info_,
+                                            std::move(req.new_range_id_),
+                                            this);
+
+    PushOperation(split_flush_op_.get());
+    Forward();
+}
+
+void TransactionExecution::ProcessTxRequest(CkptScanTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    bool_resp_ = &req.tx_result_;
+    bool_resp_->Reset();
+
+    ckpt_scan_op_ = std::make_unique<CkptScanOp>(req.table_name_,
+                                                 req.ckpt_ts_,
+                                                 req.node_group_,
+                                                 &req.ckpt_vec_,
+                                                 &req.archive_vec_,
+                                                 &req.mv_vec_,
+                                                 this);
+    PushOperation(ckpt_scan_op_.get());
+    Forward();
+}
+
 void TransactionExecution::Process(InitTxnOperation &init_txn)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -867,7 +925,7 @@ void TransactionExecution::Process(ReadOperation &read)
             read.iso_level_ = iso_level_;
 
             uint32_t key_shard_code = 0;
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
             if (read.lock_range_result_.IsFinished())
             {
                 // If there is an error when getting the key's range ID, the
@@ -880,7 +938,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 // Uses the lower 10 bits of the key's hash code to shard the
                 // key across CPU cores in a cc node.
                 uint32_t residual = key.Hash() & 0x3FF;
-                key_shard_code = read.range_rec_.RangeEntry()->partition_id_
+                key_shard_code = read.range_rec_.GetRangeInfo()->partition_id_
                                      << 10 |
                                  residual;
             }
@@ -1004,8 +1062,12 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
-#ifdef RANGE_PARTITIONED
-        bool lock_deleted_key = read.read_tx_req_->read_local_ ? true : false;
+#ifdef RANGE_PARTITION_ENABLED
+        bool lock_deleted_key =
+            read.read_tx_req_->read_local_ ||
+                    read_res.lock_type_ == LockType::WriteIntent
+                ? true
+                : false;
 #else
         bool lock_deleted_key = true;
 #endif
@@ -1148,7 +1210,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                           is_ckpt_delta);
     }
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     scan_open.Forward(this);
 #else
     StartTiming();
@@ -1225,7 +1287,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     // Constructs a pseudo slice prior to the first slice of the scan. And sets
     // the status of the scanner "Blocked".
     open_result.scanner_->SetStatus(ScannerStatus::Blocked);
@@ -1309,7 +1371,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                                    scan_next.hd_result_);
         }
     }
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     else if (to_scan_next && scanner.Type() == CcmScannerType::RangePartition)
     {
         ScanState &scan_state = *scan_next.scan_state_;
@@ -1411,7 +1473,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     {
         scan_next.hd_result_.SetFinished();
     }
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     else if (scanner.Type() == CcmScannerType::RangePartition)
     {
         scan_next.unlock_range_result_.SetFinished();
@@ -1442,7 +1504,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     if (scanner.Type() == CcmScannerType::HashPartition &&
             scan_next.hd_result_.IsError()
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
         || scanner.Type() == CcmScannerType::RangePartition &&
                scan_next.slice_hd_result_.IsError()
 #endif
@@ -1626,7 +1688,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             const TxKey *batch_end_key = nullptr;
             if (scanner.Status() == ScannerStatus::Blocked)
             {
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
                 batch_end_key = scan_next.scan_state_->SliceLastKey();
 #else
                 batch_end_key = scan_batch.empty()
@@ -1647,7 +1709,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Normal,
                                             1);
                 }
-#ifndef RANGE_PARTITIONED
+#ifndef RANGE_PARTITION_ENABLED
                 else
                 {
                     scan_batch.emplace_back(local_write.key_.get(),
@@ -1818,7 +1880,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             const TxKey *batch_start_key = nullptr;
             if (scanner.Status() == ScannerStatus::Blocked)
             {
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
                 batch_start_key = scan_next.scan_state_->SliceLastKey();
 #else
                 batch_start_key =
@@ -1839,7 +1901,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Normal,
                                             1);
                 }
-#ifndef RANGE_PARTITIONED
+#ifndef RANGE_PARTITION_ENABLED
                 else
                 {
                     scan_batch.emplace_back(local_write.key_.get(),
@@ -1926,7 +1988,7 @@ void TransactionExecution::Commit()
 
     if (rw_set_.WriteSetSize() > 0)
     {
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
         lock_write_ranges_.Reset();
         PushOperation(&lock_write_ranges_);
         Process(lock_write_ranges_);
@@ -1975,6 +2037,7 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
     const TxKey *write_key = lock_write_ranges.write_key_it_->first;
 
     lock_write_ranges.lock_range_result_.Reset();
+    lock_write_ranges.is_running_ = true;
     handler->ReadLocal(lock_write_ranges.range_table_name_,
                        *write_key,
                        lock_write_ranges.range_rec_,
@@ -2001,7 +2064,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     }
 
     const TxKey *range_start_key =
-        lock_write_ranges.range_rec_.RangeEntry()->start_key_.get();
+        lock_write_ranges.range_rec_.GetRangeInfo()->start_key_.get();
     const TxKey *range_end_key = lock_write_ranges.range_rec_.end_key_;
 
     const ReadKeyResult &read_res =
@@ -2034,6 +2097,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         // because doing so leads to recursive calls of Forward(), each
         // acquiring a read lock on one range. This may result in stack overflow
         // when there are many ranges for write-set keys.
+        lock_write_ranges.is_running_ = false;
     }
 }
 
@@ -2062,7 +2126,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     {
         for (auto &[key_ptr, write_entry] : table_write_set)
         {
-#ifndef RANGE_PARTITIONED
+#ifndef RANGE_PARTITION_ENABLED
             size_t hash = write_entry.key_->Hash();
             write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
 #endif
@@ -3121,6 +3185,92 @@ void TransactionExecution::PostProcess(DsOp<ResultType> &ds_op)
 template void TransactionExecution::PostProcess(
     DsOp<RangeMedianKeyResult> &ds_op);
 template void TransactionExecution::PostProcess(DsOp<Void> &ds_op);
+
+void TransactionExecution::Process(CkptScanOp &scan_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ckpt_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    scan_op.is_running_ = true;
+    scan_op.hd_result_.Reset();
+
+    handler->CkptScan(*scan_op.tab_name_,
+                      scan_op.ckpt_ts_,
+                      scan_op.node_group_,
+                      *scan_op.ckpt_vec_,
+                      *scan_op.archive_vec_,
+                      *scan_op.mv_vec_,
+                      scan_op.hd_result_,
+                      scan_op.start_key_,
+                      scan_op.end_key_);
+}
+
+void TransactionExecution::PostProcess(CkptScanOp &scan_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ckpt_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    state_stack_.pop_back();
+    bool_resp_->Finish(!scan_op.hd_result_.IsError());
+    Forward();
+}
+
+void TransactionExecution::Process(FlushDataOp &flush_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &flush_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    flush_op.hd_result_.Reset();
+    flush_op.is_running_ = true;
+    Sharder::Instance().GetLocalCcShards()->FlushData(*flush_op.tab_name_,
+                                                      flush_op.schema_,
+                                                      flush_op.ckpt_ts_,
+                                                      tx_term_,
+                                                      flush_op.node_group_,
+                                                      flush_op.ckpt_vec_,
+                                                      flush_op.archive_vec_,
+                                                      flush_op.mv_vec_,
+                                                      flush_op.hd_result_);
+}
+
+void TransactionExecution::PostProcess(FlushDataOp &flush_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &ckpt_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    state_stack_.pop_back();
+    Forward();
+}
 
 void TransactionExecution::Process(NoOp &no_op)
 {

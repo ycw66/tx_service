@@ -40,6 +40,22 @@ enum class OperationType
     DropIndex
 };
 
+/**
+ * @brief Operations of on KV store. This is used when a composite operation
+ * needs to run multiple operation on KV store in different phases. Currently
+ * used in SplitFlushOp.
+ */
+enum class DsOperation
+{
+    // Copy data from old partition to new partition and flush in memory data
+    // to new partition.
+    CopyAndFlush = 1,
+    // Upsert new range to range table.
+    UpsertRange,
+    // Clean data that have been copied to new partition in old partition.
+    CleanOldRange
+};
+
 enum class TxnStatus
 {
     Ongoing = 0,

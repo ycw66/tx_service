@@ -178,6 +178,13 @@ struct RangeSliceId;
 class StoreRange
 {
 public:
+    /**
+     * @brief Max number of slices in range. The total size of a range
+     * is (8*1024) * (16*1024) = 128MB
+     *
+     */
+    static constexpr uint32_t range_max_size = 134217728;
+
     StoreRange(const TxKey *start_key,
                const TxKey *end_key,
                uint32_t partition_id,
@@ -213,9 +220,19 @@ public:
 
     void UnpinSlice(StoreSlice *slice);
 
+    void UpdateRange(const TxKey *start_key,
+                     const TxKey *end_key,
+                     int32_t partition_id);
+
+    bool UpdateRangeSlicesInStore(const TableName &table_name,
+                                  const KVCatalogInfo *kv_info,
+                                  uint64_t schema_ts,
+                                  bool update_slice_keys,
+                                  store::DataStoreHandler *store_hd);
+
     /**
      * @brief Updates the range and splits the input slice into specified
-     * sub-slices. This method is called exclusively by the checkpointer, after
+     * sub-slices. This method is called exclusively by the checkpointer, before
      * it flushes changed data items in the slice and decides to split the slice
      * into multiple ones.
      *
@@ -253,6 +270,54 @@ public:
     const std::vector<std::unique_ptr<StoreSlice>> &Slices() const
     {
         return slices_;
+    }
+
+    bool NeedSplit(uint64_t new_range_size) const
+    {
+        return new_range_size > StoreRange::range_max_size;
+    }
+
+    /**
+     * @brief Split the range with new_end. new_end will be the new
+     * end key of this range, and every slice after new_end will be removed
+     * from this range and returned to the caller.
+     *
+     * @param new_end
+     * @return std::vector<std::pair<TxKey::Uptr, uint32_t>>
+     */
+    std::vector<std::pair<TxKey::Uptr, uint32_t>> SplitRange(
+        const TxKey *new_end)
+    {
+        std::unique_lock<std::shared_mutex> range_lk(mux_);
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> removed_slices;
+        std::vector<TxKey::Uptr> remain_boundary;
+        std::vector<std::unique_ptr<StoreSlice>> remain_slices;
+        auto boundary = boundary_keys_.begin();
+        auto slice = slices_.begin();
+        // The first slice always belongs to the old range and
+        // is not in boundary_keys_.
+        remain_slices.push_back(std::move(*slice));
+        slice++;
+        while (boundary != boundary_keys_.end())
+        {
+            if (!(**boundary < *new_end))
+            {
+                // Remove boundary keys >= new end key
+                removed_slices.emplace_back(std::move(*boundary),
+                                            (*slice)->Size());
+            }
+            else
+            {
+                remain_boundary.push_back(std::move(*boundary));
+                remain_slices.push_back(std::move(*slice));
+            }
+            boundary++;
+            slice++;
+        }
+        boundary_keys_ = std::move(remain_boundary);
+        slices_ = std::move(remain_slices);
+        range_end_key_ = new_end;
+        return removed_slices;
     }
 
 private:
@@ -317,6 +382,7 @@ private:
     LocalCcShards &local_cc_shards_;
 
     friend class StoreSlice;
+    friend class TableRangeEntry;
 };
 
 /**

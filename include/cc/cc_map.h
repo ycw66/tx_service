@@ -149,10 +149,6 @@ public:
     // level: the kv access unit is range.
     bool ccm_has_full_entries_{false};
 
-    // Last checkpoint ts of this table. It will be accessed by both
-    // checkpointer threads and ccshard thread.
-    std::atomic<uint64_t> ckpt_ts_{1};
-
 protected:
     /**
      * @brief After the input request is executed at the current shard, moves

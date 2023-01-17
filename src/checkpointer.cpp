@@ -63,15 +63,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
     {
         return;
     }
-
-    std::vector<FlushRecord> ckpt_vec;
-    ckpt_vec.reserve(10000);
-    std::vector<FlushRecord> archive_vec;
-    // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
-    std::vector<LruEntry *> extra_vec;
-    // Cache the entries to move record from "base" table to "archive" table
-    std::vector<LruEntry *> mv_base_vec;
-
     std::vector<uint32_t> node_groups = Sharder::Instance().LocalNodeGroups();
     for (uint32_t node_group : node_groups)
     {
@@ -82,12 +73,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         {
             continue;
         }
+        size_t shard_cnt = local_shards_.Count();
+        CkptTsCc ckpt_req(shard_cnt, node_group);
 
         // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
         // the minimum timestamp minus 1 among all the active transactions, thus
         // it's safe to flush all the entries smaller than or equal to ckpt_ts.
-        size_t shard_cnt = local_shards_.Count();
-        CkptTsCc ckpt_req(shard_cnt, node_group);
         for (auto &ccs : local_shards_.cc_shards_)
         {
             ccs->Enqueue(&ckpt_req);
@@ -111,7 +102,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 ckpt_ts = min_si_tx_ts;
             }
         }
-
         uint64_t last_ckpt_ts =
             Sharder::Instance().GetNodeGroupCkptTs(node_group);
         if (ckpt_ts <= last_ckpt_ts)
@@ -120,60 +110,286 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             Sharder::Instance().UnpinNodeGroupData(node_group);
             continue;
         }
-
-        LOG(INFO) << "Begin checkpoint node group #" << node_group
-                  << " with timestamp: " << ckpt_ts
-                  << ". The ccshard memory usage is: " << ckpt_req.GetMemUsage()
+        LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
+                  << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
+                  << " KB"
+                  << ". The log usage of node is: " << ckpt_req.GetLogUsage()
                   << "KB.";
 
-        bool flushed = false;
-        worker_flushed_.compare_exchange_strong(flushed, true);
-
+        // Reset result bool
+        bool fail = true;
+        worker_failed_.compare_exchange_strong(fail, false);
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
-        std::unordered_set<TableName> tables =
+        std::vector<TableName> tables =
             local_shards_.GetCatalogTableNamesForCkpt(node_group);
+        auto total_table = tables.size();
 
-        std::unique_lock<std::mutex> worker_lk(worker_mux_);
+        std::vector<TransactionExecution *> txms;
+        uint16_t work_done = 0;
+        uint16_t work_started = 0;
+#ifdef RANGE_PARTITION_ENABLED
+        std::vector<std::thread> range_split_workers;
+#endif
+
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
         // ckpt_vec.
-        for (const auto &table_name : tables)
+        for (uint16_t idx = 0; idx < tables.size(); idx++)
         {
             if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
             {
-                pending_work_.clear();
                 break;
             }
 
+            TableName &table_name = tables.at(idx);
             if (table_name.Type() == TableType::Catalog ||
                 table_name.Type() == TableType::RangePartition)
             {
                 continue;
             }
-            pending_work_.push_back(CkptrWorkData{node_group,
-                                                  leader_term,
-                                                  ckpt_ts,
-                                                  last_ckpt_ts,
-                                                  table_name,
-                                                  is_last_ckpt});
-        }
+            if (idx >= total_table)
+            {
+                // Have scanned over original tables. Now retrying the failed
+                // tables. Wait for 1 second before retrying to avoid busy loop.
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                total_table = tables.size();
+            }
+            // Issue read catalog tx_request to acquire read lock on catalog
+            // cc_entry using base table name, and acquire read lock in one
+            // shard is good enough to block schema change.
+            const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                            TableType::Primary};
 
-        if (pending_work_.size() != 0 || active_workers_ != 0)
+            TransactionExecution *ckpt_txm = tx_service_->NewTx();
+            InitTxRequest init_req;
+            // Set isolation level to RepeatableRead to ensure the readlock
+            // will be set during the execution of the following
+            // ReadTxRequest.
+            init_req.iso_level_ = IsolationLevel::RepeatableRead;
+            init_req.protocol_ = CcProtocol::Locking;
+            init_req.Reset();
+            ckpt_txm->Execute(&init_req);
+            init_req.Wait();
+
+            if (init_req.IsError())
+            {
+                LOG(INFO) << "checkpointer init checkpoint transaction failed.";
+                tables.push_back(std::move(table_name));
+                continue;
+            }
+
+            // If table_name has been dropped at this point, read lock would
+            // not be acquired.
+            CatalogKey table_key(base_table_name);
+            CatalogRecord catalog_rec;
+
+            ReadTxRequest read_req;
+            read_req.Reset();
+            read_req.Set(&catalog_ccm_name,
+                         &table_key,
+                         &catalog_rec,
+                         false,
+                         false,
+                         true,
+                         0UL);
+            ckpt_txm->Execute(&read_req);
+            read_req.Wait();
+
+            if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
+            {
+                // Use AbortTxRequest to release read lock.
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                ckpt_txm->Execute(&abort_req);
+                abort_req.Wait();
+                assert(abort_req.Result() == false);
+                LOG(INFO) << "checkpointer add read lock on table failed, "
+                             "table name: "
+                          << table_key.Name().StringView();
+
+                if (read_req.IsError())
+                {
+                    // If read lock acquire failed, retry next time. If
+                    // table is delted, skip the table.
+                    tables.push_back(std::move(table_name));
+                }
+                continue;
+            }
+            txms.push_back(ckpt_txm);
+            std::unique_ptr<std::vector<FlushRecord>> ckpt_vec =
+                std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
+                std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<LruEntry *>> mv_base_vec =
+                std::make_unique<std::vector<LruEntry *>>();
+
+            CkptScanTxRequest scan_req(table_name,
+                                       ckpt_ts,
+                                       node_group,
+                                       *ckpt_vec,
+                                       *archive_vec,
+                                       *mv_base_vec);
+            ckpt_txm->Execute(&scan_req);
+            scan_req.Wait();
+
+            if (scan_req.IsError())
+            {
+                LOG(INFO) << "ckpt scan failed on table "
+                          << table_name.StringView();
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                ckpt_txm->Execute(&abort_req);
+                abort_req.Wait();
+                txms.pop_back();
+                tables.push_back(std::move(table_name));
+                continue;
+            }
+
+#ifdef RANGE_PARTITION_ENABLED
+            std::vector<
+                std::pair<const StoreRange *, std::vector<const TxKey *>>>
+                splitting_info;
+            if (!UpdateSliceAndCalculateRangeUpdate(
+                    table_name,
+                    catalog_rec.Schema()->GetKVCatalogInfo(),
+                    catalog_rec.SchemaTs(),
+                    node_group,
+                    *ckpt_vec,
+                    last_ckpt_ts,
+                    ckpt_ts,
+                    splitting_info))
+            {
+                LOG(INFO) << "Pre-checkpoint slice update failed on table "
+                          << table_name.StringView();
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                ckpt_txm->Execute(&abort_req);
+                abort_req.Wait();
+                txms.pop_back();
+                tables.push_back(std::move(table_name));
+                continue;
+            }
+
+            if (!is_last_ckpt)
+            {
+                // Remove splitting ranges from ckpt_vec and archive_vec.
+                // Records in the splitting ranges will be flushed by the
+                // SplitFlush transaction. We build a new vector here to
+                // avoid vecotr.erase() which might take O(n) time.
+                std::unique_ptr<std::vector<FlushRecord>> flush_ckpt_vec =
+                    std::make_unique<std::vector<FlushRecord>>();
+                auto ckpt_it = ckpt_vec->begin();
+                for (auto range_it = splitting_info.begin();
+                     range_it != splitting_info.end() &&
+                     ckpt_it != ckpt_vec->end();
+                     range_it++)
+                {
+                    const StoreRange *range = range_it->first;
+                    while (ckpt_it != ckpt_vec->end() &&
+                           *ckpt_it->Key() < *range->RangeStartKey())
+                    {
+                        flush_ckpt_vec->push_back(std::move(*ckpt_it));
+                        ckpt_it++;
+                    }
+
+                    while (ckpt_it != ckpt_vec->end() &&
+                           (range->RangeEndKey() == nullptr ||
+                            *ckpt_it->Key() < *range->RangeEndKey()))
+                    {
+                        ckpt_it++;
+                    }
+                }
+                ckpt_vec = std::move(flush_ckpt_vec);
+
+                std::unique_ptr<std::vector<FlushRecord>> flush_archive_vec =
+                    std::make_unique<std::vector<FlushRecord>>();
+                auto archive_it = archive_vec->begin();
+                for (auto range_it = splitting_info.begin();
+                     range_it != splitting_info.end() &&
+                     archive_it != archive_vec->end();
+                     range_it++)
+                {
+                    const StoreRange *range = range_it->first;
+                    while (archive_it != archive_vec->end() &&
+                           *archive_it->Key() < *range->RangeStartKey())
+                    {
+                        flush_archive_vec->push_back(std::move(*archive_it));
+                        archive_it++;
+                    }
+
+                    while (archive_it != archive_vec->end() &&
+                           (range->RangeEndKey() == nullptr ||
+                            *archive_it->Key() < *range->RangeEndKey()))
+                    {
+                        archive_it++;
+                    }
+                }
+                archive_vec = std::move(flush_archive_vec);
+
+                for (auto &info : splitting_info)
+                {
+                    // Init range split tx.
+                    range_split_workers.push_back(std::thread(
+                        [this, &table_name, info, &node_group]
+                        { SplitFlushRange(table_name, node_group, info); }));
+                }
+            }
+#endif
+
+            {
+                std::unique_lock<std::mutex> worker_lk(worker_mux_);
+                work_started++;
+                pending_work_.emplace_back(node_group,
+                                           leader_term,
+                                           ckpt_ts,
+                                           table_name,
+                                           catalog_rec.Schema(),
+                                           std::move(ckpt_vec),
+                                           std::move(archive_vec),
+                                           std::move(mv_base_vec),
+                                           &work_done,
+                                           &worker_failed_);
+            }
+        }
+        if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
-            worker_cv_.notify_all();
-            worker_cv_.wait(
-                worker_lk,
-                [this]
-                { return pending_work_.size() == 0 && active_workers_ == 0; });
+            // Skip the node groups that are no longer on this node.
+            Sharder::Instance().UnpinNodeGroupData(node_group);
+            continue;
         }
-        worker_lk.unlock();
 
+        {
+            std::unique_lock<std::mutex> worker_lk(worker_mux_);
+
+            if (pending_work_.size() != 0)
+            {
+                worker_cv_.notify_all();
+                worker_cv_.wait(worker_lk,
+                                [this, &work_done, &work_started]
+                                { return work_done == work_started; });
+            }
+        }
+        for (auto &txm : txms)
+        {
+            CommitTxRequest commit_req;
+
+            commit_req.Reset();
+            txm->Execute(&commit_req);
+            commit_req.Wait();
+        }
+
+#ifdef RANGE_PARTITION_ENABLED
+        for (auto &split_thread : range_split_workers)
+        {
+            split_thread.join();
+        }
+#endif
         // finish checkpoint on this node group, unpin its data and clear its
         // ccmaps and catalogs if it is no longer leader
         Sharder::Instance().UnpinNodeGroupData(node_group);
 
-        if (worker_flushed_.load(std::memory_order_acquire) &&
+        if (!worker_failed_.load(std::memory_order_relaxed) &&
             Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
@@ -187,142 +403,85 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
     local_shards_.SetWaitingCkpt(false);
 }
 
-void Checkpointer::CkptWorker(Checkpointer *ckptr)
+void Checkpointer::FlushDataWorker()
 {
-    std::vector<FlushRecord> ckpt_vec;
-    ckpt_vec.reserve(10000);
-    std::vector<FlushRecord> archive_vec;
-    // Cache the entries to move record from "base" table to "archive" table
-    std::vector<LruEntry *> mv_base_vec;
-
-    std::unique_lock<std::mutex> worker_lk(ckptr->worker_mux_);
-    ckptr->active_workers_++;
+    std::unique_lock<std::mutex> worker_lk(worker_mux_);
     while (true)
     {
-        std::unique_lock<std::mutex> status_lk(ckptr->ckpt_mux_);
-        if (ckptr->pending_work_.size() == 0 &&
-            ckptr->status_ != Status::Terminated)
+        std::unique_lock<std::mutex> status_lk(ckpt_mux_);
+        if (pending_work_.size() == 0 && status_ != Status::Terminated)
         {
             status_lk.unlock();
-            ckptr->active_workers_--;
-            ckptr->worker_cv_.notify_all();
-            ckptr->worker_cv_.wait(
+            worker_cv_.notify_all();
+            worker_cv_.wait(
                 worker_lk,
-                [ckptr]
+                [this]
                 {
-                    std::unique_lock<std::mutex> status_lk(ckptr->ckpt_mux_);
-                    return ckptr->pending_work_.size() != 0 ||
-                           ckptr->status_ == Status::Terminated;
+                    std::unique_lock<std::mutex> status_lk(ckpt_mux_);
+                    return pending_work_.size() != 0 ||
+                           status_ == Status::Terminated;
                 });
-            ckptr->active_workers_++;
         }
         else
         {
             status_lk.unlock();
         }
 
-        if (ckptr->pending_work_.size() == 0)
+        if (pending_work_.size() == 0)
         {
             // Checkpointer is terminating
-            ckptr->active_workers_--;
             return;
         }
         // Retrieve first pending work and pop it.
-        CkptrWorkData &cur_work = ckptr->pending_work_.front();
+        FlushDataWork &cur_work = pending_work_.front();
+#ifdef RANGE_PARTITION_ENABLED
+        uint64_t ckpt_ts = cur_work.ckpt_ts_;
+#endif
         uint32_t node_group = cur_work.node_group_;
         int64_t leader_term = cur_work.term_;
-        uint64_t ckpt_ts = cur_work.ckpt_ts_;
-        bool is_last_ckpt = cur_work.is_last_ckpt_;
-        // uint64_t last_ckpt_ts = cur_work.last_ckpt_ts_;
         TableName table_name = cur_work.table_name_;
-        ckptr->pending_work_.erase(ckptr->pending_work_.begin());
+        const TableSchema *schema = cur_work.schema_;
+        std::unique_ptr<vector<FlushRecord>> ckpt_vec_owner, archive_vec_owner;
+        std::vector<FlushRecord> *ckpt_vec, *archive_vec;
+        std::unique_ptr<std::vector<LruEntry *>> mv_base_owner;
+        std::vector<LruEntry *> *mv_base_vec;
+        if (cur_work.vec_owner_)
+        {
+            ckpt_vec_owner = std::move(cur_work.ckpt_vec_);
+            ckpt_vec = ckpt_vec_owner.get();
+            archive_vec_owner = std::move(cur_work.archive_vec_);
+            archive_vec = archive_vec_owner.get();
+            mv_base_owner = std::move(cur_work.mv_base_vec_);
+            mv_base_vec = mv_base_owner.get();
+        }
+        else
+        {
+            ckpt_vec = cur_work.ckpt_vec_ptr_;
+            archive_vec = cur_work.archive_vec_ptr_;
+            mv_base_vec = cur_work.mv_base_vec_ptr_;
+        }
+        uint16_t *work_done = cur_work.work_done_;
+        std::atomic_bool *fail = cur_work.fail_;
+        CcHandlerResult<Void> *hand_res = cur_work.hand_res_;
+
+        pending_work_.erase(pending_work_.begin());
         worker_lk.unlock();
 
-        bool flushed = true;
-        // Issue read catalog tx_request to acquire read lock on catalog
-        // cc_entry using base table name, and acquire read lock in one
-        // shard is good enough to block schema change.
-        const TableName base_table_name_{table_name.GetBaseTableNameSV(),
-                                         TableType::Primary};
-
-        TransactionExecution *ckpt_txm = ckptr->tx_service_->NewTx();
-        InitTxRequest init_req;
-        // Set isolation level to RepeatableRead to ensure the readlock will
-        // be set during the execution of the following ReadTxRequest.
-        init_req.iso_level_ = IsolationLevel::RepeatableRead;
-        init_req.protocol_ = CcProtocol::Locking;
-        init_req.Reset();
-        ckpt_txm->Execute(&init_req);
-        init_req.Wait();
-
-        if (init_req.IsError())
-        {
-            LOG(INFO) << "init tx failed";
-            ckptr->worker_flushed_.compare_exchange_strong(flushed, false);
-            worker_lk.lock();
-            continue;
-        }
-
-        // If table_name has been dropped at this point, read lock would not
-        // be acquired.
-        CatalogKey table_key(base_table_name_);
-        CatalogRecord catalog_rec;
-
-        ReadTxRequest read_req;
-        read_req.Reset();
-        read_req.Set(&catalog_ccm_name,
-                     &table_key,
-                     &catalog_rec,
-                     false,
-                     false,
-                     true,
-                     0UL);
-        ckpt_txm->Execute(&read_req);
-        read_req.Wait();
-
-        if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
-        {
-            // Use AbortTxRequest to release read lock.
-            AbortTxRequest abort_req;
-            abort_req.Reset();
-            ckpt_txm->Execute(&abort_req);
-            abort_req.Wait();
-            assert(abort_req.Result() == false);
-            LOG(INFO) << "checkpointer add read lock on table failed, "
-                         "table name: "
-                      << table_key.Name().StringView();
-
-            ckptr->worker_flushed_.compare_exchange_strong(flushed, false);
-            worker_lk.lock();
-            continue;
-        }
-
-        // Clear the container.
-        ckpt_vec.clear();
-        archive_vec.clear();
-        mv_base_vec.clear();
-        CkptScanCc ckpt_scan_cc(
-            table_name, ckpt_ts, ckpt_vec, archive_vec, mv_base_vec);
-
-        for (auto &ccs : ckptr->local_shards_.cc_shards_)
-        {
-            ckpt_scan_cc.Reset(node_group);
-            ccs->Enqueue(&ckpt_scan_cc);
-            ckpt_scan_cc.Wait();
-        }
+        bool succ = true;
 
         // flush to data store if this node group leader term does not
         // change
-        if (!(ckpt_vec.empty() && archive_vec.empty() && mv_base_vec.empty()) &&
+        if (!(ckpt_vec->empty() && archive_vec->empty() &&
+              mv_base_vec->empty()) &&
             Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
             // Flushes to the data store
             bool ckpt_ret = true;
 
-            if (ckptr->local_shards_.EnableMvcc() && mv_base_vec.size() > 0)
+            if (local_shards_.EnableMvcc() && mv_base_vec->size() > 0)
             {
-                ckpt_ret = ckptr->store_hd_->CopyBaseToArchive(
-                    mv_base_vec, node_group, table_name, catalog_rec.Schema());
+                ckpt_ret = store_hd_->CopyBaseToArchive(
+                    *mv_base_vec, node_group, table_name, schema);
                 if (!ckpt_ret)
                 {
                     LOG(INFO) << "checkpointer CopyBaseToArchive flush to kv "
@@ -330,13 +489,10 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
                 }
             }
 
-            if (ckpt_ret && !ckpt_vec.empty())
+            if (ckpt_ret && !ckpt_vec->empty())
             {
-                ckpt_ret = ckptr->store_hd_->PutAll(ckpt_vec,
-                                                    table_name,
-                                                    catalog_rec.Schema(),
-                                                    node_group,
-                                                    is_last_ckpt);
+                ckpt_ret = store_hd_->PutAll(
+                    *ckpt_vec, table_name, schema, node_group);
                 if (!ckpt_ret)
                 {
                     LOG(INFO) << "checkpointer PutAll flush to kv "
@@ -348,73 +504,212 @@ void Checkpointer::CkptWorker(Checkpointer *ckptr)
             // entry in ccmap to latest checkpoint version's commit_ts.
             if (ckpt_ret)
             {
-                for (auto &ref : ckpt_vec)
+                for (auto &ref : *ckpt_vec)
                 {
                     ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                              std::memory_order_release);
+                    ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                 }
+#ifdef RANGE_PARTITION_ENABLED
+                // Update the slice size in data store.
+                if (ckpt_vec->size())
+                {
+                    UpdateStoreSlice(table_name,
+                                     schema->GetKVCatalogInfo(),
+                                     schema->Version(),
+                                     node_group,
+                                     *ckpt_vec,
+                                     ckpt_ts);
+                }
+                // Flush statistics based on primary table.
+                if (table_name.Type() == TableType::Primary)
+                {
+                    uint32_t shard_code = Sharder::Instance().ShardCode(
+                        std::hash<TableName>{}(table_name));
+                    uint32_t shard_id = shard_code >> 10;
+                    if (shard_id == node_group)
+                    {
+                        SyncStatistics(this,
+                                       table_name,
+                                       shard_code,
+                                       schema,
+                                       schema->Version());
+                    }
+                }
+#endif
             }
             else
             {
-                ckptr->worker_flushed_.compare_exchange_strong(flushed, false);
+                succ = false;
             }
 
             bool flush_undo_ret = true;
-            if (ckpt_ret && ckptr->local_shards_.EnableMvcc())
+            if (ckpt_ret && local_shards_.EnableMvcc())
             {
-                flush_undo_ret = ckptr->store_hd_->PutArchivesAll(
-                    node_group,
-                    table_name,
-                    catalog_rec.Schema()->GetKVCatalogInfo(),
-                    archive_vec);
+                flush_undo_ret =
+                    store_hd_->PutArchivesAll(node_group,
+                                              table_name,
+                                              schema->GetKVCatalogInfo(),
+                                              *archive_vec);
 
                 if (!flush_undo_ret)
                 {
                     // If ckpt succeeds and flushing undo fails, it is safe
                     // to update the local checkpoint timestamp, but not
                     // safe to truncate the redo log.
-                    ckptr->worker_flushed_.compare_exchange_strong(flushed,
-                                                                   false);
+                    succ = false;
                     LOG(INFO) << "checkpointer PutArchivesAll flush to "
                                  "kv storage failed";
                 }
             }
-
-#ifdef RANGE_PARTITIONED
-            ckptr->UpdateStoreSlice(table_name,
-                                    catalog_rec.Schema()->GetKVCatalogInfo(),
-                                    catalog_rec.SchemaTs(),
-                                    node_group,
-                                    ckpt_vec,
-                                    cur_work.last_ckpt_ts_,
-                                    ckpt_ts);
-#endif
-
-            // Flush statistics based on primary table.
-            if (table_name.Type() == TableType::Primary)
-            {
-                uint32_t shard_code = Sharder::Instance().ShardCode(
-                    std::hash<TableName>{}(table_name));
-                uint32_t shard_id = shard_code >> 10;
-                if (shard_id == node_group)
-                {
-                    SyncStatistics(ckptr,
-                                   table_name,
-                                   shard_code,
-                                   catalog_rec.Schema(),
-                                   catalog_rec.SchemaTs());
-                }
-            }
+        }
+        worker_lk.lock();
+        // Update the work result after acquiring the lock.
+        if (work_done)
+        {
+            (*work_done)++;
         }
 
-        // Use CommitTxRequest to release read lock.
-        CommitTxRequest commit_req;
+        if (fail != nullptr && !succ)
+        {
+            bool false_ref = true;
+            fail->compare_exchange_strong(false_ref, true);
+        }
 
-        commit_req.Reset();
-        ckpt_txm->Execute(&commit_req);
-        commit_req.Wait();
-        worker_lk.lock();
+        if (hand_res)
+        {
+            if (!succ)
+            {
+                hand_res->SetError(CcErrorCode::DATA_STORE_ERR);
+            }
+            else
+            {
+                hand_res->SetFinished();
+            }
+        }
     }
+}
+
+void Checkpointer::SplitFlushRange(
+    const TableName &table_name,
+    NodeGroupId node_group,
+    std::pair<const StoreRange *, std::vector<const TxKey *>> split_info)
+{
+    bool fail = false;
+    std::string log_output(
+        "Splitting table " + table_name.String() + " range " +
+        std::to_string(split_info.first->PartitionId()) + " into " +
+        std::to_string(split_info.second.size() + 1) +
+        " ranges. New range ids ");
+    // Request for new range ids from data store. The new range ids returned by
+    // data store are always unique.
+    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_ids;
+    for (auto &new_key : split_info.second)
+    {
+        int32_t new_part_id;
+        if (!store_hd_->GetNextRangePartitionId(table_name, &new_part_id))
+        {
+            worker_failed_.compare_exchange_strong(fail, true);
+            return;
+        }
+        log_output.append(std::to_string(new_part_id) + ",");
+        new_range_ids.emplace_back(std::move(new_key->Clone()), new_part_id);
+    }
+    log_output.back() = '.';
+    LOG(INFO) << log_output;
+    // Issue read catalog tx_request to acquire read lock on catalog
+    // cc_entry using base table name, and acquire read lock in one
+    // shard is good enough to block schema change.
+    const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                    TableType::Primary};
+
+    TransactionExecution *split_txm = tx_service_->NewTx();
+    InitTxRequest init_req;
+    // Set isolation level to RepeatableRead to ensure the readlock will
+    // be set during the execution of the following ReadTxRequest.
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    init_req.Reset();
+    split_txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        worker_failed_.compare_exchange_strong(fail, true);
+        return;
+    }
+
+    // If table_name has been dropped at this point, read lock would not
+    // be acquired.
+    CatalogKey table_key(base_table_name);
+    CatalogRecord catalog_rec;
+
+    ReadTxRequest read_req;
+    read_req.Reset();
+    read_req.Set(
+        &catalog_ccm_name, &table_key, &catalog_rec, false, false, true, 0UL);
+    split_txm->Execute(&read_req);
+    read_req.Wait();
+
+    if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
+    {
+        // Use AbortTxRequest to release read lock.
+        AbortTxRequest abort_req;
+        abort_req.Reset();
+        split_txm->Execute(&abort_req);
+        abort_req.Wait();
+        assert(abort_req.Result() == false);
+        LOG(INFO) << "checkpointer add read lock on table failed, "
+                     "table name: "
+                  << table_key.Name().StringView();
+        worker_failed_.compare_exchange_strong(fail, true);
+        return;
+    }
+
+    // Start the SplitFlush tx. This would split the range, flush the data and
+    // update slice metadata.
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    const TableRangeEntry *entry = local_shards_.GetTableRangeEntry(
+        range_table_name, node_group, split_info.first->RangeStartKey());
+    assert(entry != nullptr);
+    const TxKey *old_start_key = split_info.first->RangeStartKey();
+    if (old_start_key == nullptr)
+    {
+        old_start_key = local_shards_.catalog_factory_->NegativeInfKey();
+    }
+    const TxKey *old_end_key = split_info.first->RangeEndKey();
+    if (old_end_key == nullptr)
+    {
+        old_end_key = local_shards_.catalog_factory_->PositiveInfKey();
+    }
+    SplitFlushTxRequest split_req(table_name,
+                                  catalog_rec.Schema(),
+                                  node_group,
+                                  old_start_key,
+                                  old_end_key,
+                                  entry->GetRangeInfo(),
+                                  std::move(new_range_ids));
+    split_txm->Execute(&split_req);
+    split_req.Wait();
+    if (split_req.IsError())
+    {
+        LOG(INFO) << "Split range on table " << table_name.StringView()
+                  << " partition " << entry->GetRangeInfo()->partition_id_
+                  << " failed.";
+        AbortTxRequest abort_req;
+        abort_req.Reset();
+        split_txm->Execute(&abort_req);
+        abort_req.Wait();
+        assert(abort_req.Result() == false);
+        worker_failed_.compare_exchange_strong(fail, true);
+        return;
+    }
+    CommitTxRequest commit_req;
+
+    commit_req.Reset();
+    split_txm->Execute(&commit_req);
+    commit_req.Wait();
 }
 
 void Checkpointer::Run()
@@ -422,7 +717,7 @@ void Checkpointer::Run()
     // Starts checkpointer worker threads
     for (int id = 0; id < checkpointer_worker_num_; id++)
     {
-        worker_thds_.push_back(std::thread(CkptWorker, this));
+        worker_thds_.push_back(std::thread([this] { FlushDataWorker(); }));
     }
 
     std::unique_lock<std::mutex> lk(ckpt_mux_);
@@ -537,11 +832,10 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                                     uint64_t schema_ts,
                                     NodeGroupId node_group_id,
                                     std::vector<FlushRecord> &ckpt_vec,
-                                    uint64_t last_ckpt_ts,
                                     uint64_t ckpt_ts)
 {
     bool success = true;
-    bool slice_change = false;
+    bool range_updated = false;
     StoreRange *curr_range = nullptr;
     StoreSlice *curr_slice = nullptr;
     size_t slice_first_idx = 0;
@@ -557,17 +851,11 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                     (*curr_range->RangeEndKey() < ckpt_key ||
                      *curr_range->RangeEndKey() == ckpt_key))
             {
-                if (curr_range != nullptr)
+                if (curr_range != nullptr && range_updated)
                 {
-                    bool ret = store_hd_->UpdateRangeSlices(
-                        table_name,
-                        kv_info,
-                        schema_ts,
-                        curr_range->RangeStartKey(),
-                        curr_range->Slices(),
-                        slice_change);
+                    bool ret = curr_range->UpdateRangeSlicesInStore(
+                        table_name, kv_info, schema_ts, true, store_hd_);
                     success = ret && success;
-                    slice_change = false;
                 }
 
                 // The current ckpt key falls into a new range. Finds the range.
@@ -575,11 +863,12 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                     table_name, node_group_id, ckpt_key);
                 if (curr_range == nullptr)
                 {
-                    LOG(ERROR)
-                        << "Fail to find the range for the checkpoint key, "
-                        << table_name.StringView();
+                    LOG(ERROR) << "Fail to find the range for the "
+                                  "checkpoint key, "
+                               << table_name.StringView();
                     return false;
                 }
+                range_updated = false;
             }
 
             curr_slice = curr_range->FindSlice(ckpt_key);
@@ -591,30 +880,156 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
             curr_slice->EndKey() != nullptr &&
                 !(*ckpt_vec[idx + 1].Key() < *curr_slice->EndKey()))
         {
-            GetPostCkptSlice post_ckpt_slice(table_name,
-                                             node_group_id,
-                                             curr_slice,
-                                             curr_range,
-                                             last_ckpt_ts,
-                                             ckpt_ts);
+            int32_t slice_delta_size = 0;
 
+            for (size_t pos = slice_first_idx; pos <= idx; ++pos)
+            {
+                slice_delta_size += ckpt_vec.at(pos).delta_size_;
+            }
+
+            if (slice_delta_size)
+            {
+                curr_slice->UpdateSize(curr_slice->Size() + slice_delta_size);
+                range_updated = true;
+            }
+
+            // The next entry falls into a new slice.
+            slice_first_idx = idx + 1;
+        }
+    }
+
+    if (range_updated)
+    {
+        bool ret = curr_range->UpdateRangeSlicesInStore(
+            table_name, kv_info, schema_ts, true, store_hd_);
+        success = success && ret;
+    }
+    return success;
+}
+
+bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
+    const TableName &table_name,
+    const KVCatalogInfo *kv_info,
+    uint64_t schema_ts,
+    NodeGroupId node_group_id,
+    std::vector<FlushRecord> &ckpt_vec,
+    uint64_t last_ckpt_ts,
+    uint64_t ckpt_ts,
+    std::vector<std::pair<const StoreRange *, std::vector<const TxKey *>>>
+        &splitting_info)
+{
+    bool success = true;
+    StoreRange *curr_range = nullptr;
+    StoreSlice *curr_slice = nullptr;
+    uint64_t curr_range_size = 0;
+    std::vector<uint32_t> post_ckpt_slice_sizes;
+    size_t slice_first_idx = 0;
+
+    for (size_t idx = 0; idx < ckpt_vec.size(); ++idx)
+    {
+        if (slice_first_idx == idx)
+        {
+            const TxKey &ckpt_key = *ckpt_vec[idx].Key();
+
+            if (curr_range == nullptr ||
+                curr_range->RangeEndKey() != nullptr &&
+                    (*curr_range->RangeEndKey() < ckpt_key ||
+                     *curr_range->RangeEndKey() == ckpt_key))
+            {
+                // The current ckpt key falls into a new range. Finds
+                // the range.
+                curr_range = local_shards_.FindRange(
+                    table_name, node_group_id, ckpt_key);
+                curr_range_size = 0;
+                post_ckpt_slice_sizes.clear();
+                if (curr_range == nullptr)
+                {
+                    // Range table not initialized yet. Issue a read request
+                    // to range table to create it and initialize its range
+                    // info in local cc shards.
+                    // We need to release the read lock on range immediately
+                    // after fetching the range info from data store so that it
+                    // does not block potential split-flush tx.
+                    TransactionExecution *txm = tx_service_->NewTx();
+                    InitTxRequest init_req;
+                    // Set isolation level to RepeatableRead to ensure the
+                    // readlock will be set during the execution of the
+                    // following ReadTxRequest.
+                    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+                    init_req.protocol_ = CcProtocol::Locking;
+                    init_req.Reset();
+                    txm->Execute(&init_req);
+                    init_req.Wait();
+
+                    if (init_req.IsError())
+                    {
+                        AbortTxRequest abort_req;
+                        abort_req.Reset();
+                        txm->Execute(&abort_req);
+                        abort_req.Wait();
+
+                        LOG(ERROR) << "Fail to find the range for the "
+                                      "checkpoint key, "
+                                   << table_name.StringView();
+                        return false;
+                    }
+                    TableName range_table_name(table_name.StringView(),
+                                               TableType::RangePartition);
+                    RangeRecord rec;
+                    ReadTxRequest read_range_req(
+                        &range_table_name, &ckpt_key, &rec, false, false, true);
+                    txm->Execute(&read_range_req);
+                    read_range_req.Wait();
+                    if (read_range_req.IsError())
+                    {
+                        LOG(ERROR) << "Fail to find the range for the "
+                                      "checkpoint key, "
+                                   << table_name.StringView();
+                        return false;
+                    }
+                    CommitTxRequest commit_req;
+
+                    commit_req.Reset();
+                    txm->Execute(&commit_req);
+                    commit_req.Wait();
+                    curr_range = local_shards_.FindRange(
+                        table_name, node_group_id, ckpt_key);
+                }
+            }
+            curr_slice = curr_range->FindSlice(ckpt_key);
+        }
+
+        // Have iterated all flushed data items falling into the
+        // current slice. Re-calculates the slice's size.
+        if (idx == ckpt_vec.size() - 1 ||
+            curr_slice->EndKey() != nullptr &&
+                !(*ckpt_vec[idx + 1].Key() < *curr_slice->EndKey()))
+        {
             int32_t slice_delta_size = 0;
             uint32_t slice_size = 0;
 
             for (size_t pos = slice_first_idx; pos <= idx; ++pos)
             {
-                int32_t delta = ckpt_vec[pos].cce_->delta_size_.load(
-                    std::memory_order_relaxed);
-                if (delta == INT32_MAX)
-                {
-                    slice_delta_size = INT32_MAX;
-                    break;
-                }
-                slice_delta_size += delta;
+                slice_delta_size += ckpt_vec[pos].delta_size_;
             }
 
-            if (slice_delta_size == INT32_MAX)
+            int32_t sum = curr_slice->Size() + slice_delta_size;
+            slice_size = sum >= 0 ? sum : 0;
+            curr_range_size += slice_size;
+
+            // If the slice needs to be split, calculate splitting keys and
+            // sub-slices' sizes.
+            if (slice_size > StoreSlice::slice_upper_bound)
             {
+                GetPostCkptSlice post_ckpt_slice(table_name,
+                                                 node_group_id,
+                                                 curr_slice,
+                                                 curr_range,
+                                                 ckpt_vec,
+                                                 slice_first_idx,
+                                                 idx + 1,
+                                                 last_ckpt_ts,
+                                                 ckpt_ts);
                 local_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
                 post_ckpt_slice.Wait();
 
@@ -624,35 +1039,9 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                 }
 
                 const auto &item_vec = post_ckpt_slice.SliceRecordCollection();
-                for (const auto &item : item_vec)
-                {
-                    slice_size += item.second;
-                }
-            }
-            else
-            {
-                int32_t sum = curr_slice->Size();
-                sum += slice_delta_size;
-                slice_size = sum >= 0 ? sum : 0;
-            }
-
-            // If the slice needs to be split, loads the slice from the
-            // data store to calculate splitting keys and sub-slices'
-            // sizes.
-            const auto &item_vec = post_ckpt_slice.SliceRecordCollection();
-            if (slice_size > StoreSlice::slice_upper_bound &&
-                item_vec.size() > 1)
-            {
-                if (!post_ckpt_slice.IsFinish())
-                {
-                    local_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
-                    post_ckpt_slice.Wait();
-                }
-
-                if (post_ckpt_slice.IsError())
-                {
-                }
-
+                // Split the slice based on post checkpoint item size, but do
+                // not update the slice size with the post checkpoint size yet
+                // since the data is still not flushed into data store yet.
                 uint32_t subslice_cnt =
                     slice_size / StoreSlice::slice_upper_bound + 1;
                 uint32_t avg_subslice_size = slice_size / subslice_cnt;
@@ -660,53 +1049,99 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                     splitting_keys;
                 splitting_keys.reserve(subslice_cnt);
 
-                uint32_t subslice_size = 0;
+                uint32_t post_ckpt_subslice_size = 0;
+                uint32_t curr_subslice_size = 0;
                 uint32_t subslice_start = 0;
-                for (size_t idx = 0; idx < item_vec.size(); ++idx)
+                for (size_t pos = 0; pos < item_vec.size(); ++pos)
                 {
-                    subslice_size += item_vec[idx].second;
+                    post_ckpt_subslice_size += std::get<2>(item_vec[pos]);
+                    curr_subslice_size += std::get<1>(item_vec[pos]);
 
-                    if (subslice_size >= avg_subslice_size ||
-                        idx == item_vec.size() - 1)
+                    if (post_ckpt_subslice_size >= avg_subslice_size ||
+                        pos == item_vec.size() - 1)
                     {
                         if (splitting_keys.empty())
                         {
                             // The first sub-slice's start key re-uses
                             // the old slice's start key, so there is no
                             // need to allocate a new key.
-                            splitting_keys.emplace_back(nullptr, subslice_size);
+                            splitting_keys.emplace_back(nullptr,
+                                                        curr_subslice_size);
                         }
                         else
                         {
                             splitting_keys.emplace_back(
-                                item_vec[subslice_start].first->Clone(),
-                                subslice_size);
+                                std::get<0>(item_vec[subslice_start])->Clone(),
+                                curr_subslice_size);
                         }
-                        subslice_size = 0;
-                        subslice_start = idx + 1;
+                        post_ckpt_slice_sizes.push_back(
+                            post_ckpt_subslice_size);
+                        post_ckpt_subslice_size = 0;
+                        curr_subslice_size = 0;
+                        subslice_start = pos + 1;
                     }
                 }
-
-                curr_range->UpdateSlice(curr_slice, splitting_keys);
-                slice_change = true;
+                // Split StoreSlice in memory. Slice info in KV store
+                // will be updated after checkpoint.
+                if (splitting_keys.size() > 1)
+                {
+                    curr_range->UpdateSlice(curr_slice, splitting_keys);
+                }
             }
             else
             {
-                curr_slice->UpdateSize(slice_size);
+                post_ckpt_slice_sizes.push_back(slice_size);
+            }
+
+            // At the end of current range
+            if (idx == ckpt_vec.size() - 1 ||
+                curr_range->RangeEndKey() != nullptr &&
+                    (*curr_range->RangeEndKey() < *ckpt_vec[idx + 1].Key() ||
+                     *curr_range->RangeEndKey() == *ckpt_vec[idx + 1].Key()))
+            {
+                if (curr_range->NeedSplit(curr_range_size))
+                {
+                    auto &slices = curr_range->Slices();
+                    std::vector<const TxKey *> new_range_keys;
+                    uint32_t slice_idx = 0;
+                    bool first_subrange = true;
+                    while (slice_idx < slices.size())
+                    {
+                        for (uint32_t curr_subrange_size = 0;
+                             curr_subrange_size < StoreRange::range_max_size &&
+                             slice_idx < slices.size();
+                             slice_idx++)
+                        {
+                            curr_subrange_size +=
+                                post_ckpt_slice_sizes[slice_idx];
+                        }
+                        // Skip the first subrange since it will reuse the
+                        // current range entry
+                        if (first_subrange)
+                        {
+                            first_subrange = false;
+                        }
+                        else if (slice_idx < slices.size())
+                        {
+                            new_range_keys.emplace_back(
+                                slices[slice_idx]->StartKey());
+                        }
+                    }
+
+                    // Pass todo splitting ranges to caller through
+                    // splitting_info
+                    if (new_range_keys.size())
+                    {
+                        splitting_info.emplace_back(curr_range,
+                                                    std::move(new_range_keys));
+                    }
+                }
             }
 
             // The next entry falls into a new slice.
             slice_first_idx = idx + 1;
         }
     }
-
-    bool ret = store_hd_->UpdateRangeSlices(table_name,
-                                            kv_info,
-                                            schema_ts,
-                                            curr_range->RangeStartKey(),
-                                            curr_range->Slices(),
-                                            slice_change);
-    success = success && ret;
 
     return success;
 }
@@ -757,4 +1192,28 @@ void Checkpointer::SyncStatistics(Checkpointer *ckptr,
     }
 }
 
+void Checkpointer::FlushData(const TableName &table_name,
+                             const TableSchema *schema,
+                             uint64_t node_group,
+                             int64_t term,
+                             uint64_t ckpt_ts,
+                             std::vector<FlushRecord> *ckpt_vec,
+                             std::vector<FlushRecord> *archive_vec,
+                             std::vector<LruEntry *> *mv_vec,
+                             CcHandlerResult<Void> *res)
+{
+    std::unique_lock<std::mutex> worker_lk(worker_mux_);
+    pending_work_.emplace_back(node_group,
+                               term,
+                               ckpt_ts,
+                               table_name,
+                               schema,
+                               ckpt_vec,
+                               archive_vec,
+                               mv_vec,
+                               nullptr,
+                               nullptr,
+                               res);
+    worker_cv_.notify_all();
+}
 }  // namespace txservice

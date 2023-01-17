@@ -37,8 +37,7 @@ public:
     bool PutAll(std::vector<txservice::FlushRecord> &batch,
                 const txservice::TableName &table_name,
                 const txservice::TableSchema *table_schema,
-                uint32_t node_group,
-                bool is_last_ckpt) override
+                uint32_t node_group) override
     {
         for (const auto &ref : batch)
         {
@@ -181,12 +180,22 @@ public:
         return true;
     }
 
-    bool CopyRangeData(const txservice::TableName &table_name,
-                       int32_t old_partition_id,
-                       int32_t new_partition_id,
-                       const txservice::TxKey *start_key,
-                       uint64_t tx_ts,
-                       const txservice::TableSchema *table_schema) override
+    bool UpsertRanges(
+        const TableName &table_name,
+        std::vector<
+            std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
+            range_info,
+        uint64_t version)
+    {
+        return true;
+    }
+
+    bool CopyRangeData(
+        const txservice::TableName &table_name,
+        int32_t old_partition_id,
+        std::vector<std::pair<TxKey::Uptr, int32_t>> &new_partition_info,
+        uint64_t tx_ts,
+        const txservice::TableSchema *table_schema) override
     {
         return true;
     }
@@ -203,15 +212,6 @@ public:
     bool GetNextRangePartitionId(const txservice::TableName &tablename,
                                  int32_t *out_next_partition_id,
                                  int retry_count = 5) override
-    {
-        return true;
-    }
-
-    bool UpsertRange(const txservice::TableName &range_table_name,
-                     const TableSchema *table_schema,
-                     TxKey *key,
-                     int32_t partition_id,
-                     int64_t ts) override
     {
         return true;
     }

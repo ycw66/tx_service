@@ -33,19 +33,6 @@ class RemoteCcHandler;
 class Checkpointer;
 class TxService;
 
-struct RangesByKey
-{
-    RangesByKey() = delete;
-
-    RangesByKey(int32_t first_partition_id)
-        : first_partition_id_(first_partition_id)
-    {
-    }
-
-    int32_t first_partition_id_;
-    std::map<const TxKey *, int32_t, PtrLessThan<TxKey>> ranges_by_key_;
-};
-
 class LocalCcShards
 {
 public:
@@ -260,6 +247,13 @@ public:
     void UpdateTsBase(uint64_t timestamp);
 
     /**
+     * -------------------------------------
+     *
+     * Catalog Operation Interface
+     *
+     * -------------------------------------
+     */
+    /**
      * Returns false if catalog entry of higher version already exists.
      * @param table_name
      * @param cc_ng_id
@@ -301,14 +295,30 @@ public:
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
-    std::unordered_set<TableName> GetCatalogTableNamesForCkpt(
-        NodeGroupId cc_ng_id);
+    /**
+     * @brief Drops all tables' catalogs associated with the specified cc node
+     * group. The function is called when this node steps down from the leader
+     * of the specified cc node group.
+     *
+     * @param cc_ng_id The cc node group whose leader has transferred to another
+     * node.
+     */
+    void DropCatalogs(NodeGroupId cc_ng_id);
+
+    std::vector<TableName> GetCatalogTableNamesForCkpt(NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);
 
+    /**
+     * ---------------------------------
+     *
+     * Table Range Operation Interface
+     *
+     * ---------------------------------
+     */
     void CreateSplitRangeRecoveryTx(
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
         const TableSchema *table_schema,
@@ -323,60 +333,73 @@ public:
         uint64_t commit_ts,
         std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry);
 
+    /**
+     * @brief Create a new table range entry and fill current range info with
+     * given partition id and start key.
+     */
+    const TableRangeEntry *CreateTableRange(
+        const TableName &table_name,
+        const NodeGroupId ng_id,
+        int32_t partition_id,
+        TxKey::Uptr start_key,
+        const TxKey *end_key,
+        uint64_t version,
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys = nullptr);
+    /**
+     * @brief Initialize TableRangeEntry for a table in range_maps_.
+     */
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges,
                          const NodeGroupId ng_id);
 
-    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id);
-
-    RangesByKey *GetRangesByKey(const TableName &range_table_name,
-                                const NodeGroupId ng_id);
-
-    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesForATable(
-        const TableName &range_table_name, const NodeGroupId ng_id);
+    /**
+     * @brief Get the All Table Ranges for a table.
+     */
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+        *GetTableRangesForATable(const TableName &range_table_name,
+                                 const NodeGroupId ng_id);
 
     /**
-     * @brief Create the dirty range, and return the shade of the dirty range
+     * @brief Upload new range info into range_info_ in TableRangeEntry
+     * object.
      */
-    const TableRangeEntryWithShade *CreateDirtyTableRange(
+    const TableRangeEntry *UploadNewRangeInfo(
         const TableName &table_name,
-        int32_t partition_id,
-        std::unique_ptr<TxKey> new_key,
-        int32_t new_partition_id,
-        uint64_t commit_ts,
-        const NodeGroupId ng_id);
+        const NodeGroupId ng_id,
+        const TxKey *key,
+        const std::vector<std::unique_ptr<TxKey>> &new_key,
+        const std::vector<int32_t> &new_partition_id,
+        uint64_t commit_ts);
 
     /**
-     * @brief Commit dirty range and return both the old and new range entries
-     */
-    const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
-        const TableName &table_name,
-        int32_t partition_id,
-        uint64_t commit_ts,
-        const NodeGroupId ng_id);
-
-    /**
-     * @brief Clear the shade of the dirty range after dirty range committed
-     */
-    void PostCommitDirtyTableRange(const TableName &table_name,
-                                   int32_t partition_id,
-                                   const NodeGroupId ng_id);
-
-    /**
-     * @brief Clean range table
+     * @brief Remove all ranges of table_name from local cc shard.
      */
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
-    const TableRangeEntry *GetTableEffectiveRangeEntry(
-        const TableName &table_name,
-        int32_t partition_id,
-        const NodeGroupId ng_id);
+    /**
+     * @brief Get the TableRangeEntry with given table name and key
+     * from local cc shards. This result in a binary search with key in
+     * table_ranges_.
+     */
+    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                        const NodeGroupId ng_id,
+                                        const TxKey *key);
 
-    const TableRangeEntryWithShade *GetTableRangeWithShade(
-        const TableName &table_name,
-        int32_t partition_id,
-        const NodeGroupId ng_id);
+    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                        const NodeGroupId ng_id,
+                                        int32_t range_id);
+
+    RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const NodeGroupId ng_id,
+                               const Schema *key_schema,
+                               const Schema *rec_schema,
+                               uint64_t schema_ts,
+                               const KVCatalogInfo *kv_info,
+                               const TxKey &key,
+                               bool inclusive,
+                               CcRequestBase *cc_request,
+                               CcShard *cc_shard,
+                               RangeSliceOpStatus &pin_status);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
@@ -397,15 +420,15 @@ public:
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
-    /**
-     * @brief Drops all tables' catalogs associated with the specified cc node
-     * group. The function is called when this node steps down from the leader
-     * of the specified cc node group.
-     *
-     * @param cc_ng_id The cc node group whose leader has transferred to another
-     * node.
-     */
-    void DropCatalogs(NodeGroupId cc_ng_id);
+    void FlushData(const TableName &table_name,
+                   const TableSchema *schema,
+                   uint64_t ckpt_ts,
+                   int64_t term,
+                   uint64_t node_group,
+                   std::vector<FlushRecord> *ckpt_vec,
+                   std::vector<FlushRecord> *archive_vec,
+                   std::vector<LruEntry *> *mv_vec,
+                   CcHandlerResult<Void> &hres);
 
     uint64_t StatsLocalActiveSiTxs()
     {
@@ -444,10 +467,25 @@ public:
 
 private:
     void TimerRun();
-    uint32_t FindRangePartitionId(const TableName &range_tbl_name,
-                                  const NodeGroupId ng_id,
-                                  const TxKey &key);
+    // Internal interface that exposes non const TableRangeEntry in
+    // table_ranges_
+    TableRangeEntry *GetTableRangeEntryInternal(
+        const TableName &range_table_name,
+        const NodeGroupId ng_id,
+        const TxKey *key);
 
+    TableRangeEntry *GetTableRangeEntryInternal(
+        const TableName &range_table_name,
+        const NodeGroupId ng_id,
+        int32_t range_id);
+
+    std::unordered_map<uint32_t, TableRangeEntry *>
+        *GetTableRangeIdsForATableInternal(const TableName &range_table_name,
+                                           const NodeGroupId ng_id);
+
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+        *GetTableRangesForATableInternal(const TableName &range_table_name,
+                                         const NodeGroupId ng_id);
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
@@ -477,15 +515,26 @@ private:
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
         table_catalogs_;  // string owner
 
+    // map<table name, map<partition id, range record>>
+    std::unordered_map<
+        TableName,
+        std::unordered_map<
+            NodeGroupId,
+            std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>>>
+        table_ranges_;  // string owner
+
+    // map from range id to TableRangeEntry. TableRangeEntry* here is the
+    // pointer to TableRangeEntry in table_ranges_. This map is used as a
+    // fast path from range id to table range in PinRangeSlice so that we
+    // can avoid doing a binary search with TxKey.
     std::unordered_map<
         TableName,
         std::unordered_map<NodeGroupId,
-                           std::map<int32_t, TableRangeEntryWithShade>>>
-        table_ranges_;  // string owner
+                           std::unordered_map<uint32_t, TableRangeEntry *>>>
+        table_range_ids_;
 
-    std::unordered_map<TableName, std::unordered_map<NodeGroupId, RangesByKey>>
-        table_range_maps_;
-    std::shared_mutex catalog_mux_;
+    // Protects meta data (table_ranges_ and table_catalogs_)
+    std::shared_mutex meta_data_mux_;
 
     TxService *tx_service_;
 

@@ -283,6 +283,16 @@ public:
                              uint16_t command_id,
                              CcHandlerResult<bool> &hres) override;
 
+    void CkptScan(const TableName &table_name,
+                  uint64_t ckpt_ts,
+                  uint64_t node_group,
+                  std::vector<FlushRecord> &ckpt_vec,
+                  std::vector<FlushRecord> &archive_vec,
+                  std::vector<LruEntry *> &mv_vec,
+                  CcHandlerResult<Void> &hres,
+                  const TxKey *range_start_key = nullptr,
+                  const TxKey *range_end_key = nullptr) override;
+
     /*
      * Get the node id which runs the current transaction.
      */
@@ -316,6 +326,7 @@ private:
     CcRequestPool<ScanSliceCc> scan_slice_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
+    CcRequestPool<CkptScanCc> ckpt_scan_pool;
 
     friend class remote::RemoteCcHandler;
 };

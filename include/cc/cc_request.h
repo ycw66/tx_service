@@ -94,16 +94,6 @@ public:
                         table_name_->GetBaseTableNameSV(), TableType::Primary};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
-                    // When a tx sends a request toward a table's range
-                    // cc map, either to look up the range containing the
-                    // input key or to lock a range for splitting/merging,
-                    // this or prior tx's must have accessed the table's
-                    // cc map at this node to read or write the table's
-                    // data. Initialization of the table's cc map needs to
-                    // instantiate the schema instance. So, the table's
-                    // schema should never be null.
-                    // assert(catalog_entry != nullptr &&
-                    // catalog_entry->schema_ != nullptr);
                     if (catalog_entry == nullptr ||
                         catalog_entry->schema_ == nullptr)
                     {
@@ -113,10 +103,10 @@ public:
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
                     // The request is toward a special cc map that contains a
-                    // tabmode's ranges.
-                    std::map<int32_t, TableRangeEntryWithShade> *ranges =
-                        ccs.GetTableRangesForATable(*table_name_,
-                                                    node_group_id_);
+                    // table's range meta data.
+                    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+                        *ranges = ccs.GetTableRangesForATable(*table_name_,
+                                                              node_group_id_);
                     if (ranges != nullptr)
                     {
                         ccs.CreateOrUpdateRangeCcMap(*table_name_,
@@ -134,7 +124,6 @@ public:
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
                         ccs.FetchTableRanges(*table_name_,
-                                             table_schema->KeySchema(),
                                              table_schema->GetKVCatalogInfo(),
                                              this,
                                              node_group_id_);
@@ -1749,112 +1738,80 @@ private:
     NodeGroupId cc_ng_id_;
 };
 
-struct CkptScanCc : public CcRequestBase
+struct CkptScanCc : public TemplatedCcRequest<CkptScanCc, Void>
 {
 public:
-    enum struct CkptScanStatus
-    {
-        Ongoing,
-        Finish,
-        Error
-    };
-
     static constexpr size_t CkptScanBatch = 1000;
 
-    CkptScanCc() = delete;
+    CkptScanCc() = default;
 
     CkptScanCc(const TableName &table_name,
                const uint64_t ckpt_ts,
+               const uint64_t node_group,
                std::vector<FlushRecord> &ckpt_vec,
                std::vector<FlushRecord> &archive_vec,
-               std::vector<LruEntry *> &mv_base_vec)
-        : table_name_(table_name),
-          ckpt_ts_(ckpt_ts),
-          ckpt_vec_(ckpt_vec),
-          archive_vec_(archive_vec),
-          mv_base_vec_(mv_base_vec),
-          start_entry_(nullptr),
-          status_(CkptScanStatus::Ongoing),
-          mux_(),
-          cv_(),
-          ccm_(nullptr)
+               std::vector<LruEntry *> &mv_base_vec,
+               CcHandlerResult<Void> *res,
+               const TxKey *target_start_key = nullptr,
+               const TxKey *target_end_key = nullptr)
+        : ckpt_ts_(ckpt_ts),
+          ckpt_vec_(&ckpt_vec),
+          archive_vec_(&archive_vec),
+          mv_base_vec_(&mv_base_vec),
+          start_key_(target_start_key),
+          end_key_(target_end_key),
+          start_entry_(nullptr)
     {
-    }
-
-    // CkptScanCc is always stack object and won't be reused, worse, it might be
-    // destructed before Execute returns, so always return false as caller
-    // should never access this object after Execute returns
-    bool Execute(CcShard &ccs) override
-    {
-        if (ccm_ == nullptr)
-        {
-            ccm_ = ccs.GetCcm(table_name_, node_group_);
-        }
-
-        if (ccm_ != nullptr)
-        {
-            ccm_->Execute(*this);
-        }
-        else
-        {
-            Notify();
-        }
-        // return false since CkptScanCc is not re-used and does not need to
-        // call CcRequestBase::Free
-        return false;
-    }
-
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        if (status_ != CkptScanStatus::Finish)
-        {
-            cv_.wait(lk, [this] { return status_ == CkptScanStatus::Finish; });
-        }
+        this->table_name_ = &table_name;
+        node_group_id_ = node_group;
+        res_ = res;
     }
 
     void Reset(uint32_t node_group)
     {
-        std::lock_guard<std::mutex> lk(mux_);
         ccm_ = nullptr;
         start_entry_ = nullptr;
-        status_ = CkptScanStatus::Ongoing;
-        node_group_ = node_group;
+        node_group_id_ = node_group;
     }
 
-    void Notify()
+    void Reset(const TableName &table_name,
+               uint64_t ckpt_ts,
+               std::vector<FlushRecord> &ckpt_vec,
+               std::vector<FlushRecord> &archive_vec,
+               std::vector<LruEntry *> &mv_vec,
+               uint32_t node_group,
+               CcHandlerResult<Void> *res,
+               const TxKey *target_start_key = nullptr,
+               const TxKey *target_end_key = nullptr)
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        status_ = CkptScanCc::CkptScanStatus::Finish;
-        cv_.notify_one();
-    }
-
-    uint32_t GetNodeGroup()
-    {
-        return node_group_;
+        ccm_ = nullptr;
+        start_entry_ = nullptr;
+        ckpt_ts_ = ckpt_ts;
+        node_group_id_ = node_group;
+        this->table_name_ = &table_name;
+        ckpt_vec_ = &ckpt_vec;
+        archive_vec_ = &archive_vec;
+        mv_base_vec_ = &mv_vec;
+        start_key_ = target_start_key;
+        end_key_ = target_end_key;
+        res_ = res;
     }
 
 private:
-    const TableName &table_name_;
-    const uint64_t ckpt_ts_;
-    std::vector<FlushRecord> &ckpt_vec_;
-    std::vector<FlushRecord> &archive_vec_;
+    uint64_t ckpt_ts_;
+    std::vector<FlushRecord> *ckpt_vec_;
+    std::vector<FlushRecord> *archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<LruEntry *> &mv_base_vec_;
+    std::vector<LruEntry *> *mv_base_vec_;
+    // Start/end key of target range if the scan is on a range only, nullptr if
+    // it's on entire table.
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
     LruEntry *start_entry_;
-    CkptScanStatus status_;
-    std::mutex mux_;
-    std::condition_variable cv_;
-    CcMap *ccm_;
-    uint32_t node_group_;
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
 
-    template <typename SkT, typename PkT>
-    friend class SkCcMap;
-
-    friend class Checkpointer;
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::CkptScanCc *r);
 };
@@ -2187,7 +2144,6 @@ public:
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
                         ccs.FetchTableRanges(*table_name_,
-                                             table_schema_->KeySchema(),
                                              table_schema_->GetKVCatalogInfo(),
                                              this,
                                              node_group_id_);

@@ -178,6 +178,20 @@ public:
     void NotifyCkpt();
 
     /**
+     * @brief Checkpoint a table until ckpt_ts. This will notify checkpointer
+     * to start a new thread and do the checkpoint.
+     */
+    void FlushData(const TableName &table_name,
+                   const TableSchema *schema,
+                   uint64_t ckpt_ts,
+                   int64_t term,
+                   uint64_t node_group,
+                   std::vector<FlushRecord> *ckpt_vec,
+                   std::vector<FlushRecord> *archive_vec,
+                   std::vector<LruEntry *> *mv_vec,
+                   CcHandlerResult<Void> *hres = nullptr);
+
+    /**
      * @brief Get the number of ccentries in this ccshard
      *
      */
@@ -354,36 +368,30 @@ public:
                          std::vector<InitRangeEntry> &init_ranges,
                          const NodeGroupId ng_id);
 
-    std::map<int32_t, TableRangeEntryWithShade> *GetTableRangesForATable(
-        const TableName &range_table_name, const NodeGroupId ng_id);
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+        *GetTableRangesForATable(const TableName &range_table_name,
+                                 const NodeGroupId ng_id);
 
-    const TableRangeEntryWithShade *CreateDirtyTableRange(
+    const TableRangeEntry *CreateTableRange(
         const TableName &table_name,
+        const NodeGroupId ng_id,
         int32_t partition_id,
-        std::unique_ptr<TxKey> new_key,
-        int32_t new_partition_id,
-        uint64_t commit_ts,
-        const NodeGroupId ng_id);
+        TxKey::Uptr start_key,
+        const TxKey *end_key,
+        uint64_t version,
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys = nullptr);
 
-    const std::pair<TableRangeEntry *, TableRangeEntry *> CommitDirtyTableRange(
+    const TableRangeEntry *UploadNewRangeInfo(
         const TableName &table_name,
-        int32_t partition_id,
-        uint64_t commit_ts,
-        const NodeGroupId ng_id);
+        const NodeGroupId ng_id,
+        const TxKey *key,
+        const std::vector<std::unique_ptr<TxKey>> &new_key,
+        const std::vector<int32_t> &new_partition_id,
+        uint64_t commit_ts);
 
-    const TableRangeEntry *GetTableEffectiveRangeEntry(
-        const TableName &table_name,
-        int32_t partition_id,
-        const NodeGroupId ng_id);
-
-    const TableRangeEntryWithShade *GetTableRangeWithShade(
-        const TableName &table_name,
-        int32_t partition_id,
-        const NodeGroupId ng_id);
-
-    void PostCommitDirtyTableRange(const TableName &table_name,
-                                   int32_t partition_id,
-                                   const NodeGroupId ng_id);
+    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                        const NodeGroupId ng_id,
+                                        const TxKey *key);
 
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
@@ -403,7 +411,6 @@ public:
                       CcRequestBase *requester);
 
     void FetchTableRanges(const TableName &range_table_name,
-                          const Schema *key_schema,
                           const KVCatalogInfo *kv_info,
                           CcRequestBase *requester,
                           NodeGroupId ng_id);
@@ -452,6 +459,17 @@ public:
         NodeGroupId cc_ng_id,
         const TxKey *slice_start,
         const TxKey *slice_end);
+
+    RangeSliceId PinRangeSlice(const TableName &table_name,
+                               const NodeGroupId ng_id,
+                               const Schema *key_schema,
+                               const Schema *rec_schema,
+                               uint64_t schema_ts,
+                               const KVCatalogInfo *kv_info,
+                               const TxKey &key,
+                               bool inclusive,
+                               CcRequestBase *cc_request,
+                               RangeSliceOpStatus &pin_status);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,

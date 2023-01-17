@@ -367,9 +367,8 @@ public:
                                 false);
 #ifdef RANGE_PARTITION_ENABLED
                             // Update current sk range table if exist.
-                            std::map<int32_t, TableRangeEntryWithShade>
-                                *ranges = shard_->GetTableRangesForATable(
-                                    old_index_name, req.NodeGroupId());
+                            auto ranges = shard_->GetTableRangesForATable(
+                                old_index_name, req.NodeGroupId());
                             if (ranges != nullptr)
                             {
                                 shard_->CreateOrUpdateRangeCcMap(
@@ -479,6 +478,7 @@ public:
                     init_partition_id = tbl_name_hash & 0x3FF;
                 }
 
+                // Use nullptr to represent negative infinity key here.
                 range_init_vec.emplace_back(
                     nullptr, init_partition_id, req.CommitTs());
 

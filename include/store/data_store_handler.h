@@ -5,6 +5,7 @@
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
+#include "range_slice.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
@@ -59,15 +60,13 @@ public:
      * @param batch
      * @param table_name base table name or sk index name
      * @param table_schema
-     * @param schema_ts
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
     virtual bool PutAll(std::vector<txservice::FlushRecord> &batch,
                         const txservice::TableName &table_name,
                         const txservice::TableSchema *table_schema,
-                        uint32_t node_group,
-                        bool is_last_ckpt = false) = 0;
+                        uint32_t node_group) = 0;
 
     virtual void UpsertTable(
         const TableSchema *table_schema,
@@ -137,6 +136,20 @@ public:
         const TxKey *range_start_key,
         const std::vector<std::unique_ptr<StoreSlice>> &slices,
         bool update_slice_keys)
+    {
+        return false;
+    }
+
+    /**
+     * @brief Upsert list of ranges into range table. This will also update
+     * range slice sizes.
+     */
+    virtual bool UpsertRanges(
+        const TableName &table_name,
+        std::vector<
+            std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
+            range_info,
+        uint64_t version)
     {
         return false;
     }
@@ -218,12 +231,12 @@ public:
         const TableSchema *table_schema,
         CcHandlerResult<RangeMedianKeyResult> *out_median_key_result) = 0;
 
-    virtual bool CopyRangeData(const txservice::TableName &table_name,
-                               int32_t old_partition_id,
-                               int32_t new_partition_id,
-                               const TxKey *start_key,
-                               uint64_t tx_ts,
-                               const TableSchema *table_schema) = 0;
+    virtual bool CopyRangeData(
+        const txservice::TableName &table_name,
+        int32_t old_partition_id,
+        std::vector<std::pair<TxKey::Uptr, int32_t>> &new_partition_info,
+        uint64_t tx_ts,
+        const TableSchema *table_schema) = 0;
 
     virtual bool DeleteOutOfRangeData(const txservice::TableName &table_name,
                                       int32_t partition_id,
@@ -233,12 +246,6 @@ public:
     virtual bool GetNextRangePartitionId(const TableName &tablename,
                                          int32_t *out_next_partition_id,
                                          int retry_count = 5) = 0;
-
-    virtual bool UpsertRange(const txservice::TableName &table_name,
-                             const TableSchema *table_schema,
-                             TxKey *key,
-                             int32_t partition_id,
-                             int64_t ts) = 0;
 
     virtual std::string CreateKVCatalogInfo(
         const TableSchema *table_schema) const = 0;

@@ -100,7 +100,7 @@ public:
     CcHandlerResult<ReadKeyResult> hd_result_;
     bool local_cache_miss_{false};
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
@@ -182,6 +182,7 @@ public:
     void Reset()
     {
         init_ = false;
+        is_running_ = false;
         lock_range_result_.Reset();
     }
 
@@ -311,7 +312,7 @@ struct ScanState
 
     std::unique_ptr<CcScanner> scanner_;
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint32_t range_id,
               const TxKey *last_key,
@@ -392,7 +393,7 @@ struct ScanNextOperation : TransactionOperation
     ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
 
-#ifdef RANGE_PARTITIONED
+#ifdef RANGE_PARTITION_ENABLED
     CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     RangeRecord range_rec_;
@@ -631,6 +632,166 @@ struct NoOp : public TransactionOperation
     CcHandlerResult<Void> hd_result_;
 };
 
+struct FlushDataOp : public TransactionOperation
+{
+    FlushDataOp(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName *tab_name_{nullptr};
+    uint64_t ckpt_ts_;
+    NodeGroupId node_group_;
+    int64_t tx_term_;
+    const TableSchema *schema_{nullptr};
+    std::vector<FlushRecord> *ckpt_vec_{nullptr};
+    std::vector<FlushRecord> *archive_vec_{nullptr};
+    std::vector<LruEntry *> *mv_vec_{nullptr};
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct CkptScanOp : public TransactionOperation
+{
+    CkptScanOp(TransactionExecution *txm);
+    CkptScanOp(const TableName &table_name,
+               uint64_t ckpt_ts,
+               NodeGroupId node_group,
+               std::vector<FlushRecord> *ckpt_vec,
+               std::vector<FlushRecord> *archive_vec,
+               std::vector<LruEntry *> *mv_vec,
+               TransactionExecution *txm,
+               const TxKey *start_key = nullptr,
+               const TxKey *end_key = nullptr);
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    const TableName *tab_name_{nullptr};
+    uint64_t ckpt_ts_;
+    NodeGroupId node_group_;
+    std::vector<FlushRecord> *ckpt_vec_{nullptr};
+    std::vector<FlushRecord> *archive_vec_{nullptr};
+    std::vector<LruEntry *> *mv_vec_{nullptr};
+    // Start/end key of the target range of the ckpt scan.
+    // nullptr if target is entire table.
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
+    CcHandlerResult<Void> hd_result_;
+};
+
+struct SplitFlushRangeOp : public CompositeTransactionOperation
+{
+    SplitFlushRangeOp() = delete;
+
+    SplitFlushRangeOp(
+        const TableName &table_name,
+        const TableSchema *table_schema,
+        NodeGroupId node_group,
+        const TxKey *old_start_key,
+        const TxKey *old_end_key,
+        const RangeInfo *old_range_info,
+        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+        TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+
+    const TableSchema *table_schema_{nullptr};
+    const TableName table_name_;
+    const TableName range_table_name_;
+    NodeGroupId node_group_;
+
+    RangeInfo range_info_;
+    RangeRecord range_record_;
+    // TODO{liunyl}: change these to Uptr after we update inf key instance.
+    // Now we need to use raw pointers to accomadate with inf key instance.
+    // Now we make them point to the Uptr in range_info_ if they are normal key,
+    // or raw pointers to inf key instances otherwise.
+    const TxKey *old_start_key_;
+    const TxKey *old_end_key_;
+    // vector< new start key, new partition id >
+    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
+
+    // vector buffer used during checkpoint scan
+    std::vector<FlushRecord> ckpt_vec_;
+    std::vector<FlushRecord> archive_vec_;
+    std::vector<LruEntry *> mv_base_vec_;
+
+    /**
+     * @brief Acquire write lock on all node groups. Since split-flush op is
+     * the only operation that would try to acquire write lock on range
+     * table entry, and each range is only sharded to one node group, we
+     * should be the only one trying to acquire write lock on this range
+     * entry. So we can directly try to acquire write lock and not worrying
+     * about dead locks. The last valid ts returned by this op will be used
+     * to calculate commit ts of the split-flush tx.
+     */
+    AcquireAllOp prepare_acquire_all_write_op_;
+    /**
+     * @brief Write prepare log. Prepare log should have
+     * 1. The old range id.
+     * 2. The new range id.
+     * 3. The start key of new range id.
+     * 4. The commit ts of this split-flush tx.
+     */
+    WriteToLogOp prepare_log_op_;
+    /**
+     * @brief Add new partition id to range entry on each node group. Now
+     * write operation will write to both new and old range partition.
+     * Downgrade write lock to write intent lock.
+     */
+    PostWriteAllOp install_new_range_op_;
+    /**
+     * @brief Copy data from old partition to new partition in KV store.
+     * Flush in-memory data that has smaller ts than commit ts to new KV
+     * store.
+     */
+    DsOp<Void> ds_migrate_old_partition_op_;
+    /**
+     * @brief Scan for data before commit_ts in the splitting range. We need to
+     * make these data available to the new range before we commit the range
+     * split.
+     */
+    CkptScanOp ckpt_scan_op_;
+    /**
+     * @brief Flush data in memory before commit_ts to KV storage. These data
+     * will be flushed into both old and new partitions.
+     */
+    FlushDataOp flush_op_;
+    /**
+     * @brief Acquire write lock on all node group on the old partition and
+     * new partition.
+     */
+    AcquireAllOp commit_acquire_all_write_op_;
+    /**
+     * @brief Write commit log.
+     */
+    WriteToLogOp commit_log_op_;
+    /**
+     * @brief Upsert new ranges into range table in KV store.
+     */
+    DsOp<Void> ds_upsert_range_op_;
+    /**
+     * @brief 1. Insert new range into range tables on all nodes
+     * 2. Remove new range info from old range entry.
+     * 3. Release locks on all nodes.
+     */
+    PostWriteAllOp post_all_lock_op_;
+    /**
+     * @brief Remove obselete data from old range in KV store. We don't need
+     * any lock here since these data will not be visible to anyone after the
+     * new range info has been comitted.
+     */
+    DsOp<Void> ds_clean_old_range_op_;
+    /**
+     * @brief Remove split-flush log.
+     */
+    WriteToLogOp clean_log_op_;
+
+private:
+    void FillPrepareLogRequest(TransactionExecution *txm);
+    void FillCommitLogRequest(TransactionExecution *txm);
+    void FillCleanLogRequest(TransactionExecution *txm);
+    void ForceToFinish(TransactionExecution *txm);
+};
+
 struct DsSplitRangeOp : public CompositeTransactionOperation
 {
     DsSplitRangeOp() = delete;
@@ -660,7 +821,7 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     const TxKey *range_key_{nullptr};
     std::unique_ptr<RangeRecord> old_range_record_{nullptr};
     std::unique_ptr<TxKey> new_range_key_{nullptr};
-    std::unique_ptr<TableRangeEntry> upload_range_entry_{nullptr};
+    std::unique_ptr<RangeInfo> upload_range_entry_{nullptr};
     std::unique_ptr<RangeRecord> upload_range_record_{nullptr};
     int32_t new_partition_id_{-1};
     // Store the catalog read lock information, only effect for recovering
@@ -705,7 +866,6 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     /**
      * @brief Write log to mark the range split is finished
      */
-    // WriteToLogOp ds_copy_old_range_data_finished_log_op_;
     WriteToLogOp ds_copy_old_range_data_finished_log_op_;
     /**
      * @brief
@@ -716,7 +876,6 @@ struct DsSplitRangeOp : public CompositeTransactionOperation
     /**
      * @brief Write commit log to mark the split range transaction is succeed
      */
-    // WriteToLogOp commit_log_for_dirty_old_range_op_;
     WriteToLogOp commit_log_for_dirty_old_range_op_;
     /**
      * @brief

@@ -9,9 +9,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error -W -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DFAULT_INJECTOR")
 
-option(RANGE_PARTITION_ENABLED "Whether enable range partition" OFF)
-message(NOTICE "RANGE_PARTITION_ENABLED : ${RANGE_PARTITION_ENABLED}")
-
 if ( CMAKE_COMPILER_IS_GNUCC )
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-reorder -Wno-unused-parameter -Wno-parentheses")
 endif()
@@ -116,11 +113,6 @@ if ( CMAKE_COMPILER_IS_GNUCC )
        ${BRPC_LIB}
        ${OPENSSL_LIB}
     )
-endif()
-
-if(RANGE_PARTITION_ENABLED)
-  # add preprocessor defition RANGE_PARTITION_ENABLED
-  add_compile_definitions(RANGE_PARTITION_ENABLED)
 endif()
 
 if (METRICS_COLLECTOR_ENABLE)

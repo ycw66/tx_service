@@ -346,6 +346,59 @@ struct UpsertTableTxRequest
     const std::string *alter_table_info_image_;
 };
 
+struct CkptScanTxRequest : public TemplateTxRequest<CkptScanTxRequest, bool>
+{
+    CkptScanTxRequest(const TableName &table_name,
+                      uint64_t ckpt_ts,
+                      uint64_t node_group,
+                      std::vector<FlushRecord> &ckpt_vec,
+                      std::vector<FlushRecord> &archive_vec,
+                      std::vector<LruEntry *> &mv_vec)
+        : table_name_(table_name),
+          ckpt_ts_(ckpt_ts),
+          node_group_(node_group),
+          ckpt_vec_(ckpt_vec),
+          archive_vec_(archive_vec),
+          mv_vec_(mv_vec)
+    {
+    }
+
+    const TableName &table_name_;
+    uint64_t ckpt_ts_;
+    uint64_t node_group_;
+    std::vector<FlushRecord> &ckpt_vec_;
+    std::vector<FlushRecord> &archive_vec_;
+    std::vector<LruEntry *> &mv_vec_;
+};
+
+struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
+{
+    SplitFlushTxRequest(
+        const TableName &table_name,
+        const TableSchema *schema,
+        NodeGroupId node_group,
+        const TxKey *old_start_key,
+        const TxKey *old_end_key,
+        const RangeInfo *old_info,
+        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_id)
+        : table_name_(&table_name),
+          schema_(schema),
+          node_group_(node_group),
+          old_start_key_(old_start_key),
+          old_end_key_(old_end_key),
+          old_range_info_(old_info),
+          new_range_id_(std::move(new_range_id))
+    {
+    }
+    const TableName *table_name_{nullptr};
+    const TableSchema *schema_{nullptr};
+    NodeGroupId node_group_;
+    const TxKey *old_start_key_{nullptr};
+    const TxKey *old_end_key_{nullptr};
+    const RangeInfo *old_range_info_{nullptr};
+    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_id_;
+};
+
 struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
 {
     SplitRangeTxRequest(const TableName table_name,

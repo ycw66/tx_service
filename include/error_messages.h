@@ -129,6 +129,7 @@ enum struct CcErrorCode
 
     // data store handler
     DATA_STORE_UPSERT_TABLE_ERR,
+    DATA_STORE_ERR,
 
     // log service
     LOG_CLOSURE_RESULT_UNKOWN_ERR,
