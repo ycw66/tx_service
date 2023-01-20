@@ -664,6 +664,16 @@ public:
         schema_op_msg.ParseFromArray(content.data(), content.length());
 
         const CatalogEntry *catalog_entry = nullptr;
+        bool is_coordinator = false;
+        uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+
+        if (tx_node_id == req.NodeGroupId())
+        {
+            if (Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0)
+            {
+                is_coordinator = true;
+            }
+        }
 
         // Need to parse the string if not include table type in protobuf
         TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
@@ -674,16 +684,48 @@ public:
         // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)
         {
-            if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
-                                             SchemaOpMessage_Stage_CommitSchema)
+            if (schema_op_msg.stage() ==
+                    ::txlog::SchemaOpMessage_Stage::
+                        SchemaOpMessage_Stage_PrepareSchema ||
+                (schema_op_msg.stage() ==
+                     ::txlog::SchemaOpMessage_Stage::
+                         SchemaOpMessage_Stage_CommitSchema &&
+                 is_coordinator))
             {
+                // If we are coordinator, we need to recover to the state
+                // right after commit log is flushed since the
+                // upsert_kv_table_op_ might need both old table schema and
+                // new table schema.
+                // If we are recovering from prepare log, we also need to
+                // restore to the state right before commit log is flushed, so
+                // both current and dirty schema are needed.
+                auto [success, new_catalog_entry] = shard_->CreateReplayCatalog(
+                    table_name,
+                    req.NodeGroupId(),
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.new_catalog_blob(),
+                    schema_op_msg.catalog_ts(),
+                    req.CommitTs());
+                if (!success)
+                {
+                    // create fail, the catalog to be created is out of date
+                    LOG(INFO)
+                        << "create catalog fails, table name: " << table_name_sv
+                        << ", catalog entry of the same or higher "
+                           "version exists, stop replaying this schema op";
+                    req.SetFinish();
+                    return false;
+                }
+                catalog_entry = new_catalog_entry;
+            }
+            else
+            {
+                // If we are recovering as participant from commit stage,
+                // we don't  need to do kv_upsert_table_op_ so we can directly
+                // recover to the state before commit log is cleaned, that is
+                // after dirty schema is commited as current schema and write
+                // lock has been released.
                 uint64_t commit_ts = req.CommitTs();
-
-                // If flush kv succeeds, create new catalog. If flush kv fails,
-                // restore old catalog. In theory, the flush error case does not
-                // need to restore CatalogEntry and set CatalogRecord in cc_map.
-                // Here, for readability and simplicity of the code, these steps
-                // are not skipped.
                 auto [success, new_catalog_entry] = shard_->CreateCatalog(
                     table_name,
                     req.NodeGroupId(),
@@ -726,30 +768,6 @@ public:
                     }
                 }
             }
-            else
-            {
-                assert(schema_op_msg.stage() ==
-                       ::txlog::SchemaOpMessage_Stage::
-                           SchemaOpMessage_Stage_PrepareSchema);
-                auto [success, new_catalog_entry] = shard_->CreateReplayCatalog(
-                    table_name,
-                    req.NodeGroupId(),
-                    schema_op_msg.old_catalog_blob(),
-                    schema_op_msg.new_catalog_blob(),
-                    schema_op_msg.catalog_ts(),
-                    req.CommitTs());
-                if (!success)
-                {
-                    // create fail, the catalog to be created is out of date
-                    LOG(INFO)
-                        << "create catalog fails, table name: " << table_name_sv
-                        << ", catalog entry of the same or higher "
-                           "version exists, stop replaying this schema op";
-                    req.SetFinish();
-                    return false;
-                }
-                catalog_entry = new_catalog_entry;
-            }
         }
         else
         {
@@ -767,8 +785,11 @@ public:
             return false;
         }
 
-        if (schema_op_msg.stage() ==
-            ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareSchema)
+        if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                         SchemaOpMessage_Stage_PrepareSchema ||
+            (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                          SchemaOpMessage_Stage_CommitSchema &&
+             is_coordinator))
         {
             // If the prepare log has been flushed, the recovered cc ng leader
             // replays all steps between the prepare log and the commit log,
@@ -779,6 +800,9 @@ public:
             // guaranteed to be recovered upon failures. The tx's term is not
             // necessary here to mark whether or not if the coordinating tx has
             // failed or not.
+            // When coordinator is recovering from commit log, we need to
+            // restore the state right after commit log is flushed, so we need
+            // to acquire write lock as well.
             auto lock_pair = AcquireCceKeyLock(cce,
                                                cce->payload_status_,
                                                &req,

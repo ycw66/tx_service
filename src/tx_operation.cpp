@@ -1725,12 +1725,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->rw_set_.ClearReadSet(table_key_.Name());
 
             // For DROP TABLE, the data store operation happens after all
-            // write locks are acquired and before the commit log is
-            // flushed.
-            op_ = &commit_log_op_;
-            FillCommitLogRequest(txm);
-            txm->PushOperation(&commit_log_op_);
-            txm->Process(commit_log_op_);
+            // write locks are acquired and commit log is flushed.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
         }
         else
         {
@@ -1770,25 +1768,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (op_type_ == OperationType::DropTable ||
-                op_type_ == OperationType::DropIndex)
-            {
-                op_ = &upsert_kv_table_op_;
-                upsert_kv_table_op_.table_schema_ =
-                    (op_type_ == OperationType::DropTable)
-                        ? catalog_rec_.Schema()
-                        : catalog_rec_.DirtySchema();
-                upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
-            }
-            else
-            {
-                op_ = &commit_log_op_;
-                FillCommitLogRequest(txm);
-                txm->PushOperation(&commit_log_op_);
-                txm->Process(commit_log_op_);
-            }
+            op_ = &commit_log_op_;
+            FillCommitLogRequest(txm);
+            txm->PushOperation(&commit_log_op_);
+            txm->Process(commit_log_op_);
         }
     }
     else if (op_ == &commit_log_op_)
@@ -1826,10 +1809,31 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            op_ = &post_all_lock_op_;
-
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            if (op_type_ == OperationType::DropTable ||
+                op_type_ == OperationType::DropIndex)
+            {
+                op_ = &upsert_kv_table_op_;
+                // Read table schema from local cc shard. This is because we
+                // could be recovering from commit stage, in which case we have
+                // skipped post_all_intent_op_ and the schema in catalog_rec_
+                // would be empty.
+                LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+                auto catalog_entry =
+                    shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
+                upsert_kv_table_op_.table_schema_ =
+                    (op_type_ == OperationType::DropTable)
+                        ? catalog_entry->schema_.get()
+                        : catalog_entry->dirty_schema_.get();
+                upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+                txm->PushOperation(&upsert_kv_table_op_);
+                txm->Process(upsert_kv_table_op_);
+            }
+            else
+            {
+                op_ = &post_all_lock_op_;
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
         }
     }
     else if (op_ == &post_all_lock_op_)
