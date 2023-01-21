@@ -2326,7 +2326,7 @@ CkptScanOp::CkptScanOp(const TableName &table_name,
                        NodeGroupId node_group,
                        std::vector<FlushRecord> *ckpt_vec,
                        std::vector<FlushRecord> *archive_vec,
-                       std::vector<LruEntry *> *mv_vec,
+                       std::vector<const TxKey *> *mv_vec,
                        TransactionExecution *txm,
                        const TxKey *start_key,
                        const TxKey *end_key)

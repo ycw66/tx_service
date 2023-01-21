@@ -33,8 +33,8 @@ CcShard::CcShard(uint16_t core_id,
       next_lock_idx_(0),
       used_lock_count_(0),
       next_tx_ident_(0),
-      head_cce_(nullptr),
-      tail_cce_(nullptr),
+      head_ccp_(nullptr),
+      tail_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
       processor_sleep_(false),
@@ -59,10 +59,10 @@ CcShard::CcShard(uint16_t core_id,
         lock_vec_.emplace_back(std::make_unique<NonBlockingLock>());
     }
 
-    head_cce_.lru_prev_ = nullptr;
-    head_cce_.lru_next_ = &tail_cce_;
-    tail_cce_.lru_prev_ = &head_cce_;
-    tail_cce_.lru_next_ = nullptr;
+    head_ccp_.lru_prev_ = nullptr;
+    head_ccp_.lru_next_ = &tail_ccp_;
+    tail_ccp_.lru_prev_ = &head_ccp_;
+    tail_ccp_.lru_next_ = nullptr;
 
     thd_token_.reserve((size_t) core_cnt + 1);
     for (size_t idx = 0; idx < core_cnt; ++idx)
@@ -276,47 +276,44 @@ TEntry *CcShard::LocateTx(TxNumber tx_number)
     return nullptr;
 }
 
-void CcShard::DetachLru(LruEntry *entry)
+void CcShard::DetachLru(LruPage *page)
 {
-    LruEntry *prev = entry->lru_prev_;
-    LruEntry *post = entry->lru_next_;
-    prev->lru_next_ = post;
-    post->lru_prev_ = prev;
-    entry->lru_prev_ = nullptr;
-    entry->lru_next_ = nullptr;
+    LruPage *prev = page->lru_prev_;
+    LruPage *next = page->lru_next_;
+    //    LOG(INFO) << "detach lru for page : " << page << ", prev: " << prev
+    //              << ", next: " << next;
+    assert(prev != nullptr && next != nullptr);
+    prev->lru_next_ = next;
+    next->lru_prev_ = prev;
+    page->lru_prev_ = nullptr;
+    page->lru_next_ = nullptr;
 }
 
-void CcShard::UpdateLruList(LruEntry *entry)
+void CcShard::UpdateLruList(LruPage *page)
 {
-    // Removes the entry from the list, if it's already in the list. This is
-    // used to keep the updated entry at the end(tail) of the LRU list. A
-    // entry's prev and post are both not-null when the entry is in the
+    //    LOG(INFO) << "Before UpdateLruList for page: " << page
+    //              << ", lru prev: " << page->lru_prev_
+    //              << ", next: " << page->lru_next_;
+    //    assert(VerifyLruList());
+
+    // page already at the tail, do nothing
+    if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
+    {
+        return;
+    }
+    // Removes the page from the list, if it's already in the list. This is
+    // used to keep the updated page at the end(tail) of the LRU list. A
+    // page's prev and post are both not-null when the page is in the
     // list. This is because we have a reserved head and tail for the list.
-    if (entry->lru_prev_ != nullptr)
+    if (page->lru_next_ != nullptr)
     {
-        DetachLru(entry);
+        DetachLru(page);
     }
-    else
-    {
-        ++size_;
-    }
-
-    // Inserts the entry as the second-to-last (the tail is reserved).
-    LruEntry *second_last = tail_cce_.lru_prev_;
-    second_last->lru_next_ = entry;
-    entry->lru_prev_ = second_last;
-    entry->lru_next_ = &tail_cce_;
-    tail_cce_.lru_prev_ = entry;
-}
-
-void CcShard::DetachCkpt(LruEntry *entry)
-{
-    LruEntry *prev = entry->ckpt_prev_;
-    LruEntry *post = entry->ckpt_next_;
-    prev->ckpt_next_ = post;
-    post->ckpt_prev_ = prev;
-    entry->ckpt_prev_ = nullptr;
-    entry->ckpt_next_ = nullptr;
+    LruPage *second_tail = tail_ccp_.lru_prev_;
+    second_tail->lru_next_ = page;
+    tail_ccp_.lru_prev_ = page;
+    page->lru_next_ = &tail_ccp_;
+    page->lru_prev_ = second_tail;
 }
 
 void CcShard::UpdateEstimateLogSize(LruEntry *entry,
@@ -466,6 +463,20 @@ void CcShard::ClearTx(TxNumber txn)
     }
 }
 
+void CcShard::VerifyLruList()
+{
+    LruPage *pre = &head_ccp_;
+    for (LruPage *cur = head_ccp_.lru_next_; cur != nullptr;
+         cur = cur->lru_next_)
+    {
+        assert(pre->lru_next_ == cur && cur->lru_prev_ == pre);
+        pre = cur;
+        // LOG(INFO) << "prev: " << cur->lru_prev_ << ", cur: " << cur
+        //           << ", next: " << cur->lru_next_;
+    }
+    assert(pre == &tail_ccp_);
+}
+
 /**
  * @brief Kick out freeable entries from ccmap.
  *
@@ -473,7 +484,7 @@ void CcShard::ClearTx(TxNumber txn)
  */
 size_t CcShard::Clean()
 {
-    LruEntry *cce = head_cce_.lru_next_;
+    LruPage *ccp = head_ccp_.lru_next_;
     size_t free_cnt = 0;
 
     // previous check has notified ckpt since freeable entries cannot be found,
@@ -482,17 +493,17 @@ size_t CcShard::Clean()
     {
         return 0;
     }
-    while (free_cnt < CcShard::freeBatchSize && cce != &tail_cce_)
-    {
-        LruEntry *next_cce = cce->lru_next_;
-        if (cce->IsFree())
-        {
-            cce->parent_map_->Clean(cce);
-            --size_;
-            ++free_cnt;
-        }
 
-        cce = next_cce;
+    //    LOG(INFO) << "Before CcShard::Clean, lru list: ";
+    //    assert(VerifyLruList());
+
+    while (free_cnt < CcShard::freeBatchSize && ccp != &tail_ccp_)
+    {
+        // merge and removal might happen during Clean so ccp and ccp->lru_next_
+        // might change
+        auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
+        free_cnt += freed;
+        ccp = next;
     }
 
     // notify the checkpointer thread to do checkpoint if there is not freeable
@@ -502,6 +513,10 @@ size_t CcShard::Clean()
         local_shards_.SetWaitingCkpt(true);
         NotifyCkpt();
     }
+
+    //    LOG(INFO) << "After CcShard::Clean, free_cnt: " << free_cnt
+    //              << ", lru list: ";
+    //    assert(VerifyLruList());
 
     return free_cnt;
 }
@@ -517,7 +532,7 @@ void CcShard::FlushData(const TableName &table_name,
                         uint64_t node_group,
                         std::vector<FlushRecord> *ckpt_vec,
                         std::vector<FlushRecord> *archive_vec,
-                        std::vector<LruEntry *> *mv_vec,
+                        std::vector<const TxKey *> *mv_vec,
                         CcHandlerResult<Void> *res)
 {
     ckpter_->FlushData(table_name,
@@ -1089,18 +1104,6 @@ uint64_t CcShard::Now() const
 void CcShard::UpdateTsBase(uint64_t ts)
 {
     local_shards_.UpdateTsBase(ts);
-}
-
-std::pair<std::unique_ptr<TxKey>, size_t> CcShard::GetSliceMiddleKey(
-    const TableName &table_name,
-    NodeGroupId cc_ng_id,
-    const TxKey *slice_start,
-    const TxKey *slice_end)
-{
-    CcMap *ccm = GetCcm(table_name, cc_ng_id);
-    assert(ccm != nullptr);
-
-    return ccm->SliceMiddleKey(slice_start, slice_end);
 }
 
 RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,

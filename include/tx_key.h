@@ -296,6 +296,11 @@ public:
         return fields_ == rhs.fields_;
     }
 
+    bool operator!=(const CompositeKey<Types...> &rhs) const
+    {
+        return !(*this == rhs);
+    }
+
     bool operator==(const TxKey &rhs) const override
     {
         const CompositeKey<Types...> &rhs_key =
@@ -318,6 +323,11 @@ public:
         }
 
         return fields_ < rhs.fields_;
+    }
+
+    bool operator<=(const CompositeKey<Types...> &rhs) const
+    {
+        return *this < rhs || *this == rhs;
     }
 
     bool operator<(const TxKey &rhs) const override

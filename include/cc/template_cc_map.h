@@ -3,6 +3,7 @@
 #include <algorithm>  // std::max
 #include <chrono>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <utility>  // std::pair
@@ -57,24 +58,22 @@ public:
                 table_schema,
                 schema_ts,
                 ccm_has_full_entries),
-          ccm_(),
-          neg_inf_(this),
-          pos_inf_(this),
+          pg_ng_inf_(this),
+          pg_ps_inf_(this),
+          neg_inf_(this, &pg_ng_inf_),
+          pos_inf_(this, &pg_ps_inf_),
           maintain_statistics_(false),
           shard_profile_(nullptr)
     {
-        neg_inf_.key_ = NegativeInfinity<KeyT>::Instance();
-        pos_inf_.key_ = PositiveInfinity<KeyT>::Instance();
+        LOG(INFO) << "TemplateCcMap created, table name: "
+                  << table_name_.StringView();
+        pg_ng_inf_.prev_page_ = nullptr;
+        pg_ng_inf_.next_page_ = &pg_ps_inf_;
+        pg_ps_inf_.prev_page_ = &pg_ng_inf_;
+        pg_ps_inf_.next_page_ = nullptr;
 
-        neg_inf_.map_prev_ = nullptr;
-        neg_inf_.map_next_ = &pos_inf_;
-        pos_inf_.map_prev_ = &neg_inf_;
-        pos_inf_.map_next_ = nullptr;
-
-        neg_inf_.ckpt_prev_ = nullptr;
-        neg_inf_.ckpt_next_ = &pos_inf_;
-        pos_inf_.ckpt_prev_ = &neg_inf_;
-        pos_inf_.ckpt_next_ = nullptr;
+        pg_ng_inf_.ckpt_next_ = &pg_ps_inf_;
+        pg_ps_inf_.ckpt_prev_ = &pg_ng_inf_;
 
         if (table_name.Type() == TableType::Primary ||
             table_name.Type() == TableType::Secondary)
@@ -110,7 +109,7 @@ public:
                         reinterpret_cast<uint64_t>(&this->neg_inf_)))
                     .append("\"key_\":")
                     .append(std::to_string(
-                        reinterpret_cast<uint64_t>(&this->neg_inf_.key_)))
+                        reinterpret_cast<uint64_t>(&this->neg_inf_.Key())))
                     .append("\"table_name_\":")
                     .append(this->table_name_.StringView());
             });
@@ -214,9 +213,11 @@ public:
 
             if (req.IsInsert())
             {
-                cce_ptr = Floor(*target_key);
+                Iterator it = Floor(*target_key);
+                const KeyT *key_ptr = it->first;
+                cce_ptr = it->second;
 
-                if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
+                if (cce_ptr != &neg_inf_ && *key_ptr == *target_key)
                 {
                     // The floor entry's key is equal to the insert key. If the
                     // key is deleted, the insert becomes an update. Or the
@@ -239,7 +240,8 @@ public:
             }
             else
             {
-                cce_ptr = FindEmplace(*target_key);
+                Iterator it = FindEmplace(*target_key);
+                cce_ptr = it->second;
 
                 if (cce_ptr == nullptr)
                 {
@@ -450,7 +452,9 @@ public:
             }
             else
             {
-                CcEntry<KeyT, ValueT> *new_cce = Emplace(insert_entry.key_);
+                Iterator insert_it = Emplace(insert_entry.key_);
+                const KeyT *key_ptr = insert_it->first;
+                CcEntry<KeyT, ValueT> *new_cce = insert_it->second;
 
                 if (new_cce == nullptr)
                 {
@@ -498,13 +502,13 @@ public:
 
                 TryInsertCkptList(new_cce);
 
-                size_t key_size = new_cce->key_->SerializedLength();
+                size_t key_size = key_ptr->SerializedLength();
                 size_t payload_size = new_cce->PayloadSerializedLength();
                 shard_->UpdateEstimateLogSize(new_cce, key_size, payload_size);
 
                 if (maintain_statistics_)
                 {
-                    shard_profile_->OnInsert(*new_cce->key_);
+                    shard_profile_->OnInsert(*key_ptr);
                 }
             }
 
@@ -573,7 +577,8 @@ public:
                 }
                 shard_->mem_usage_ += cce.PayloadMemUsage();
 
-                size_t key_size = cce.key_->SerializedLength();
+                // todo: get key from cce_addr
+                size_t key_size = cce.Key()->SerializedLength();
                 size_t payload_size = cce.PayloadSerializedLength();
                 shard_->UpdateEstimateLogSize(&cce, key_size, payload_size);
 
@@ -589,11 +594,13 @@ public:
                 {
                     if (op_type == OperationType::Insert)
                     {
-                        shard_profile_->OnInsert(*cce.key_);
+                        shard_profile_->OnInsert(
+                            *static_cast<const KeyT *>(cce.Key()));
                     }
                     else if (op_type == OperationType::Delete)
                     {
-                        shard_profile_->OnDelete(*cce.key_);
+                        shard_profile_->OnDelete(
+                            *static_cast<const KeyT *>(cce.Key()));
                     }
                 }
             }
@@ -630,6 +637,7 @@ public:
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         bool resume = false;
         const KeyT *target_key = nullptr;
+        bool will_insert = false;
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireAllCc", {
             LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireAllCc";
@@ -681,10 +689,10 @@ public:
                 switch (*req.KeyStrType())
                 {
                 case KeyType::NegativeInf:
-                    target_key = neg_inf_.key_;
+                    target_key = NegativeInfinity<KeyT>::Instance();
                     break;
                 case KeyType::PositiveInf:
-                    target_key = pos_inf_.key_;
+                    target_key = PositiveInfinity<KeyT>::Instance();
                     break;
                 case KeyType::Normal:
                     const std::string *key_str = req.KeyStr();
@@ -704,9 +712,11 @@ public:
             {
                 // For insert requests, finds a cc entry whose gap will
                 // accommodate the insert key.
-                cce_ptr = Floor(*target_key);
+                Iterator it = Floor(*target_key);
+                const KeyT *key_ptr = it->first;
+                cce_ptr = it->second;
 
-                if (cce_ptr != &neg_inf_ && *cce_ptr->key_ == *target_key)
+                if (cce_ptr != &neg_inf_ && *key_ptr == *target_key)
                 {
                     // The floor entry's key is equal to the insert key. If the
                     // key is deleted, the insert becomes an update. Or the
@@ -730,10 +740,15 @@ public:
                         req.SetCcePtr(cce_ptr);
                     }
                 }
+                else
+                {
+                    will_insert = true;
+                }
             }
             else
             {
-                cce_ptr = FindEmplace(*target_key);
+                Iterator it = FindEmplace(*target_key);
+                cce_ptr = it->second;
 
                 if (cce_ptr == nullptr)
                 {
@@ -753,8 +768,7 @@ public:
         CcEntry<KeyT, ValueT> &cc_entry = *cce_ptr;
         TxNumber txn = req.Txn();
 
-        if (req.IsInsert() &&
-            (cce_ptr == &neg_inf_ || !(*cce_ptr->key_ == *req.Key())))
+        if (will_insert)
         {
             // This is an insert. The new insert results in an insert entry in
             // the intention set of the preceding key's gap.
@@ -975,14 +989,19 @@ public:
             }
         }
 
+        const KeyT *key_ptr = nullptr;
         CcEntry<KeyT, ValueT> *cce_ptr = nullptr;
         if (req.OpType() == OperationType::Insert)
         {
-            cce_ptr = Floor(*target_key);
+            Iterator it = Floor(*target_key);
+            key_ptr = it->first;
+            cce_ptr = it->second;
         }
         else
         {
-            cce_ptr = FindEmplace(*target_key);
+            Iterator it = FindEmplace(*target_key);
+            key_ptr = it->first;
+            cce_ptr = it->second;
         }
 
         if (cce_ptr == nullptr)
@@ -994,8 +1013,7 @@ public:
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();
 
-        if (req.OpType() == OperationType::Insert &&
-            !(*cce_ptr->key_ == *target_key))
+        if (req.OpType() == OperationType::Insert && *key_ptr != *target_key)
         {
             auto insert_it = cce_ptr->insert_intention_set_.find(target_key);
             if (insert_it != cce_ptr->insert_intention_set_.end() &&
@@ -1013,8 +1031,8 @@ public:
                 }
                 else
                 {
-                    CcEntry<KeyT, ValueT> *new_cce =
-                        Emplace(insert_it->second->key_);
+                    Iterator iterator = Emplace(insert_it->second->key_);
+                    CcEntry<KeyT, ValueT> *new_cce = iterator->second;
 
                     if (new_cce == nullptr)
                     {
@@ -1438,7 +1456,7 @@ public:
                 }
 
 #ifdef RANGE_PARTITION_ENABLED
-                cce = Find(*look_key);
+                cce = Find(*look_key).second;
                 if (cce == nullptr)
                 {
                     if (Type() == TableType::Primary)
@@ -1461,7 +1479,7 @@ public:
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
                             slice_id.Unpin();
-                            cce = Find(*look_key);
+                            cce = Find(*look_key).second;
                             if (cce == nullptr)
                             {
                                 // The searched key does not exist in this
@@ -1473,7 +1491,8 @@ public:
                                         cc_op, iso_lvl, cc_proto) ==
                                     LockType::WriteIntent)
                                 {
-                                    cce = Emplace(*look_key);
+                                    Iterator it = Emplace(*look_key);
+                                    cce = it->second;
                                     // Memory is full, need to clean up ccmap
                                     // first.
                                     if (cce == nullptr)
@@ -1519,11 +1538,13 @@ public:
                     }
                     else
                     {
-                        cce = FindEmplace(*look_key);
+                        Iterator it = FindEmplace(*look_key);
+                        cce = it->second;
                     }
                 }
 #else
-                cce = FindEmplace(*look_key);
+                Iterator it = FindEmplace(*look_key);
+                cce = it->second;
 
                 // The read request accesses a new key not in the cc map. But
                 // the cc map is full and cannot allocates a new entry.
@@ -1876,7 +1897,8 @@ public:
         return true;
     }
 
-    void AddScanTuple(CcEntry<KeyT, ValueT> *cce,
+    void AddScanTuple(const KeyT *key,
+                      CcEntry<KeyT, ValueT> *cce,
                       TemplateScanCache<KeyT, ValueT> *typed_cache,
                       ScanType scan_type,
                       uint32_t ng_id,
@@ -1893,11 +1915,12 @@ public:
         {
             TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                 typed_cache->AddScanTuple();
-            ScanGap(cce, scan_tuple, ng_id, ng_term);
+            ScanGap(key, cce, scan_tuple, ng_id, ng_term);
             break;
         }
         case ScanType::ScanBoth:
             ScanKey(
+                key,
                 cce,
                 typed_cache,
                 true,
@@ -1909,6 +1932,7 @@ public:
             break;
         case ScanType::ScanKey:
             ScanKey(
+                key,
                 cce,
                 typed_cache,
                 false,
@@ -1982,12 +2006,14 @@ public:
                 (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
 
+        const KeyT *key_ptr = nullptr;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 
         if (req.CcePtr() != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
-            const KeyT *continue_look_key = cce->key_;
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            key_ptr = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType();
 
             req.SetCcePtr(nullptr);
@@ -2022,23 +2048,14 @@ public:
                 }
             }
 
-            AddScanTuple(cce,
+            AddScanTuple(key_ptr,
+                         cce,
                          typed_cache,
                          scan_type,
                          ng_id,
                          ng_term,
                          req.ReadTimestamp(),
                          is_read_snapshot);
-
-            std::pair<Iterator, ScanType> start_pair =
-                req.direct_ == ScanDirection::Forward
-                    ? ForwardScanStart(
-                          *continue_look_key,
-                          req.inclusive_,
-                          (table_name_.Type() != TableType::Secondary) &&
-                              req.is_include_floor_cce_)
-                    : BackwardScanStart(*continue_look_key, req.inclusive_);
-            scan_ccm_it = start_pair.first;
         }
         else
         {
@@ -2052,8 +2069,9 @@ public:
                     : BackwardScanStart(*look_key, req.inclusive_);
 
             scan_ccm_it = start_pair.first;
-            ScanType scan_type = start_pair.second;
+            key_ptr = scan_ccm_it->first;
             cce = scan_ccm_it->second;
+            ScanType scan_type = start_pair.second;
 
             req.SetCcePtr(cce);
             req.SetCcePtrScanType(scan_type);
@@ -2107,7 +2125,8 @@ public:
                 // TODO(lzx): handle gap lock
             }
 
-            AddScanTuple(cce,
+            AddScanTuple(key_ptr,
+                         cce,
                          typed_cache,
                          scan_type,
                          ng_id,
@@ -2124,6 +2143,7 @@ public:
             for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
                  ++scan_ccm_it)
             {
+                key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
@@ -2170,7 +2190,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(key_ptr,
+                             cce,
                              typed_cache,
                              ScanType::ScanBoth,
                              ng_id,
@@ -2188,6 +2209,7 @@ public:
             for (; scan_ccm_it != neg_inf_it && !typed_cache->Full();
                  --scan_ccm_it)
             {
+                key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
@@ -2234,7 +2256,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(key_ptr,
+                             cce,
                              typed_cache,
                              ScanType::ScanBoth,
                              ng_id,
@@ -2296,10 +2319,13 @@ public:
         assert(typed_cache->Full());
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
-        CcEntry<KeyT, ValueT> *prior_cce = nullptr;
+        Iterator scan_ccm_it;
         if (req.CcePtr() != nullptr)
         {
-            prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            CcEntry<KeyT, ValueT> *prior_cce =
+                static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            const KeyT *prior_cce_key = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType();
 
             req.SetCcePtr(nullptr);
@@ -2334,7 +2360,8 @@ public:
                 }
             }
 
-            AddScanTuple(prior_cce,
+            AddScanTuple(prior_cce_key,
+                         prior_cce,
                          typed_cache,
                          scan_type,
                          ng_id,
@@ -2345,23 +2372,29 @@ public:
         }
         else
         {
-            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                typed_cache->Last()->cce_addr_.CcePtr());
+            CcEntry<KeyT, ValueT> *prior_cce =
+                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    typed_cache->Last()->cce_addr_.CcePtr());
+            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
             typed_cache->Reset();
         }
 
         if (direction == ScanDirection::Forward)
         {
-            CcEntry<KeyT, ValueT> *cce = prior_cce->map_next_;
-            while (cce != &pos_inf_ && !typed_cache->Full())
+            ++scan_ccm_it;
+
+            Iterator pos_inf_it = End();
+            for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
+                 ++scan_ccm_it)
             {
+                const KeyT *key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
                 {
                     // If this is a scan for modified records since last
                     // checkpoint, skips those that have been checkpointed.
-                    cce = cce->map_next_;
                     continue;
                 }
 
@@ -2410,7 +2443,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(key,
+                             cce,
                              typed_cache,
                              ScanType::ScanBoth,
                              ng_id,
@@ -2418,21 +2452,24 @@ public:
                              req.ReadTimestamp(),
                              is_read_snapshot,
                              req.is_ckpt_delta_);
-                cce = cce->map_next_;
             }
         }
         else
         {
-            CcEntry<KeyT, ValueT> *cce = prior_cce->map_prev_;
-            while (cce != nullptr && !typed_cache->Full())
+            --scan_ccm_it;
+            Iterator neg_inf_it = Begin();
+            for (; !typed_cache->Full(); --scan_ccm_it)
             {
-                if (cce == &neg_inf_)
+                const KeyT *key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                if (scan_ccm_it == neg_inf_it)
                 {
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanGap);
 
                     // TODO(lzx): handle gap lock
-                    AddScanTuple(cce,
+                    AddScanTuple(key,
+                                 cce,
                                  typed_cache,
                                  ScanType::ScanGap,
                                  ng_id,
@@ -2440,6 +2477,7 @@ public:
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
                                  req.is_ckpt_delta_);
+                    break;
                 }
                 else
                 {
@@ -2489,7 +2527,8 @@ public:
                     }
                     }  //-- end: switch
 
-                    AddScanTuple(cce,
+                    AddScanTuple(key,
+                                 cce,
                                  typed_cache,
                                  ScanType::ScanBoth,
                                  ng_id,
@@ -2498,8 +2537,6 @@ public:
                                  is_read_snapshot,
                                  req.is_ckpt_delta_);
                 }
-
-                cce = cce->map_prev_;
             }
         }
 
@@ -2507,7 +2544,8 @@ public:
         return true;
     }
 
-    void AddScanTupleMsg(CcEntry<KeyT, ValueT> *cce,
+    void AddScanTupleMsg(const KeyT *key,
+                         CcEntry<KeyT, ValueT> *cce,
                          std::vector<remote::ScanTuple_msg *> &cache,
                          size_t &tuple_idx,
                          ScanType scan_type,
@@ -2524,11 +2562,12 @@ public:
         case ScanType::ScanGap:
             if (!is_ckpt_delta)
             {
-                ScanGap(cce, tuple, ng_term);
+                ScanGap(key, cce, tuple, ng_term);
             }
             break;
         case ScanType::ScanBoth:
             ScanKey(
+                key,
                 cce,
                 tuple,
                 true,
@@ -2539,6 +2578,7 @@ public:
             break;
         case ScanType::ScanKey:
             ScanKey(
+                key,
                 cce,
                 tuple,
                 false,
@@ -2624,12 +2664,15 @@ public:
         size_t &tuple_idx = req.scan_caches_idxs_.at(shard_->LocalCoreId());
 
         Iterator scan_ccm_it;
+        const KeyT *key_ptr = nullptr;
         CcEntry<KeyT, ValueT> *cce = nullptr;
 
         if (req.CcePtr(shard_->LocalCoreId()) != nullptr)
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(
                 req.CcePtr(shard_->LocalCoreId()));
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            key_ptr = scan_ccm_it->first;
             ScanType scan_type = req.CcePtrScanType(shard_->LocalCoreId());
 
             req.SetCcePtr(nullptr, shard_->LocalCoreId());
@@ -2664,7 +2707,8 @@ public:
                 }
             }
 
-            AddScanTupleMsg(cce,
+            AddScanTupleMsg(key_ptr,
+                            cce,
                             cache,
                             tuple_idx,
                             scan_type,
@@ -2683,6 +2727,7 @@ public:
 
             scan_ccm_it = start_pair.first;
             ScanType scan_type = start_pair.second;
+            key_ptr = scan_ccm_it->first;
             cce = scan_ccm_it->second;
 
             req.SetCcePtr(cce, shard_->LocalCoreId());
@@ -2739,7 +2784,8 @@ public:
                 // TODO(lzx): handle gap lock
             }
 
-            AddScanTupleMsg(cce,
+            AddScanTupleMsg(key_ptr,
+                            cce,
                             cache,
                             tuple_idx,
                             scan_type,
@@ -2757,6 +2803,7 @@ public:
             for (; scan_ccm_it != pos_inf_it && tuple_idx < cache.size();
                  ++scan_ccm_it)
             {
+                key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
@@ -2814,7 +2861,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTupleMsg(cce,
+                AddScanTupleMsg(key_ptr,
+                                cce,
                                 cache,
                                 tuple_idx,
                                 ScanType::ScanBoth,
@@ -2832,6 +2880,7 @@ public:
             for (; scan_ccm_it != neg_inf_it && tuple_idx < cache.size();
                  --scan_ccm_it)
             {
+                key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
@@ -2889,7 +2938,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTupleMsg(cce,
+                AddScanTupleMsg(key_ptr,
+                                cce,
                                 cache,
                                 tuple_idx,
                                 ScanType::ScanBoth,
@@ -2947,6 +2997,7 @@ public:
                 (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
 
+        Iterator scan_ccm_it;
         ScanDirection direction = req.direct_;
         CcEntry<KeyT, ValueT> *prior_cce = nullptr;
 
@@ -2954,6 +3005,8 @@ public:
         {
             prior_cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
             ScanType scan_type = req.CcePtrScanType();
+            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
+            const KeyT *prior_cce_key = scan_ccm_it->first;
 
             req.SetCcePtr(nullptr);
             req.SetCcePtrScanType(ScanType::ScanUnknow);
@@ -2988,7 +3041,8 @@ public:
                 }
             }
 
-            AddScanTupleMsg(prior_cce,
+            AddScanTupleMsg(prior_cce_key,
+                            prior_cce,
                             req.scan_cache_,
                             req.scan_cache_idx_,
                             scan_type,
@@ -3001,19 +3055,24 @@ public:
         {
             prior_cce =
                 reinterpret_cast<CcEntry<KeyT, ValueT> *>(req.prior_cce_addr_);
+            scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
         }
 
         if (direction == ScanDirection::Forward)
         {
-            CcEntry<KeyT, ValueT> *cce = prior_cce->map_next_;
-            while (cce != &pos_inf_ &&
-                   req.scan_cache_idx_ < req.scan_cache_.size())
+            ++scan_ccm_it;
+            Iterator pos_inf_it = End();
+            for (; scan_ccm_it != pos_inf_it &&
+                   req.scan_cache_idx_ < req.scan_cache_.size();
+                 ++scan_ccm_it)
             {
+                const KeyT *key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+
                 if (req.is_ckpt_delta_ &&
                     cce->commit_ts_ <=
                         cce->ckpt_ts_.load(std::memory_order_acquire))
                 {
-                    cce = cce->map_next_;
                     continue;
                 }
 
@@ -3064,7 +3123,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTupleMsg(cce,
+                AddScanTupleMsg(key,
+                                cce,
                                 req.scan_cache_,
                                 req.scan_cache_idx_,
                                 ScanType::ScanBoth,
@@ -3072,23 +3132,24 @@ public:
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
                                 req.is_ckpt_delta_);
-
-                cce = cce->map_next_;
             }
         }
         else
         {
-            CcEntry<KeyT, ValueT> *cce = prior_cce->map_prev_;
-            while (cce != nullptr &&
-                   req.scan_cache_idx_ < req.scan_cache_.size())
+            --scan_ccm_it;
+            Iterator neg_inf_it = Begin();
+            for (; req.scan_cache_idx_ < req.scan_cache_.size(); --scan_ccm_it)
             {
-                if (cce == &neg_inf_)
+                const KeyT *key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
+                if (scan_ccm_it == neg_inf_it)
                 {
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanGap);
 
                     // TODO(lzx): handle gap lock
-                    AddScanTupleMsg(cce,
+                    AddScanTupleMsg(key,
+                                    cce,
                                     req.scan_cache_,
                                     req.scan_cache_idx_,
                                     ScanType::ScanGap,
@@ -3096,6 +3157,7 @@ public:
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
+                    break;
                 }
                 else
                 {
@@ -3146,7 +3208,8 @@ public:
                     }
                     }  //-- end: switch
 
-                    AddScanTupleMsg(cce,
+                    AddScanTupleMsg(key,
+                                    cce,
                                     req.scan_cache_,
                                     req.scan_cache_idx_,
                                     ScanType::ScanBoth,
@@ -3155,7 +3218,6 @@ public:
                                     is_read_snapshot,
                                     req.is_ckpt_delta_);
                 }
-                cce = cce->map_prev_;
             }
         }
         req.scan_cache_.resize(req.scan_cache_idx_);
@@ -3251,6 +3313,7 @@ public:
         }
 
         Iterator scan_ccm_it;
+        const KeyT *cce_key = nullptr;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         uint32_t ng_id = req.NodeGroupId();
         int64_t tx_term = req.TxTerm();
@@ -3259,6 +3322,8 @@ public:
         {
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr(core_id));
             ScanType scan_type = req.BlockedCceScanType(core_id);
+            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            cce_key = scan_ccm_it->first;
 
             req.SetCcePtr(nullptr, core_id);
             req.SetCceScanType(ScanType::ScanUnknow, core_id);
@@ -3293,15 +3358,14 @@ public:
                 }
             }
 
-            AddScanTuple(cce,
+            AddScanTuple(cce_key,
+                         cce,
                          scan_cache,
                          scan_type,
                          ng_id,
                          ng_term,
                          req.ReadTimestamp(),
                          is_read_snapshot);
-
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
         }
         else if (req.PriorCceAddr(core_id) != 0)
         {
@@ -3318,6 +3382,7 @@ public:
 
             scan_ccm_it = start_pair.first;
             ScanType scan_type = start_pair.second;
+            cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
 
             if (scan_type != ScanType::ScanGap)
@@ -3367,7 +3432,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(cce_key,
+                             cce,
                              scan_cache,
                              scan_type,
                              ng_id,
@@ -3382,13 +3448,13 @@ public:
             ++scan_ccm_it;
             const StoreSlice *slice = slice_id.Slice();
 
-            // The scan at core 0 sets the scan's end key. By default, the
+            // The scan at core 0 sets the scan's end cce_key. By default, the
             // scan's end is the end of the slice. In case keys in the slice are
-            // too many to fit into the scan cache, the last key of the scan at
-            // core 0 becomes the end key of scans at other cores. In such a
-            // case, it is mandatory that all keys smaller than the end key at
-            // other cores are returned in this batch. So, scans at other cores
-            // may slightly exceed the scan cache's capacity.
+            // too many to fit into the scan cache, the last cce_key of the scan
+            // at core 0 becomes the end cce_key of scans at other cores. In
+            // such a case, it is mandatory that all keys smaller than the end
+            // cce_key at other cores are returned in this batch. So, scans at
+            // other cores may slightly exceed the scan cache's capacity.
             const KeyT *slice_end =
                 shard_->core_id_ == 0
                     ? static_cast<const KeyT *>(slice->EndKey())
@@ -3396,10 +3462,11 @@ public:
                           hd_res->Value().last_key_.get());
 
             Iterator pos_inf_it = End();
+            cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
             while (scan_ccm_it != pos_inf_it &&
                    (shard_->core_id_ > 0 || !scan_cache->IsFull()) &&
-                   (slice_end == nullptr || *cce->key_ < *slice_end))
+                   (slice_end == nullptr || *cce_key < *slice_end))
             {
                 req.SetCcePtr(cce, core_id);
                 req.SetCceScanType(ScanType::ScanBoth, core_id);
@@ -3446,7 +3513,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(cce_key,
+                             cce,
                              scan_cache,
                              ScanType::ScanBoth,
                              ng_id,
@@ -3455,6 +3523,7 @@ public:
                              is_read_snapshot);
 
                 ++scan_ccm_it;
+                cce_key = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
             }
 
@@ -3522,10 +3591,11 @@ public:
                           hd_res->Value().last_key_.get());
 
             Iterator neg_inf_it = Begin();
+            cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
             while (scan_ccm_it != neg_inf_it &&
                    (shard_->core_id_ > 0 || !scan_cache->IsFull()) &&
-                   (slice_begin == nullptr || !(*cce->key_ < *slice_begin)))
+                   (slice_begin == nullptr || !(*cce_key < *slice_begin)))
             {
                 req.SetCcePtr(cce, core_id);
                 req.SetCceScanType(ScanType::ScanBoth, core_id);
@@ -3572,7 +3642,8 @@ public:
                 }
                 }  //-- end: switch
 
-                AddScanTuple(cce,
+                AddScanTuple(cce_key,
+                             cce,
                              scan_cache,
                              ScanType::ScanBoth,
                              ng_id,
@@ -3581,6 +3652,7 @@ public:
                              is_read_snapshot);
 
                 --scan_ccm_it;
+                cce_key = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
             }
 
@@ -3668,17 +3740,17 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        LruEntry *lru_cce = req.start_entry_ == nullptr ? neg_inf_.ckpt_next_
-                                                        : req.start_entry_;
-        CcEntry<KeyT, ValueT> *cce =
-            static_cast<CcEntry<KeyT, ValueT> *>(lru_cce);
+        LruPage *lru_ccp = req.start_page_ == nullptr ? pg_ng_inf_.ckpt_next_
+                                                      : req.start_page_;
+        CcPage<KeyT, ValueT> *ccp =
+            static_cast<CcPage<KeyT, ValueT> *>(lru_ccp);
+        // a page is pinned when CkptScan stops at it, Unpin the page when
+        // CkptScan resumes
+        ccp->UnpinPage();
+
         const KeyT *start_key = static_cast<const KeyT *>(req.start_key_);
         const KeyT *end_key = static_cast<const KeyT *>(req.end_key_);
 
-        // CkptScanCc is running on TxProcessor thread. To avoid blocking
-        // other transaction for a long time, we only process CkptScanBatch
-        // number of entries in each round.
-        size_t cnt = 0;
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -3691,95 +3763,122 @@ public:
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
-        while (cnt < CkptScanCc::CkptScanBatch && cce != &pos_inf_ &&
-               KeyInRange(
-                   static_cast<const KeyT *>(cce->Key()), start_key, end_key))
-        {
-            if (shard_->EnableMvcc())
-            {
-                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
-            }
+        // todo: calculate memory accumulated
+        // size_t collected_size = 0;
 
-            if (cce->commit_ts_ > cce->ckpt_ts_.load(std::memory_order_acquire))
+        // CkptScanCc is running on TxProcessor thread. To avoid blocking
+        // other transaction for a long time, we only process CkptScanBatch
+        // number of pages in each round. So CkptScan might stop at some page
+        // and this page must not be removed or change its position in
+        // checkpoint list because its address is taken by CkptScanCc. Also, the
+        // page might get cleaned and become empty. To avoid dealing with empty
+        // pages in ccmap, we do not clean the page ongoing CkptScan stops at.
+        for (size_t scan_cnt = 0;
+             scan_cnt < CkptScanCc::CkptScanBatch && ccp != &pg_ps_inf_;
+             scan_cnt++)
+        {
+            // a page is detached from the checkpoint list if all entries in it
+            // have been flushed, i.e, a page is lazily detached from the
+            // checkpoint list in the next round of checkpoint scan.
+            bool detachable = true;
+            auto key_it = ccp->keys_.begin();
+            auto entry_it = ccp->entries_.begin();
+            for (; key_it != ccp->keys_.end(); key_it++, entry_it++)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                    INT32_MAX)
+                const KeyT &key = *key_it;
+                CcEntry<KeyT, ValueT> *cce = entry_it->get();
+
+                if (shard_->EnableMvcc())
                 {
-                    // Load data store size by pinning the slice. Data store
-                    // size is required to decide slice & range update plan.
-                    RangeSliceOpStatus pin_status;
-                    RangeSliceId slice_id =
-                        shard_->PinRangeSlice(table_name_,
-                                              req.NodeGroupId(),
-                                              KeySchema(),
-                                              RecordSchema(),
-                                              table_schema_->Version(),
-                                              table_schema_->GetKVCatalogInfo(),
-                                              *cce->key_,
-                                              true,
-                                              &req,
-                                              pin_status);
-                    if (pin_status == RangeSliceOpStatus::Successful)
+                    shard_->DecrementMemory(
+                        cce->KickOutArchiveRecords(recycle_ts));
+                }
+
+                if (cce->NeedCkpt())
+                {
+                    detachable = false;
+                    if (KeyInRange(&key, start_key, end_key))
                     {
+#ifdef RANGE_PARTITION_ENABLED
                         if (cce->data_store_size_.load(
                                 std::memory_order_acquire) == INT32_MAX)
                         {
-                            // If data store size is still unavailable after the
-                            // slice is loaded from data store, that means this
-                            // entry does not exist in data store.
-                            cce->data_store_size_.store(0);
+                            // Load data store size by pinning the slice. Data
+                            // store size is required to decide slice & range
+                            // update plan.
+                            RangeSliceOpStatus pin_status;
+                            RangeSliceId slice_id = shard_->PinRangeSlice(
+                                table_name_,
+                                req.NodeGroupId(),
+                                KeySchema(),
+                                RecordSchema(),
+                                table_schema_->Version(),
+                                table_schema_->GetKVCatalogInfo(),
+                                key,
+                                true,
+                                &req,
+                                pin_status);
+                            if (pin_status == RangeSliceOpStatus::Successful)
+                            {
+                                if (cce->data_store_size_.load(
+                                        std::memory_order_acquire) == INT32_MAX)
+                                {
+                                    // If data store size is still unavailable
+                                    // after the slice is loaded from data
+                                    // store, that means this entry does not
+                                    // exist in data store.
+                                    cce->data_store_size_.store(0);
+                                }
+                                slice_id.Unpin();
+                            }
+                            else if (pin_status == RangeSliceOpStatus::Blocked)
+                            {
+                                ccp->PinPage();
+                                req.start_page_ = ccp;
+                                shard_->Enqueue(&req);
+                                return false;
+                            }
+                            else
+                            {
+                                req.Result()->SetError(
+                                    CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                                return true;
+                            }
                         }
-                        slice_id.Unpin();
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Blocked)
-                    {
-                        req.start_entry_ = cce;
-                        shard_->Enqueue(&req);
-                        return false;
-                    }
-                    else
-                    {
-                        req.Result()->SetError(
-                            CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return true;
-                    }
-                }
 #endif
-                cce->ExportForCkpt(*req.ckpt_vec_,
-                                   *req.archive_vec_,
-                                   *req.mv_base_vec_,
-                                   req.ckpt_ts_,
-                                   recycle_ts,
-                                   Type(),
-                                   shard_->EnableMvcc());
+                        cce->ExportForCkpt(key,
+                                           *req.ckpt_vec_,
+                                           *req.archive_vec_,
+                                           *req.mv_base_vec_,
+                                           req.ckpt_ts_,
+                                           recycle_ts,
+                                           Type(),
+                                           shard_->EnableMvcc());
 
-                if (cce->commit_ts_ <= req.ckpt_ts_)
-                {
-                    shard_->estimate_ccshard_log_size_ -=
-                        cce->estimate_ccentry_log_size_;
-                    cce->estimate_ccentry_log_size_ = 0;
+                        if (cce->commit_ts_ <= req.ckpt_ts_)
+                        {
+                            // todo: decrement log size after notify log service
+                            // of ckpt_ts
+                            shard_->estimate_ccshard_log_size_ -=
+                                cce->estimate_ccentry_log_size_;
+                            cce->estimate_ccentry_log_size_ = 0;
+                        }
+                    }
                 }
             }
-            else if (cce->commit_ts_ <=
-                     cce->ckpt_ts_.load(std::memory_order_acquire))
-            {
-                // If the key has been checkpointed, removes it from the
-                // checkpoint list.
-                ++cnt;
-                LruEntry *next = cce->ckpt_next_;
-                shard_->DetachCkpt(cce);
-                cce = static_cast<CcEntry<KeyT, ValueT> *>(next);
-                continue;
-            }
 
-            ++cnt;
-            cce = static_cast<CcEntry<KeyT, ValueT> *>(cce->ckpt_next_);
+            LruPage *next = ccp->ckpt_next_;
+            if (detachable)
+            {
+                // scan over for this page and this page can be detached from
+                // the checkpoint list
+                DetachFromCkptList(ccp);
+            }
+            // move to next page
+            ccp = static_cast<CcPage<KeyT, ValueT> *>(next);
         }
 
-        if (cce == &pos_inf_ ||
-            !KeyInRange(
-                static_cast<const KeyT *>(cce->Key()), start_key, end_key))
+        if (ccp == &pg_ps_inf_)
         {
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
@@ -3806,11 +3905,13 @@ public:
         }
         else
         {
-            // set the start_entry and put the CkptScanCc request in to
-            // CcQueue again.
-            req.start_entry_ = cce;
+            // set the start_page_ and put the CkptScanCc request into CcQueue
+            // again.
+            ccp->PinPage();
+            req.start_page_ = ccp;
             shard_->Enqueue(&req);
         }
+
         return false;
     }
 
@@ -3882,7 +3983,8 @@ public:
                 continue;
             }
 
-            CcEntry<KeyT, ValueT> *cce = FindEmplace(key);
+            Iterator it = FindEmplace(key);
+            CcEntry<KeyT, ValueT> *cce = it->second;
 
             if (cce == nullptr)
             {
@@ -3970,18 +4072,13 @@ public:
     {
         const TxKey *key_ptr = req.Key();
         bool only_archives = req.OnlyCleanArchives();
-        CcEntry<KeyT, ValueT> *cce = nullptr;
         assert(key_ptr != nullptr);
         if (key_ptr != nullptr)
         {
             // find cc entry
             const KeyT *typed_key_ptr = dynamic_cast<const KeyT *>(key_ptr);
             const KeyT &key = *typed_key_ptr;
-            auto lb_it = ccm_.lower_bound(key);
-            if (lb_it != ccm_.end() && lb_it->first == key)
-            {
-                cce = &lb_it->second;
-            }
+            auto [cce_key, cce] = Find(key);
 
             if (cce != nullptr)
             {
@@ -3990,8 +4087,9 @@ public:
                     std::vector<FlushRecord> tmp_ckpt_vec;
 
                     std::vector<FlushRecord> tmp_akv_vec;
-                    std::vector<LruEntry *> tmp_mv_base_vec;
-                    cce->ExportForCkpt(tmp_ckpt_vec,
+                    std::vector<const TxKey *> tmp_mv_base_vec;
+                    cce->ExportForCkpt(*cce_key,
+                                       tmp_ckpt_vec,
                                        tmp_akv_vec,
                                        tmp_mv_base_vec,
                                        cce->commit_ts_,
@@ -4029,7 +4127,9 @@ public:
             const ValueT *record =
                 static_cast<const ValueT *>(data_item.record_.get());
 
-            CcEntry<KeyT, ValueT> *cce = FindEmplace(*key);
+            Iterator it = FindEmplace(*key);
+            const KeyT *cce_key = it->first;
+            CcEntry<KeyT, ValueT> *cce = it->second;
             if (cce == nullptr)
             {
                 // Memory reaches capacity while bringing a range slice into
@@ -4047,7 +4147,7 @@ public:
                     INT32_MAX)
                 {
                     cce->data_store_size_.store(
-                        cce->key_->Size() + record->Size(),
+                        cce_key->Size() + record->Size(),
                         std::memory_order_relaxed);
                 }
 
@@ -4061,7 +4161,7 @@ public:
             *cce->payload_ = *record;
             cce->commit_ts_ = data_item.version_ts_;
             cce->payload_status_ = RecordStatus::Normal;
-            cce->data_store_size_.store(cce->key_->Size() + record->Size(),
+            cce->data_store_size_.store(cce_key->Size() + record->Size(),
                                         std::memory_order_relaxed);
 
             shard_->mem_usage_ += cce->payload_->MemUsage();
@@ -4147,6 +4247,7 @@ public:
 
         for (; map_it != map_end_it; ++map_it)
         {
+            const KeyT *cce_key = map_it->first;
             CcEntry<KeyT, ValueT> *cce = map_it->second;
 
             if (cce->commit_ts_ <= 1)
@@ -4177,7 +4278,7 @@ public:
                     ckpt_size = ckpt_it->Key()->Size() + ckpt_it->PayloadSize();
                 }
                 item_vec.emplace_back(
-                    cce->key_, ckpt_size - ckpt_it->delta_size_, ckpt_size);
+                    cce_key, ckpt_size - ckpt_it->delta_size_, ckpt_size);
 
                 ckpt_it++;
             }
@@ -4196,7 +4297,7 @@ public:
                 // This entry is not going to be flushed in this checkpoint, so
                 // the data store size before and post ckpt are the same.
                 item_vec.emplace_back(
-                    cce->key_, data_store_size, data_store_size);
+                    cce_key, data_store_size, data_store_size);
             }
         }
 
@@ -4225,27 +4326,7 @@ public:
 
     size_t size() const override
     {
-        return ccm_.size();
-    }
-
-    /**
-     * Used for debug to verify the map_link is complete.
-     */
-    size_t VerifyOrdering() override
-    {
-        CcEntry<KeyT, ValueT> *cce_prev = nullptr;
-        CcEntry<KeyT, ValueT> *cce = neg_inf_.map_next_;
-        assert(cce != nullptr);
-        size_t cnt = 0;
-        while (cce != &pos_inf_)
-        {
-            assert(cce_prev == nullptr || *cce_prev->key_ < *cce->key_);
-            cce_prev = cce;
-            cce = cce->map_next_;
-            ++cnt;
-        }
-
-        return cnt;
+        return size_;
     }
 
     void Clean(LruEntry *remove_entry) override
@@ -4255,45 +4336,193 @@ public:
 
 #ifdef RANGE_PARTITION_ENABLED
         bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
-            table_name_, cc_ng_id_, *cc_entry->key_);
+            table_name_, cc_ng_id_, *cc_entry->Key());
         if (!kick_ret)
         {
             return;
         }
 #endif
-        // Don't call DetachLru if entry is not in lru list(Emplaced by
-        // force)
-        if (remove_entry->lru_prev_ != nullptr &&
-            remove_entry->lru_next_ != nullptr)
+
+        // remove entry and decrement memory usage
+        CcPage<KeyT, ValueT> *page = cc_entry->parent_page_;
+        const KeyT old_page_key(page->FirstKey());
+        size_t mem_decreased = page->Remove(cc_entry);
+        if (page->Empty())
         {
-            CcShard::DetachLru(remove_entry);
+            mem_decreased += page->MemUsage();
+            ccmp_.erase(old_page_key);
+        }
+        else if (page->FirstKey() != old_page_key)
+        {
+            auto page_it = ccmp_.find(old_page_key);
+            assert(page_it != ccmp_.end());
+            TryUpdatePageKey(page_it);
+        }
+        shard_->mem_usage_ -= mem_decreased;
+        assert(size_ > 0);
+        size_--;
+    }
+
+    /**
+     * Clean erasable entries in lru_page, re-balance pages after clean.
+     *
+     * @param lru_page
+     * @return free count and the lru_next_ of page
+     */
+    std::pair<size_t, LruPage *> CleanPageAndReBalance(
+        LruPage *lru_page) override
+    {
+        size_t free_cnt = 0;
+        LruPage *next_in_lru = lru_page->lru_next_;
+        if (lru_page->IsPinned())
+        {
+            // pinned page cannot be removed, skip cleaning pinned page to avoid
+            // empty page
+            return {free_cnt, next_in_lru};
+        }
+        size_t mem_decreased = 0;
+
+        // clean page
+        CcPage<KeyT, ValueT> *page =
+            static_cast<CcPage<KeyT, ValueT> *>(lru_page);
+        const KeyT old_page_key(page->FirstKey());
+        uint64_t last_read_ts = CleanPage(page, mem_decreased, free_cnt);
+
+        if (page->Empty())  // remove page if empty
+        {
+            // only non-empty page will be pinned by ongoing CkptScanCc
+            assert(!page->IsPinned());
+            mem_decreased += page->MemUsage();
+            if (page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(page);
+            }
+            ccmp_.erase(old_page_key);
+        }
+        else if (page->Size() >= CcPage<KeyT, ValueT>::merge_threshold_)
+        {
+            // page is still half full, no redistribution or merge needed
+            auto page_it = ccmp_.find(old_page_key);
+            assert(page_it != ccmp_.end());
+            TryUpdatePageKey(page_it);
+        }
+        else
+        {
+            // redistribute or merge page with its siblings
+            CcPage<KeyT, ValueT> *prev = page->prev_page_;
+            CcPage<KeyT, ValueT> *next = page->next_page_;
+            bool can_borrow_from_prev =
+                prev != &pg_ng_inf_ &&
+                page->Size() + prev->Size() >
+                    CcPage<KeyT, ValueT>::split_threshold_;
+            bool can_borrow_from_next =
+                next != &pg_ps_inf_ &&
+                page->Size() + next->Size() >
+                    CcPage<KeyT, ValueT>::split_threshold_;
+            bool can_merge_with_prev =
+                prev != &pg_ng_inf_ &&
+                page->Size() + prev->Size() <=
+                    CcPage<KeyT, ValueT>::split_threshold_;
+            bool can_merge_with_next =
+                next != &pg_ps_inf_ &&
+                page->Size() + next->Size() <=
+                    CcPage<KeyT, ValueT>::split_threshold_;
+            if (can_borrow_from_prev || can_borrow_from_next)
+            {
+                // map needs to be updated through iterator
+                auto page_it = ccmp_.find(old_page_key);
+                // the two pages whose entries need to be redistributed are
+                // identified by page1 and page2, page1 is the page with smaller
+                // key
+                auto page1_it = page_it;
+                auto page2_it = page_it;
+                // decide the relative order in LRU list of the two pages by
+                // comparing their last_read_ts
+                uint64_t page1_last_read_ts = last_read_ts;
+                uint64_t page2_last_read_ts = last_read_ts;
+                if (can_borrow_from_prev)
+                {
+                    // borrow entries from previous page
+                    page1_it--;
+                    page1_last_read_ts = page1_it->second.LastReadTs();
+                }
+                else if (can_borrow_from_next)
+                {
+                    // borrow entries from next page
+                    page2_it++;
+                    page2_last_read_ts = page2_it->second.LastReadTs();
+                }
+
+                RedistributeBetweenPages(
+                    page1_it, page2_it, page1_last_read_ts, page2_last_read_ts);
+            }
+            else if (can_merge_with_prev || can_merge_with_next)
+            {
+                // map needs to be updated through iterator
+                auto page_it = ccmp_.find(old_page_key);
+                // the two pages to be merged are identified by page1 and page2,
+                // page1 is the page with smaller key
+                auto page1_it = page_it;
+                auto page2_it = page_it;
+                // decide the relative order in LRU list of the two pages by
+                // comparing their last_read_ts
+                uint64_t page1_last_read_ts = last_read_ts;
+                uint64_t page2_last_read_ts = last_read_ts;
+
+                if (can_merge_with_prev)
+                {
+                    // merge `page` with its previous page
+                    page1_it--;
+                    page1_last_read_ts = page1_it->second.LastReadTs();
+                }
+                else if (can_merge_with_next)
+                {
+                    // merge `page` with its next page
+                    page2_it++;
+                    page2_last_read_ts = page2_it->second.LastReadTs();
+                }
+
+                // merge page1 and page2
+                next_in_lru = MergePages(page1_it,
+                                         page2_it,
+                                         page1_last_read_ts,
+                                         page2_last_read_ts,
+                                         page,
+                                         mem_decreased);
+            }
         }
 
-        if (remove_entry->ckpt_next_ != nullptr)
+        shard_->DecrementMemory(mem_decreased);
+        size_ -= free_cnt;
+        if (free_cnt > 0)
         {
-            // If the cc entry is in the checkpoint list, removes it from
-            // the checkpoint list.
-            shard_->DetachCkpt(remove_entry);
+            ccm_has_full_entries_ = false;
         }
 
-        CcEntry<KeyT, ValueT> *prior = cc_entry->map_prev_;
-        CcEntry<KeyT, ValueT> *next = cc_entry->map_next_;
-
-        prior->map_next_ = next;
-        next->map_prev_ = prior;
-
-        shard_->DecrementMemory(cc_entry->GetCcEntryMemUsage());
-
-        ccm_.erase(*cc_entry->key_);
-        ccm_has_full_entries_ = false;
+        return {free_cnt, next_in_lru};
     }
 
     void Clean() override
     {
-        while (neg_inf_.map_next_ != &pos_inf_)
+        size_t mem_decreased = 0;
+        for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
-            Clean(neg_inf_.map_next_);
+            //            const CcPage<KeyT, ValueT> &page = it->second;
+            CcPage<KeyT, ValueT> &page = it->second;
+            if (page.ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(&page);
+            }
+            if (page.lru_next_ != nullptr)
+            {
+                shard_->DetachLru(&page);
+            }
+            mem_decreased += page.TotalMemUsage();
         }
+
+        shard_->DecrementMemory(mem_decreased);
+        size_ = 0;
+        ccmp_.clear();
     }
 
     TableType Type() const override
@@ -4303,14 +4532,9 @@ public:
 
     void TryInsertCkptList(LruEntry *entry) override
     {
-        if (entry->ckpt_next_ == nullptr)
-        {
-            LruEntry *second_last = pos_inf_.ckpt_prev_;
-            second_last->ckpt_next_ = entry;
-            entry->ckpt_prev_ = second_last;
-            entry->ckpt_next_ = &pos_inf_;
-            pos_inf_.ckpt_prev_ = entry;
-        }
+        CcEntry<KeyT, ValueT> *cce =
+            static_cast<CcEntry<KeyT, ValueT> *>(entry);
+        TryInsertCkptList(cce->parent_page_);
     }
 
     const Schema *KeySchema() const override
@@ -4339,272 +4563,83 @@ public:
         return nullptr;
     }
 
-    std::pair<std::unique_ptr<TxKey>, size_t> SliceMiddleKey(
-        const TxKey *start_key, const TxKey *end_key) const override
+    /**
+     * Used for debug to verify the map_link is complete and keys are in order.
+     */
+    size_t VerifyOrdering() override
     {
-        const KeyT *start = start_key == nullptr
-                                ? NegativeInfinity<KeyT>::Instance()
-                                : static_cast<const KeyT *>(start_key);
-        const KeyT *end = end_key == nullptr
-                              ? PositiveInfinity<KeyT>::Instance()
-                              : static_cast<const KeyT *>(end_key);
-
-        const CcEntry<KeyT, ValueT> *cce_head = FindFloor(*start);
-        const CcEntry<KeyT, ValueT> *cce_tail = cce_head;
-        size_t half_size = 0;
-
-        while (cce_tail != &pos_inf_ && *cce_tail->key_ < *end &&
-               cce_tail->map_next_ != &pos_inf_ &&
-               *cce_tail->map_next_->key_ < *end)
+        // verify page order in map
+        CcPage<KeyT, ValueT> *prev_page = &pg_ng_inf_;
+        for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
-            if (cce_head != &neg_inf_)
-            {
-                half_size += cce_head->key_->Size();
-                half_size += cce_head->PayloadSize();
-            }
-
-            cce_head = cce_head->map_next_;
-            cce_tail = cce_tail->map_next_;
-            cce_tail = cce_tail->map_next_;
+            const KeyT &page_key = it->first;
+            CcPage<KeyT, ValueT> *page = &it->second;
+            assert(page_key == page->FirstKey());
+            assert(page->prev_page_ == prev_page &&
+                   prev_page->next_page_ == page);
+            prev_page = page;
         }
+        assert(prev_page->next_page_ == &pg_ps_inf_ &&
+               pg_ps_inf_.prev_page_ == prev_page);
 
-        size_t est_global_size = half_size * shard_->core_cnt_;
-
-        if (cce_head->key_ == start)
+        // verify key order in all pages
+        Iterator ccm_it = Begin();
+        Iterator pos_inf_it = End();
+        const KeyT *prev_key = ccm_it->first;
+        ccm_it++;
+        size_t cnt = 0;
+        for (; ccm_it != pos_inf_it; ccm_it++)
         {
-            return {nullptr, est_global_size};
+            const KeyT *key = ccm_it->first;
+            assert(*prev_key < *key);
+            prev_key = key;
+            ++cnt;
         }
-        else
-        {
-            return {std::make_unique<KeyT>(*cce_head->key_), est_global_size};
-        }
-    }
+        assert(cnt > 0);
 
-protected:
-    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key)
-    {
-        bool emplace;
-        return FindEmplace(key, emplace);
-    }
-
-    CcEntry<KeyT, ValueT> *FindEmplace(const KeyT &key, bool &emplace)
-    {
-        emplace = false;
-
-        if (&key == neg_inf_.key_)
-        {
-            return &neg_inf_;
-        }
-        else if (&key == pos_inf_.key_)
-        {
-            return &pos_inf_;
-        }
-
-        auto lb_it = ccm_.lower_bound(key);
-        if (lb_it != ccm_.end() && lb_it->first == key)
-        {
-            shard_->UpdateLruList(&lb_it->second);
-            return &lb_it->second;
-        }
-
-        // catalog ccmap bypass shard memory limit. since checkpointer may
-        // emplace ccentry into ccmap.
-        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
-        {
-            // The shard has reached the maximal capacity. Tries to clean cc
-            // entries that have been checkpointed but are not being
-            // accessed by active tx's.
-            size_t free_cnt = shard_->Clean();
-            if (free_cnt == 0)
-            {
-                return nullptr;
-            }
-            lb_it = ccm_.lower_bound(key);
-        }
-
-        CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.emplace_hint(lb_it, std::move(key), this);
-        new_cce_ptr = &em_it->second;
-        new_cce_ptr->key_ = &em_it->first;
-
-        CcEntry<KeyT, ValueT> *prev_cce = nullptr;
-        if (em_it == ccm_.begin())
-        {
-            prev_cce = &neg_inf_;
-        }
-        else
-        {
-            --em_it;
-            prev_cce = &em_it->second;
-            ++em_it;
-        }
-
-        ++em_it;
-        CcEntry<KeyT, ValueT> *next_cce =
-            em_it == ccm_.end() ? &pos_inf_ : &em_it->second;
-
-        new_cce_ptr->map_prev_ = prev_cce;
-        new_cce_ptr->map_next_ = next_cce;
-        prev_cce->map_next_ = new_cce_ptr;
-        next_cce->map_prev_ = new_cce_ptr;
-
-        shard_->UpdateLruList(new_cce_ptr);
-
-        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
-
-        emplace = true;
-        return new_cce_ptr;
-    }
-
-    CcEntry<KeyT, ValueT> *Find(const KeyT &key)
-    {
-        if (&key == NegativeInfinity<KeyT>::Instance())
-        {
-            return &neg_inf_;
-        }
-
-        auto lb_it = ccm_.lower_bound(key);
-        if (lb_it != ccm_.end() && lb_it->first == key)
-        {
-            shard_->UpdateLruList(&lb_it->second);
-            return &lb_it->second;
-        }
-        else
-        {
-            // The input key does not exist.
-            return nullptr;
-        }
-    }
-
-    const CcEntry<KeyT, ValueT> *FindFloor(const KeyT &key) const
-    {
-        if (&key == NegativeInfinity<KeyT>::Instance())
-        {
-            return &neg_inf_;
-        }
-
-        auto lb_it = ccm_.lower_bound(key);
-        if (lb_it == ccm_.end())
-        {
-            // The input key is greater than the largest key in the cc map.
-            // Returns the last cc entry.
-            return &ccm_.rbegin()->second;
-        }
-        else if (lb_it == ccm_.begin())
-        {
-            // The inut key is smaller than or equal to the first key in the
-            // cc map.
-            if (lb_it->first == key)
-            {
-                return &lb_it->second;
-            }
-            else
-            {
-                return &neg_inf_;
-            }
-        }
-        else
-        {
-            if (!(lb_it->first == key))
-            {
-                --lb_it;
-            }
-            return &lb_it->second;
-        }
-    }
-
-    CcEntry<KeyT, ValueT> *Emplace(const KeyT &key)
-    {
-        // catalog ccmap bypass shard memory limit. since checkpointer may
-        // emplace ccentry into ccmap.
-        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
-        {
-            // The shard has reached the maximal capacity. Try cleaning cc
-            // entries that has been checkpointed and is not accessed by
-            // active tx's.
-            size_t free_cnt = shard_->Clean();
-            if (free_cnt == 0)
-            {
-                return nullptr;
-            }
-        }
-
-        CcEntry<KeyT, ValueT> *new_cce_ptr = nullptr;
-        auto em_it = ccm_.try_emplace(KeyT(key), this);
-        new_cce_ptr = &em_it.first->second;
-
-        if (em_it.second)
-        {
-            // If a new cc entry is inserted, updates the ordered
-            // double-linked list of cc entries.
-
-            new_cce_ptr->key_ = &em_it.first->first;
-
-            CcEntry<KeyT, ValueT> *prev_cce = nullptr;
-            if (em_it.first == ccm_.begin())
-            {
-                prev_cce = &neg_inf_;
-            }
-            else
-            {
-                --em_it.first;
-                prev_cce = &em_it.first->second;
-                ++em_it.first;
-            }
-
-            ++em_it.first;
-            CcEntry<KeyT, ValueT> *next_cce =
-                em_it.first == ccm_.end() ? &pos_inf_ : &em_it.first->second;
-
-            new_cce_ptr->map_prev_ = prev_cce;
-            new_cce_ptr->map_next_ = next_cce;
-            prev_cce->map_next_ = new_cce_ptr;
-            next_cce->map_prev_ = new_cce_ptr;
-        }
-
-        shard_->UpdateLruList(new_cce_ptr);
-        shard_->mem_usage_ += new_cce_ptr->GetCcEntryMemUsage();
-
-        return new_cce_ptr;
+        return cnt;
     }
 
     /**
-     * @brief Finds the greatest cc entry whose key is less than or equal to
-     * the input key. If the map is empty, the floor key is negative
-     * infinity.
-     *
-     * @param key The input key
-     * @return CcEntry<KeyT, ValueT>* The pointer to the cc entry whose key
-     * is the greatest key less than or equal to the input key.
+     * Used for unit test to verify the ckpt link is complete.
      */
-    CcEntry<KeyT, ValueT> *Floor(const KeyT &key)
+    void VerifyCkptList()
     {
-        auto it = ccm_.lower_bound(key);
-        if (it == ccm_.end())
+        LruPage *pre = &pg_ng_inf_;
+        for (LruPage *cur = pg_ng_inf_.ckpt_next_; cur != nullptr;
+             cur = cur->ckpt_next_)
         {
-            if (ccm_.empty())
-            {
-                return &neg_inf_;
-            }
-            else
-            {
-                return &ccm_.rbegin()->second;
-            }
+            assert(pre->ckpt_next_ == cur && cur->ckpt_prev_ == pre);
+            pre = cur;
         }
-
-        if (!(it->first == key))
-        {
-            if (it == ccm_.begin())
-            {
-                return &neg_inf_;
-            }
-
-            --it;
-        }
-
-        return &it->second;
+        assert(pre == &pg_ps_inf_);
     }
 
+    bool BulkEmplaceForTest(std::vector<KeyT *> &keys)
+    {
+        std::random_device rd;
+        std::default_random_engine generator(rd());
+        std::uniform_int_distribution<uint64_t> distribution(0, 0xFFFFFFFF);
+        for (auto key : keys)
+        {
+            bool emplace = false;
+            auto it = FindEmplace(*key, emplace);
+            if (!emplace)
+            {
+                assert(false);
+                return false;
+            }
+            CcEntry<KeyT, ValueT> *cce = it->second;
+            cce->payload_status_ = RecordStatus::Normal;
+            // randomly set ckpt_ts and commit_ts
+            cce->ckpt_ts_ = distribution(generator);
+            cce->commit_ts_ = distribution(generator);
+            TryInsertCkptList(cce->parent_page_);
+        }
+        return true;
+    }
+
+protected:
     class Iterator
     {
         using iterator_category = std::bidirectional_iterator_tag;
@@ -4616,11 +4651,38 @@ protected:
     public:
         Iterator() = default;
 
-        Iterator(
-            typename std::map<KeyT, CcEntry<KeyT, ValueT>>::iterator &map_it,
-            CcEntry<KeyT, ValueT> *neg_inf_cce)
-            : internal_it_(map_it), neg_inf_cce_(neg_inf_cce)
+        void DebugPrint()
         {
+            bool is_neg_inf =
+                (current_.first == NegativeInfinity<KeyT>::Instance());
+            bool is_pos_inf =
+                (current_.first == PositiveInfinity<KeyT>::Instance());
+            LOG(INFO) << "key: " << current_.first
+                      << ", cce: " << current_.second
+                      << ", is neg inf: " << is_neg_inf
+                      << ", is pos inf: " << is_pos_inf
+                      << ", current_page_: " << current_page_
+                      << ", idx_in_page_: " << idx_in_page_;
+            LOG(INFO) << "neg_inf key: " << NegativeInfinity<KeyT>::Instance()
+                      << ", pos_inf key: " << PositiveInfinity<KeyT>::Instance()
+                      << ", neg_inf cce: " << neg_inf_cce_;
+            LOG(INFO) << "pg_ng_inf_: " << neg_inf_cce_->parent_page_
+                      << ", pg_ps_inf_: "
+                      << &(neg_inf_cce_->parent_page_->parent_map_->pg_ps_inf_);
+            if (!is_neg_inf && !is_pos_inf)
+            {
+                LOG(INFO) << ", cce parent_page_: "
+                          << current_.second->parent_page_;
+                current_.second->parent_page_->DebugPrint();
+            }
+        }
+
+        Iterator(CcPage<KeyT, ValueT> *page,
+                 size_t idx,
+                 CcEntry<KeyT, ValueT> *neg_inf_cce)
+            : neg_inf_cce_(neg_inf_cce), current_page_(page), idx_in_page_(idx)
+        {
+            assert(current_page_ != nullptr);
             UpdateCurrent();
         }
 
@@ -4629,50 +4691,56 @@ protected:
                  CcEntry<KeyT, ValueT> *pos_inf_cce = nullptr)
             : neg_inf_cce_(neg_inf_cce)
         {
-            std::map<KeyT, CcEntry<KeyT, ValueT>> &internal_map =
-                static_cast<TemplateCcMap<KeyT, ValueT> *>(cce->parent_map_)
-                    ->ccm_;
-
             if (cce == neg_inf_cce)
             {
                 current_.first = NegativeInfinity<KeyT>::Instance();
                 current_.second = neg_inf_cce_;
-                internal_it_ = internal_map.begin();
+                current_page_ = nullptr;
             }
             else if (cce == pos_inf_cce)
             {
                 current_.first = PositiveInfinity<KeyT>::Instance();
                 current_.second = nullptr;
-                internal_it_ = internal_map.end();
+                current_page_ = nullptr;
             }
             else
             {
-                internal_it_ = internal_map.find(*cce->key_);
-                assert(internal_it_ != internal_map.end());
-
+                current_page_ = cce->parent_page_;
+                idx_in_page_ = current_page_->FindEntry(cce);
                 UpdateCurrent();
             }
         }
 
+        Iterator(CcPage<KeyT, ValueT> *page, CcEntry<KeyT, ValueT> *cce)
+        {
+        }
+
+        Iterator(CcPage<KeyT, ValueT> *page, size_t idx_in_page)
+        {
+        }
+
         Iterator(Iterator &&rhs)
-            : internal_it_(rhs.internal_it_),
-              current_(rhs.current_),
-              neg_inf_cce_(rhs.neg_inf_cce_)
+            : current_(rhs.current_),
+              neg_inf_cce_(rhs.neg_inf_cce_),
+              current_page_(rhs.current_page_),
+              idx_in_page_(rhs.idx_in_page_)
         {
         }
 
         Iterator(const Iterator &rhs)
-            : internal_it_(rhs.internal_it_),
-              current_(rhs.current_),
-              neg_inf_cce_(rhs.neg_inf_cce_)
+            : current_(rhs.current_),
+              neg_inf_cce_(rhs.neg_inf_cce_),
+              current_page_(rhs.current_page_),
+              idx_in_page_(rhs.idx_in_page_)
         {
         }
 
         Iterator &operator=(const Iterator &rhs)
         {
-            internal_it_ = rhs.internal_it_;
             current_ = rhs.current_;
             neg_inf_cce_ = rhs.neg_inf_cce_;
+            current_page_ = rhs.current_page_;
+            idx_in_page_ = rhs.idx_in_page_;
             return *this;
         }
 
@@ -4692,17 +4760,19 @@ protected:
             if (current_.first == NegativeInfinity<KeyT>::Instance())
             {
                 // The iterator points to negative infinity. Increments the
-                // iterator to the first entry in the map, if the map is not
+                // iterator to the first page in the map, if the map is not
                 // empty.
-
-                std::map<KeyT, CcEntry<KeyT, ValueT>> &internal_map =
+                std::map<KeyT, CcPage<KeyT, ValueT>> &internal_map =
                     static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        neg_inf_cce_->parent_map_)
-                        ->ccm_;
-                internal_it_ = internal_map.begin();
+                        neg_inf_cce_->parent_page_->parent_map_)
+                        ->ccmp_;
 
-                if (internal_it_ != internal_map.end())
+                auto map_it = internal_map.begin();
+                if (map_it != internal_map.end())
                 {
+                    // pages in cc_map should never be empty
+                    current_page_ = &map_it->second;
+                    idx_in_page_ = 0;
                     UpdateCurrent();
                 }
                 else
@@ -4715,25 +4785,29 @@ protected:
             }
             else if (current_.first != PositiveInfinity<KeyT>::Instance())
             {
-                std::map<KeyT, CcEntry<KeyT, ValueT>> &internal_map =
-                    static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        current_.second->parent_map_)
-                        ->ccm_;
-                ++internal_it_;
-
-                // The next entry points to positive infinity.
-                if (internal_it_ == internal_map.end())
+                if (idx_in_page_ + 1 == current_page_->Size())
                 {
-                    current_.first = PositiveInfinity<KeyT>::Instance();
-                    current_.second = nullptr;
+                    current_page_ = current_page_->next_page_;
+                    if (current_page_->IsPosInf())
+                    {
+                        // The next entry points to positive infinity.
+                        current_.first = PositiveInfinity<KeyT>::Instance();
+                        current_.second = nullptr;
+                    }
+                    else
+                    {
+                        idx_in_page_ = 0;
+                        UpdateCurrent();
+                    }
                 }
                 else
                 {
+                    idx_in_page_++;
                     UpdateCurrent();
                 }
             }
-            // If the current points to positive infinity, keeps the
-            // iterator unchanged.
+            // If the current points to positive infinity, keeps the iterator
+            // unchanged.
 
             return *this;
         }
@@ -4746,15 +4820,16 @@ protected:
                 // The iterator points to positive infinity. Decrements the
                 // iterator to the last entry in the map, if the map is not
                 // empty.
-                std::map<KeyT, CcEntry<KeyT, ValueT>> &internal_map =
+                std::map<KeyT, CcPage<KeyT, ValueT>> &internal_map =
                     static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        neg_inf_cce_->parent_map_)
-                        ->ccm_;
-                internal_it_ = internal_map.end();
-
-                if (internal_it_ != internal_map.begin())
+                        neg_inf_cce_->parent_page_->parent_map_)
+                        ->ccmp_;
+                auto map_it = internal_map.end();
+                if (map_it != internal_map.begin())
                 {
-                    --internal_it_;
+                    --map_it;
+                    current_page_ = &map_it->second;
+                    idx_in_page_ = current_page_->Size() - 1;
                     UpdateCurrent();
                 }
                 else
@@ -4763,25 +4838,29 @@ protected:
                     // infinity is negative infinity.
                     current_.first = NegativeInfinity<KeyT>::Instance();
                     current_.second = neg_inf_cce_;
+                    current_page_ = nullptr;
                 }
             }
             else if (current_.first != NegativeInfinity<KeyT>::Instance())
             {
-                std::map<KeyT, CcEntry<KeyT, ValueT>> &internal_map =
-                    static_cast<TemplateCcMap<KeyT, ValueT> *>(
-                        current_.second->parent_map_)
-                        ->ccm_;
-
-                // If the current points to the beginning of the map, the
-                // prior entry is negative infinity.
-                if (internal_it_ == internal_map.begin())
+                if (idx_in_page_ == 0)
                 {
-                    current_.first = NegativeInfinity<KeyT>::Instance();
-                    current_.second = neg_inf_cce_;
+                    // update current_page to previous page, if any
+                    current_page_ = current_page_->prev_page_;
+                    if (current_page_->IsNegInf())
+                    {
+                        current_.first = NegativeInfinity<KeyT>::Instance();
+                        current_.second = neg_inf_cce_;
+                    }
+                    else
+                    {
+                        idx_in_page_ = current_page_->Size() - 1;
+                        UpdateCurrent();
+                    }
                 }
                 else
                 {
-                    --internal_it_;
+                    idx_in_page_--;
                     UpdateCurrent();
                 }
             }
@@ -4823,14 +4902,20 @@ protected:
     private:
         void UpdateCurrent()
         {
-            current_.first = &internal_it_->first;
-            current_.second = &internal_it_->second;
+            assert(current_page_ != nullptr &&
+                   idx_in_page_ < current_page_->Size());
+            current_.first = &current_page_->keys_.at(idx_in_page_);
+            current_.second = current_page_->entries_.at(idx_in_page_).get();
         }
 
-        typename std::map<KeyT, CcEntry<KeyT, ValueT>>::iterator internal_it_;
+    protected:
         std::pair<const KeyT *, CcEntry<KeyT, ValueT> *> current_{nullptr,
                                                                   nullptr};
+        // neg_inf_cce_ is necessary for its gap
         CcEntry<KeyT, ValueT> *neg_inf_cce_{nullptr};
+
+        CcPage<KeyT, ValueT> *current_page_{nullptr};
+        size_t idx_in_page_{};
     };
 
     /**
@@ -4851,6 +4936,173 @@ protected:
     Iterator End()
     {
         return Iterator(&pos_inf_, &neg_inf_, &pos_inf_);
+    }
+
+    std::pair<const KeyT *, CcEntry<KeyT, ValueT> *> Find(const KeyT &key)
+    {
+        if (&key == NegativeInfinity<KeyT>::Instance())
+        {
+            return {NegativeInfinity<KeyT>::Instance(), &neg_inf_};
+        }
+
+        Iterator lb_it = LowerBound(key);
+        if (lb_it != End() && *lb_it->first == key)
+        {
+            CcEntry<KeyT, ValueT> *cce = lb_it->second;
+            shard_->UpdateLruList(cce->parent_page_);
+            return {lb_it->first, cce};
+        }
+        else
+        {
+            // The input key does not exist.
+            return {nullptr, nullptr};
+        }
+    }
+
+    Iterator FindEmplace(const KeyT &key)
+    {
+        bool emplace;
+        return FindEmplace(key, emplace);
+    }
+
+    /**
+     * Find or Emplace the CcEntry with key @param key.
+     *
+     * @param key
+     * @return The Iterator pointing to the target CcEntry
+     */
+    Iterator FindEmplace(const KeyT &key, bool &emplace)
+    {
+        emplace = false;
+        if (&key == NegativeInfinity<KeyT>::Instance())
+        {
+            return Begin();
+        }
+        if (&key == PositiveInfinity<KeyT>::Instance())
+        {
+            return End();
+        }
+
+        // catalog ccmap bypass shard memory limit. since checkpointer may
+        // emplace ccentry into ccmap.
+        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
+        {
+            // The shard has reached the maximal capacity. Tries to clean cc
+            // entries that have been checkpointed but are not being
+            // accessed by active tx's.
+            size_t free_cnt = shard_->Clean();
+            if (free_cnt == 0)
+            {
+                return End();
+            }
+        }
+
+        size_t mem_increased = 0;
+        if (ccmp_.begin() == ccmp_.end())
+        {
+            // ccmap is empty, insert a page
+            auto [it, inserted] =
+                ccmp_.try_emplace(key, this, &pg_ng_inf_, &pg_ps_inf_);
+            assert(inserted);
+            mem_increased += it->second.MemUsage();
+        }
+
+        // First locate target page, then find or emplace `key` in the page.
+        auto ub_it = ccmp_.upper_bound(key);
+        auto target_it = ub_it;
+        if (target_it != ccmp_.begin())
+        {
+            target_it--;
+        }
+        CcPage<KeyT, ValueT> *target_page = &target_it->second;
+
+        size_t idx_in_page = target_page->Find(key);
+        if (idx_in_page < target_page->Size())
+        {
+            // found, return Iterator
+            Iterator iterator(target_page, idx_in_page, &neg_inf_);
+            CcEntry<KeyT, ValueT> *cce_ptr = iterator->second;
+            shard_->UpdateLruList(cce_ptr->parent_page_);
+            return iterator;
+        }
+
+        // not found, emplace key into target page, split the page if it's full
+        if (target_page->Full() && target_page->LastKey() < key)
+        {
+            // target page is full, choose the next page if `key` can be
+            // inserted into next page
+            target_it++;
+            if (target_it == ccmp_.end())
+            {
+                // create a new page
+                target_it = ccmp_.try_emplace(
+                    target_it, key, this, target_page, target_page->next_page_);
+                mem_increased += target_it->second.MemUsage();
+            }
+            target_page = &target_it->second;
+        }
+
+        if (target_page->Full())
+        {
+            // split this page
+            std::vector<KeyT> new_page_keys;
+            std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+                new_page_entries;
+            target_page->Split(new_page_keys, new_page_entries);
+
+            const KeyT &key_of_new_page = *new_page_keys.begin();
+            auto new_page_it = ccmp_.try_emplace(target_it,
+                                                 key_of_new_page,
+                                                 this,
+                                                 std::move(new_page_keys),
+                                                 std::move(new_page_entries),
+                                                 target_page,
+                                                 target_page->next_page_);
+            CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
+            mem_increased += new_page->MemUsage();
+
+            // insert new page into checkpoint list and lru list right after old
+            // page
+            if (target_page->ckpt_next_ != nullptr)
+            {
+                LruPage *next = target_page->ckpt_next_;
+                new_page->ckpt_next_ = next;
+                next->ckpt_prev_ = new_page;
+                target_page->ckpt_next_ = new_page;
+                new_page->ckpt_prev_ = target_page;
+            }
+            if (target_page->lru_next_ != nullptr)
+            {
+                LruPage *next = target_page->lru_next_;
+                new_page->lru_next_ = next;
+                next->lru_prev_ = new_page;
+                target_page->lru_next_ = new_page;
+                new_page->lru_prev_ = target_page;
+            }
+
+            if (new_page->FirstKey() <= key)
+            {
+                target_it = new_page_it;
+                target_page = new_page;
+            }
+        }
+
+        idx_in_page = target_page->Emplace(key, mem_increased);
+        emplace = true;
+        // modify page key in the map if it changed
+        TryUpdatePageKey(target_it);
+
+        // update lru list
+        shard_->UpdateLruList(target_page);
+        shard_->mem_usage_ += mem_increased;
+        size_++;
+
+        return Iterator(target_page, idx_in_page, &neg_inf_);
+    }
+
+    Iterator Emplace(const KeyT &key)
+    {
+        return FindEmplace(key);
     }
 
     ScanType GetScanType(bool is_include_floor_cce)
@@ -4882,6 +5134,133 @@ protected:
     }
 
     /**
+     * Find lower bound of @param key in map, i.e. the first entry whose key is
+     * equal to or greater than @param key. Return an Iterator pointing to this
+     * entry, if no such entry, return Begin() which points to neg_inf_.
+     * @param key
+     * @return
+     */
+    Iterator LowerBound(const KeyT &key)
+    {
+        if (&key == NegativeInfinity<KeyT>::Instance())
+        {
+            return Begin();
+        }
+
+        // ccmp_ key is each page's smallest key, so the lower bound of `key`
+        // might fall into either of two adjacent pages
+        auto lb_it = ccmp_.lower_bound(key);
+        CcPage<KeyT, ValueT> *page1 = nullptr;
+        CcPage<KeyT, ValueT> *page2 = nullptr;
+        auto pg_it1 = lb_it;
+        auto pg_it2 = lb_it;
+        if (pg_it2 != ccmp_.end())
+        {
+            page2 = &pg_it2->second;
+        }
+        if (pg_it1 != ccmp_.begin())
+        {
+            pg_it1--;
+            page1 = &pg_it1->second;
+        }
+        // now we have the order:
+        // neg_inf < page1(if exist)->FirstKey() < key <= page2(if
+        // exist)->FirstKey() < pos_inf_
+
+        if (page2 == nullptr && (page1 == nullptr || page1->LastKey() < key))
+        {
+            // no key bigger than or equal to `key`
+            return End();
+        }
+        else if (page1 != nullptr && key <= page1->LastKey())
+        {
+            // page1->FirstKey < key <= page1->LastKey(), the lower bound of
+            // `key` must locate in page1
+            size_t idx_in_page = page1->LowerBound(key);
+            return Iterator(page1, idx_in_page, &neg_inf_);
+        }
+        else
+        {
+            // page1->LastKey() < key <= page2->FirstKey(), the lower bound of
+            // `key` must be the first key of page2
+            return Iterator(page2, 0, &neg_inf_);
+        }
+    }
+
+    /**
+     * Find upper bound of @param key in map, i.e. the first entry whose key is
+     * greater than @param key. Return an Iterator pointing to this entry, if
+     * no such entry, return End() which points to pos_inf_.
+     * @param key
+     * @return
+     */
+    Iterator UpperBound(const KeyT &key)
+    {
+        // ccmp_ key is each page's smallest key, so the upper bound of `key`
+        // might fall into either of two adjacent pages
+        auto ub_it = ccmp_.upper_bound(key);
+        CcPage<KeyT, ValueT> *page1 = nullptr;
+        CcPage<KeyT, ValueT> *page2 = nullptr;
+        auto pg_it1 = ub_it;
+        auto pg_it2 = ub_it;
+        if (pg_it2 != ccmp_.end())
+        {
+            page2 = &pg_it2->second;
+        }
+        if (pg_it1 != ccmp_.begin())
+        {
+            pg_it1--;
+            page1 = &pg_it1->second;
+        }
+        // now we have the order:
+        // neg_inf <= page1(if exist)->FirstKey() <= key < page2(if
+        // exist)->FirstKey() < pos_inf
+
+        if (page2 == nullptr && (page1 == nullptr || page1->LastKey() <= key))
+        {
+            // no key bigger than `key`
+            return End();
+        }
+        else if (page1 != nullptr && key < page1->LastKey())
+        {
+            // page1->FirstKey <= key < page1->LastKey(), the upper bound of
+            // `key` must locate in page1
+            size_t idx_in_page = page1->UpperBound(key);
+            return Iterator(page1, idx_in_page, &neg_inf_);
+        }
+        else
+        {
+            // page1->LastKey() <= key < page2->FirstKey(), the upper bound of
+            // `key` must be the first key of page2
+            return Iterator(page2, 0, &neg_inf_);
+        }
+    }
+
+    /**
+     * @brief Finds the greatest cc entry whose key is less than or equal to
+     * the input key. If the map is empty, the floor key is negative
+     * infinity.
+     *
+     * @param key The input key
+     * @return The Iterator pointing to the cc entry whose key is the greatest
+     * key less than or equal to the input key. If `key` is positive infinity,
+     * the Iterator points to the last key in the map.
+     */
+    Iterator Floor(const KeyT &key)
+    {
+        Iterator it = LowerBound(key);
+        if (*it->first != key ||
+            it == End())  // special case for positive infinity
+        {
+            // lower bound of a non-negative infinity key should never be
+            // Begin()
+            assert(it != Begin());
+            it--;
+        }
+        return it;
+    }
+
+    /**
      * @brief Searches the start cc entry of a forward scan.
      *
      * @param key Search key
@@ -4901,47 +5280,49 @@ protected:
         {
             return MakeForwardScanPair(Begin(), is_include_floor_cce);
         }
-
-        if (inclusive || is_include_floor_cce)  // >= key or range_cc_map scan,
-                                                // search for lower_bound(key)
+        if (key.Type() == KeyType::PositiveInf)
         {
-            auto lb_it = ccm_.lower_bound(key);
-            if (lb_it == ccm_.end() || !(lb_it->first == key))
+            return MakeForwardScanPair(End(), is_include_floor_cce);
+        }
+
+        if (inclusive ||
+            is_include_floor_cce)  // >= `key` or range_cc_map scan,
+                                   // search for lower_bound(key)
+        {
+            auto lb_it = LowerBound(key);
+            if (lb_it == End() || !(*lb_it->first == key))
             {
                 // for template_cc_map, start from previous entry's gap;
                 // for range_cc_map, start from previous entry's key and gap
-                if (lb_it == ccm_.begin())
+                if (lb_it == Begin())
                 {
-                    return MakeForwardScanPair(Begin(), is_include_floor_cce);
+                    return MakeForwardScanPair(lb_it, is_include_floor_cce);
                 }
                 else
                 {
                     --lb_it;
-                    return MakeForwardScanPair(Iterator(lb_it, &neg_inf_),
-                                               is_include_floor_cce);
+                    return MakeForwardScanPair(lb_it, is_include_floor_cce);
                 }
             }
             else
             {
-                // lb_it's key is exactly equal to key, start from lb_it and its
-                // gap, but not including previous key gap
-                return std::make_pair(Iterator(lb_it, &neg_inf_),
-                                      ScanType::ScanBoth);
+                // lb_it's key is exactly equal to `key`, start from lb_it and
+                // its gap, but not including previous key gap
+                return std::make_pair(lb_it, ScanType::ScanBoth);
             }
         }
-        else  // > key, search for the entry before upper_bound(key)
+        else  // > `key`, search for the entry before upper_bound(key)
         {
-            auto ub_it = ccm_.upper_bound(key);
+            auto ub_it = UpperBound(key);
             // start from the gap of previous entry of ub_it
-            if (ub_it == ccm_.begin())
+            if (ub_it == Begin())
             {
-                return std::make_pair(Begin(), ScanType::ScanGap);
+                return std::make_pair(ub_it, ScanType::ScanGap);
             }
             else
             {
                 ub_it--;
-                return std::make_pair(Iterator(ub_it, &neg_inf_),
-                                      ScanType::ScanGap);
+                return std::make_pair(ub_it, ScanType::ScanGap);
             }
         }
     }
@@ -4966,55 +5347,53 @@ protected:
             return std::make_pair(start_it, ScanType::ScanBoth);
         }
 
-        if (inclusive)  // <= key, search for the entry before upper_bound(key)
+        if (inclusive)  // <= `key`, search for the entry before
+                        // upper_bound(key)
         {
-            auto ub_it = ccm_.upper_bound(key);
-            if (ub_it == ccm_.begin())
+            Iterator ub_it = UpperBound(key);
+            if (ub_it == Begin())
             {
-                // map empty or every key in ccm_ is greater than key, return
+                // map empty or every key in map is greater than `key`, return
                 // neg_inf_'s gap
-                return std::make_pair(Begin(), ScanType::ScanGap);
+                return std::make_pair(ub_it, ScanType::ScanGap);
             }
             else
             {
                 ub_it--;
-                // now, ub_it is the greatest entry equal to or less than key
+                // now, ub_it is the greatest entry equal to or less than `key`
 
-                if (!(ub_it->first == key))
+                if (!(*ub_it->first == key))
                 {
-                    // key not equal should include the
-                    // gap
-                    return std::make_pair(Iterator(ub_it, &neg_inf_),
-                                          ScanType::ScanBoth);
+                    // key not equal, should include the gap
+                    return std::make_pair(ub_it, ScanType::ScanBoth);
                 }
                 else
                 {
                     // exactly full key match, not include the gap
-                    return std::make_pair(Iterator(ub_it, &neg_inf_),
-                                          ScanType::ScanKey);
+                    return std::make_pair(ub_it, ScanType::ScanKey);
                 }
             }
         }
-        else  // < key, search for the entry before lower_bound(key)
+        else  // < `key`, search for the entry before lower_bound(key)
         {
-            auto lb_it = ccm_.lower_bound(key);
-            if (lb_it == ccm_.begin())
+            Iterator lb_it = LowerBound(key);
+            if (lb_it == Begin())
             {
                 // map empty or every key in ccm_ is greater than or equal to
-                // key, return neg_inf_ gap
-                return std::make_pair(Begin(), ScanType::ScanGap);
+                // `key`, return neg_inf_ gap
+                return std::make_pair(lb_it, ScanType::ScanGap);
             }
             else
             {
                 // starting from the gap and key of entry before lb_it
                 lb_it--;
-                return std::make_pair(Iterator(lb_it, &neg_inf_),
-                                      ScanType::ScanBoth);
+                return std::make_pair(lb_it, ScanType::ScanBoth);
             }
         }
     }
 
-    void ScanKey(CcEntry<KeyT, ValueT> *cce,
+    void ScanKey(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
                  TemplateScanCache<KeyT, ValueT> *typed_cache,
                  bool include_gap,
                  uint32_t ng_id,
@@ -5043,8 +5422,8 @@ protected:
             {
                 return;
             }
-            tuple->KeyObj().Copy(*cce->key_);
-            tuple_size = cce->key_->Size();
+            tuple->KeyObj().Copy(*key);
+            tuple_size = key->Size();
 
             if (v_rec.payload_status_ == RecordStatus::Normal ||
                 (is_ckpt_delta &&
@@ -5071,8 +5450,8 @@ protected:
             {
                 return;
             }
-            tuple->KeyObj().Copy(*cce->key_);
-            tuple_size = cce->key_->Size();
+            tuple->KeyObj().Copy(*key);
+            tuple_size = key->Size();
 
             if (cce->payload_status_ == RecordStatus::Normal ||
                 (is_ckpt_delta &&
@@ -5092,7 +5471,8 @@ protected:
         typed_cache->AddScanTupleSize(tuple_size);
     }
 
-    void ScanKey(CcEntry<KeyT, ValueT> *cce,
+    void ScanKey(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
                  remote::ScanTuple_msg *tuple,
                  bool include_gap,
                  int64_t ng_term,
@@ -5101,7 +5481,7 @@ protected:
                  bool is_ckpt_delta = false) const
     {
         tuple->clear_key();
-        cce->key_->Serialize(*tuple->mutable_key());
+        key->Serialize(*tuple->mutable_key());
 
         if (is_read_snapshot)
         {
@@ -5148,7 +5528,8 @@ protected:
         // on the sender side when the sender receives the response.
     }
 
-    void ScanGap(CcEntry<KeyT, ValueT> *cce,
+    void ScanGap(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
                  TemplateScanTuple<KeyT, ValueT> *tuple,
                  uint32_t ng_id,
                  int64_t ng_term) const
@@ -5159,7 +5540,8 @@ protected:
             reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
     }
 
-    void ScanGap(CcEntry<KeyT, ValueT> *cce,
+    void ScanGap(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
                  remote::ScanTuple_msg *tuple,
                  int64_t ng_term) const
     {
@@ -5200,8 +5582,402 @@ protected:
         return false;
     }
 
-    std::map<KeyT, CcEntry<KeyT, ValueT>> ccm_;
+    void DetachFromCkptList(LruPage *page)
+    {
+        LruPage *prev = page->ckpt_prev_;
+        LruPage *next = page->ckpt_next_;
+        assert(prev != nullptr && next != nullptr);
+        prev->ckpt_next_ = next;
+        next->ckpt_prev_ = prev;
+        page->ckpt_prev_ = nullptr;
+        page->ckpt_next_ = nullptr;
+    }
+
+    void TryInsertCkptList(LruPage *page)
+    {
+        if (page->ckpt_next_ == nullptr)
+        {
+            LruPage *old_tail = pg_ps_inf_.ckpt_prev_;
+            old_tail->ckpt_next_ = page;
+            page->ckpt_prev_ = old_tail;
+            page->ckpt_next_ = &pg_ps_inf_;
+            pg_ps_inf_.ckpt_prev_ = page;
+        }
+    }
+
+    void TryUpdatePageKey(
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page_it)
+    {
+        CcPage<KeyT, ValueT> &page = page_it->second;
+        if (page_it->first != page.FirstKey())
+        {
+            auto node_handle = ccmp_.extract(page_it);
+            KeyT new_key(page.FirstKey());
+            node_handle.key() = std::move(new_key);
+            auto insert_res = ccmp_.insert(std::move(node_handle));
+            assert(insert_res.inserted);
+            page_it = insert_res.position;
+        }
+    }
+
+    /**
+     * Clean page and return the last_read_ts of page.
+     *
+     * @param page
+     * @param mem_decreased
+     * @param free_cnt
+     * @return
+     */
+    uint64_t CleanPage(CcPage<KeyT, ValueT> *page,
+                       size_t &mem_decreased,
+                       size_t &free_cnt)
+    {
+        uint64_t last_read_ts = 0;
+        std::vector<KeyT> &keys = page->keys_;
+        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &entries =
+            page->entries_;
+        auto key_insert_it = keys.begin();
+        auto entry_insert_it = entries.begin();
+
+        bool detach_ckpt = true;
+        auto key_it = keys.begin();
+        auto entry_it = entries.begin();
+        for (; key_it != keys.end(); key_it++, entry_it++)
+        {
+            CcEntry<KeyT, ValueT> *cce = entry_it->get();
+            last_read_ts = std::max(last_read_ts, cce->last_read_ts_);
+            if (cce->NeedCkpt())
+            {
+                detach_ckpt = false;
+            }
+            if (cce->IsFree())
+            {
+                // free entries will be erased
+                mem_decreased += cce->GetCcEntryMemUsage() +
+                                 key_it->MemUsage() - sizeof(KeyT);
+                free_cnt++;
+            }
+            else
+            {
+                detach_ckpt = false;
+                // keep the entries that are not free
+                *key_insert_it = std::move(*key_it);
+                *entry_insert_it = std::move(*entry_it);
+                key_insert_it++;
+                entry_insert_it++;
+            }
+        }
+        keys.erase(key_insert_it, keys.end());
+        entries.erase(entry_insert_it, entries.end());
+
+        if (detach_ckpt && page->ckpt_next_ != nullptr && !page->IsPinned())
+        {
+            // detach page from the checkpoint list if it is not pinned
+            DetachFromCkptList(page);
+        }
+        return last_read_ts;
+    }
+
+    /**
+     * Redistribute entries between page1 and page2. This happens when one page
+     * is cleaned and its size is below merge threshold and it needs to borrow
+     * entries from its siblings to keep the tree balanced.
+     *
+     * @param page1_it
+     * @param page2_it
+     * @param page1_last_read_ts
+     * @param page2_last_read_ts
+     * @return
+     */
+    void RedistributeBetweenPages(
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
+        uint64_t page1_last_read_ts,
+        uint64_t page2_last_read_ts)
+    {
+        CcPage<KeyT, ValueT> &page1 = page1_it->second;
+        CcPage<KeyT, ValueT> &page2 = page2_it->second;
+
+        if (page1.Size() > page2.Size())
+        {
+            // move keys and entries from page1's tail to page2's head
+            size_t move_pos = (page1.Size() + page2.Size()) / 2;
+            page2.keys_.insert(
+                page2.keys_.begin(),
+                std::make_move_iterator(page1.keys_.begin() + move_pos),
+                std::make_move_iterator(page1.keys_.end()));
+            page1.keys_.erase(page1.keys_.begin() + move_pos,
+                              page1.keys_.end());
+            // update parent page of entries to be moved
+            for (auto entry_ptr_it = page1.entries_.begin() + move_pos;
+                 entry_ptr_it != page1.entries_.end();
+                 entry_ptr_it++)
+            {
+                (*entry_ptr_it)->parent_page_ = &page2;
+            }
+            page2.entries_.insert(
+                page2.entries_.begin(),
+                std::make_move_iterator(page1.entries_.begin() + move_pos),
+                std::make_move_iterator(page1.entries_.end()));
+            page1.entries_.erase(page1.entries_.begin() + move_pos,
+                                 page1.entries_.end());
+        }
+        else
+        {
+            // move keys and entries from page2's head to page1's tail
+            size_t move_idx = page2.Size() - (page1.Size() + page2.Size()) / 2;
+            page1.keys_.insert(
+                page1.keys_.end(),
+                std::make_move_iterator(page2.keys_.begin()),
+                std::make_move_iterator(page2.keys_.begin() + move_idx));
+            page2.keys_.erase(page2.keys_.begin(),
+                              page2.keys_.begin() + move_idx);
+            // update parent page of entries to be moved
+            for (auto entry_ptr_it = page2.entries_.begin();
+                 entry_ptr_it != page2.entries_.begin() + move_idx;
+                 entry_ptr_it++)
+            {
+                (*entry_ptr_it)->parent_page_ = &page1;
+            }
+            page1.entries_.insert(
+                page1.entries_.end(),
+                std::make_move_iterator(page2.entries_.begin()),
+                std::make_move_iterator(page2.entries_.begin() + move_idx));
+            page2.entries_.erase(page2.entries_.begin(),
+                                 page2.entries_.begin() + move_idx);
+        }
+
+        // update page key in the map
+        TryUpdatePageKey(page1_it);
+        TryUpdatePageKey(page2_it);
+
+        // update checkpoint list
+        // checkpoint scan might stop at a pinned page and page redistribution
+        // could happen while the checkpoint scan is ongoing. The requirements
+        // are as follows:
+        // 1. the pinned page and its position in checkpoint list should remain
+        // unchanged;
+        // 2. pages behind the pinned page in checkpoint list should not be
+        // skipped by the ongoing checkpoint scan after the redistribution.
+        if (page1.IsPinned() || page2.IsPinned())
+        {
+            // if either page is pinned by ongoing checkpoint scan, keep the
+            // pinned page unchanged and insert the other after the pinned page
+            CcPage<KeyT, ValueT> *pinned_page =
+                page1.IsPinned() ? &page1 : &page2;
+            CcPage<KeyT, ValueT> *other = page1.IsPinned() ? &page2 : &page1;
+            if (other->ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(other);
+            }
+            LruPage *next = pinned_page->ckpt_next_;
+            other->ckpt_next_ = next;
+            other->ckpt_prev_ = pinned_page;
+            next->ckpt_prev_ = other;
+            pinned_page->ckpt_next_ = other;
+        }
+        else if (page1.ckpt_next_ != nullptr || page2.ckpt_next_ != nullptr)
+        {
+            // if either page is in checkpoint list, reinsert the two pages at
+            // the tail
+            if (page1.ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(&page1);
+            }
+            if (page2.ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(&page2);
+            }
+            TryInsertCkptList(&page1);
+            TryInsertCkptList(&page2);
+        }
+        else
+        {
+            // neither page is in checkpoint list, no entry needs to be scanned
+            // by CkptScanCc, do nothing
+        }
+
+        // update LRU list
+        // after redistribution, the two pages should be seen as one in the LRU
+        // list, insert the less recently used page after the more recently used
+        // one
+        LruPage *less_recently_used =
+            page1_last_read_ts > page2_last_read_ts ? &page1 : &page2;
+        LruPage *more_recently_used =
+            page1_last_read_ts > page2_last_read_ts ? &page2 : &page1;
+        if (less_recently_used->lru_next_ != nullptr)
+        {
+            shard_->DetachLru(less_recently_used);
+        }
+        LruPage *next = more_recently_used->lru_next_;
+        less_recently_used->lru_next_ = next;
+        next->lru_prev_ = less_recently_used;
+        less_recently_used->lru_prev_ = more_recently_used;
+        more_recently_used->lru_next_ = less_recently_used;
+    }
+
+    /**
+     * Merge page1 and page2. Update the map, checkpoint list and lru list after
+     * merge.
+     *
+     * @param page
+     * @param page_key
+     * @param mem_decreased
+     * @return the lru_next_ of page
+     */
+    LruPage *MergePages(
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
+        typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
+        uint64_t page1_last_read_ts,
+        uint64_t page2_last_read_ts,
+        CcPage<KeyT, ValueT> *page,
+        size_t &mem_decreased)
+    {
+        CcPage<KeyT, ValueT> *page1 = &page1_it->second;
+        CcPage<KeyT, ValueT> *page2 = &page2_it->second;
+
+        // if either page is pinned, use the pinned page as the merged page and
+        // discard the other
+        auto merged_page_it = page2_it->second.IsPinned() ? page2_it : page1_it;
+        auto discarded_page_it =
+            page2_it->second.IsPinned() ? page1_it : page2_it;
+        CcPage<KeyT, ValueT> *merged_page = &merged_page_it->second;
+        CcPage<KeyT, ValueT> *discarded_page = &discarded_page_it->second;
+
+        mem_decreased += discarded_page->MemUsage();
+
+        // merge the key vector and entry vector
+        std::vector<KeyT> merged_keys = std::move(page1->keys_);
+        merged_keys.insert(merged_keys.end(),
+                           std::make_move_iterator(page2->keys_.begin()),
+                           std::make_move_iterator(page2->keys_.end()));
+        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> merged_entries =
+            std::move(page1->entries_);
+        merged_entries.insert(merged_entries.end(),
+                              std::make_move_iterator(page2->entries_.begin()),
+                              std::make_move_iterator(page2->entries_.end()));
+        // update entry parent_page_
+        for (auto &entry_ptr : merged_entries)
+        {
+            entry_ptr->parent_page_ = merged_page;
+        }
+        merged_page->keys_ = std::move(merged_keys);
+        merged_page->entries_ = std::move(merged_entries);
+
+        // Update the page order list.
+        CcPage<KeyT, ValueT> *map_prev = page1->prev_page_;
+        CcPage<KeyT, ValueT> *map_next = page2->next_page_;
+        merged_page->prev_page_ = map_prev;
+        merged_page->next_page_ = map_next;
+        map_prev->next_page_ = merged_page;
+        map_next->prev_page_ = merged_page;
+
+        // Update the checkpoint list.
+        // There are some issues about the merged page's position in the
+        // checkpoint list, because checkpoint scan might stop at a pinned page
+        // and page merge could happen while the checkpoint scan is ongoing.
+        // The requirements are as follows:
+        // 1. the pinned page and its position in checkpoint list should remain
+        // unchanged;
+        // 2. pages behind the pinned page in checkpoint list should not be
+        // skipped by the ongoing checkpoint scan after the merge.
+        if (merged_page_it->second.IsPinned())
+        {
+            // merged_page is pinned, keep its position in checkpoint list
+            // unchanged, detach discard_page from the checkpoint list
+            DetachFromCkptList(discarded_page);
+        }
+        else if (merged_page->ckpt_next_ != nullptr ||
+                 discarded_page->ckpt_next_ != nullptr)
+        {
+            // detach both pages and insert merged_page to the end of the
+            // checkpoint list so that entries in the two pages being merged are
+            // guaranteed to be scanned at least once by the ongoing CkptScanCc
+            if (merged_page->ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(merged_page);
+            }
+            if (discarded_page->ckpt_next_ != nullptr)
+            {
+                DetachFromCkptList(discarded_page);
+            }
+            TryInsertCkptList(merged_page);
+        }
+        else
+        {
+            // neither of the two page is in checkpoint list, no entry in the
+            // merged page needs to be scanned by CkptScanCc, do nothing
+        }
+
+        // Update the LRU list.
+        // record page's original lru_next as it will change after the Lru list
+        // is updated
+        LruPage *next = page->lru_next_;
+        // skip the discarded page
+        if (next == discarded_page)
+        {
+            next = discarded_page->lru_next_;
+        }
+        // the merged page should take the more recently used page's position in
+        // the LRU list
+        if (page1->lru_next_ == page2 || page1->lru_prev_ == page2)
+        {
+            // corner case: the two pages are adjacent in LRU list, just detach
+            // the discarded page
+            if (discarded_page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(discarded_page);
+            }
+        }
+        else
+        {
+            LruPage *lru_prev = page1_last_read_ts > page2_last_read_ts
+                                    ? page1->lru_prev_
+                                    : page2->lru_prev_;
+            LruPage *lru_next = page1_last_read_ts > page2_last_read_ts
+                                    ? page1->lru_next_
+                                    : page2->lru_next_;
+
+            if (merged_page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(merged_page);
+            }
+            if (discarded_page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(discarded_page);
+            }
+            // reinsert the merged page into lru list
+            merged_page->lru_prev_ = lru_prev;
+            merged_page->lru_next_ = lru_next;
+            lru_prev->lru_next_ = merged_page;
+            lru_next->lru_prev_ = merged_page;
+        }
+        // remove discarded page from the map
+        ccmp_.erase(discarded_page_it);
+        // modify merged page's key in the map
+        if (merged_page->FirstKey() != merged_page_it->first)
+        {
+            // merged page key has changed
+            TryUpdatePageKey(merged_page_it);
+        }
+
+        return next;
+    }
+
+    CcPage<KeyT, ValueT> *PageNegInf()
+    {
+        return &pg_ng_inf_;
+    }
+
+    CcPage<KeyT, ValueT> *PagePosInf()
+    {
+        return &pg_ps_inf_;
+    }
+
+    std::map<KeyT, CcPage<KeyT, ValueT>> ccmp_;
+    CcPage<KeyT, ValueT> pg_ng_inf_, pg_ps_inf_;
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
+    size_t size_{};
 
     // When maintain_statistics_ is true, shard_profile_ is valid.
     bool maintain_statistics_;

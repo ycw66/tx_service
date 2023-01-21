@@ -150,6 +150,10 @@ void LruEntry::RecycleGapLock()
 
 const TxKey *FlushRecord::Key() const
 {
-    return cce_->Key();
+    if (is_key_owner_)
+    {
+        return key_.uptr_.get();
+    }
+    return key_.ptr_;
 }
 }  // namespace txservice

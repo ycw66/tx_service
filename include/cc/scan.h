@@ -104,9 +104,9 @@ public:
     friend bool operator<(const TemplateScanTuple<KeyT, ValueT> &lhs,
                           const TemplateScanTuple<KeyT, ValueT> &rhs)
     {
-        return lhs.key_ts_ != 0 && rhs.key_ts_ != 0 &&
-                   lhs.KeyObj() < rhs.KeyObj() ||
-               lhs.key_ts_ == 0 && rhs.key_ts_ != 0;
+        return (lhs.key_ts_ != 0 && rhs.key_ts_ != 0 &&
+                lhs.KeyObj() < rhs.KeyObj()) ||
+               (lhs.key_ts_ == 0 && rhs.key_ts_ != 0);
     }
 
 private:

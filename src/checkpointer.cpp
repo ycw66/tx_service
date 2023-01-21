@@ -221,8 +221,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 std::make_unique<std::vector<FlushRecord>>();
             std::unique_ptr<std::vector<FlushRecord>> archive_vec =
                 std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<LruEntry *>> mv_base_vec =
-                std::make_unique<std::vector<LruEntry *>>();
+            std::unique_ptr<std::vector<const TxKey *>> mv_base_vec =
+                std::make_unique<std::vector<const TxKey *>>();
 
             CkptScanTxRequest scan_req(table_name,
                                        ckpt_ts,
@@ -443,8 +443,8 @@ void Checkpointer::FlushDataWorker()
         const TableSchema *schema = cur_work.schema_;
         std::unique_ptr<vector<FlushRecord>> ckpt_vec_owner, archive_vec_owner;
         std::vector<FlushRecord> *ckpt_vec, *archive_vec;
-        std::unique_ptr<std::vector<LruEntry *>> mv_base_owner;
-        std::vector<LruEntry *> *mv_base_vec;
+        std::unique_ptr<std::vector<const TxKey *>> mv_base_owner;
+        std::vector<const TxKey *> *mv_base_vec;
         if (cur_work.vec_owner_)
         {
             ckpt_vec_owner = std::move(cur_work.ckpt_vec_);
@@ -506,6 +506,7 @@ void Checkpointer::FlushDataWorker()
             {
                 for (auto &ref : *ckpt_vec)
                 {
+                    // todo: remove cce_
                     ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                              std::memory_order_release);
                     ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
@@ -1199,7 +1200,7 @@ void Checkpointer::FlushData(const TableName &table_name,
                              uint64_t ckpt_ts,
                              std::vector<FlushRecord> *ckpt_vec,
                              std::vector<FlushRecord> *archive_vec,
-                             std::vector<LruEntry *> *mv_vec,
+                             std::vector<const TxKey *> *mv_vec,
                              CcHandlerResult<Void> *res)
 {
     std::unique_lock<std::mutex> worker_lk(worker_mux_);

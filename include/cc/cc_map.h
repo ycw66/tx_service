@@ -21,6 +21,8 @@ struct RemoteScanNextBatch;
 struct RemoteReadOutside;
 }  // namespace remote
 
+struct LruEntry;
+
 struct AcquireCc;
 struct AcquireAllCc;
 struct PostWriteCc;
@@ -99,6 +101,8 @@ public:
     virtual size_t size() const = 0;
 
     virtual void Clean(LruEntry *remove_entry) = 0;
+    virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
+        LruPage *page) = 0;
     virtual void Clean() = 0;
 
     /**
@@ -137,8 +141,6 @@ public:
     {
         schema_ts_ = schema_ts;
     }
-    virtual std::pair<std::unique_ptr<TxKey>, size_t> SliceMiddleKey(
-        const TxKey *start_key, const TxKey *end_key) const = 0;
 
     CcShard *const shard_;
     NodeGroupId cc_ng_id_;

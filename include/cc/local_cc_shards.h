@@ -208,15 +208,6 @@ public:
                 assert(map_iter->second->VerifyOrdering() ==
                        map_iter->second->size());
             }
-
-            size_t list_cnt = 0;
-            LruEntry *eptr = shard.head_cce_.lru_next_;
-            while (eptr != &shard.tail_cce_)
-            {
-                ++list_cnt;
-                eptr = eptr->lru_next_;
-            }
-            assert(entry_cnt == list_cnt);
         }
 
         /*for (auto map_iter = mapsizes.begin(); map_iter != mapsizes.end();
@@ -427,7 +418,7 @@ public:
                    uint64_t node_group,
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
-                   std::vector<LruEntry *> *mv_vec,
+                   std::vector<const TxKey *> *mv_vec,
                    CcHandlerResult<Void> &hres);
 
     uint64_t StatsLocalActiveSiTxs()

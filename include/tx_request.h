@@ -353,7 +353,7 @@ struct CkptScanTxRequest : public TemplateTxRequest<CkptScanTxRequest, bool>
                       uint64_t node_group,
                       std::vector<FlushRecord> &ckpt_vec,
                       std::vector<FlushRecord> &archive_vec,
-                      std::vector<LruEntry *> &mv_vec)
+                      std::vector<const TxKey *> &mv_vec)
         : table_name_(table_name),
           ckpt_ts_(ckpt_ts),
           node_group_(node_group),
@@ -368,7 +368,7 @@ struct CkptScanTxRequest : public TemplateTxRequest<CkptScanTxRequest, bool>
     uint64_t node_group_;
     std::vector<FlushRecord> &ckpt_vec_;
     std::vector<FlushRecord> &archive_vec_;
-    std::vector<LruEntry *> &mv_vec_;
+    std::vector<const TxKey *> &mv_vec_;
 };
 
 struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>

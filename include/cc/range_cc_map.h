@@ -48,7 +48,6 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
-    using TemplateCcMap<KeyT, RangeRecord>::ccm_;
     using TemplateCcMap<KeyT, RangeRecord>::neg_inf_;
     using TemplateCcMap<KeyT, RangeRecord>::pos_inf_;
     using TemplateCcMap<KeyT, RangeRecord>::table_schema_;
@@ -86,8 +85,9 @@ public:
             }
             else
             {
-                CcEntry<KeyT, RangeRecord> *cce =
+                auto it =
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
+                CcEntry<KeyT, RangeRecord> *cce = it->second;
                 cce->commit_ts_ = range_info->version_ts_;
                 cce->payload_.get()->range_info_ = range_info;
                 cce->payload_status_ = RecordStatus::Normal;
@@ -186,7 +186,9 @@ public:
             // Rather than looking for an exact match, looks up the floor key
             // that represents the range containing the input key.
             const KeyT *look_key = static_cast<const KeyT *>(req.Key());
-            floor_cce = Floor(*look_key);
+
+            auto it = Floor(*look_key);
+            floor_cce = it->second;
             req.SetCcePtr(floor_cce);
 
             // try to acquire lock
@@ -275,10 +277,10 @@ public:
             switch (*req.KeyStrType())
             {
             case KeyType::NegativeInf:
-                target_key = neg_inf_.key_;
+                target_key = NegativeInfinity<KeyT>::Instance();
                 break;
             case KeyType::PositiveInf:
-                target_key = pos_inf_.key_;
+                target_key = PositiveInfinity<KeyT>::Instance();
                 break;
             case KeyType::Normal:
                 const std::string *key_str = req.KeyStr();
@@ -421,8 +423,9 @@ public:
                     end_key = new_range_infos.at(idx + 1)->start_key_.get();
                 }
 
-                CcEntry<KeyT, RangeRecord> *cce =
+                auto it =
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(start_key);
+                CcEntry<KeyT, RangeRecord> *cce = it->second;
 
                 cce->commit_ts_ = new_range_info->version_ts_;
                 cce->payload_.get()->range_info_ = new_range_info;

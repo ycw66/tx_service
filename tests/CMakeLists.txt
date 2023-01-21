@@ -13,6 +13,7 @@ set( HEADER_DIR   ${CMAKE_SOURCE_DIR}/tests/include)
 
 set( SOURCES_SINGLE_FILE
     CcEntry-Test.cpp
+    CcPage-Test.cpp
     StartTsCollector-Test.cpp
 )
 

@@ -391,7 +391,7 @@ public:
                           uint64_t node_group,
                           std::vector<FlushRecord> &ckpt_vec,
                           std::vector<FlushRecord> &archive_vec,
-                          std::vector<LruEntry *> &mv_vec,
+                          std::vector<const TxKey *> &mv_vec,
                           CcHandlerResult<Void> &hres,
                           const TxKey *range_start_key = nullptr,
                           const TxKey *range_end_key = nullptr) = 0;

@@ -24,6 +24,7 @@ public:
     CatalogKey(const TableName &name);
     CatalogKey(CatalogKey &&rhs);
     CatalogKey(const CatalogKey &rhs);
+    CatalogKey &operator=(CatalogKey &&) = default;
     ~CatalogKey() = default;
     CatalogKey(const CatalogKey &rhs, const Schema *);
 
@@ -44,7 +45,9 @@ public:
     }
 
     friend bool operator==(const CatalogKey &lhs, const CatalogKey &rhs);
+    friend bool operator!=(const CatalogKey &lhs, const CatalogKey &rhs);
     friend bool operator<(const CatalogKey &lhs, const CatalogKey &rhs);
+    friend bool operator<=(const CatalogKey &lhs, const CatalogKey &rhs);
     const TableName &Name() const;
     TableName &Name();
 

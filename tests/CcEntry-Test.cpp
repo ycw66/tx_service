@@ -5,6 +5,7 @@
 
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
+#include "cc/template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
 #include "tx_record.h"  // CompositeRecord
 

@@ -19,7 +19,6 @@
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
 #include "cc/ccm_scanner.h"
-#include "cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "constants.h"
@@ -44,6 +43,8 @@ template <typename SkT, typename PkT>
 class SkCcMap;
 
 class CcMap;
+
+struct LruPage;
 
 template <typename RequestT, typename ResultType>
 struct TemplatedCcRequest : public CcRequestBase
@@ -1741,7 +1742,10 @@ private:
 struct CkptScanCc : public TemplatedCcRequest<CkptScanCc, Void>
 {
 public:
-    static constexpr size_t CkptScanBatch = 1000;
+    // how many pages to scan one time
+    static constexpr size_t CkptScanBatch = 20;
+    // todo: limit scan by scanned size
+    // static constexpr size_t CkptScanBatchSize = 32 * 1024;
 
     CkptScanCc() = default;
 
@@ -1750,7 +1754,7 @@ public:
                const uint64_t node_group,
                std::vector<FlushRecord> &ckpt_vec,
                std::vector<FlushRecord> &archive_vec,
-               std::vector<LruEntry *> &mv_base_vec,
+               std::vector<const TxKey *> &mv_base_vec,
                CcHandlerResult<Void> *res,
                const TxKey *target_start_key = nullptr,
                const TxKey *target_end_key = nullptr)
@@ -1760,7 +1764,7 @@ public:
           mv_base_vec_(&mv_base_vec),
           start_key_(target_start_key),
           end_key_(target_end_key),
-          start_entry_(nullptr)
+          start_page_(nullptr)
     {
         this->table_name_ = &table_name;
         node_group_id_ = node_group;
@@ -1770,7 +1774,7 @@ public:
     void Reset(uint32_t node_group)
     {
         ccm_ = nullptr;
-        start_entry_ = nullptr;
+        start_page_ = nullptr;
         node_group_id_ = node_group;
     }
 
@@ -1778,14 +1782,13 @@ public:
                uint64_t ckpt_ts,
                std::vector<FlushRecord> &ckpt_vec,
                std::vector<FlushRecord> &archive_vec,
-               std::vector<LruEntry *> &mv_vec,
+               std::vector<const TxKey *> &mv_vec,
                uint32_t node_group,
                CcHandlerResult<Void> *res,
                const TxKey *target_start_key = nullptr,
                const TxKey *target_end_key = nullptr)
     {
         ccm_ = nullptr;
-        start_entry_ = nullptr;
         ckpt_ts_ = ckpt_ts;
         node_group_id_ = node_group;
         this->table_name_ = &table_name;
@@ -1794,6 +1797,7 @@ public:
         mv_base_vec_ = &mv_vec;
         start_key_ = target_start_key;
         end_key_ = target_end_key;
+        start_page_ = nullptr;
         res_ = res;
     }
 
@@ -1802,12 +1806,12 @@ private:
     std::vector<FlushRecord> *ckpt_vec_;
     std::vector<FlushRecord> *archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<LruEntry *> *mv_base_vec_;
+    std::vector<const TxKey *> *mv_base_vec_;
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
-    LruEntry *start_entry_;
+    LruPage *start_page_;
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;

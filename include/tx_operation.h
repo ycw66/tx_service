@@ -645,7 +645,7 @@ struct FlushDataOp : public TransactionOperation
     const TableSchema *schema_{nullptr};
     std::vector<FlushRecord> *ckpt_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
-    std::vector<LruEntry *> *mv_vec_{nullptr};
+    std::vector<const TxKey *> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
 };
 
@@ -657,7 +657,7 @@ struct CkptScanOp : public TransactionOperation
                NodeGroupId node_group,
                std::vector<FlushRecord> *ckpt_vec,
                std::vector<FlushRecord> *archive_vec,
-               std::vector<LruEntry *> *mv_vec,
+               std::vector<const TxKey *> *mv_vec,
                TransactionExecution *txm,
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr);
@@ -669,7 +669,7 @@ struct CkptScanOp : public TransactionOperation
     NodeGroupId node_group_;
     std::vector<FlushRecord> *ckpt_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
-    std::vector<LruEntry *> *mv_vec_{nullptr};
+    std::vector<const TxKey *> *mv_vec_{nullptr};
     // Start/end key of the target range of the ckpt scan.
     // nullptr if target is entire table.
     const TxKey *start_key_{nullptr};
@@ -712,7 +712,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     // vector buffer used during checkpoint scan
     std::vector<FlushRecord> ckpt_vec_;
     std::vector<FlushRecord> archive_vec_;
-    std::vector<LruEntry *> mv_base_vec_;
+    std::vector<const TxKey *> mv_base_vec_;
 
     /**
      * @brief Acquire write lock on all node groups. Since split-flush op is

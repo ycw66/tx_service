@@ -45,7 +45,8 @@ public:
                 static_cast<CcEntry<CompositeKey<int>, CompositeRecord<int>> *>(
                     ref.cce_);
 
-            const CompositeKey<int> &key = *cce->key_;
+            const CompositeKey<int> &key =
+                *dynamic_cast<const CompositeKey<int> *>(cce->Key());
             const CompositeRecord<int> &rec = *ref.Payload();
 
             int key_val = std::get<0>(key.Tuple());
@@ -231,7 +232,7 @@ public:
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
-    bool CopyBaseToArchive(std::vector<LruEntry *> &batch,
+    bool CopyBaseToArchive(std::vector<const TxKey *> &batch,
                            uint32_t node_group,
                            const txservice::TableName &table_name,
                            const txservice::TableSchema *table_schema) override

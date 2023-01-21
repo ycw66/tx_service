@@ -1134,7 +1134,7 @@ void txservice::LocalCcHandler::CkptScan(const TableName &table_name,
                                          uint64_t node_group,
                                          std::vector<FlushRecord> &ckpt_vec,
                                          std::vector<FlushRecord> &archive_vec,
-                                         std::vector<LruEntry *> &mv_vec,
+                                         std::vector<const TxKey *> &mv_vec,
                                          CcHandlerResult<Void> &hres,
                                          const TxKey *start_key,
                                          const TxKey *end_key)

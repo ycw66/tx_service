@@ -687,7 +687,7 @@ void LocalCcShards::FlushData(const TableName &table_name,
                               uint64_t node_group,
                               std::vector<FlushRecord> *ckpt_vec,
                               std::vector<FlushRecord> *archive_vec,
-                              std::vector<LruEntry *> *mv_vec,
+                              std::vector<const TxKey *> *mv_vec,
                               CcHandlerResult<Void> &hres)
 {
     cc_shards_.at(0)->FlushData(table_name,

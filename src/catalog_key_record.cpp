@@ -46,6 +46,11 @@ bool operator==(const CatalogKey &lhs, const CatalogKey &rhs)
     return lhs.table_name_ == rhs.table_name_;
 }
 
+bool operator!=(const CatalogKey &lhs, const CatalogKey &rhs)
+{
+    return !(lhs == rhs);
+}
+
 bool CatalogKey::operator<(const TxKey &rhs) const
 {
     return false;
@@ -54,6 +59,11 @@ bool CatalogKey::operator<(const TxKey &rhs) const
 bool operator<(const CatalogKey &lhs, const CatalogKey &rhs)
 {
     return lhs.table_name_ < rhs.table_name_;
+}
+
+bool operator<=(const CatalogKey &lhs, const CatalogKey &rhs)
+{
+    return !(rhs < lhs);
 }
 
 size_t CatalogKey::Hash() const

@@ -214,7 +214,8 @@ public:
                 catalog_entry->RejectDirtySchema();
 
                 CcEntry<CatalogKey, CatalogRecord> *cce =
-                    TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key);
+                    TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key)
+                        .second;
                 assert(cce != nullptr);
                 cce->payload_->ClearDirtySchema();
                 cce->payload_->SetDirtySchemaImage("");
@@ -578,8 +579,8 @@ public:
 
         const CatalogKey *table_key =
             static_cast<const CatalogKey *>(req.Key());
-        CcEntry<CatalogKey, CatalogRecord> *cce = FindEmplace(*table_key);
-
+        Iterator it = FindEmplace(*table_key);
+        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
@@ -777,7 +778,8 @@ public:
         }
 
         CatalogKey table_key(table_name);
-        CcEntry<CatalogKey, CatalogRecord> *cce = FindEmplace(table_key);
+        Iterator it = FindEmplace(table_key);
+        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
 
         if (cce == nullptr)
         {

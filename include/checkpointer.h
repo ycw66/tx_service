@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -72,7 +73,7 @@ public:
                    uint64_t ckpt_ts,
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
-                   std::vector<LruEntry *> *mv_vec,
+                   std::vector<const TxKey *> *mv_vec,
                    CcHandlerResult<Void> *res = nullptr);
 
 private:
@@ -134,7 +135,7 @@ private:
                       const TableSchema *schema,
                       std::unique_ptr<std::vector<FlushRecord>> &&ckpt_vec,
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
-                      std::unique_ptr<std::vector<LruEntry *>> &&mv_base_vec,
+                      std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
                       uint16_t *work_done = nullptr,
                       std::atomic_bool *fail = nullptr,
                       CcHandlerResult<Void> *res = nullptr)
@@ -160,7 +161,7 @@ private:
                       const TableSchema *schema,
                       std::vector<FlushRecord> *ckpt_vec,
                       std::vector<FlushRecord> *archive_vec,
-                      std::vector<LruEntry *> *mv_base_vec,
+                      std::vector<const TxKey *> *mv_base_vec,
                       uint16_t *work_done = nullptr,
                       std::atomic_bool *fail = nullptr,
                       CcHandlerResult<Void> *res = nullptr)
@@ -186,11 +187,10 @@ private:
         const TableSchema *schema_;
         std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        // Cache the entries that exist in "archive_vec_" but not in "ckpt_vec_"
-        std::unique_ptr<std::vector<LruEntry *>> mv_base_vec_{nullptr};
+        std::unique_ptr<std::vector<const TxKey *>> mv_base_vec_{nullptr};
         std::vector<FlushRecord> *ckpt_vec_ptr_{nullptr};
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
-        std::vector<LruEntry *> *mv_base_vec_ptr_{nullptr};
+        std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
 
         bool vec_owner_{true};
         // Increased by worker after finishing the retrieved work.
