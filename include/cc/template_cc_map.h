@@ -1041,8 +1041,10 @@ public:
                         return false;
                     }
 
+                    shard_->DecrementMemory(new_cce->PayloadMemUsage());
                     new_cce->payload_ = std::make_unique<ValueT>(*payload);
                     new_cce->payload_status_ = RecordStatus::Normal;
+                    shard_->mem_usage_ += new_cce->PayloadMemUsage();
 
                     // Splits the gap.
                     ++insert_it;
@@ -1110,7 +1112,9 @@ public:
             {
                 if (commit_ts > 0)
                 {
+                    shard_->DecrementMemory(cce_ptr->PayloadMemUsage());
                     cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
+                    shard_->mem_usage_ += cce_ptr->PayloadMemUsage();
 
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
@@ -1672,8 +1676,10 @@ public:
 
             if (cce->payload_status_ == RecordStatus::Unknown)
             {
+                shard_->DecrementMemory(cce->PayloadMemUsage());
                 cce->payload_ = std::move(tmp_payload);
                 cce->payload_status_ = tmp_payload_status;
+                shard_->mem_usage_ += cce->PayloadMemUsage();
                 cce->commit_ts_ = req.ReadTimestamp();
                 // set "ckpt_ts_" to identify the entry is refilled
                 uint64_t tmp_ts = 0U;
@@ -1835,8 +1841,10 @@ public:
             if (req.RecordStatus() == RecordStatus::Normal)
             {
                 size_t offset = 0;
+                shard_->DecrementMemory(cce->PayloadMemUsage());
                 cce->payload_ = std::make_unique<ValueT>();
                 cce->payload_->Deserialize(req.rec_str_->data(), offset);
+                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
             cce->commit_ts_ = req.CommitTs();
             cce->payload_status_ = req.RecordStatus();
@@ -4028,9 +4036,11 @@ public:
                 }
                 if (delete_flag == 0)
                 {
+                    shard_->DecrementMemory(cce->PayloadMemUsage());
                     cce->payload_ = std::make_unique<ValueT>();
                     cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
+                    shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
                 else
                 {
