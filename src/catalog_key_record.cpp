@@ -98,6 +98,12 @@ void CatalogKey::Serialize(std::string &str) const
     str.append(ptr, sizeof(uint8_t));
 }
 
+size_t CatalogKey::SerializedLength() const
+{
+    // table name's length + table name + table type
+    return sizeof(uint16_t) + table_name_.StringView().size() + sizeof(uint8_t);
+}
+
 void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
 {
     // construct table name string_view
@@ -210,6 +216,13 @@ void CatalogRecord::Serialize(std::string &str) const
     len_ptr = reinterpret_cast<const char *>(&len_val);
     str.append(len_ptr, len_sizeof);
     str.append(schema_image_.data(), len_val);
+}
+
+size_t CatalogRecord::SerializedLength() const
+{
+    // dirty_schema_image_ and schema_image_ and their length
+    return sizeof(uint32_t) * 2 + dirty_schema_image_.size() +
+           schema_image_.size();
 }
 
 void CatalogRecord::Deserialize(const char *buf, size_t &offset)

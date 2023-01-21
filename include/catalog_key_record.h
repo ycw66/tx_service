@@ -32,6 +32,7 @@ public:
     size_t Hash() const override;
     void Serialize(std::vector<char> &buf, size_t &offset) const override;
     void Serialize(std::string &str) const override;
+    size_t SerializedLength() const override;
     void Deserialize(const char *buf, size_t &offset, const Schema *) override;
     TxKey::Uptr Clone() const override;
     std::string ToString() const override;
@@ -181,6 +182,7 @@ public:
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override;
     void Serialize(std::string &str) const override;
+    size_t SerializedLength() const override;
     void Deserialize(const char *buf, size_t &offset) override;
     TxRecord::Uptr Clone() const override;
     void Copy(const TxRecord &rhs) override;

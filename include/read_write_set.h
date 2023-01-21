@@ -22,7 +22,7 @@ enum class ReadEntryResult : uint8_t
 
 class ReadWriteSet
 {
-    static const uint32_t MaxWriteSetBytesCnt = 128 * 1024 * 1024;
+    static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
 
 public:
     ReadWriteSet()
@@ -214,8 +214,8 @@ public:
                   OperationType op_type)
     {
         // Check write set bytes count.
-        wset_bytes_cnt_ += ((key.get() ? key.get()->MemUsage() : 0) +
-                            (rec.get() ? rec.get()->MemUsage() : 0));
+        wset_bytes_cnt_ += ((key.get() ? key.get()->SerializedLength() : 0) +
+                            (rec.get() ? rec.get()->SerializedLength() : 0));
         if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
         {
             return false;
@@ -352,8 +352,9 @@ public:
             wset_cnt_ -= tab_wset.size();
             for (auto &key_it : tab_wset)
             {
-                wset_bytes_cnt_ -= (key_it.second.key_.get()->MemUsage() +
-                                    key_it.second.rec_.get()->MemUsage());
+                wset_bytes_cnt_ -=
+                    (key_it.second.key_.get()->SerializedLength() +
+                     key_it.second.rec_.get()->SerializedLength());
             }
             wset_.erase(tab_it);
         }

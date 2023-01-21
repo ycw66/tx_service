@@ -53,6 +53,12 @@ struct TxRecord
     virtual void Copy(const TxRecord &rhs) = 0;
     virtual std::string ToString() const = 0;
 
+    /**
+     * To estimate log length.
+     * @return
+     */
+    virtual size_t SerializedLength() const = 0;
+
     virtual size_t MemUsage() const
     {
         return 0;
@@ -146,6 +152,11 @@ public:
                    fields_);
     }
 
+    size_t SerializedLength() const override
+    {
+        return 0;
+    }
+
     void Deserialize(const char *buf, size_t &offset) override
     {
         TupleDeserializeHelper(
@@ -218,6 +229,11 @@ public:
 
     void Serialize(std::string &str) const override
     {
+    }
+
+    size_t SerializedLength() const override
+    {
+        return 0;
     }
 
     void Deserialize(const char *buf, size_t &offset) override

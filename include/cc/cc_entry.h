@@ -436,6 +436,11 @@ public:
         return payload_ == nullptr ? 0 : payload_->Size();
     }
 
+    size_t PayloadSerializedLength() const
+    {
+        return payload_ == nullptr ? 0 : payload_->SerializedLength();
+    }
+
     const KeyT *key_;
     std::unique_ptr<ValueT> payload_;
     RecordStatus payload_status_;

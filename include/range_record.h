@@ -277,6 +277,12 @@ public:
         assert(false);
     }
 
+    size_t SerializedLength() const override
+    {
+        // TODO{liunyl} : serialized length of RangeRecord
+        return 0;
+    }
+
     TxRecord::Uptr Clone() const override
     {
         return std::make_unique<RangeRecord>(*this);

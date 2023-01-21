@@ -42,6 +42,12 @@ public:
     virtual void Copy(const TxKey &rhs) = 0;
 
     /**
+     * To estimate log length.
+     * @return
+     */
+    virtual size_t SerializedLength() const = 0;
+
+    /**
      * Whether a search key is prefix of a full key, to distinguish between
      * prefix equality and full equality. Returns true if *this is a prefix of
      * rhs, false if *this and rhs is exactly the same. Should be called only
@@ -385,6 +391,11 @@ public:
             fields_, std::index_sequence_for<Types...>{}, buf, offset);
     }
 
+    size_t SerializedLength() const override
+    {
+        return 0;
+    }
+
     TxKey::Uptr Clone() const override
     {
         return std::make_unique<CompositeKey<Types...>>(*this);
@@ -454,6 +465,11 @@ struct VoidKey : public TxKey
 
     void Serialize(std::string &str) const override
     {
+    }
+
+    size_t SerializedLength() const override
+    {
+        return 0;
     }
 
     void Deserialize(const char *buf,

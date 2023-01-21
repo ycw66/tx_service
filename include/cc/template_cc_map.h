@@ -498,8 +498,8 @@ public:
 
                 TryInsertCkptList(new_cce);
 
-                size_t key_size = new_cce->key_->MemUsage();
-                size_t payload_size = new_cce->PayloadMemUsage();
+                size_t key_size = new_cce->key_->SerializedLength();
+                size_t payload_size = new_cce->PayloadSerializedLength();
                 shard_->UpdateEstimateLogSize(new_cce, key_size, payload_size);
 
                 if (maintain_statistics_)
@@ -573,8 +573,8 @@ public:
                 }
                 shard_->mem_usage_ += cce.PayloadMemUsage();
 
-                size_t key_size = cce.key_->MemUsage();
-                size_t payload_size = cce.PayloadMemUsage();
+                size_t key_size = cce.key_->SerializedLength();
+                size_t payload_size = cce.PayloadSerializedLength();
                 shard_->UpdateEstimateLogSize(&cce, key_size, payload_size);
 
                 cce.payload_status_ =
