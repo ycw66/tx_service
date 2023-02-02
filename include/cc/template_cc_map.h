@@ -2686,9 +2686,9 @@ public:
             req.SetCcePtr(nullptr, shard_->LocalCoreId());
             req.SetCcePtrScanType(ScanType::ScanUnknow, shard_->LocalCoreId());
 
-            if (req.IsWaitForPostWrite())
+            if (req.IsWaitForPostWrite(shard_->LocalCoreId()))
             {
-                req.SetIsWaitForPostWrite(false);
+                req.SetIsWaitForPostWrite(false, shard_->LocalCoreId());
                 cce->key_lock_ptr_->ReleaseLock(
                     req.Txn(), shard_, LockType::ReadLock);
             }
@@ -2759,7 +2759,7 @@ public:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
                     // Put the request to top of key lock's blocking queue
                     // with acquring readlock. And then should release the
                     // readlock before handling this requst when PostWriteCc
@@ -2841,7 +2841,7 @@ public:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
                     // Put the request to top of key lock's blocking queue
                     // with acquring readlock. And then should release the
                     // readlock before handling this requst when PostWriteCc
@@ -2918,7 +2918,7 @@ public:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
                     // Put the request to top of key lock's blocking queue
                     // with acquring readlock. And then should release the
                     // readlock before handling this requst when PostWriteCc

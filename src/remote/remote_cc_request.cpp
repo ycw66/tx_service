@@ -704,6 +704,7 @@ void txservice::remote::RemoteScanOpen::Reset(
     cce_ptr_.resize(core_cnt);
     cce_ptr_scan_type_.clear();
     cce_ptr_scan_type_.resize(core_cnt);
+    is_wait_for_post_write_.resize(core_cnt);
 
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 
