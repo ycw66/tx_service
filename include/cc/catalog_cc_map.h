@@ -90,7 +90,11 @@ public:
                           TransactionOperation::tx_op_failed_ts_ &&
                       action == "post_commit_sleep"))
             {
+                LOG(INFO) << "sleep 10 seconds: ";
                 sleep(10);
+                // remove fault injection after sleep
+                FaultInject::Instance().InjectFault("during_post_write_all",
+                                                    "remove");
             }
         });
 

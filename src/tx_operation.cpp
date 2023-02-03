@@ -1634,8 +1634,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // set catalog_rec_'s binary_value_ to image_str since it
                 // could be set to TableSchemaView pointer in localshard.
                 catalog_rec_.SetSchemaImage(image_str_);
-                // Retry here does not need PushOperation in that we do not
-                // want to increase command_id.
+
+                txm->PushOperation(&post_all_intent_op_);
                 txm->Process(post_all_intent_op_);
             }
             else
