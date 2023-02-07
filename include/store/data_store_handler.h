@@ -1,10 +1,12 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>  // std::vector
 
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
+#include "metrics/metrics.h"
 #include "range_slice.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
@@ -258,8 +260,34 @@ public:
         const txservice::TableSchema *current_table_schema,
         txservice::AlterTableInfo &alter_table_info) = 0;
 
+#ifdef METRICS_COLLECTOR_ENABLE
+    void SetMetricRegistry(metrics::MetricsRegistry *metrics_registry)
+    {
+        assert(metrics_registry);
+        metrics_registry_ = metrics_registry;
+        base_flush_cnt_ = metrics_registry_->RegisterV2(
+            txservice::metrics::MetricsNaming{
+                "flush_rows", txservice::metrics::MetricsNaming::Type::Counter},
+            {{"table_type", "base"}});
+        arch_flush_cnt_ = metrics_registry_->RegisterV2(
+            txservice::metrics::MetricsNaming{
+                "flush_rows", txservice::metrics::MetricsNaming::Type::Counter},
+            {{"table_type", "archive"}});
+        latency_ = metrics_registry_->RegisterV2(
+            txservice::metrics::MetricsNaming{
+                "latency", txservice::metrics::MetricsNaming::Type::Histograms},
+            {});
+    };
+#endif
+
 protected:
     TxService *tx_service_;
+#ifdef METRICS_COLLECTOR_ENABLE
+    txservice::metrics::MetricsRegistry *metrics_registry_{nullptr};
+    std::unique_ptr<txservice::metrics::MeterV2> base_flush_cnt_;
+    std::unique_ptr<txservice::metrics::MeterV2> arch_flush_cnt_;
+    std::unique_ptr<txservice::metrics::MeterV2> latency_;
+#endif
 };
 }  // namespace store
 }  // namespace txservice

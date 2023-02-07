@@ -2849,9 +2849,8 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
 #ifdef METRICS_COLLECTOR_ENABLE
-    tx_processor_->MetricCollect(metrics::Value::IncDecValue::Increment,
-                                 post_process_total,
-                                 std::nullopt);
+    tx_processor_->MetricCollect(
+        metrics::Value(1), post_process_total, std::nullopt);
 #endif
     Reset();
 }
