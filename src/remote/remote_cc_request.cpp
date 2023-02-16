@@ -343,6 +343,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
     assert(input_msg->has_read_req());
 
     cc_res_.Reset();
+    cc_res_.Value().Reset();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -625,24 +626,7 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
         scan_open->set_error_code(
             ToRemoteType::ConvertCcErrorCode(cc_res_.ErrorCode()));
 
-        if (!cc_res_.IsError())
-        {
-            for (int core_id = 0; core_id < scan_open->scan_cache_size();
-                 ++core_id)
-            {
-                ScanCache_msg *cache = scan_open->mutable_scan_cache(core_id);
-
-                // The response message allocates a fixed number (the batch
-                // size) of scan tuples up front. If the batch is not full,
-                // removes the trailing tuples.
-                while (scan_caches_.at(core_id).size() <
-                       (size_t) cache->scan_tuple_size())
-                {
-                    cache->mutable_scan_tuple()->RemoveLast();
-                }
-            }
-        }
-        else
+        if (cc_res_.IsError())
         {
             CcOperation cc_op =
                 IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
@@ -653,6 +637,11 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
             LockType lock_type =
                 LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
 
+            // When there is a scan error and the scan does not put locks on the
+            // scanned entries, clears the scan cache and does not return them
+            // back to the sender. If the scan puts locks on scanned entries,
+            // returns them to the sending tx, who will release locks on
+            // post-processing.
             if (lock_type == LockType::NoLock)
             {
                 // Not acquire lock, just clear scan cache.
@@ -662,26 +651,6 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
                     ScanCache_msg *cache =
                         scan_open->mutable_scan_cache(core_id);
                     cache->Clear();
-                }
-            }
-            else
-            {
-                // Acquired lock, should transfer scan cache back to release
-                // the locks through PostRead.
-                for (int core_id = 0; core_id < scan_open->scan_cache_size();
-                     ++core_id)
-                {
-                    ScanCache_msg *cache =
-                        scan_open->mutable_scan_cache(core_id);
-
-                    // The response message allocates a fixed number (the
-                    // batch size) of scan tuples up front. If the batch is not
-                    // full, removes the trailing tuples.
-                    while (scan_caches_.at(core_id).size() <
-                           (size_t) cache->scan_tuple_size())
-                    {
-                        cache->mutable_scan_tuple()->RemoveLast();
-                    }
                 }
             }
         }
@@ -751,22 +720,14 @@ void txservice::remote::RemoteScanOpen::Reset(
     output_msg_.clear_scan_open_resp();
 
     ScanOpenResponse *resp = output_msg_.mutable_scan_open_resp();
-    assert(resp->scan_cache_size() == 0);
+    resp->clear_scan_cache();
 
-    scan_caches_.resize(core_cnt);
-    scan_caches_idxs_.resize(core_cnt);
+    scan_caches_.clear();
     for (size_t cid = 0; cid < core_cnt; ++cid)
     {
         ScanCache_msg *cache_msg = resp->add_scan_cache();
         assert(cache_msg->scan_tuple_size() == 0);
-        scan_caches_.at(cid).clear();
-        scan_caches_idxs_.at(cid) = 0;
-
-        for (size_t idx = 0; idx < ScanCache::ScanBatchSize; ++idx)
-        {
-            ScanTuple_msg *tuple = cache_msg->add_scan_tuple();
-            scan_caches_.at(cid).emplace_back(tuple);
-        }
+        scan_caches_.emplace_back(cache_msg, 0);
     }
 
     unfinish_cnt_.store(core_cnt);
@@ -790,7 +751,6 @@ void txservice::remote::RemoteScanOpen::Free()
 
 txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 {
-    scan_cache_.reserve(ScanCache::ScanBatchSize);
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse);
     is_ckpt_delta_ = false;
@@ -812,21 +772,12 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
-        ScanNextResponse *scan_next = output_msg_.mutable_scan_next_resp();
+        ScanNextResponse *scan_next_resp = output_msg_.mutable_scan_next_resp();
         const ScanNextRequest &req = input_msg_->scan_next_req();
-        scan_next->set_error_code(
+        scan_next_resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
-        if (!res->IsError())
-        {
-            while (scan_cache_.size() < (size_t) scan_next->scan_tuple_size())
-            {
-                scan_next->mutable_scan_tuple()->RemoveLast();
-            }
-
-            scan_next->set_scan_cache_ptr(req.scan_cache_ptr());
-        }
-        else
+        if (res->IsError())
         {
             CcOperation cc_op =
                 IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
@@ -839,24 +790,17 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
             LockType lock_type =
                 LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
 
+            // When there is a scan error and the scan does not put locks on the
+            // scanned entries, clears the scan cache and does not return them
+            // back to the sender. If the scan puts locks on scanned entries,
+            // returns them to the sending tx, who will release locks on
+            // post-processing.
             if (lock_type == LockType::NoLock)
             {
-                // Not acquire lock, just clear scan cache.
-                scan_next->mutable_scan_tuple()->Clear();
-            }
-            else
-            {
-                // Acquired lock, should transfer scan cache back to release
-                // the locks through PostRead.
-                while (scan_cache_.size() <
-                       (size_t) scan_next->scan_tuple_size())
-                {
-                    scan_next->mutable_scan_tuple()->RemoveLast();
-                }
-
-                scan_next->set_scan_cache_ptr(req.scan_cache_ptr());
+                scan_next_resp->mutable_scan_cache()->clear_scan_tuple();
             }
         }
+        scan_next_resp->set_scan_cache_ptr(req.scan_cache_ptr());
 
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
@@ -893,17 +837,143 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     output_msg_.clear_scan_next_resp();
 
     ScanNextResponse *resp = output_msg_.mutable_scan_next_resp();
-    assert(resp->scan_tuple_size() == 0);
-
-    scan_cache_.clear();
-    scan_cache_idx_ = 0;
-    for (size_t idx = 0; idx < ScanCache::ScanBatchSize; ++idx)
-    {
-        ScanTuple_msg *tuple = resp->add_scan_tuple();
-        scan_cache_.emplace_back(tuple);
-    }
+    resp->clear_scan_cache();
+    scan_cache_.cache_msg_ = resp->mutable_scan_cache();
+    scan_cache_.cache_mem_size_ = 0;
 
     is_ckpt_delta_ = scan_next.ckpt();
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+txservice::remote::RemoteScanSlice::RemoteScanSlice()
+{
+    parallel_req_ = true;
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ScanSliceResponse);
+    res_ = &cc_res_;
+
+    cc_res_.Value().is_local_ = false;
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<RangeScanSliceResult> *res)
+    {
+        ScanSliceResponse *scan_slice_resp =
+            output_msg_.mutable_scan_slice_resp();
+        scan_slice_resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(cc_res_.ErrorCode()));
+
+        if (cc_res_.IsError())
+        {
+            CcOperation cc_op;
+
+            if (remote_tbl_name_.Type() == TableType::Secondary)
+            {
+                cc_op = CcOperation::ReadSkIndex;
+            }
+            else if (IsForWrite())
+            {
+                cc_op = CcOperation::ReadForWrite;
+            }
+            else
+            {
+                cc_op = CcOperation::Read;
+            }
+
+            LockType lock_type =
+                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
+
+            // When there is a scan error and the scan does not put locks on the
+            // scanned entries, clears the scan cache and does not return them
+            // back to the sender. If the scan puts locks on scanned entries,
+            // returns them to the sending tx, who will release locks on
+            // post-processing.
+            if (lock_type == LockType::NoLock)
+            {
+                scan_slice_resp->clear_scan_cache();
+            }
+        }
+
+        const RangeScanSliceResult &slice_result = cc_res_.Value();
+        scan_slice_resp->clear_last_key();
+        if (slice_result.last_key_ != nullptr)
+        {
+            slice_result.last_key_->Serialize(
+                *scan_slice_resp->mutable_last_key());
+        }
+        scan_slice_resp->set_slice_position(
+            ToRemoteType::ConvertSlicePosition(slice_result.slice_position_));
+
+        const ScanSliceRequest &req = input_msg_->scan_slice_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteScanSlice::Reset(
+    std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt)
+{
+    assert(input_msg->has_scan_slice_req());
+
+    cc_res_.Reset();
+    cc_res_.SetRefCnt(core_cnt);
+
+    const ScanSliceRequest &scan_slice_req = input_msg->scan_slice_req();
+    std::string_view tbl_name_view(scan_slice_req.table_name_str());
+    remote_tbl_name_ =
+        TableName(tbl_name_view,
+                  ToLocalType::ConvertCcTableType(scan_slice_req.table_type()));
+
+    ScanSliceCc::Set(remote_tbl_name_,
+                     scan_slice_req.range_id(),
+                     scan_slice_req.node_group_id(),
+                     scan_slice_req.cc_ng_term(),
+                     &scan_slice_req.start_key(),
+                     scan_slice_req.start_inclusive(),
+                     &scan_slice_req.end_key(),
+                     scan_slice_req.end_inclusive(),
+                     scan_slice_req.is_forward() ? ScanDirection::Forward
+                                                 : ScanDirection::Backward,
+                     scan_slice_req.ts(),
+                     input_msg->tx_number(),
+                     input_msg->tx_term(),
+                     cc_res_,
+                     ToLocalType::ConvertIsolation(scan_slice_req.iso_level()),
+                     ToLocalType::ConvertProtocol(scan_slice_req.protocol()),
+                     scan_slice_req.is_for_write());
+
+    output_msg_.set_tx_number(input_msg->tx_number());
+    output_msg_.set_handler_addr(input_msg->handler_addr());
+    output_msg_.set_tx_term(input_msg->tx_term());
+    output_msg_.set_command_id(input_msg->command_id());
+
+    SetShardCount(core_cnt);
+
+    size_t vec_size = scan_slice_req.prior_cce_vec_size();
+    for (size_t core_id = 0; core_id < core_cnt; ++core_id)
+    {
+        uint64_t cce_addr =
+            core_id < vec_size ? scan_slice_req.prior_cce_vec(core_id) : 0;
+        SetPriorCceAddr(cce_addr, core_id);
+        SetCcePtr(nullptr, core_id);
+    }
+
+    RangeScanSliceResult &slice_result = cc_res_.Value();
+    ScanSliceResponse *scan_slice_resp = output_msg_.mutable_scan_slice_resp();
+
+    scan_slice_resp->set_error_code(0);
+
+    scan_slice_resp->clear_scan_cache();
+    scan_cache_vec_.clear();
+    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
+    {
+        scan_cache_vec_.emplace_back(scan_slice_resp->add_scan_cache(), 0);
+    }
+    slice_result.remote_scan_caches_ = &scan_cache_vec_;
 
     input_msg_ = std::move(input_msg);
 

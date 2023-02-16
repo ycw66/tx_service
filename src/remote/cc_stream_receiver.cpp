@@ -23,6 +23,7 @@ thread_local CcRequestPool<RemotePostRead> postread_pool_;
 thread_local CcRequestPool<RemoteRead> read_pool_;
 thread_local CcRequestPool<RemoteReadOutside> read_outside_pool_;
 thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
+thread_local CcRequestPool<RemoteScanSlice> scan_slice_pool;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
@@ -328,16 +329,30 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const ValidateRequest &req = msg->validate_req();
         const CceAddr_msg &cce_addr = req.cce_addr();
 
-        if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(),
-                                                 cce_addr.term()))
+        int64_t node_term = Sharder::Instance().LeaderTerm(req.node_group_id());
+        CcErrorCode cc_err_code = CcErrorCode::NO_ERROR;
+        if (node_term < 0)
+        {
+            cc_err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+        }
+        else if (node_term != cce_addr.term())
+        {
+            cc_err_code = CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH;
+        }
+
+        if (cc_err_code != CcErrorCode::NO_ERROR)
         {
             CcMessage return_msg;
+            return_msg.set_type(
+                CcMessage::MessageType::CcMessage_MessageType_ValidateResponse);
+
             return_msg.set_tx_number(msg->tx_number());
             return_msg.set_handler_addr(msg->handler_addr());
             return_msg.set_tx_term(msg->tx_term());
+            return_msg.set_command_id(msg->command_id());
 
             ValidateResponse *resp = return_msg.mutable_validate_resp();
-            resp->set_error_code(1);
+            resp->set_error_code(ToRemoteType::ConvertCcErrorCode(cc_err_code));
 
             CcStreamSender *cc_stream_sender =
                 Sharder::Instance().GetCcStreamSender();
@@ -578,16 +593,30 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const PostCommitRequest &post_commit = msg->postcommit_req();
         const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
 
-        if (!Sharder::Instance().CheckLeaderTerm(post_commit.node_group_id(),
-                                                 cce_addr_msg.term()))
+        int64_t node_term =
+            Sharder::Instance().LeaderTerm(post_commit.node_group_id());
+        CcErrorCode cc_err_code = CcErrorCode::NO_ERROR;
+        if (node_term < 0)
+        {
+            cc_err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+        }
+        else if (node_term != cce_addr_msg.term())
+        {
+            cc_err_code = CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH;
+        }
+
+        if (cc_err_code != CcErrorCode::NO_ERROR)
         {
             CcMessage return_msg;
+            return_msg.set_type(CcMessage::MessageType::
+                                    CcMessage_MessageType_PostprocessResponse);
             return_msg.set_tx_number(msg->tx_number());
             return_msg.set_handler_addr(msg->handler_addr());
             return_msg.set_tx_term(msg->tx_term());
+            return_msg.set_command_id(msg->command_id());
 
             PostprocessResponse *resp = return_msg.mutable_post_resp();
-            resp->set_error_code(1);
+            resp->set_error_code(ToRemoteType::ConvertCcErrorCode(cc_err_code));
 
             CcStreamSender *cc_stream_sender =
                 Sharder::Instance().GetCcStreamSender();
@@ -615,7 +644,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
-        std::shared_ptr<CcHandlerResult<Void>> cc_res_{nullptr};
         RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
         uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
         TX_TRACE_ASSOCIATE(msg.get(), scan_open_req);
@@ -779,10 +807,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             uint32_t ng_id = shard_cache->LastTuple()->cce_addr_.NodeGroupId();
             shard_cache->Reset();
+            const ScanCache_msg &scan_cache = scan_next_res.scan_cache();
 
-            for (int idx = 0; idx < scan_next_res.scan_tuple_size(); ++idx)
+            for (int idx = 0; idx < scan_cache.scan_tuple_size(); ++idx)
             {
-                const ScanTuple_msg &tuple_msg = scan_next_res.scan_tuple(idx);
+                const ScanTuple_msg &tuple_msg = scan_cache.scan_tuple(idx);
                 hd_res->Value().term_ = tuple_msg.cce_addr().term();
 
                 RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
@@ -803,6 +832,108 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
+        }
+        else
+        {
+            hd_res->SetFinished();
+        }
+
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest:
+    {
+        RemoteScanSlice *scan_slice_req = scan_slice_pool.NextRequest();
+        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
+        TX_TRACE_ASSOCIATE(msg.get(), scan_slice_req);
+        scan_slice_req->Reset(std::move(msg), local_core_cnt);
+        // The scan slice request is enqueued into the first core, where it pins
+        // the slice and sets the scan's end key. The request is then dispatched
+        // to remaining cores to scan the slice in parallel.
+        local_shards_.EnqueueCcRequest(0, scan_slice_req);
+
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ScanSliceResponse:
+    {
+        CcHandlerResult<RangeScanSliceResult> *hd_res = nullptr;
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx node has failed. Pointer stability does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        else
+        {
+            hd_res = reinterpret_cast<CcHandlerResult<RangeScanSliceResult> *>(
+                msg->handler_addr());
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+        }
+
+        const ScanSliceResponse &scan_slice_resp = msg->scan_slice_resp();
+        RangeScanSliceResult &scan_slice_result = hd_res->Value();
+
+        scan_slice_result.slice_position_ =
+            ToLocalType::ConvertSlicePosition(scan_slice_resp.slice_position());
+
+        CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
+        if (!scan_slice_resp.last_key().empty())
+        {
+            scan_slice_result.last_key_ =
+                range_scanner.DecodeKey(scan_slice_resp.last_key());
+        }
+        else
+        {
+            scan_slice_result.last_key_ = nullptr;
+        }
+
+        size_t remote_core_cnt = scan_slice_resp.scan_cache_size();
+        range_scanner.ResetShards(remote_core_cnt);
+        int64_t cc_ng_term = -1;
+
+        for (size_t core_id = 0; core_id < remote_core_cnt; ++core_id)
+        {
+            const ScanCache_msg &cache_msg =
+                scan_slice_resp.scan_cache(core_id);
+            ScanCache *shard_cache = range_scanner.Cache(core_id);
+
+            size_t cache_size = cache_msg.scan_tuple_size();
+            for (size_t idx = 0; idx < cache_size; ++idx)
+            {
+                const ScanTuple_msg &tuple_msg = cache_msg.scan_tuple(idx);
+                cc_ng_term = tuple_msg.cce_addr().term();
+
+                RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
+                    tuple_msg.rec_status());
+
+                shard_cache->AddScanTuple(tuple_msg.key(),
+                                          tuple_msg.key_ts(),
+                                          tuple_msg.record(),
+                                          rec_status,
+                                          tuple_msg.gap_ts(),
+                                          tuple_msg.cce_addr().cce_ptr(),
+                                          tuple_msg.cce_addr().term(),
+                                          scan_slice_result.cc_ng_id_);
+            }
+        }
+        range_scanner.SetPartitionNgTerm(cc_ng_term);
+
+        if (scan_slice_resp.error_code() != 0)
+        {
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(scan_slice_resp.error_code()));
         }
         else
         {

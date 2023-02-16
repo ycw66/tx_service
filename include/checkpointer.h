@@ -136,9 +136,11 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> &&ckpt_vec,
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
                       std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
-                      uint16_t *work_done = nullptr,
-                      std::atomic_bool *fail = nullptr,
-                      CcHandlerResult<Void> *res = nullptr)
+                      TransactionExecution *txm,
+                      std::mutex *sender_mux,
+                      std::condition_variable *sender_cv,
+                      uint16_t *finish_work_cnt,
+                      std::atomic_bool *fail)
             : node_group_(node_group),
               term_(term),
               ckpt_ts_(ckpt_ts),
@@ -148,9 +150,12 @@ private:
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
               vec_owner_(true),
-              work_done_(work_done),
+              txm_(txm),
+              sender_mux_(sender_mux),
+              sender_cv_(sender_cv),
+              finish_work_cnt_(finish_work_cnt),
               fail_(fail),
-              hand_res_(res)
+              hand_res_(nullptr)
         {
         }
 
@@ -162,9 +167,7 @@ private:
                       std::vector<FlushRecord> *ckpt_vec,
                       std::vector<FlushRecord> *archive_vec,
                       std::vector<const TxKey *> *mv_base_vec,
-                      uint16_t *work_done = nullptr,
-                      std::atomic_bool *fail = nullptr,
-                      CcHandlerResult<Void> *res = nullptr)
+                      CcHandlerResult<Void> *res)
             : node_group_(node_group),
               term_(term),
               ckpt_ts_(ckpt_ts),
@@ -174,8 +177,11 @@ private:
               archive_vec_ptr_(archive_vec),
               mv_base_vec_ptr_(mv_base_vec),
               vec_owner_(false),
-              work_done_(work_done),
-              fail_(fail),
+              txm_(nullptr),
+              sender_mux_(nullptr),
+              sender_cv_(nullptr),
+              finish_work_cnt_(nullptr),
+              fail_(nullptr),
               hand_res_(res)
         {
         }
@@ -191,10 +197,15 @@ private:
         std::vector<FlushRecord> *ckpt_vec_ptr_{nullptr};
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
         std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
-
         bool vec_owner_{true};
+
+        // Worker is now the owner of ckpt txm and should commit it
+        // once the data flush is compelted.
+        TransactionExecution *txm_{nullptr};
         // Increased by worker after finishing the retrieved work.
-        uint16_t *work_done_{nullptr};
+        std::mutex *sender_mux_{nullptr};
+        std::condition_variable *sender_cv_{nullptr};
+        uint16_t *finish_work_cnt_{nullptr};
         // Set by worker to indicate flush data result
         std::atomic_bool *fail_{nullptr};
         CcHandlerResult<Void> *hand_res_{nullptr};
@@ -207,7 +218,7 @@ private:
     bool request_ckpt_;
     store::DataStoreHandler *store_hd_;
     std::thread thd_;
-    Status status_;
+    Status ckpt_thd_status_;
     const uint32_t checkpoint_interval_;
     // ckpt_ts = {min_being_held_locks_ts} - {ckpt_delay_time_}
     uint32_t ckpt_delay_time_;  // unit: Microsecond
@@ -217,8 +228,9 @@ private:
     std::mutex worker_mux_;
     std::condition_variable worker_cv_;
     std::vector<FlushDataWork> pending_work_;
-    std::atomic_bool worker_failed_;
+    std::atomic_bool worker_failed_{false};
     std::vector<std::thread> worker_thds_;
+    Status worker_thd_status_;
     static const int checkpointer_worker_num_ = 5;
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);

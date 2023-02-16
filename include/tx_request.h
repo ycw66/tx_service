@@ -191,7 +191,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     ScanOpenTxRequest(const TableName *tabname,
                       ScanIndexType index_type,
                       const TxKey *start_key,
-                      bool inclusive = true,
+                      bool start_inclusive = true,
+                      const TxKey *end_key = nullptr,
+                      bool end_inclusive = true,
                       ScanDirection direction = ScanDirection::Forward,
                       bool is_ckpt = false,
                       bool is_for_write = false,
@@ -200,7 +202,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         : tab_name_(tabname),
           indx_type_(index_type),
           start_key_(start_key),
-          inclusive_(inclusive),
+          start_inclusive_(start_inclusive),
+          end_key_(end_key),
+          end_inclusive_(end_inclusive),
           direct_(direction),
           is_ckpt_delta_(is_ckpt),
           is_for_write_(is_for_write),
@@ -214,10 +218,17 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         return start_key_;
     }
 
+    const TxKey *EndKey() const
+    {
+        return end_key_;
+    }
+
     const TableName *tab_name_;
     ScanIndexType indx_type_;
     const TxKey *start_key_;
-    bool inclusive_;
+    bool start_inclusive_;
+    const TxKey *end_key_;
+    bool end_inclusive_;
     ScanDirection direct_;
     bool is_ckpt_delta_;
     bool is_for_write_;
@@ -397,25 +408,6 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     const TxKey *old_end_key_{nullptr};
     const RangeInfo *old_range_info_{nullptr};
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_id_;
-};
-
-struct SplitRangeTxRequest : public TemplateTxRequest<SplitRangeTxRequest, bool>
-{
-    SplitRangeTxRequest(const TableName table_name,
-                        const TableSchema *table_schema,
-                        const TxKey *range_key,
-                        std::unique_ptr<RangeRecord> range_record)
-        : table_name_(std::move(table_name)),
-          table_schema_(table_schema),
-          range_key_(range_key),
-          range_record_(std::move(range_record))
-    {
-    }
-
-    const TableName table_name_;
-    const TableSchema *table_schema_{nullptr};
-    const TxKey *range_key_{nullptr};
-    std::unique_ptr<RangeRecord> range_record_{nullptr};
 };
 
 struct FaultInjectTxRequest

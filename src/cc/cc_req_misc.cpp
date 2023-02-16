@@ -87,13 +87,13 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
                                        CcShard &ccs,
                                        NodeGroupId ng_id)
-    : FetchCc(ccs, 0), table_name_(table_name), ng_id_(ng_id)
+    : FetchCc(ccs, ng_id), table_name_(table_name)
 {
 }
 
 bool FetchTableRangesCc::Execute(CcShard &ccs)
 {
-    ccs.InitTableRanges(table_name_, ranges_vec_, ng_id_);
+    ccs.InitTableRanges(table_name_, ranges_vec_, cc_ng_id_);
 
     for (CcRequestBase *&req : requesters_)
     {
@@ -108,6 +108,20 @@ void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges,
                                    int err)
 {
     ranges_vec_ = std::move(ranges);
+    error_code_ = err;
+    ccs_.Enqueue(this);
+}
+
+void FetchTableRangesCc::AppendTableRanges(std::vector<InitRangeEntry> &&ranges)
+{
+    for (auto &range : ranges)
+    {
+        ranges_vec_.push_back(std::move(range));
+    }
+}
+
+void FetchTableRangesCc::SetFinish(int err)
+{
     error_code_ = err;
     ccs_.Enqueue(this);
 }
@@ -146,7 +160,8 @@ void LoadRangeSliceRequest::SetFinish()
         {
             fill_slice_cc_->AddDataItem(std::move(data_item.key_),
                                         std::move(data_item.record_),
-                                        data_item.version_ts_);
+                                        data_item.version_ts_,
+                                        data_item.is_deleted_);
         }
         fill_slice_cc_->StartFilling();
     }
@@ -167,7 +182,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                                    uint64_t schema_ts,
                                    StoreSlice &slice,
                                    StoreRange &range,
-                                   uint64_t last_ckpt_ts,
+                                   uint64_t snapshot_ts,
                                    LocalCcShards &cc_shards)
     : table_name_(&table_name),
       cc_ng_id_(cc_ng),
@@ -179,7 +194,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                       schema_ts,
                       slice.StartKey(),
                       slice.EndKey(),
-                      last_ckpt_ts,
+                      snapshot_ts,
                       this),
       range_slice_(slice),
       range_(range),
@@ -251,7 +266,8 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
 void FillStoreSliceCc::AddDataItem(txservice::TxKey::Uptr key,
                                    txservice::TxRecord::Uptr record,
-                                   uint64_t version_ts)
+                                   uint64_t version_ts,
+                                   bool is_deleted)
 {
     size_t hash = key->Hash();
     // Uses the lower 10 bits of the hash code to shard the key across
@@ -260,7 +276,7 @@ void FillStoreSliceCc::AddDataItem(txservice::TxKey::Uptr key,
     uint16_t core_id = core_code % local_cc_shards_.Count();
 
     partitioned_slice_data_[core_id].emplace_back(
-        std::move(key), std::move(record), version_ts);
+        std::move(key), std::move(record), version_ts, is_deleted);
 }
 
 void FillStoreSliceCc::SetFinish()

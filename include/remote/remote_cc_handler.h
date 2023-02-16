@@ -141,6 +141,23 @@ public:
                   bool is_for_write = false,
                   bool is_ckpt = false);
 
+    void ScanNext(uint32_t src_node_id,
+                  const TableName &tbl_name,
+                  uint32_t range_id,
+                  NodeGroupId cc_ng_id,
+                  int64_t cc_ng_term,
+                  const TxKey *start_key,
+                  bool start_inclusive,
+                  const TxKey *end_key,
+                  bool end_inclusive,
+                  uint64_t read_ts,
+                  uint64_t tx_number,
+                  int64_t tx_term,
+                  uint16_t command_id,
+                  CcHandlerResult<RangeScanSliceResult> &hd_res,
+                  IsolationLevel iso_level,
+                  CcProtocol proto);
+
     void ScanClose(const TableName &table_name,
                    size_t alias,
                    const TxKey &end_key,

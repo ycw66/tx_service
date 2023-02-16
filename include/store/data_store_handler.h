@@ -133,7 +133,6 @@ public:
 
     virtual bool UpdateRangeSlices(
         const TableName &table_name,
-        const KVCatalogInfo *kv_info,
         uint64_t schema_ts,
         const TxKey *range_start_key,
         const std::vector<std::unique_ptr<StoreSlice>> &slices,
@@ -221,17 +220,6 @@ public:
     {
         tx_service_ = tx_service;
     }
-
-    virtual bool GetRangeSize(const txservice::TableName &table_name,
-                              const TableSchema *table_schema,
-                              int32_t partition_id,
-                              int64_t *size) = 0;
-
-    virtual bool FindRangeMedianKey(
-        const txservice::TableName &table_name,
-        int32_t partition_id,
-        const TableSchema *table_schema,
-        CcHandlerResult<RangeMedianKeyResult> *out_median_key_result) = 0;
 
     virtual bool CopyRangeData(
         const txservice::TableName &table_name,

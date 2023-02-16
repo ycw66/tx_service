@@ -584,9 +584,6 @@ void txservice::LocalCcHandler::ScanOpen(
     scanner_ptr->read_local_ = false;
 
 #ifdef RANGE_PARTITION_ENABLED
-    // For range-partitioned ccm scanners, adding the last shard implicitly
-    // allocates scan cache for all cores.
-    scanner_ptr->AddShard(cc_shards_.Count() - 1);
     hd_res.SetFinished();
 #else
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
@@ -853,37 +850,52 @@ void txservice::LocalCcHandler::ScanNextBatch(
 void txservice::LocalCcHandler::ScanNextBatch(
     const TableName &tbl_name,
     uint32_t range_id,
+    int64_t cc_ng_term,
     const TxKey *start_key,
-    bool inclusive,
+    bool start_inclusive,
+    const TxKey *end_key,
+    bool end_inclusive,
     uint64_t read_ts,
     uint64_t tx_number,
     int64_t tx_term,
-    CcScanner &scanner,
+    uint16_t command_id,
     CcHandlerResult<RangeScanSliceResult> &hd_res,
     IsolationLevel iso_level,
     CcProtocol proto)
 {
     uint32_t cc_ng_id = range_id % Sharder::Instance().NodeGroupCount();
+    hd_res.Value().cc_ng_id_ = cc_ng_id;
 
     uint32_t node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (node_id == cc_shards_.node_id_)
     {
+        CcScanner &scanner = *hd_res.Value().ccm_scanner_;
         ScanSliceCc *req = scan_slice_pool.NextRequest();
         req->Set(tbl_name,
                  range_id,
                  cc_ng_id,
+                 cc_ng_term,
                  start_key,
-                 inclusive,
+                 start_inclusive,
+                 end_key,
+                 end_inclusive,
                  read_ts,
                  tx_number,
                  tx_term,
-                 &scanner,
                  hd_res,
                  iso_level,
-                 proto);
+                 proto,
+                 scanner.is_for_write_);
 
         uint32_t core_cnt = cc_shards_.Count();
         req->SetShardCount(core_cnt);
+
+        // When the cc ng term is less than 0, this is the first scan of the
+        // specified range.
+        if (cc_ng_term < 0)
+        {
+            scanner.ResetShards(core_cnt);
+        }
 
         for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
         {
@@ -892,6 +904,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
             req->SetPriorCceAddr(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0,
                 core_id);
+            req->SetCcePtr(nullptr, core_id);
+
             cache->Reset();
         }
 
@@ -902,6 +916,22 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
     else
     {
+        remote_hd_.ScanNext(cc_shards_.node_id_,
+                            tbl_name,
+                            range_id,
+                            cc_ng_id,
+                            cc_ng_term,
+                            start_key,
+                            start_inclusive,
+                            end_key,
+                            end_inclusive,
+                            read_ts,
+                            tx_number,
+                            tx_term,
+                            command_id,
+                            hd_res,
+                            iso_level,
+                            proto);
     }
 }
 

@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "cc/cc_entry.h"
+#include "proto/cc_request.pb.h"
 #include "type.h"
 
 namespace txservice
@@ -120,22 +121,79 @@ struct ScanOpenResult
     std::vector<uint8_t> cc_node_returned_;
 };
 
+struct RemoteScanCache
+{
+    RemoteScanCache() : cache_msg_(nullptr), cache_mem_size_(0)
+    {
+    }
+
+    RemoteScanCache(remote::ScanCache_msg *cache_msg, uint32_t mem_size)
+        : cache_msg_(cache_msg), cache_mem_size_(mem_size)
+    {
+    }
+
+    size_t Size() const
+    {
+        return cache_msg_->scan_tuple_size();
+    }
+
+    bool IsFull() const
+    {
+        return cache_mem_size_ >= 1024;
+    }
+
+    const std::string &LastScanKey() const
+    {
+        return cache_msg_->scan_tuple(cache_msg_->scan_tuple_size() - 1).key();
+    }
+
+    remote::ScanCache_msg *cache_msg_;
+    uint32_t cache_mem_size_;
+};
+
 struct RangeScanSliceResult
 {
     RangeScanSliceResult()
-        : last_key_(nullptr), slice_position_(SlicePosition::FirstSlice)
+        : last_key_(nullptr),
+          slice_position_(SlicePosition::FirstSlice),
+          ccm_scanner_(nullptr),
+          is_local_(true),
+          cc_ng_id_(0)
     {
     }
 
     RangeScanSliceResult(TxKey::Uptr last_key, SlicePosition status)
-        : last_key_(std::move(last_key)), slice_position_(status)
+        : last_key_(std::move(last_key)),
+          slice_position_(status),
+          ccm_scanner_(nullptr),
+          is_local_(true),
+          cc_ng_id_(0)
+
     {
     }
 
     RangeScanSliceResult(RangeScanSliceResult &&rhs)
         : last_key_(std::move(rhs.last_key_)),
-          slice_position_(rhs.slice_position_)
+          slice_position_(rhs.slice_position_),
+          is_local_(rhs.is_local_),
+          cc_ng_id_(rhs.cc_ng_id_)
     {
+        if (rhs.is_local_)
+        {
+            ccm_scanner_ = rhs.ccm_scanner_;
+        }
+        else
+        {
+            remote_scan_caches_ = rhs.remote_scan_caches_;
+        }
+    }
+
+    ~RangeScanSliceResult()
+    {
+        if (!is_local_)
+        {
+            last_key_ = nullptr;
+        }
     }
 
     RangeScanSliceResult &operator=(RangeScanSliceResult &&rhs)
@@ -147,6 +205,17 @@ struct RangeScanSliceResult
 
         last_key_ = std::move(rhs.last_key_);
         slice_position_ = rhs.slice_position_;
+        is_local_ = rhs.is_local_;
+        cc_ng_id_ = rhs.cc_ng_id_;
+
+        if (rhs.is_local_)
+        {
+            ccm_scanner_ = rhs.ccm_scanner_;
+        }
+        else
+        {
+            remote_scan_caches_ = rhs.remote_scan_caches_;
+        }
 
         return *this;
     }
@@ -161,6 +230,15 @@ struct RangeScanSliceResult
      */
     TxKey::Uptr last_key_;
     SlicePosition slice_position_;
+
+    union
+    {
+        CcScanner *ccm_scanner_;
+        std::vector<RemoteScanCache> *remote_scan_caches_;
+    };
+    bool is_local_{true};
+
+    NodeGroupId cc_ng_id_{0};
 };
 
 struct ScanNextResult

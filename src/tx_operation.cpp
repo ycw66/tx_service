@@ -92,6 +92,7 @@ void ReadOperation::Reset()
     hd_result_.Reset();
     local_cache_miss_ = false;
 #ifdef RANGE_PARTITION_ENABLED
+    lock_range_result_.Value().Reset();
     lock_range_result_.Reset();
     unlock_range_result_.Reset();
 #endif
@@ -150,13 +151,17 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+        if ((hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+             hd_result_.ErrorCode() ==
+                 CcErrorCode::REQUESTED_NODE_NOT_LEADER) &&
             retry_num_ >= 0)
         {
             // The read request was directed to a non-leader node. Updates
             // the leader cache. Sine UpdateLeader() is a sync call, we only
             // do it when re-run the operation fails.
-            if (retry_num_ == 0)
+            if (hd_result_.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+                retry_num_ == 0)
             {
                 Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
                 retry_num_ = -1;
@@ -577,7 +582,7 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
             LOG(WARNING)
                 << "Write Log Request result unknown, retrying, tx_number: "
-                << txm->tx_number_;
+                << txm->TxNumber();
             // log request return unknown status, we need to set retry flag to
             // inform log service that this is a retried request
             ::txlog::LogRequest &log_req = log_closure_.LogRequest();
@@ -707,6 +712,7 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         }
         else if (!is_running_)
         {
+            txm->StartTiming();
             is_running_ = true;
             txm->ReleaseCatalogLock(catalog_hd_result_);
         }
@@ -728,6 +734,8 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
+            txm->StartTiming();
+            is_running_ = true;
             txm->ReleaseCatalogLock(catalog_hd_result_);
         }
     }
@@ -931,6 +939,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             }
             else if (retry_num_ > 0)
             {
+                hd_result_.Reset();
                 ReRunOp(txm);
                 return;
             }
@@ -944,8 +953,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              slice_hd_result_.IsFinished())
     {
-        // Error code -1 indicates send message failed or term changed.
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        if (slice_hd_result_.ErrorCode() ==
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+            slice_hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED)
         {
             if (retry_num_ == 0)
             {
@@ -954,12 +964,14 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             }
             else if (retry_num_ > 0)
             {
+                slice_hd_result_.Reset();
                 ReRunOp(txm);
                 return;
             }
         }
 
-        if (scanner.Status() == ScannerStatus::Blocked)
+        if (!slice_hd_result_.IsError() &&
+            scanner.Status() == ScannerStatus::Blocked)
         {
             RangeScanSliceResult &scan_slice_result = slice_hd_result_.Value();
 
@@ -1003,20 +1015,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 Direction() == ScanDirection::Forward ? false : true;
             scan_state_->slice_position_ = scan_slice_result.slice_position_;
             scanner.SetStatus(ScannerStatus::Open);
-
-            if (scanner.Current() == nullptr &&
-                ((scanner.Direction() == ScanDirection::Forward &&
-                  scan_state_->slice_position_ != SlicePosition::LastSlice) ||
-                 (scanner.Direction() == ScanDirection::Backward &&
-                  scan_state_->slice_position_ != SlicePosition::FirstSlice)))
-            {
-                // Scan next batch in range partition scans a slice at a time.
-                // Keep scanning until we reach the last slice in last range or
-                // we get something from the last slice scanned.
-                slice_hd_result_.Reset();
-                txm->Process(*this);
-                return;
-            }
         }
 
         txm->PostProcess(*this);
@@ -1339,7 +1337,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut(2))
+    else if (txm->IsTimeOut(4))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1488,7 +1486,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             DLOG(ERROR)
                 << "Upsert table acquire write intent failed, tx_number:"
-                << txm->tx_number_;
+                << txm->TxNumber();
             txm->bool_resp_->SetErrorCode(
                 TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
             // Fails to acquire the write intent on the schema. Since write
@@ -1546,7 +1544,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     DLOG(WARNING)
                         << "Upsert table write prepare log result unknown, "
                            "tx_number:"
-                        << txm->tx_number_ << ", keep retrying";
+                        << txm->TxNumber() << ", keep retrying";
                     // set retry flag and retry prepare log
                     ::txlog::WriteLogRequest *log_req =
                         prepare_log_op_.log_closure_.LogRequest()
@@ -1559,7 +1557,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 {
                     DLOG(ERROR) << "Upsert table write prepare log result "
                                    "unknown, tx_number:"
-                                << txm->tx_number_
+                                << txm->TxNumber()
                                 << ", not leader any more, stop retrying";
                     // Not leader anymore, just quit. New leader will know
                     // whether prepare log succeeds and continue the rest if it
@@ -1580,7 +1578,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             {
                 DLOG(ERROR)
                     << "Upsert table write prepare log failed, tx_number:"
-                    << txm->tx_number_;
+                    << txm->TxNumber();
                 // Fails to flush the prepare log. The schema operation is
                 // considered failed if the prepare log is not flushed. The
                 // commit ts is set to 0 to signal that the following post write
@@ -1704,6 +1702,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                         txm->bool_resp_->SetErrorCode(
                             TxErrorCode::DATA_STORE_WRITE_ERR);
                     }
+
                     // Set txm->commit_ts_ to 0 to indicate there is a flush
                     // error during upsert_kv_table_op_.
                     txm->commit_ts_ = tx_op_failed_ts_;
@@ -2050,7 +2049,7 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
         prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     prepare_log_rec->set_tx_term(txm->tx_term_);
-    prepare_log_rec->set_txn_number(txm->tx_number_);
+    prepare_log_rec->set_txn_number(txm->TxNumber());
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
 
     ::txlog::SchemaOpMessage *prepare_schema_msg =
@@ -2085,7 +2084,7 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     commit_log_rec->set_tx_term(txm->tx_term_);
-    commit_log_rec->set_txn_number(txm->tx_number_);
+    commit_log_rec->set_txn_number(txm->TxNumber());
 
     ::txlog::SchemaOpMessage *commit_schema_msg =
         commit_log_rec->mutable_log_content()->mutable_schema_log();
@@ -2125,7 +2124,7 @@ void UpsertTableOp::FillCleanLogRequest(TransactionExecution *txm)
         clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     clean_log_rec->set_tx_term(txm->tx_term_);
-    clean_log_rec->set_txn_number(txm->tx_number_);
+    clean_log_rec->set_txn_number(txm->TxNumber());
 
     ::txlog::SchemaOpMessage *clean_schema_msg =
         clean_log_rec->mutable_log_content()->mutable_schema_log();
@@ -2328,6 +2327,7 @@ CkptScanOp::CkptScanOp(const TableName &table_name,
                        std::vector<FlushRecord> *archive_vec,
                        std::vector<const TxKey *> *mv_vec,
                        TransactionExecution *txm,
+                       bool is_subop,
                        const TxKey *start_key,
                        const TxKey *end_key)
     : tab_name_(&table_name),
@@ -2336,6 +2336,7 @@ CkptScanOp::CkptScanOp(const TableName &table_name,
       ckpt_vec_(ckpt_vec),
       archive_vec_(archive_vec),
       mv_vec_(mv_vec),
+      is_subop_(is_subop),
       start_key_(start_key),
       end_key_(end_key),
       hd_result_(txm)
@@ -2353,22 +2354,6 @@ void CkptScanOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        txm->PostProcess(*this);
-    }
-    else if (txm->IsTimeOut())
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeOut",
-            txm,
-            [txm]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
-        hd_result_.ForceError();
         txm->PostProcess(*this);
     }
 }
@@ -2460,6 +2445,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     ckpt_scan_op_.archive_vec_ = &archive_vec_;
     ckpt_scan_op_.mv_vec_ = &mv_base_vec_;
     ckpt_scan_op_.node_group_ = node_group_;
+    ckpt_scan_op_.is_subop_ = true;
 
     flush_op_.tab_name_ = &table_name_;
     flush_op_.ckpt_vec_ = &ckpt_vec_;
@@ -2527,7 +2513,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to obtain write "
                           "lock, tx_number:"
-                       << txm->tx_number_;
+                       << txm->TxNumber();
 
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
@@ -2568,11 +2554,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to write prepare "
                           "log, tx number "
-                       << txm->tx_number_;
+                       << txm->TxNumber();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
             ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
         }
 
         // Fill in new range info to old range record.
@@ -2600,11 +2587,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to install new range "
                           "info, tx number "
-                       << txm->tx_number_;
+                       << txm->TxNumber();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
             ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
         }
 
         // Copy data from old partition to its new partition in data store.
@@ -2659,12 +2647,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to migrate old "
                           "partition, tx number "
-                       << txm->tx_number_;
+                       << txm->TxNumber();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
             ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
         }
+        LOG(INFO) << "ckpt scan for " << txm->TxNumber();
         ckpt_scan_op_.ckpt_ts_ = txm->commit_ts_;
         ForwardToSubOperation(txm, &ckpt_scan_op_);
     }
@@ -2680,11 +2670,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to scan for "
                           "checkpoint, tx number "
-                       << txm->tx_number_;
+                       << txm->TxNumber();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
             ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
         }
         flush_op_.ckpt_ts_ = txm->commit_ts_;
         flush_op_.tx_term_ = txm->tx_term_;
@@ -2702,12 +2693,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR)
                 << "Split Flush transaction failed to flush data, tx number "
-                << txm->tx_number_;
+                << txm->TxNumber();
 
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
             ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
         }
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
@@ -2725,7 +2717,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush transaction failed to obtain write "
                           "lock, tx_number:"
-                       << txm->tx_number_;
+                       << txm->TxNumber();
 
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
@@ -2741,7 +2733,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // error
+            // error & retry
+            ::txlog::WriteLogRequest *log_req =
+                commit_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
+            RetrySubOperation(txm, &commit_log_op_);
+            return;
         }
         // Split the range slices based on the range split keys.
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
@@ -2818,12 +2816,26 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (ds_upsert_range_op_.hd_result_.IsError())
         {
             // error & retry
+            LOG(ERROR) << "Split Flush transaction failed to update range info "
+                          "in data store, tx_number:"
+                       << txm->TxNumber();
+            RetrySubOperation(txm, &ds_upsert_range_op_);
+            return;
         }
         post_all_lock_op_.rec_ = &range_record_;
         ForwardToSubOperation(txm, &post_all_lock_op_);
     }
     else if (op_ == &post_all_lock_op_)
     {
+        if (post_all_lock_op_.hd_result_.IsError())
+        {
+            // error & retry
+            LOG(ERROR)
+                << "Split Flush transaction failed at post all lock, tx_number:"
+                << txm->TxNumber();
+            RetrySubOperation(txm, &post_all_lock_op_);
+            return;
+        }
         // Delete stale data from old partition
         ds_clean_old_range_op_.op_func_ =
             [partition_id = range_info_.partition_id_,
@@ -2863,6 +2875,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (ds_clean_old_range_op_.hd_result_.IsError())
         {
             // error & retry
+            LOG(ERROR)
+                << "Split Flush transaction failed to delete data in old range "
+                   "in data store, tx_number:"
+                << txm->TxNumber();
+            RetrySubOperation(txm, &ds_clean_old_range_op_);
+            return;
         }
         FillCleanLogRequest(txm);
         ForwardToSubOperation(txm, &clean_log_op_);
@@ -2888,6 +2906,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     .mutable_write_log_request();
             log_req->set_retry(true);
             RetrySubOperation(txm, &clean_log_op_);
+            return;
         }
         else if (txm->tx_status_ == TxnStatus::Recovering)
         {
@@ -2902,7 +2921,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            txm->bool_resp_->Finish(true);
+            if (txm->commit_ts_ == tx_op_failed_ts_)
+            {
+                txm->bool_resp_->Finish(false);
+            }
+            else
+            {
+                txm->bool_resp_->Finish(true);
+            }
             txm->state_stack_.pop_back();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             assert(txm->state_stack_.empty());
@@ -2928,7 +2954,7 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
 
     // Set general transaction information
     prepare_log_rec->set_tx_term(txm->tx_term_);
-    prepare_log_rec->set_txn_number(txm->tx_number_);
+    prepare_log_rec->set_txn_number(txm->TxNumber());
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
     prepare_log_rec->clear_node_terms();
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
@@ -2940,11 +2966,11 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
     }
 
     // Set split-flush tx information
-    ::txlog::SplitFlushOpMessage *prepare_split_msg =
-        prepare_log_rec->mutable_log_content()->mutable_split_flush_log();
+    ::txlog::SplitRangeOpMessage *prepare_split_msg =
+        prepare_log_rec->mutable_log_content()->mutable_split_range_log();
     prepare_split_msg->set_table_name(range_table_name_.String());
     prepare_split_msg->set_stage(
-        ::txlog::SplitFlushOpMessage_Stage_PrepareSplit);
+        ::txlog::SplitRangeOpMessage_Stage_PrepareSplit);
     // Set range info for splitting range
     prepare_split_msg->set_partition_id(range_info_.partition_id_);
     prepare_split_msg->set_range_key_neg_inf(false);
@@ -2979,12 +3005,12 @@ void SplitFlushRangeOp::FillCommitLogRequest(TransactionExecution *txm)
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     commit_log_rec->set_tx_term(txm->tx_term_);
-    commit_log_rec->set_txn_number(txm->tx_number_);
+    commit_log_rec->set_txn_number(txm->TxNumber());
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
     auto commit_schema_msg =
-        commit_log_rec->mutable_log_content()->mutable_split_flush_log();
+        commit_log_rec->mutable_log_content()->mutable_split_range_log();
     commit_schema_msg->set_stage(
-        ::txlog::SplitFlushOpMessage_Stage_CommitSplit);
+        ::txlog::SplitRangeOpMessage_Stage_CommitSplit);
 
     // The prepare log keeps all cc nodes' terms and match them in the log
     // service to detect invalidated write intents. The commit log, however,
@@ -3007,12 +3033,12 @@ void SplitFlushRangeOp::FillCleanLogRequest(TransactionExecution *txm)
         clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     clean_log_rec->set_tx_term(txm->tx_term_);
-    clean_log_rec->set_txn_number(txm->tx_number_);
+    clean_log_rec->set_txn_number(txm->TxNumber());
 
-    ::txlog::SplitFlushOpMessage *clean_split_msg =
-        clean_log_rec->mutable_log_content()->mutable_split_flush_log();
+    ::txlog::SplitRangeOpMessage *clean_split_msg =
+        clean_log_rec->mutable_log_content()->mutable_split_range_log();
 
-    clean_split_msg->set_stage(::txlog::SplitFlushOpMessage_Stage_CleanSplit);
+    clean_split_msg->set_stage(::txlog::SplitRangeOpMessage_Stage_CleanSplit);
     clean_log_rec->mutable_node_terms()->clear();
 }
 void SplitFlushRangeOp::ForceToFinish(TransactionExecution *txm)
@@ -3021,1031 +3047,6 @@ void SplitFlushRangeOp::ForceToFinish(TransactionExecution *txm)
     op_ = &clean_log_op_;
     Forward(txm);
 }
-DsSplitRangeOp::DsSplitRangeOp(
-    const TableName &table_name,
-    const TableSchema *table_schema,
-    const TxKey *range_key,
-    std::unique_ptr<RangeRecord> splitting_range_record,
-    TransactionExecution *txm,
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
-    : CompositeTransactionOperation(),
-      table_name_(table_name.StringView().data(),
-                  table_name.StringView().size(),
-                  table_name.Type()),
-      range_table_name_(table_name.StringView().data(),
-                        table_name.StringView().size(),
-                        TableType::RangePartition),
-      table_schema_(table_schema),
-      range_key_(range_key),
-      old_range_record_(std::move(splitting_range_record)),
-      upload_range_entry_(nullptr),
-      upload_range_record_(nullptr),
-      new_partition_id_{-1},
-      catalog_cc_entry_(std::move(catalog_cc_entry)),
-      acquire_all_intent_for_update_old_range_op_(txm),
-      ds_find_median_key_for_old_range_op_(txm),
-      acquire_all_lock_for_update_old_range_op_(txm),
-      prepare_log_for_update_old_range_op_(txm),
-      post_all_lock_for_update_old_range_op_(txm),
-      ds_copy_old_range_data_op_(txm),
-      ds_copy_old_range_data_finished_log_op_(txm),
-      acquire_all_lock_for_dirty_old_range_op_(txm),
-      commit_log_for_dirty_old_range_op_(txm),
-      post_write_all_for_dirty_old_range_op_(txm),
-      ds_upsert_new_range_op_(txm),
-      delete_out_of_old_range_data_log_op_(txm),
-      delete_out_of_old_range_data_op_(txm),
-      clean_log_op_(txm),
-      catalog_post_read_op_(txm)
-{
-    partition_id_ = old_range_record_->GetRangeInfo()->partition_id_;
-    upload_range_entry_ = old_range_record_->GetRangeInfo()->Clone();
-    upload_range_record_ = std::make_unique<RangeRecord>();
-    upload_range_record_->range_info_ = upload_range_entry_.get();
-
-    // prepare acquire_all_intent_for_update_old_range_op_
-    acquire_all_intent_for_update_old_range_op_.table_name_ =
-        &range_table_name_;
-    acquire_all_intent_for_update_old_range_op_.key_ = range_key_;
-    acquire_all_intent_for_update_old_range_op_.cc_op_ =
-        CcOperation::ReadForWrite;
-    acquire_all_intent_for_update_old_range_op_.protocol_ = CcProtocol::OCC;
-
-    // prepare acquire_all_lock_for_update_old_range_op_
-    acquire_all_lock_for_update_old_range_op_.table_name_ = &range_table_name_;
-    acquire_all_lock_for_update_old_range_op_.key_ = range_key_;
-    acquire_all_lock_for_update_old_range_op_.cc_op_ = CcOperation::Write;
-    acquire_all_lock_for_update_old_range_op_.protocol_ = CcProtocol::Locking;
-
-    post_all_lock_for_update_old_range_op_.table_name_ = &range_table_name_;
-    post_all_lock_for_update_old_range_op_.key_ = range_key_;
-    post_all_lock_for_update_old_range_op_.op_type_ = OperationType::Update;
-    post_all_lock_for_update_old_range_op_.write_type_ =
-        PostWriteType::PrepareCommit;
-
-    // prepare acquire_all_lock_for_dirty_old_range_op_
-    acquire_all_lock_for_dirty_old_range_op_.table_name_ = &range_table_name_;
-    acquire_all_lock_for_dirty_old_range_op_.key_ = range_key_;
-    acquire_all_lock_for_dirty_old_range_op_.cc_op_ = CcOperation::Write;
-    acquire_all_lock_for_dirty_old_range_op_.protocol_ = CcProtocol::Locking;
-
-    // prepare the post_write_all_for_dirty_old_range_op_ for failed case
-    post_write_all_for_dirty_old_range_op_.table_name_ = &range_table_name_;
-    post_write_all_for_dirty_old_range_op_.key_ = range_key_;
-    post_write_all_for_dirty_old_range_op_.op_type_ = OperationType::Update;
-    post_write_all_for_dirty_old_range_op_.write_type_ =
-        PostWriteType::PostCommit;
-
-    TX_TRACE_ASSOCIATE(this,
-                       &acquire_all_intent_for_update_old_range_op_,
-                       "acquire_all_intent_for_update_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &ds_find_median_key_for_old_range_op_,
-                       "ds_find_median_key_for_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &acquire_all_lock_for_update_old_range_op_,
-                       "acquire_all_lock_for_update_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &prepare_log_for_update_old_range_op_,
-                       "prepare_log_for_update_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &post_all_lock_for_update_old_range_op_,
-                       "post_all_lock_for_update_old_range_op_");
-    TX_TRACE_ASSOCIATE(
-        this, &ds_copy_old_range_data_op_, "ds_copy_old_range_data_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &ds_copy_old_range_data_finished_log_op_,
-                       "ds_copy_old_range_data_finished_log_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &acquire_all_lock_for_dirty_old_range_op_,
-                       "acquire_all_lock_for_dirty_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &commit_log_for_dirty_old_range_op_,
-                       "commit_log_for_dirty_old_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &post_write_all_for_dirty_old_range_op_,
-                       "post_write_all_for_dirty_old_range_op_");
-    TX_TRACE_ASSOCIATE(
-        this, &ds_upsert_new_range_op_, "ds_upsert_new_range_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &delete_out_of_old_range_data_log_op_,
-                       "delete_out_of_old_range_data_log_op_");
-    TX_TRACE_ASSOCIATE(this,
-                       &delete_out_of_old_range_data_op_,
-                       "delete_out_of_old_range_data_op_");
-    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
-}
-
-void DsSplitRangeOp::FillTxLog(TransactionExecution *txm,
-                               WriteToLogOp &log_op,
-                               TxLogType log_type,
-                               ::txlog::SplitRangeOpMessage::Stage stage)
-{
-    log_op.log_type_ = log_type;
-    log_op.log_closure_.LogRequest().Clear();
-    ::txlog::WriteLogRequest *log_range_rec =
-        log_op.log_closure_.LogRequest().mutable_write_log_request();
-
-    log_range_rec->set_tx_term(txm->tx_term_);
-    log_range_rec->set_txn_number(txm->tx_number_);
-    log_range_rec->set_commit_timestamp(txm->commit_ts_);
-
-    ::txlog::SplitRangeOpMessage *log_range_msg =
-        log_range_rec->mutable_log_content()->mutable_split_range_log();
-    log_range_msg->set_stage(stage);
-
-    log_range_msg->set_table_name(range_table_name_.String());
-    log_range_msg->set_table_schema(table_schema_->SchemaImage());
-    log_range_msg->set_partition_id(partition_id_);
-    log_range_msg->set_new_partition_id(new_partition_id_);
-
-    log_range_msg->set_range_key_neg_inf(false);
-    log_range_msg->set_range_key_pos_inf(false);
-    switch (range_key_->Type())
-    {
-    case KeyType::NegativeInf:
-        log_range_msg->set_range_key_neg_inf(true);
-        break;
-    case KeyType::PositiveInf:
-        log_range_msg->set_range_key_pos_inf(true);
-        break;
-    default:
-        range_key_->Serialize(*log_range_msg->mutable_range_key_value());
-        break;
-    }
-
-    new_range_key_->Serialize(*log_range_msg->mutable_new_range_key());
-
-    log_range_rec->mutable_node_terms()->clear();
-}
-
-void DsSplitRangeOp::FillTxLogForCleanLog(TransactionExecution *txm)
-{
-    clean_log_op_.log_type_ = TxLogType::CLEAN;
-
-    clean_log_op_.log_closure_.LogRequest().Clear();
-
-    ::txlog::WriteLogRequest *clean_log_rec =
-        clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    clean_log_rec->set_tx_term(txm->tx_term_);
-    clean_log_rec->set_txn_number(txm->tx_number_);
-
-    ::txlog::SplitRangeOpMessage *log_range_msg =
-        clean_log_rec->mutable_log_content()->mutable_split_range_log();
-
-    log_range_msg->set_stage(::txlog::SplitRangeOpMessage::CleanLog);
-    clean_log_rec->mutable_node_terms()->clear();
-}
-
-void DsSplitRangeOp::ForceToFinish(TransactionExecution *txm)
-{
-    clean_log_op_.hd_result_.SetFinished();
-    op_ = &clean_log_op_;
-    Forward(txm);
-}
-
-void DsSplitRangeOp::PrepareUploadRangeRecord()
-{
-    // upload_range_entry_ = old_range_record_->RangeEntry()->Clone();
-    // upload_range_entry_->new_key_ =
-    //     new_range_key_ != nullptr ? new_range_key_->Clone() : nullptr;
-    // upload_range_entry_->new_partition_id_ = new_partition_id_;
-
-    // upload_range_record_ = std::make_unique<RangeRecord>();
-    // upload_range_record_->range_entry_ = upload_range_entry_.get();
-}
-
-void DsSplitRangeOp::Forward(TransactionExecution *txm)
-{
-    if (op_ == nullptr)
-    {
-        // Pin data only when DsSplitRangeOp begin
-        uint32_t node_group_id = txm->TxCcNodeId();
-        int64_t leader_term =
-            Sharder::Instance().TryPinNodeGroupData(node_group_id);
-
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_term_fail_before_split_range_op_start", leader_term < 0))
-        {
-            DLOG(ERROR) << "DsSplitRangeOp abort: TRANSACTION_NODE_NOT_LEADER";
-            txm->MarkFailed();
-            return;
-        }
-
-        ACTION_FAULT_INJECTOR("af_split_range_acquire_write_intent");
-
-        DLOG(INFO) << "acquire_all_intent_for_update_old_range_op_";
-        ForwardToSubOperation(txm,
-                              &acquire_all_intent_for_update_old_range_op_);
-    }
-    else if (op_ == &acquire_all_intent_for_update_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_split_range_acquire_write_intent",
-                acquire_all_intent_for_update_old_range_op_.fail_cnt_.load(
-                    std::memory_order_acquire) > 0))
-        {
-            // txm->bool_resp_->SetErrorCode(
-            // TxErrorCode::SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL);
-            DLOG(ERROR) << "DsSplitRangeOp failed: "
-                           "SPLIT_RANGE_ACQUIRE_WRITE_INTENT_FAIL";
-            txm->MarkFailed();
-            PrepareUploadRangeRecord();
-            post_write_all_for_dirty_old_range_op_.rec_ =
-                upload_range_record_.get();
-            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                uint32_t node_group_id = txm->TxCcNodeId();
-                Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_ds_find_median_key");
-
-                // TODO(Xiao Ji): Check old_range_record_.version_ts_ against
-                // the acquire_all_result.commit_ts_ to make sure the split
-                // range is not changed since been read.
-                uint64_t candidate_max_ts =
-                    acquire_all_intent_for_update_old_range_op_.MaxTs();
-                txm->ForwardTs(candidate_max_ts);
-
-                // prepare ds_find_median_key_for_old_range_op_
-                ds_find_median_key_for_old_range_op_.op_func_ =
-                    [partition_id = partition_id_,
-                     &table_name = table_name_,
-                     table_schema = table_schema_,
-                     &hd_res = ds_find_median_key_for_old_range_op_.hd_result_]
-                {
-                    TxWorkerPool *tx_worker_pool =
-                        Sharder::Instance().GetTxWorkerPool();
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-
-                    tx_worker_pool->SubmitWork(
-                        [partition_id,
-                         table_name,
-                         table_schema,
-                         store_hd,
-                         &hd_res]
-                        {
-                            bool succ =
-                                store_hd->FindRangeMedianKey(table_name,
-                                                             partition_id,
-                                                             table_schema,
-                                                             &hd_res);
-                            if (!succ)
-                            {
-                                DLOG(INFO) << "FindRangeMedianKey failed: "
-                                           << table_name.String() << " "
-                                           << partition_id;
-                                hd_res.SetError(
-                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                            }
-                            else
-                            {
-                                succ = store_hd->GetNextRangePartitionId(
-                                    table_name,
-                                    &hd_res.Value().new_partition_id_);
-                                if (succ)
-                                {
-                                    hd_res.SetFinished();
-                                }
-                                else
-                                {
-                                    hd_res.SetError(
-                                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                                }
-                            }
-                        });
-                };
-
-                ForwardToSubOperation(txm,
-                                      &ds_find_median_key_for_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &ds_find_median_key_for_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_ds_find_median_key",
-                ds_find_median_key_for_old_range_op_.hd_result_.IsError()))
-        {
-            DLOG(ERROR) << "DsSplitRangeOp failed: DATA_STORE_READ_ERR";
-            txm->MarkFailed();
-            PrepareUploadRangeRecord();
-            post_write_all_for_dirty_old_range_op_.rec_ =
-                upload_range_record_.get();
-            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                uint32_t node_group_id = txm->TxCcNodeId();
-                Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                ForceToFinish(txm);
-            }
-            else
-            {
-                RangeMedianKeyResult &median_key_result =
-                    ds_find_median_key_for_old_range_op_.hd_result_.Value();
-                new_range_key_ = std::move(median_key_result.median_key_);
-                new_partition_id_ = median_key_result.new_partition_id_;
-
-                ACTION_FAULT_INJECTOR(
-                    "af_acquire_all_lock_for_update_old_range");
-
-                // Going to lock the range table with the old range start key
-                ForwardToSubOperation(
-                    txm, &acquire_all_lock_for_update_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &acquire_all_lock_for_update_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_acquire_all_lock_for_update_old_range",
-                acquire_all_lock_for_update_old_range_op_.fail_cnt_.load(
-                    std::memory_order_acquire) > 0))
-        {
-            DLOG(ERROR)
-                << "DsSplitRangeOp failed: SPLIT_RANGE_ACQUIRE_WRITE_LOCK_FAIL";
-            txm->MarkFailed();
-            PrepareUploadRangeRecord();
-            post_write_all_for_dirty_old_range_op_.rec_ =
-                upload_range_record_.get();
-            ForwardToSubOperation(txm, &post_write_all_for_dirty_old_range_op_);
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                uint32_t node_group_id = txm->TxCcNodeId();
-                Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR(
-                    "af_prepare_log_for_update_for_old_range");
-
-                FillTxLog(txm,
-                          prepare_log_for_update_old_range_op_,
-                          TxLogType::PREPARE,
-                          ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange);
-                ForwardToSubOperation(txm,
-                                      &prepare_log_for_update_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &prepare_log_for_update_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_prepare_log_for_update_old_range",
-                prepare_log_for_update_old_range_op_.hd_result_.IsError()))
-        {
-            DLOG(ERROR) << "DsSplitRangeOp failed: "
-                           "SPLIT_RANGE_PREPARE_LOG_FOR_OLD_RANGE_FAIL";
-
-            if (prepare_log_for_update_old_range_op_.hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
-            {
-                // prepare log result unknown, keep retrying until getting a
-                // clear response, either success or failure, or the coordinator
-                // itself is no longer leader
-                if (!CheckLeaderTerm(
-                        txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-                {
-                    uint32_t node_group_id = txm->TxCcNodeId();
-                    Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                    ForceToFinish(txm);
-                }
-                else
-                {
-                    RetrySubOperation(txm,
-                                      &prepare_log_for_update_old_range_op_);
-                }
-            }
-            else
-            {
-                txm->MarkFailed();
-                PrepareUploadRangeRecord();
-                post_write_all_for_dirty_old_range_op_.rec_ =
-                    upload_range_record_.get();
-                ForwardToSubOperation(txm,
-                                      &post_write_all_for_dirty_old_range_op_);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                uint32_t node_group_id = txm->TxCcNodeId();
-                Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_post_all_lock_for_update_range");
-
-                // Going to update the old range with new key and new partition
-                // id as the splitting key and the old range became dirty
-                DLOG(INFO) << "post_all_lock_for_update_old_range_op_";
-                PrepareUploadRangeRecord();
-                post_all_lock_for_update_old_range_op_.rec_ =
-                    upload_range_record_.get();
-                ForwardToSubOperation(txm,
-                                      &post_all_lock_for_update_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &post_all_lock_for_update_old_range_op_)
-    {
-        bool failed = post_all_lock_for_update_old_range_op_.IsFailed();
-
-        if (FAULT_INJECTOR_CONDITION_WRAP("cw_post_all_lock_for_update_range",
-                                          failed))
-        {
-            // After prepare log is succeed, this range split operation is
-            // guaranteed to succeed, and can only roll forward, retry if failed
-            // unless the leader is changed.
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &post_all_lock_for_update_old_range_op_);
-            }
-            else
-            {
-                // txm->bool_resp_->SetErrorCode(
-                // TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_ds_copy_old_range_data_finished_log");
-
-                FillTxLog(txm,
-                          ds_copy_old_range_data_finished_log_op_,
-                          TxLogType::DATA,
-                          ::txlog::SplitRangeOpMessage::CopingOldRangeData);
-                DLOG(INFO) << "ds_copy_old_range_data_finished_log_op_";
-                ForwardToSubOperation(txm,
-                                      &ds_copy_old_range_data_finished_log_op_);
-            }
-        }
-    }
-    else if (op_ == &ds_copy_old_range_data_finished_log_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_ds_copy_old_range_data_finished_log",
-                ds_copy_old_range_data_finished_log_op_.hd_result_.IsError()))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                // Retry if failed
-                RetrySubOperation(txm,
-                                  &ds_copy_old_range_data_finished_log_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_ds_copy_old_range_data");
-
-                // Going to copy data after middle key in the old range to the
-                // new range
-                ds_copy_old_range_data_op_.op_func_ =
-                    [&table_name = table_name_,
-                     old_partition_id = partition_id_,
-                     new_partition_id = new_partition_id_,
-                     start_key = new_range_key_.get(),
-                     tx_ts = txm->commit_ts_,
-                     table_schema = table_schema_,
-                     &hd_res = ds_copy_old_range_data_op_.hd_result_]
-                {
-                    TxWorkerPool *tx_worker_pool =
-                        Sharder::Instance().GetTxWorkerPool();
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    tx_worker_pool->SubmitWork(
-                        [table_name,
-                         old_partition_id,
-                         new_partition_id,
-                         start_key,
-                         tx_ts,
-                         table_schema,
-                         &hd_res,
-                         store_hd]
-                        {
-                            // bool succ =
-                            //     store_hd->CopyRangeData(table_name,
-                            //                             old_partition_id,
-                            //                             new_partition_id,
-                            //                             start_key,
-                            //                             tx_ts,
-                            //                             table_schema);
-                            // if (succ)
-                            //{
-                            //     hd_res.SetFinished();
-                            // }
-                            // else
-                            //{
-                            //     hd_res.SetError(CcErrorCode::REQUEST_NODE_NOT_LEADER);
-                            // }
-                        });
-                };
-
-                ForwardToSubOperation(txm, &ds_copy_old_range_data_op_);
-            }
-        }
-    }
-    else if (op_ == &ds_copy_old_range_data_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_af_ds_copy_old_range_data",
-                ds_copy_old_range_data_op_.hd_result_.IsError()))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &ds_copy_old_range_data_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR(
-                    "af_acquire_all_lock_for_dirty_old_range");
-
-                ForwardToSubOperation(
-                    txm, &acquire_all_lock_for_dirty_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &acquire_all_lock_for_dirty_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_acquire_all_lock_for_dirty_old_range",
-                acquire_all_lock_for_dirty_old_range_op_.fail_cnt_.load(
-                    std::memory_order_acquire) > 0))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm,
-                                  &acquire_all_lock_for_dirty_old_range_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_commit_log_for_dirty_old_range");
-
-                FillTxLog(txm,
-                          commit_log_for_dirty_old_range_op_,
-                          TxLogType::COMMIT,
-                          ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange);
-                ForwardToSubOperation(txm, &commit_log_for_dirty_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &commit_log_for_dirty_old_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_commit_log_for_dirty_old_range",
-                commit_log_for_dirty_old_range_op_.hd_result_.IsError()))
-        {
-            // Fails to flush the commit log. Retries the operation if the
-            // tx node is still the leader.
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &commit_log_for_dirty_old_range_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_post_write_all_for_dirty_old_range");
-
-                // Restore the dirty range record to the old one,
-                // and fork the new range
-                PrepareUploadRangeRecord();
-                post_write_all_for_dirty_old_range_op_.rec_ =
-                    upload_range_record_.get();
-                ForwardToSubOperation(txm,
-                                      &post_write_all_for_dirty_old_range_op_);
-            }
-        }
-    }
-    else if (op_ == &post_write_all_for_dirty_old_range_op_)
-    {
-        bool failed = post_write_all_for_dirty_old_range_op_.IsFailed();
-
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_post_write_all_for_dirty_old_range", failed))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                PrepareUploadRangeRecord();
-                post_write_all_for_dirty_old_range_op_.rec_ =
-                    upload_range_record_.get();
-                RetrySubOperation(txm, &post_write_all_for_dirty_old_range_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_ds_upsert_new_range");
-
-                if (txm->commit_ts_ == 0)
-                {
-                    // The split op failed without prepare log, bypass any retry
-                    DLOG(ERROR)
-                        << "DsSplitRangeOp is aborted without prepare log";
-                    txm->state_stack_.pop_back();
-                    assert(txm->state_stack_.empty());
-                    txm->ds_split_range_op_ = nullptr;
-
-                    if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                            txm->tx_term_))
-                    {
-                        txm->Abort();
-                    }
-
-                    uint32_t node_group_id = txm->TxCcNodeId();
-                    Sharder::Instance().UnpinNodeGroupData(node_group_id);
-                }
-                else
-                {
-                    // prepare ds_upsert_new_range_op_
-                    ds_upsert_new_range_op_.op_func_ =
-                        [&range_table_name = range_table_name_,
-                         table_schema = table_schema_,
-                         key = new_range_key_.get(),
-                         partition_id = new_partition_id_,
-                         ts = txm->commit_ts_,
-                         &hd_res = ds_upsert_new_range_op_.hd_result_]
-                    {
-                        TxWorkerPool *tx_worker_pool =
-                            Sharder::Instance().GetTxWorkerPool();
-                        store::DataStoreHandler *const store_hd =
-                            Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        tx_worker_pool->SubmitWork(
-                            [range_table_name,
-                             table_schema,
-                             key,
-                             partition_id,
-                             ts,
-                             &hd_res,
-                             store_hd]
-                            {
-                                // bool succ =
-                                //     store_hd->UpsertRange(range_table_name,
-                                //                           table_schema,
-                                //                           key,
-                                //                           partition_id,
-                                //                           ts);
-                                // if (succ)
-                                //{
-                                //     hd_res.SetFinished();
-                                // }
-                                // else
-                                //{
-                                //     hd_res.SetError(
-                                //         CcErrorCode::REQUEST_NODE_NOT_LEADER);
-                                // }
-                            });
-                    };
-
-                    DLOG(INFO) << "ds_upsert_new_range_op_";
-                    ForwardToSubOperation(txm, &ds_upsert_new_range_op_);
-                }
-            }
-        }
-    }
-    else if (op_ == &ds_upsert_new_range_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_ds_upsert_new_range",
-                ds_upsert_new_range_op_.hd_result_.IsError()))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                // Retry if failed
-                RetrySubOperation(txm, &ds_upsert_new_range_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_delete_out_of_old_range_data_log");
-
-                FillTxLog(txm,
-                          delete_out_of_old_range_data_log_op_,
-                          TxLogType::DATA,
-                          ::txlog::SplitRangeOpMessage::DeletingOldRangeData);
-                DLOG(INFO) << "delete_out_of_old_range_data_log_op_";
-                ForwardToSubOperation(txm,
-                                      &delete_out_of_old_range_data_log_op_);
-            }
-        }
-    }
-    else if (op_ == &delete_out_of_old_range_data_log_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_delete_out_of_old_range_data_log",
-                delete_out_of_old_range_data_log_op_.hd_result_.IsError()))
-        {
-            // Fails to flush the commit log. Retries the operation if the
-            // tx node is still the leader.
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &delete_out_of_old_range_data_log_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_delete_out_of_old_range_data");
-
-                // prepare delete_out_of_old_range_data_op_
-                delete_out_of_old_range_data_op_.op_func_ =
-                    [partition_id = partition_id_,
-                     start_key = new_range_key_.get(),
-                     &table_name = table_name_,
-                     table_schema = table_schema_,
-                     &hd_res = delete_out_of_old_range_data_op_.hd_result_]
-                {
-                    TxWorkerPool *tx_worker_pool =
-                        Sharder::Instance().GetTxWorkerPool();
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    tx_worker_pool->SubmitWork(
-                        [partition_id,
-                         start_key,
-                         table_name,
-                         table_schema,
-                         &hd_res,
-                         store_hd]
-                        {
-                            bool succ =
-                                store_hd->DeleteOutOfRangeData(table_name,
-                                                               partition_id,
-                                                               start_key,
-                                                               table_schema);
-                            if (succ)
-                            {
-                                hd_res.SetFinished();
-                            }
-                            else
-                            {
-                                hd_res.SetError(
-                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                            }
-                        });
-                };
-
-                ForwardToSubOperation(txm, &delete_out_of_old_range_data_op_);
-            }
-        }
-    }
-    else if (op_ == &delete_out_of_old_range_data_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_delete_out_of_old_range_data",
-                delete_out_of_old_range_data_op_.hd_result_.IsError()))
-        {
-            // The data store operation failed. Retry the operation if the
-            // tx node is still the leader.
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &delete_out_of_old_range_data_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else if (txm->tx_status_ == TxnStatus::Recovering)
-            {
-                assert(catalog_cc_entry_ != std::nullopt);
-                catalog_post_read_op_.Reset(std::make_pair(
-                    &catalog_cc_entry_->first, &catalog_cc_entry_->second));
-                ForwardToSubOperation(txm, &catalog_post_read_op_);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_clean_log");
-
-                FillTxLogForCleanLog(txm);
-                ForwardToSubOperation(txm, &clean_log_op_);
-            }
-        }
-    }
-    else if (op_ == &catalog_post_read_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_catalog_post_read_op",
-                catalog_post_read_op_.hd_result_.IsError()))
-        {
-            if (CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                RetrySubOperation(txm, &catalog_post_read_op_);
-            }
-            else
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (!CheckLeaderTerm(
-                    txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
-            {
-                DLOG(ERROR) << "DsSplitRangeOp is forced to finish: "
-                               "TRANSACTION_NODE_NOT_LEADER";
-                ForceToFinish(txm);
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("af_clean_log");
-
-                FillTxLogForCleanLog(txm);
-                ForwardToSubOperation(txm, &clean_log_op_);
-            }
-        }
-    }
-    else if (op_ == &clean_log_op_)
-    {
-        if (FAULT_INJECTOR_CONDITION_WRAP(
-                "cw_clean_log",
-                clean_log_op_.hd_result_.IsError() &&
-                    Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                        txm->tx_term_)))
-        {
-            RetrySubOperation(txm, &clean_log_op_);
-        }
-        else if (txm->tx_status_ == TxnStatus::Recovering)
-        {
-            txm->Reset();
-            txm->tx_status_.store(TxnStatus::Finished,
-                                  std::memory_order_release);
-        }
-        else
-        {
-            txm->state_stack_.pop_back();
-            assert(txm->state_stack_.empty());
-            if (Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                    txm->tx_term_))
-            {
-                // Prepare for commit
-                txm->Commit();
-            }
-            uint32_t node_group_id = txm->TxCcNodeId();
-            Sharder::Instance().UnpinNodeGroupData(node_group_id);
-            txm->ds_split_range_op_ = nullptr;
-        }
-    }
-}
-
 ReleaseScanExtraLockOp::ReleaseScanExtraLockOp(TransactionExecution *txm)
     : hd_result_(txm),
       scan_open_tx_result_(nullptr),

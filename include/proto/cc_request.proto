@@ -127,6 +127,20 @@ enum CcTableType {
     RangePartition = 3;
 }
 
+enum RemoteKeyType {
+	Normal = 0;
+	NegativeInf = 1;
+	PositiveInf = 2;
+}
+
+enum SlicePosition {
+	Middle = 0;
+	FirstSliceInRange = 1;
+	LastSliceInRange = 2;
+	FirstSlice = 3;
+	LastSlice = 4;
+}
+
 message AcquireRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
@@ -322,8 +336,37 @@ message ScanNextRequest {
 
 message ScanNextResponse {
 	int32 error_code = 1;
-	repeated ScanTuple_msg scan_tuple = 2;
+	ScanCache_msg scan_cache = 2;
 	uint64 scan_cache_ptr = 3;
+}
+
+message ScanSliceRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	// The term of the node group the scan targets. 
+	// -1, if the to-scan slice is the first in the remote node 
+	// (and therefore its term is unknown).
+	int64 cc_ng_term = 3;
+	string table_name_str = 4;
+	CcTableType table_type = 5;
+	uint32 range_id = 6;
+	bytes start_key = 7;
+	bool start_inclusive = 9;
+	bytes end_key = 10;
+	bool end_inclusive = 11;
+	bool is_forward = 12;
+	uint64 ts = 13;
+	repeated uint64 prior_cce_vec = 14;
+	IsolationType iso_level = 15;
+	CcProtocolType protocol = 16;
+	bool is_for_write = 17;
+}
+
+message ScanSliceResponse {
+	int32 error_code = 1;
+	repeated ScanCache_msg scan_cache = 2;
+	bytes last_key = 3;
+	SlicePosition slice_position = 4;
 }
 
 message FaultInjectRequest {
@@ -427,6 +470,8 @@ message CcMessage {
 		ScanNextRequest = 14;
 		ScanNextResponse = 15;
 		ReadOutsideRequest = 17;
+		ScanSliceRequest = 18;
+		ScanSliceResponse = 19;
 		FaultInjectRequest = 26;
 		FaultInjectResponse = 27;
 		AcquireAllRequest = 28;
@@ -463,6 +508,8 @@ message CcMessage {
 		ScanNextRequest scan_next_req = 22;
 		ScanNextResponse scan_next_resp = 23;
 		ReadOutsideRequest read_outside_req = 25;
+		ScanSliceRequest scan_slice_req = 26;
+		ScanSliceResponse scan_slice_resp = 27;
 		FaultInjectRequest fault_inject_req = 34;
 		FaultInjectResponse fault_inject_resp= 35;
 		AcquireAllRequest acquire_all_req = 36;

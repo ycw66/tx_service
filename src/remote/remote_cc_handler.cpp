@@ -63,7 +63,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
+    stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
 
 void txservice::remote::RemoteCcHandler::AcquireWriteAll(
@@ -338,7 +338,7 @@ void txservice::remote::RemoteCcHandler::Read(
 
     read->set_ts(ts);
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
+    stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
 
 /*
@@ -496,6 +496,91 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }
 
+void txservice::remote::RemoteCcHandler::ScanNext(
+    uint32_t src_node_id,
+    const TableName &tbl_name,
+    uint32_t range_id,
+    NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
+    const TxKey *start_key,
+    bool start_inclusive,
+    const TxKey *end_key,
+    bool end_inclusive,
+    uint64_t read_ts,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<RangeScanSliceResult> &hd_res,
+    IsolationLevel iso_level,
+    CcProtocol proto)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest);
+    send_msg.set_tx_number(tx_number);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+
+    ScanSliceRequest *scan_slice = send_msg.mutable_scan_slice_req();
+    scan_slice->set_src_node_id(src_node_id);
+    scan_slice->set_node_group_id(cc_ng_id);
+    scan_slice->set_cc_ng_term(cc_ng_term);
+    scan_slice->set_table_name_str(tbl_name.StringView().data());
+    scan_slice->set_table_type(ToRemoteType::ConvertTableType(tbl_name.Type()));
+    scan_slice->set_range_id(range_id);
+    scan_slice->clear_start_key();
+    if (start_key->Type() == KeyType::Normal)
+    {
+        start_key->Serialize(*scan_slice->mutable_start_key());
+    }
+    scan_slice->set_start_inclusive(start_inclusive);
+
+    scan_slice->clear_end_key();
+    if (end_key != nullptr && end_key->Type() == KeyType::Normal)
+    {
+        end_key->Serialize(*scan_slice->mutable_end_key());
+        scan_slice->set_end_inclusive(end_inclusive);
+    }
+
+    bool forward =
+        hd_res.Value().ccm_scanner_->Direction() == ScanDirection::Forward;
+    scan_slice->set_is_forward(forward);
+    scan_slice->set_ts(read_ts);
+
+    CcScanner &scanner = *hd_res.Value().ccm_scanner_;
+
+    scan_slice->clear_prior_cce_vec();
+    // When the cc ng term is greater than 0, this scan resumes the last scan in
+    // the range. Sets the cc entry addresses where last scan stops.
+    if (cc_ng_term > 0)
+    {
+        uint32_t remote_core_cnt = scanner.CacheCount();
+
+        for (uint32_t core_id = 0; core_id < remote_core_cnt; ++core_id)
+        {
+            ScanCache *cache = scanner.Cache(core_id);
+            const ScanTuple *last_tuple = cache->LastTuple();
+            if (last_tuple != nullptr)
+            {
+                scan_slice->add_prior_cce_vec(last_tuple->cce_addr_.CcePtr());
+            }
+            else
+            {
+                scan_slice->add_prior_cce_vec(0);
+            }
+            cache->Reset();
+        }
+    }
+
+    scan_slice->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
+    scan_slice->set_protocol(ToRemoteType::ConvertProtocol(proto));
+    scan_slice->set_is_for_write(scanner.is_for_write_);
+
+    stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
+}
+
 void txservice::remote::RemoteCcHandler::FaultInject(
     uint32_t src_node_id,
     const std::string &fault_name,
@@ -556,5 +641,6 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->set_only_archives(only_archives);
     clean_req->set_flush(flush);
 
-    stream_sender_.SendMessageToNg(key_shard_code >> 10, send_msg, &hres);
+    uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+    stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hres);
 }

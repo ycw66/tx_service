@@ -306,19 +306,30 @@ struct ScanOpenOperation : TransactionOperation
 struct ScanState
 {
     ScanState() = delete;
-    ScanState(std::unique_ptr<CcScanner> scanner) : scanner_(std::move(scanner))
+    ScanState(std::unique_ptr<CcScanner> scanner,
+              const TxKey *end_key,
+              bool end_inclusive)
+        : scanner_(std::move(scanner)),
+          scan_end_key_(end_key),
+          scan_end_inclusive_(end_inclusive)
     {
     }
 
     std::unique_ptr<CcScanner> scanner_;
+    const TxKey *scan_end_key_;
+    bool scan_end_inclusive_;
 
 #ifdef RANGE_PARTITION_ENABLED
     ScanState(std::unique_ptr<CcScanner> scanner,
+              const TxKey *end_key,
+              bool end_inclusive,
               uint32_t range_id,
               const TxKey *last_key,
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
+          scan_end_key_(end_key),
+          scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
           slice_last_key_ptr_(last_key),
           is_key_owner_(false),
@@ -328,11 +339,15 @@ struct ScanState
     }
 
     ScanState(std::unique_ptr<CcScanner> scanner,
+              const TxKey *end_key,
+              bool end_inclusive,
               uint32_t range_id,
               std::unique_ptr<TxKey> last_key,
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
+          scan_end_key_(end_key),
+          scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
           slice_last_key_uptr_(std::move(last_key)),
           is_key_owner_(true),
@@ -390,10 +405,28 @@ struct ScanNextOperation : TransactionOperation
                    : ScanDirection::Forward;
     }
 
+    void UpdateScanState(ScanState *scan_state)
+    {
+        scan_state_ = scan_state;
+#ifdef RANGE_PARTITION_ENABLED
+        slice_hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
+#endif
+    }
+
     ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
 
 #ifdef RANGE_PARTITION_ENABLED
+    int64_t RangeNgTerm() const
+    {
+        return slice_hd_result_.Value().ccm_scanner_->PartitionNgTerm();
+    }
+
+    SlicePosition LastScannedSlicePosition() const
+    {
+        return scan_state_->slice_position_;
+    }
+
     CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     RangeRecord range_rec_;
@@ -659,6 +692,7 @@ struct CkptScanOp : public TransactionOperation
                std::vector<FlushRecord> *archive_vec,
                std::vector<const TxKey *> *mv_vec,
                TransactionExecution *txm,
+               bool is_subop = false,
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr);
     void Forward(TransactionExecution *txm) override;
@@ -670,6 +704,10 @@ struct CkptScanOp : public TransactionOperation
     std::vector<FlushRecord> *ckpt_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
     std::vector<const TxKey *> *mv_vec_{nullptr};
+    // If this is a subop of another tx op. If not,
+    // CkptScanOp will set tx_result_ as finished after
+    // it is done.
+    bool is_subop_{false};
     // Start/end key of the target range of the ckpt scan.
     // nullptr if target is entire table.
     const TxKey *start_key_{nullptr};
@@ -790,122 +828,6 @@ private:
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
-};
-
-struct DsSplitRangeOp : public CompositeTransactionOperation
-{
-    DsSplitRangeOp() = delete;
-
-    DsSplitRangeOp(const TableName &table_name,
-                   const TableSchema *table_schema,
-                   const TxKey *range_key,
-                   std::unique_ptr<RangeRecord> splitting_range_record,
-                   TransactionExecution *txm,
-                   std::optional<std::pair<CcEntryAddr, ReadSetEntry>>
-                       catalog_cc_entry = std::nullopt);
-
-    void FillTxLog(TransactionExecution *txm,
-                   WriteToLogOp &log_op,
-                   TxLogType log_type,
-                   ::txlog::SplitRangeOpMessage::Stage stage);
-    void FillTxLogForCleanLog(TransactionExecution *txm);
-    void ForceToFinish(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-    void PrepareUploadRangeRecord();
-
-    TableName table_name_{empty_sv, TableType::Primary};
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
-
-    const TableSchema *table_schema_{nullptr};
-    int32_t partition_id_{-1};
-    const TxKey *range_key_{nullptr};
-    std::unique_ptr<RangeRecord> old_range_record_{nullptr};
-    std::unique_ptr<TxKey> new_range_key_{nullptr};
-    std::unique_ptr<RangeInfo> upload_range_entry_{nullptr};
-    std::unique_ptr<RangeRecord> upload_range_record_{nullptr};
-    int32_t new_partition_id_{-1};
-    // Store the catalog read lock information, only effect for recovering
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
-        std::nullopt};
-
-    /**
-     * @brief Acquire write intents on the range to split at all shards. This is
-     * to prevent concurrent modifications on the same range.
-     */
-    AcquireAllOp acquire_all_intent_for_update_old_range_op_;
-    /**
-     * @brief Find the median key value of the old range
-     */
-    DsOp<RangeMedianKeyResult> ds_find_median_key_for_old_range_op_;
-    /**
-     * @brief Upgrades the write intents to write locks. This is to wait for
-     * existing queries reading or writing the range to finish and to block new
-     * reads and writes on the range to start.
-     */
-    AcquireAllOp acquire_all_lock_for_update_old_range_op_;
-    /**
-     * @brief Write log to mark the split range is started, with the information
-     * of the old range and new range information, after this it is guaranted to
-     * succeed after this
-     */
-    WriteToLogOp prepare_log_for_update_old_range_op_;
-    /**
-     * @brief
-     * 1. Upload the new key, ne_partition_id to the
-     * old range entry, it is visible to all nodes
-     * 2. Downgrade lock to write intent
-     */
-    PostWriteAllOp post_all_lock_for_update_old_range_op_;
-    /**
-     * @brief
-     * 1.Start a new thread to do work of copy data from the old range to the
-     * new ranges 2.The working thread updates the running status to the
-     * ds_copy_old_range_data_op_
-     */
-    DsOp<Void> ds_copy_old_range_data_op_;
-    /**
-     * @brief Write log to mark the range split is finished
-     */
-    WriteToLogOp ds_copy_old_range_data_finished_log_op_;
-    /**
-     * @brief
-     * 1. Upgrade the write intent on old range entry to write lock on all nodes
-     * 2. Add write lock on new range entries to write locks on all nodes
-     */
-    AcquireAllOp acquire_all_lock_for_dirty_old_range_op_;
-    /**
-     * @brief Write commit log to mark the split range transaction is succeed
-     */
-    WriteToLogOp commit_log_for_dirty_old_range_op_;
-    /**
-     * @brief
-     * 1. Update the dirty old range, clean new key and new partition id
-     * 2. Upload the new range
-     * 3. Remove all write locks on all nodes
-     */
-    PostWriteAllOp post_write_all_for_dirty_old_range_op_;
-    /**
-     * @brief Flush all updated range entries into KV storage
-     */
-    DsOp<Void> ds_upsert_new_range_op_;
-    /**
-     * @brief Write log to mark removing out of data from old range
-     */
-    // WriteToLogOp delete_out_of_old_range_data_log_op_;
-    WriteToLogOp delete_out_of_old_range_data_log_op_;
-    /**
-     * @brief Delete out of range data from the Cassandra partition
-     */
-    DsOp<Void> delete_out_of_old_range_data_op_;
-    /**
-     * @brief Remove split range log from the log state machine
-     */
-    // WriteToLogOp clean_log_op_;
-    WriteToLogOp clean_log_op_;
-    /**
-     * @brief Post read if acquired catalog read lock in recovery scenario
-     */
-    PostReadOperation catalog_post_read_op_;
 };
 
 // To remove remainder records' lock when scan close

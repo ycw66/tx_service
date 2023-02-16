@@ -149,6 +149,11 @@ public:
 
     ~TemplateScanCache() = default;
 
+    bool IsFull() const
+    {
+        return mem_size_ >= 1024;
+    }
+
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
     {
         TemplateScanTuple<KeyT, ValueT> *scan_t = nullptr;
@@ -170,11 +175,6 @@ public:
     void AddScanTupleSize(uint32_t tuple_size)
     {
         mem_size_ += tuple_size;
-    }
-
-    bool IsFull() const
-    {
-        return mem_size_ >= 1024;
     }
 
     ScanTuple *AddScanTuple(const std::string &key_str,
@@ -271,6 +271,7 @@ public:
     virtual uint32_t BlockedShard() const = 0;
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
     virtual ScanCache *AddShard(uint32_t shard_code) = 0;
+    virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ShardCacheSizes(
         std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) = 0;
 
@@ -291,6 +292,20 @@ public:
 
     virtual void SetDrainCacheMode(bool drain_cache_mode) = 0;
     virtual bool GetDrainCacheMode() = 0;
+    virtual std::unique_ptr<TxKey> DecodeKey(const std::string &blob) const
+    {
+        return nullptr;
+    }
+
+    virtual int64_t PartitionNgTerm() const
+    {
+        return -1;
+    }
+    virtual void SetPartitionNgTerm(int64_t partition_ng_term)
+    {
+    }
+
+    virtual uint32_t CacheCount() const = 0;
 
     ScanDirection Direction() const
     {
@@ -359,6 +374,10 @@ public:
         auto em_it = scans_.try_emplace(shard_code, this, key_schema_);
         assert(em_it.second == true);
         return &em_it.first->second;
+    }
+
+    void ResetShards(size_t shard_cnt) override
+    {
     }
 
     uint32_t BlockedShard() const override
@@ -496,6 +515,11 @@ public:
         return CcmScannerType::HashPartition;
     }
 
+    uint32_t CacheCount() const override
+    {
+        return scans_.size();
+    }
+
 private:
     /// <summary>
     /// A collection of local and remote scan caches, one per core.
@@ -540,6 +564,33 @@ public:
         assert(shard_code < scans_.size());
 
         return &scans_[shard_code];
+    }
+
+    void ResetShards(size_t shard_cnt) override
+    {
+        size_t old_size = scans_.size();
+        if (shard_cnt > old_size)
+        {
+            scans_.reserve(shard_cnt);
+            for (size_t idx = old_size; idx < shard_cnt; ++idx)
+            {
+                scans_.emplace_back(this, key_schema_);
+            }
+        }
+        else if (shard_cnt < old_size)
+        {
+            for (size_t idx = shard_cnt; idx < old_size; ++idx)
+            {
+                scans_.pop_back();
+            }
+        }
+
+        assert(scans_.size() == shard_cnt);
+
+        for (size_t idx = 0; idx < old_size; ++idx)
+        {
+            scans_[idx].Reset();
+        }
     }
 
     uint32_t BlockedShard() const override
@@ -633,6 +684,30 @@ public:
         return CcmScannerType::RangePartition;
     }
 
+    int64_t PartitionNgTerm() const override
+    {
+        return partition_ng_term_;
+    }
+
+    void SetPartitionNgTerm(int64_t partition_ng_term) override
+    {
+        partition_ng_term_ = partition_ng_term;
+    }
+
+    std::unique_ptr<TxKey> DecodeKey(const std::string &blob) const override
+    {
+        std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
+        size_t offset = 0;
+        key->Deserialize(blob.data(), offset, key_schema_);
+
+        return key;
+    }
+
+    uint32_t CacheCount() const override
+    {
+        return scans_.size();
+    }
+
 private:
     struct ForwardCompare
     {
@@ -668,5 +743,12 @@ private:
     std::vector<TemplateScanCache<KeyT, ValueT>> scans_;
 
     const Schema *key_schema_;
+    /**
+     * @brief The term of the cc node group where the range partition resides.
+     * When the first slice from the range is scanned, the term is set. The
+     * following scans of the same range partition expects to see the same term.
+     *
+     */
+    int64_t partition_ng_term_{-1};
 };
 }  // namespace txservice

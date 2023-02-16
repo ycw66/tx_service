@@ -490,12 +490,12 @@ public:
                 TableName range_table_name(table_name_view,
                                            TableType::RangePartition);
                 shard_->InitTableRanges(
-                    range_table_name, range_init_vec, req.NodeGroupId());
+                    range_table_name, range_init_vec, req.NodeGroupId(), true);
 
                 std::vector<TableName> index_names = new_schema->IndexNames();
                 for (const TableName &index_name : index_names)
                 {
-                    // Drop range table if exist
+                    // Create range table for each sk index
                     TableName index_range_table_name{index_name.StringView(),
                                                      TableType::RangePartition};
 
@@ -507,7 +507,8 @@ public:
                         nullptr, init_partition_id, req.CommitTs());
                     shard_->InitTableRanges(index_range_table_name,
                                             range_init_vec,
-                                            req.NodeGroupId());
+                                            req.NodeGroupId(),
+                                            true);
                 }
             }
             else if (old_schema != nullptr && new_schema != nullptr)
@@ -752,35 +753,39 @@ public:
                     return false;
                 }
                 catalog_entry = new_catalog_entry;
-
-                const TableSchema *committed_schema =
-                    catalog_entry->schema_.get();
-                if (committed_schema != nullptr)
-                {
-                    shard_->CreateOrUpdatePkCcMap(table_name,
-                                                  committed_schema,
-                                                  req.NodeGroupId(),
-                                                  catalog_entry->Version());
-
-                    std::vector<TableName> index_names =
-                        committed_schema->IndexNames();
-                    for (const TableName &index_name : index_names)
-                    {
-                        shard_->CreateOrUpdateSkCcMap(index_name,
-                                                      committed_schema,
-                                                      req.NodeGroupId(),
-                                                      catalog_entry->Version());
-                    }
-                }
             }
         }
         else
         {
-            // other shards
+            // other cores
             catalog_entry = shard_->GetCatalog(table_name, req.NodeGroupId());
             assert(catalog_entry != nullptr);
         }
 
+        if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                         SchemaOpMessage_Stage_CommitSchema &&
+            !is_coordinator)
+        {
+            // Create ccmap for participants
+            const TableSchema *committed_schema = catalog_entry->schema_.get();
+            if (committed_schema != nullptr)
+            {
+                shard_->CreateOrUpdatePkCcMap(table_name,
+                                              committed_schema,
+                                              req.NodeGroupId(),
+                                              catalog_entry->Version());
+
+                std::vector<TableName> index_names =
+                    committed_schema->IndexNames();
+                for (const TableName &index_name : index_names)
+                {
+                    shard_->CreateOrUpdateSkCcMap(index_name,
+                                                  committed_schema,
+                                                  req.NodeGroupId(),
+                                                  catalog_entry->Version());
+                }
+            }
+        }
         CatalogKey table_key(table_name);
         Iterator it = FindEmplace(table_key);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;

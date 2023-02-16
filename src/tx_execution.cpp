@@ -90,7 +90,6 @@ void TransactionExecution::Reset(CcProtocol proto)
     next_req_.store(nullptr);
     protocol_ = proto;
     schema_op_ = nullptr;
-    ds_split_range_op_ = nullptr;
     split_flush_op_ = nullptr;
 }
 
@@ -681,36 +680,6 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
     Process(fault_inject_op_);
 }
 
-void TransactionExecution::ProcessTxRequest(SplitRangeTxRequest &req)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &req,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    bool_resp_ = &req.tx_result_;
-    bool_resp_->Reset();
-
-    ds_split_range_op_ =
-        std::make_unique<DsSplitRangeOp>(req.table_name_,
-                                         req.table_schema_,
-                                         req.range_key_,
-                                         std::move(req.range_record_),
-                                         this);
-    // Fire and forget the SplitRangeTxRequest
-    bool_resp_->Finish(true);
-    bool_resp_ = nullptr;
-
-    PushOperation(ds_split_range_op_.get());
-    Forward();
-}
-
 void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1062,18 +1031,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        bool lock_deleted_key =
-            read.read_tx_req_->read_local_ ||
-                    read_res.lock_type_ == LockType::WriteIntent
-                ? true
-                : false;
-#else
-        bool lock_deleted_key = true;
-#endif
-
-        if (read_.read_type_ == ReadType::Inside &&
-            (lock_deleted_key || read_res.rec_status_ != RecordStatus::Deleted))
+        if (read_.read_type_ == ReadType::Inside)
         {
             const TableName *table_name = read_req->tab_name_;
             LockType lock_type = read_res.lock_type_;
@@ -1154,7 +1112,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
     const TxKey &start_key = *scan_open.tx_req_->StartKey();
-    bool inclusive = scan_open.tx_req_->inclusive_;
+    bool inclusive = scan_open.tx_req_->start_inclusive_;
     ScanDirection direction = scan_open.tx_req_->direct_;
     bool is_ckpt_delta = scan_open.tx_req_->is_ckpt_delta_;
     bool is_for_write = scan_open.tx_req_->is_for_write_;
@@ -1295,9 +1253,11 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     {
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           scan_open.tx_req_->EndKey(),
+                           scan_open.tx_req_->end_inclusive_,
                            UINT32_MAX,
                            scan_open.tx_req_->StartKey()->Clone(),
-                           !scan_open.tx_req_->inclusive_,
+                           !scan_open.tx_req_->start_inclusive_,
                            scan_open.direction_ == ScanDirection::Forward
                                ? SlicePosition::LastSliceInRange
                                : SlicePosition::FirstSliceInRange);
@@ -1306,16 +1266,21 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     {
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           scan_open.tx_req_->EndKey(),
+                           scan_open.tx_req_->end_inclusive_,
                            UINT32_MAX,
                            scan_open.tx_req_->StartKey(),
-                           !scan_open.tx_req_->inclusive_,
+                           !scan_open.tx_req_->start_inclusive_,
                            scan_open.direction_ == ScanDirection::Forward
                                ? SlicePosition::LastSliceInRange
                                : SlicePosition::FirstSliceInRange);
     }
 
 #else
-    scans_.emplace(open_result.scan_alias_, std::move(open_result.scanner_));
+    scans_.try_emplace(open_result.scan_alias_,
+                       std::move(open_result.scanner_),
+                       scan_open.tx_req_->EndKey(),
+                       scan_open.tx_req_->end_inclusive_);
 #endif
 
     uint64_resp_->Finish(open_result.scan_alias_);
@@ -1339,7 +1304,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     {
         auto scan_it = scans_.find(alias);
         assert(scan_it != scans_.end());
-        scan_next.scan_state_ = &scan_it->second;
+        scan_next.UpdateScanState(&scan_it->second);
     }
     scan_next.alias_ = alias;
 
@@ -1398,12 +1363,15 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
             handler->ScanNextBatch(scan_next.tx_req_->table_name_,
                                    scan_state.range_id_,
+                                   scan_next.RangeNgTerm(),
                                    scan_state.SliceLastKey(),
                                    !scan_state.inclusive_,
+                                   scan_state.scan_end_key_,
+                                   scan_state.scan_end_inclusive_,
                                    start_ts_,
                                    tx_number_.load(std::memory_order_relaxed),
                                    tx_term_,
-                                   scanner,
+                                   CommandId(),
                                    scan_next.slice_hd_result_,
                                    iso_level_,
                                    protocol_);
@@ -1423,21 +1391,30 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             if (scan_next.lock_range_result_.IsFinished())
             {
                 // If there is an error when getting the key's range ID, the
-                // error would be caught when forwarding the read operation,
+                // error would be caught when forwarding the scan operation,
                 // which forces the tx state machine moves to
-                // post-processing of the read operation and returns an
-                // error to the tx read request.
+                // post-processing of the scan operation and returns an
+                // error to the tx scan request.
                 assert(!scan_next.lock_range_result_.IsError());
 
+                // The term of the cc node group hosting the to-be-scanned range
+                // is unknown. Sets the term to -1, indicating it is not matched
+                // against that of the cc node when the first slice of the
+                // range. The first scan of the range will return the cc node's
+                // term and subsequence scans of the remaining slices in the
+                // range will match the term.
                 handler->ScanNextBatch(
                     scan_next.tx_req_->table_name_,
                     scan_state.range_id_,
+                    -1,
                     scan_state.SliceLastKey(),
                     !scan_state.inclusive_,
+                    scan_state.scan_end_key_,
+                    scan_state.scan_end_inclusive_,
                     start_ts_,
                     tx_number_.load(std::memory_order_relaxed),
                     tx_term_,
-                    scanner,
+                    CommandId(),
                     scan_next.slice_hd_result_,
                     iso_level_,
                     protocol_);
@@ -1503,19 +1480,25 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
 
     if (scanner.Type() == CcmScannerType::HashPartition &&
-            scan_next.hd_result_.IsError()
-#ifdef RANGE_PARTITION_ENABLED
-        || scanner.Type() == CcmScannerType::RangePartition &&
-               scan_next.slice_hd_result_.IsError()
-#endif
-    )
+        scan_next.hd_result_.IsError())
     {
-        DLOG(ERROR) << "ScanNextOperation failed for cc error:"
+        DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.hd_result_.ErrorMsg();
-        void_resp_->FinishError();
-
+        void_resp_->FinishError(
+            ConvertCcError(scan_next.hd_result_.ErrorCode()));
         return;
     }
+#ifdef RANGE_PARTITION_ENABLED
+    else if (scanner.Type() == CcmScannerType::RangePartition &&
+             scan_next.slice_hd_result_.IsError())
+    {
+        DLOG(ERROR) << "ScanNextOperation failed for cc error: "
+                    << scan_next.slice_hd_result_.ErrorMsg();
+        void_resp_->FinishError(
+            ConvertCcError(scan_next.slice_hd_result_.ErrorCode()));
+        return;
+    }
+#endif
 
     enum struct AdvanceType
     {
@@ -1546,8 +1529,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
             if (it == wset_iters_.end() ||
                 it->second.first == it->second.second ||
-                cc_scan_tuple->key_ts_ == 0 ||
-                cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+                cc_scan_tuple->key_ts_ == 0)
             {
                 advance_type = AdvanceType::Ccm;
             }
@@ -1573,21 +1555,32 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 auto &wset_it = it->second.first;
                 const WriteSetEntry &local_write = wset_it->second;
-                scan_batch.emplace_back(local_write.key_.get(),
-                                        local_write.rec_.get(),
-                                        RecordStatus::Normal,
-                                        0);
+                if (local_write.op_ == OperationType::Delete)
+                {
+                    scan_batch.emplace_back(local_write.key_.get(),
+                                            nullptr,
+                                            RecordStatus::Deleted,
+                                            1);
+                }
+                else
+                {
+                    scan_batch.emplace_back(local_write.key_.get(),
+                                            local_write.rec_.get(),
+                                            RecordStatus::Normal,
+                                            1);
+                }
+
                 ++wset_it;
             }
             else
             {
-                // Deduces the lock type. If a lock is put on the scanned entry,
-                // adds the entry into the read set, so that the tx releases the
-                // lock in the commit phase.
+                // Deduces the lock type. If a lock is put on the scanned
+                // entry, adds the entry into the read set, so that the tx
+                // releases the lock in the commit phase.
                 LockType scan_tuple_lock_type =
                     scanner.DeduceScanTupleLockType(cc_scan_tuple);
-                // "key_ts_ == 0", means the lock is added on gap. Now, gap lock
-                // is not used when do scan operation.
+                // "key_ts_ == 0", means the lock is added on gap. Now, gap
+                // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
                     cc_scan_tuple->key_ts_ != 0)
                 {
@@ -1607,8 +1600,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                         cc_scan_tuple->cce_addr_.CcePtr()));
                             }));
 
-                    // When the record status is unknown, the read ts is set to
-                    // 0 to release the lock without validation.
+                    // When the record status is unknown, the read ts is set
+                    // to 0 to release the lock without validation.
                     uint64_t read_ts =
                         cc_scan_tuple->rec_status_ != RecordStatus::Unknown
                             ? cc_scan_tuple->key_ts_
@@ -1630,6 +1623,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     if (cc_scan_tuple->key_ts_ > 0)
                     {
+#ifndef RANGE_PARTITION_ENABLED
                         if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                         {
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
@@ -1651,6 +1645,21 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     cc_scan_tuple->cce_addr_,
                                                     scan_tuple_lock_type);
                         }
+#else
+                        // When the record status is not Normal, the record
+                        // is set to null in the scan result.
+                        const TxRecord *rec =
+                            cc_scan_tuple->rec_status_ == RecordStatus::Normal
+                                ? cc_scan_tuple->Record()
+                                : nullptr;
+
+                        scan_batch.emplace_back(cc_scan_tuple->Key(),
+                                                rec,
+                                                cc_scan_tuple->rec_status_,
+                                                cc_scan_tuple->key_ts_,
+                                                cc_scan_tuple->cce_addr_,
+                                                scan_tuple_lock_type);
+#endif
                     }
 
                     scanner.MoveNext();
@@ -1709,7 +1718,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Normal,
                                             1);
                 }
-#ifndef RANGE_PARTITION_ENABLED
                 else
                 {
                     scan_batch.emplace_back(local_write.key_.get(),
@@ -1717,7 +1725,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Deleted,
                                             1);
                 }
-#endif
 
                 ++wset_it;
             }
@@ -1740,8 +1747,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
             if (rit == wset_reverse_iters_.end() ||
                 rit->second.first == rit->second.second ||
-                cc_scan_tuple->key_ts_ == 0 ||
-                cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+                cc_scan_tuple->key_ts_ == 0)
             {
                 advance_type = AdvanceType::Ccm;
             }
@@ -1767,21 +1773,32 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             {
                 auto &wset_it = rit->second.first;
                 const WriteSetEntry &local_write = wset_it->second;
-                scan_batch.emplace_back(local_write.key_.get(),
-                                        local_write.rec_.get(),
-                                        RecordStatus::Normal,
-                                        0);
+                if (local_write.op_ != OperationType::Delete)
+                {
+                    scan_batch.emplace_back(local_write.key_.get(),
+                                            local_write.rec_.get(),
+                                            RecordStatus::Normal,
+                                            1);
+                }
+                else
+                {
+                    scan_batch.emplace_back(local_write.key_.get(),
+                                            nullptr,
+                                            RecordStatus::Deleted,
+                                            1);
+                }
+
                 ++wset_it;
             }
             else
             {
-                // Deduces the lock type. If a lock is put on the scanned entry,
-                // adds the entry into the read set, so that the tx releases the
-                // lock in the commit phase.
+                // Deduces the lock type. If a lock is put on the scanned
+                // entry, adds the entry into the read set, so that the tx
+                // releases the lock in the commit phase.
                 LockType scan_tuple_lock_type =
                     scanner.DeduceScanTupleLockType(cc_scan_tuple);
-                // "key_ts_ == 0", means the lock is added on gap. Now, gap lock
-                // is not used when do scan operation.
+                // "key_ts_ == 0", means the lock is added on gap. Now, gap
+                // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
                     cc_scan_tuple->key_ts_ != 0)
                 {
@@ -1822,6 +1839,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     if (cc_scan_tuple->key_ts_ > 0)
                     {
+#ifndef RANGE_PARTITION_ENABLED
                         if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                         {
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
@@ -1843,6 +1861,21 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     cc_scan_tuple->cce_addr_,
                                                     scan_tuple_lock_type);
                         }
+#else
+                        // When the record status is not Normal, the record
+                        // is set to null in the scan result.
+                        const TxRecord *rec =
+                            cc_scan_tuple->rec_status_ == RecordStatus::Normal
+                                ? cc_scan_tuple->Record()
+                                : nullptr;
+
+                        scan_batch.emplace_back(cc_scan_tuple->Key(),
+                                                rec,
+                                                cc_scan_tuple->rec_status_,
+                                                cc_scan_tuple->key_ts_,
+                                                cc_scan_tuple->cce_addr_,
+                                                scan_tuple_lock_type);
+#endif
                     }
 
                     scanner.MoveNext();
@@ -1901,7 +1934,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Normal,
                                             1);
                 }
-#ifndef RANGE_PARTITION_ENABLED
                 else
                 {
                     scan_batch.emplace_back(local_write.key_.get(),
@@ -1909,12 +1941,33 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                             RecordStatus::Deleted,
                                             1);
                 }
-#endif
 
                 ++wset_it;
             }
         }
     }
+
+#ifdef RANGE_PARTITION_ENABLED
+    if (scan_batch.empty())
+    {
+        ScanDirection dir = scan_next.Direction();
+        SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
+
+        // Scan next batch in range partition scans a slice at a time.
+        // Keep scanning until we reach the last slice in last range or
+        // we get something from the last slice scanned.
+        if (dir == ScanDirection::Forward &&
+                slice_pos != SlicePosition::LastSlice ||
+            dir == ScanDirection::Backward &&
+                slice_pos != SlicePosition::FirstSlice)
+        {
+            scan_next.Reset();
+            PushOperation(&scan_next);
+            Process(scan_next);
+            return;
+        }
+    }
+#endif
 
     void_resp_->Finish(void_);
 }
@@ -2413,37 +2466,25 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     {
         for (const auto &[key_ptr, wset_entry] : table_write_set)
         {
-            uint32_t cc_node_id;
+            const CcEntryAddr &addr = wset_entry.cce_addr_;
+            uint32_t cc_node_id = addr.NodeGroupId();
 
-            if (table_name.Type() == TableType::Secondary)
+            // Only fills WriteLogRequest::node_terms for base table.
+            auto shard_term_it = shard_terms->find(cc_node_id);
+            if (shard_term_it == shard_terms->end())
             {
-                uint32_t shard_code =
-                    Sharder::Instance().ShardCode(key_ptr->Hash());
-                cc_node_id = Sharder::Instance().LeaderNodeId(shard_code >> 10);
+                (*shard_terms)[cc_node_id] = addr.Term();
             }
-            else
+            else if (shard_term_it->second != addr.Term())
             {
-                const CcEntryAddr &addr = wset_entry.cce_addr_;
-                cc_node_id = addr.NodeGroupId();
-
-                // Only fills WriteLogRequest::node_terms for base table.
-                auto shard_term_it = shard_terms->find(cc_node_id);
-                if (shard_term_it == shard_terms->end())
-                {
-                    (*shard_terms)[cc_node_id] = addr.Term();
-                }
-                else if (shard_term_it->second != addr.Term())
-                {
-                    // Two keys in the tx's write set refer to the same cc
-                    // node group, but have different terms. It means that
-                    // the cc node must have failed over at least once and
-                    // the tx have obtained a write intention before the
-                    // failure. The tx must abort because the write
-                    // intention obtained  the failure have been
-                    // invalidated.
-                    write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
-                    return;
-                }
+                // Two keys in the tx's write set refer to the same cc node
+                // group, but have different terms. It means that the cc node
+                // must have failed over at least once and the tx have obtained
+                // a write intention before the failure. The tx must abort
+                // because the write intention obtained  the failure have been
+                // invalidated.
+                write_log.hd_result_.SetError(CcErrorCode::NG_TERM_CHANGED);
+                return;
             }
 
             auto table_rec_it = ng_table_rec_set.try_emplace(cc_node_id);
@@ -3161,7 +3202,6 @@ void TransactionExecution::Process(DsOp<ResultType> &ds_op)
     }
 }
 
-template void TransactionExecution::Process(DsOp<RangeMedianKeyResult> &ds_op);
 template void TransactionExecution::Process(DsOp<Void> &ds_op);
 
 template <typename ResultType>
@@ -3181,15 +3221,13 @@ void TransactionExecution::PostProcess(DsOp<ResultType> &ds_op)
     Forward();
 }
 
-template void TransactionExecution::PostProcess(
-    DsOp<RangeMedianKeyResult> &ds_op);
 template void TransactionExecution::PostProcess(DsOp<Void> &ds_op);
 
 void TransactionExecution::Process(CkptScanOp &scan_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &ckpt_op,
+        &scan_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -3209,13 +3247,14 @@ void TransactionExecution::Process(CkptScanOp &scan_op)
                       scan_op.hd_result_,
                       scan_op.start_key_,
                       scan_op.end_key_);
+    StartTiming();
 }
 
 void TransactionExecution::PostProcess(CkptScanOp &scan_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &ckpt_op,
+        &scan_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -3225,7 +3264,10 @@ void TransactionExecution::PostProcess(CkptScanOp &scan_op)
         });
 
     state_stack_.pop_back();
-    bool_resp_->Finish(!scan_op.hd_result_.IsError());
+    if (!scan_op.is_subop_)
+    {
+        bool_resp_->Finish(!scan_op.hd_result_.IsError());
+    }
     Forward();
 }
 

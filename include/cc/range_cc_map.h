@@ -160,13 +160,19 @@ public:
 
         LockType acquired_lock;
         CcErrorCode err_code;
-        if (req.CcePtr() != nullptr)
+        // Rather than looking for an exact match, looks up the floor key
+        // that represents the range containing the input key.
+        const KeyT *look_key = static_cast<const KeyT *>(req.Key());
+
+        auto it = Floor(*look_key);
+        floor_cce = it->second;
+        if (req.CcePtr() != nullptr && req.CcePtr() == floor_cce)
         {
             // The request was blocked before. This is execution resumption
             // after the request is unblocked. The read lock/intention must have
             // been acquired.
-            floor_cce = static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
-
+            // If the searching key is still in the same range, we don't
+            // need to reacquire the key.
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
@@ -183,14 +189,15 @@ public:
         }
         else
         {
-            // Rather than looking for an exact match, looks up the floor key
-            // that represents the range containing the input key.
-            const KeyT *look_key = static_cast<const KeyT *>(req.Key());
-
-            auto it = Floor(*look_key);
-            floor_cce = it->second;
-            req.SetCcePtr(floor_cce);
-
+            if (req.CcePtr() != nullptr)
+            {
+                // This is a resumed cc request but the searching key now falls
+                // into a new range, release the lock on old range.
+                CcEntry<KeyT, RangeRecord> *prev_cce =
+                    static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
+                prev_cce->key_lock_ptr_->ReleaseLock(
+                    req.Txn(), shard_, LockType::ReadLock);
+            }
             // try to acquire lock
             int64_t tx_term = req.TxTerm();
             uint32_t ng_id = req.NodeGroupId();
@@ -326,8 +333,9 @@ public:
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
             std::vector<const RangeInfo *> new_range_infos;
-            TableRangeEntry *old_entry = shard_->GetTableRangeEntry(
-                this->table_name_, req.NodeGroupId(), target_key);
+            TableRangeEntry *old_entry =
+                const_cast<TableRangeEntry *>(shard_->GetTableRangeEntry(
+                    this->table_name_, req.NodeGroupId(), target_key));
             RangeInfo *old_info = old_entry->range_info_.get();
 
             if (shard_->core_id_ == 0)

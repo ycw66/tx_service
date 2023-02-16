@@ -151,6 +151,26 @@ public:
     {
         return static_cast<int>(error_code);
     }
+
+    static remote::SlicePosition ConvertSlicePosition(
+        txservice::SlicePosition slice_pos)
+    {
+        switch (slice_pos)
+        {
+        case txservice::SlicePosition::Middle:
+            return remote::SlicePosition::Middle;
+        case txservice::SlicePosition::FirstSliceInRange:
+            return remote::SlicePosition::FirstSliceInRange;
+        case txservice::SlicePosition::LastSliceInRange:
+            return remote::SlicePosition::LastSliceInRange;
+        case txservice::SlicePosition::FirstSlice:
+            return remote::SlicePosition::FirstSlice;
+        case txservice::SlicePosition::LastSlice:
+            return remote::SlicePosition::LastSlice;
+        default:
+            return remote::SlicePosition::Middle;
+        }
+    }
 };
 
 class ToLocalType
@@ -260,6 +280,8 @@ public:
             return RecordStatus::Deleted;
         case RecordStatusType::UNDEFINED:
             return RecordStatus::Unknown;
+        case RecordStatusType::VERSIONUNDEFIND:
+            return RecordStatus::VersionUnknown;
         default:
             return RecordStatus::Unknown;
         }
@@ -286,6 +308,26 @@ public:
         assert(error_code >= 0 &&
                error_code < static_cast<int>(CcErrorCode::LAST_ERROR_CODE));
         return txservice::CcErrorCode(error_code);
+    }
+
+    static txservice::SlicePosition ConvertSlicePosition(
+        remote::SlicePosition slice_pos)
+    {
+        switch (slice_pos)
+        {
+        case SlicePosition::Middle:
+            return txservice::SlicePosition::Middle;
+        case SlicePosition::FirstSliceInRange:
+            return txservice::SlicePosition::FirstSliceInRange;
+        case SlicePosition::LastSliceInRange:
+            return txservice::SlicePosition::LastSliceInRange;
+        case SlicePosition::FirstSlice:
+            return txservice::SlicePosition::FirstSlice;
+        case SlicePosition::LastSlice:
+            return txservice::SlicePosition::LastSlice;
+        default:
+            return txservice::SlicePosition::Middle;
+        }
     }
 };
 

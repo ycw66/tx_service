@@ -131,13 +131,11 @@ struct FlushRecord
         if (rhs.is_rec_owner_)
         {
             SetPayload(std::move(rhs.payload_.uptr_));
-            is_rec_owner_ = true;
             rhs.is_rec_owner_ = false;
         }
         else
         {
             SetPayload(rhs.payload_.ptr_);
-            is_rec_owner_ = false;
         }
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
@@ -228,8 +226,8 @@ struct FlushRecord
             // not own it.
             payload_.uptr_.release();
             payload_.uptr_ = std::move(uptr);
-            is_rec_owner_ = true;
         }
+        is_rec_owner_ = true;
     }
 
     const TxRecord *Payload() const
@@ -532,8 +530,7 @@ public:
      */
     size_t ArchiveBeforeUpdate(TableType tbl_type)
     {
-        if (payload_status_ == RecordStatus::Unknown ||
-            (commit_ts_ == 1U && payload_status_ == RecordStatus::Deleted))
+        if (payload_status_ == RecordStatus::Unknown || commit_ts_ == 1U)
         {
             return 0;
         }
@@ -829,7 +826,7 @@ public:
         const TxKey *key_ptr = nullptr;
         if (commit_ts_ <= to_ts)
         {
-            auto &ref = ckpt_vec.emplace_back();
+            FlushRecord &ref = ckpt_vec.emplace_back();
             std::unique_ptr<TxKey> key_uptr = std::make_unique<KeyT>(key);
             key_ptr = key_uptr.get();
             ref.SetKey(std::move(key_uptr));
@@ -1002,21 +999,21 @@ struct LruPage
     CcMap *parent_map_{nullptr};
     // if page pinned, do not change this page and its position in checkpoint
     // list when cleaning and merging pages
-    bool pinned_{false};
+    int pinned_{0};
 
     bool IsPinned() const
     {
-        return pinned_;
+        return pinned_ > 0;
     }
 
     void PinPage()
     {
-        pinned_ = true;
+        pinned_++;
     }
 
     void UnpinPage()
     {
-        pinned_ = false;
+        pinned_--;
     }
 };
 
@@ -1307,7 +1304,7 @@ struct CcPage : public LruPage
 
     size_t Remove(size_t idx)
     {
-        assert(idx >= 0 && idx < keys_.size());
+        assert(idx < keys_.size());
 
         auto key_it = keys_.begin() + idx;
         auto entry_ptr_it = entries_.begin() + idx;

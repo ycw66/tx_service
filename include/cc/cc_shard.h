@@ -360,9 +360,23 @@ public:
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
+    /**
+     * @brief Initialize table_ranges_ in local_cc_shard based on the
+     * InitRangeEntry. StoreRange and StoreSlice will also be initialized if the
+     * range belongs to this ng.
+     *
+     * @param table_name
+     * @param init_ranges
+     * @param ng_id
+     * @param fully_cached If range is already fully cached. This will affect
+     * the StoreSlice status of the created range. Currently set to true on
+     * table create so that we don't need to visit data store once when reading
+     * a just created table.
+     */
     void InitTableRanges(const TableName &table_name,
                          std::vector<InitRangeEntry> &init_ranges,
-                         const NodeGroupId ng_id);
+                         const NodeGroupId ng_id,
+                         bool fully_cached = false);
 
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
         *GetTableRangesForATable(const TableName &range_table_name,
@@ -385,9 +399,9 @@ public:
         const std::vector<int32_t> &new_partition_id,
         uint64_t commit_ts);
 
-    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
-                                        const NodeGroupId ng_id,
-                                        const TxKey *key);
+    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                              const NodeGroupId ng_id,
+                                              const TxKey *key);
 
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
@@ -495,7 +509,7 @@ public:
     // Scan {active_si_txs_} to update {min_si_tx_start_ts_}
     void UpdateLocalMinSiTxStartTs();
     uint64_t LocalMinSiTxStartTs();
-    uint64_t GlobalMinSiTxStartTs();
+    uint64_t GlobalMinSiTxStartTs() const;
 
     // shard level memory limit.
     uint64_t memory_limit_{0};

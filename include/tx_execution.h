@@ -38,7 +38,6 @@ struct UpsertTableTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
-struct SplitRangeTxRequest;
 struct ScanBatchTuple;
 struct SplitFlushTxRequest;
 struct CkptScanTxRequest;
@@ -114,7 +113,6 @@ public:
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
-    void ProcessTxRequest(SplitRangeTxRequest &range_split_req);
     void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
     void ProcessTxRequest(CkptScanTxRequest &ckpt_scan_req);
 
@@ -263,9 +261,6 @@ private:
     void Process(DsUpsertTableOp &ds_upsert_table_op);
     void PostProcess(DsUpsertTableOp &ds_upsert_table_op);
 
-    void Process(DsSplitRangeOp &ds_split_range_op);
-    void PostProcess(DsSplitRangeOp &ds_split_range_op);
-
     void Process(PostReadOperation &post_read_operation);
     void PostProcess(PostReadOperation &post_read_operation);
 
@@ -377,8 +372,6 @@ private:
 
     std::unique_ptr<UpsertTableOp> schema_op_;
 
-    std::unique_ptr<DsSplitRangeOp> ds_split_range_op_;
-
     std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
 
     std::unique_ptr<CkptScanOp> ckpt_scan_op_;
@@ -486,7 +479,6 @@ private:
     friend struct CkptScanOp;
     friend struct FlushDataOp;
     friend struct DsSplitOp;
-    friend struct DsSplitRangeOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct DsOp;

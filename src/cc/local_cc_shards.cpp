@@ -194,7 +194,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
                                            Statistics::EMPTY_STATISTICS_BINARY,
                                            old_schema_ts,
                                            cc_ng_id),
-                                 1);
+                                 old_schema_ts);
     }
     if (catalog_entry.Version() < dirty_schema_ts &&
         catalog_entry.DirtyVersion() < dirty_schema_ts)
@@ -357,7 +357,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
 }
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                     std::vector<InitRangeEntry> &init_ranges,
-                                    NodeGroupId ng_id)
+                                    NodeGroupId ng_id,
+                                    bool fully_cached)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -401,7 +402,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                              next_range_entry.key_.get(),
                                              range_entry.partition_id_,
                                              *this);
-            range_slices->InitSlices(range_entry.slice_keys_);
+            range_slices->InitSlices(range_entry.slice_keys_, fully_cached);
         }
         auto res = ranges.try_emplace(range_start_key,
                                       std::move(range_entry.key_),
@@ -427,7 +428,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     {
         range_slices = std::make_unique<StoreRange>(
             range_start_key, nullptr, last_range_entry.partition_id_, *this);
-        range_slices->InitSlices(last_range_entry.slice_keys_);
+        range_slices->InitSlices(last_range_entry.slice_keys_, fully_cached);
     }
 
     auto res = ranges.try_emplace(range_start_key,
@@ -508,17 +509,15 @@ const TableRangeEntry *LocalCcShards::UploadNewRangeInfo(
     return entry;
 }
 
-TableRangeEntry *LocalCcShards::GetTableRangeEntry(const TableName &table_name,
-                                                   const NodeGroupId ng_id,
-                                                   const TxKey *key)
+const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
+    const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     return GetTableRangeEntryInternal(table_name, ng_id, key);
 }
 
-TableRangeEntry *LocalCcShards::GetTableRangeEntry(const TableName &table_name,
-                                                   const NodeGroupId ng_id,
-                                                   int32_t range_id)
+const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
+    const TableName &table_name, const NodeGroupId ng_id, int32_t range_id)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     return GetTableRangeEntryInternal(table_name, ng_id, range_id);
@@ -631,13 +630,19 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         return RangeSliceId(nullptr, nullptr);
     }
 
+    uint64_t snapshot_ts = 0;
+    if (EnableMvcc())
+    {
+        snapshot_ts = TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
+    }
+
     return entry->RangeSlices()->PinSlice(table_name,
                                           key,
                                           inclusive,
                                           key_schema,
                                           rec_schema,
                                           schema_ts,
-                                          INT64_MAX,
+                                          snapshot_ts,
                                           kv_info,
                                           cc_request,
                                           cc_shard,

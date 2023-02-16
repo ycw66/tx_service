@@ -139,7 +139,6 @@ template class CcHandlerResult<ScanOpenResult>;
 template class CcHandlerResult<RangeScanSliceResult>;
 template class CcHandlerResult<AcquireAllResult>;
 template class CcHandlerResult<std::vector<AcquireKeyResult>>;
-template class CcHandlerResult<RangeMedianKeyResult>;
 template class CcHandlerResult<Void>;
 template class CcHandlerResult<TxId>;
 template class CcHandlerResult<PostProcessResult>;

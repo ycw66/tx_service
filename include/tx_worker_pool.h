@@ -23,6 +23,10 @@ public:
     void SubmitWork(std::function<void()> work);
     size_t WorkQueueSize();
     void Shutdown();
+    size_t WorkerPoolSize()
+    {
+        return max_workers_num_;
+    }
 
 private:
     size_t max_workers_num_;

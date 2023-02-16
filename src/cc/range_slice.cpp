@@ -102,7 +102,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   const Schema *key_schema,
                                   const Schema *rec_schema,
                                   uint64_t schema_ts,
-                                  uint64_t last_ckpt_ts,
+                                  uint64_t snapshot_ts,
                                   const KVCatalogInfo *kv_info,
                                   CcRequestBase *cc_request,
                                   CcShard *cc_shard,
@@ -131,12 +131,13 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
     }
     else
     {
+        slice_lk.unlock();
         bool load_success = LoadSlice(tbl_name,
                                       *slice,
                                       key_schema,
                                       rec_schema,
                                       schema_ts,
-                                      last_ckpt_ts,
+                                      snapshot_ts,
                                       kv_info,
                                       cc_request,
                                       cc_shard,
@@ -153,7 +154,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                         const Schema *key_schema,
                                         const Schema *rec_schema,
                                         uint64_t schema_ts,
-                                        uint64_t last_ckpt_ts,
+                                        uint64_t snapshot_ts,
                                         const KVCatalogInfo *kv_info,
                                         CcRequestBase *cc_request,
                                         CcShard *cc_shard,
@@ -176,12 +177,13 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
     }
     else
     {
+        slice_lk.unlock();
         bool load_success = LoadSlice(tbl_name,
                                       *slice,
                                       key_schema,
                                       rec_schema,
                                       schema_ts,
-                                      last_ckpt_ts,
+                                      snapshot_ts,
                                       kv_info,
                                       cc_request,
                                       cc_shard,
@@ -292,18 +294,13 @@ void StoreRange::UpdateSlice(
 }
 
 bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
-                                          const KVCatalogInfo *kv_info,
                                           uint64_t schema_ts,
                                           bool update_slice_keys,
                                           store::DataStoreHandler *store_hd)
 {
     std::unique_lock<std::shared_mutex> range_lk(mux_);
-    return store_hd->UpdateRangeSlices(table_name,
-                                       kv_info,
-                                       schema_ts,
-                                       range_start_key_,
-                                       slices_,
-                                       update_slice_keys);
+    return store_hd->UpdateRangeSlices(
+        table_name, schema_ts, range_start_key_, slices_, update_slice_keys);
 }
 
 size_t StoreRange::LowerBound(
@@ -390,7 +387,7 @@ bool StoreRange::LoadSlice(const TableName &tbl_name,
                            const Schema *key_schema,
                            const Schema *rec_schema,
                            uint64_t schema_ts,
-                           uint64_t last_ckpt_ts,
+                           uint64_t snapshot_ts,
                            const KVCatalogInfo *kv_info,
                            CcRequestBase *cc_request,
                            CcShard *cc_shard,
@@ -423,7 +420,7 @@ bool StoreRange::LoadSlice(const TableName &tbl_name,
                                                schema_ts,
                                                slice,
                                                *this,
-                                               last_ckpt_ts,
+                                               snapshot_ts,
                                                local_cc_shards_);
 
         if (cc_request != nullptr)
@@ -473,7 +470,8 @@ StoreSlice *StoreRange::FindSlice(const TxKey &key)
 }
 
 void StoreRange::InitSlices(
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys)
+    std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys,
+    bool fully_cached)
 {
     slices_.clear();
     boundary_keys_.clear();
@@ -482,6 +480,10 @@ void StoreRange::InitSlices(
     slice->end_key_ =
         slice_keys.size() > 1 ? slice_keys[1].first.get() : range_end_key_;
     slice->size_ = slice_keys.size() > 0 ? slice_keys[0].second : 0;
+    if (fully_cached)
+    {
+        slice->status_ = SliceStatus::FullyCached;
+    }
     slices_.emplace_back(std::move(slice));
 
     for (size_t idx = 1; idx < slice_keys.size(); ++idx)
@@ -493,6 +495,10 @@ void StoreRange::InitSlices(
                               ? range_end_key_
                               : slice_keys[idx + 1].first.get();
         slice->size_ = slice_keys[idx].second;
+        if (fully_cached)
+        {
+            slice->status_ = SliceStatus::FullyCached;
+        }
 
         slices_.emplace_back(std::move(slice));
         boundary_keys_.emplace_back(std::move(slice_keys[idx].first));

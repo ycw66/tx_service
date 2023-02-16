@@ -1471,36 +1471,120 @@ struct ScanSliceCc
     : public TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>
 {
 public:
-    ScanSliceCc()
+    ScanSliceCc() : start_key_(nullptr), start_key_type_(RangeKeyType::RawPtr)
     {
         parallel_req_ = true;
+    }
+
+    ~ScanSliceCc()
+    {
+        if (start_key_type_ == RangeKeyType::UniquePtr)
+        {
+            start_key_uptr_ = nullptr;
+            end_key_uptr_ = nullptr;
+        }
     }
 
     void Set(const TableName &tbl_name,
              uint32_t range_id,
              uint32_t ng_id,
+             int64_t ng_term,
              const TxKey *start_key,
-             bool inclusive,
+             bool start_inclusive,
+             const TxKey *end_key,
+             bool end_inclusive,
              uint64_t read_ts,
              TxNumber tx_number,
              int64_t tx_term,
-             CcScanner *scanner,
              CcHandlerResult<RangeScanSliceResult> &hd_res,
              IsolationLevel iso_level,
-             CcProtocol protocol)
+             CcProtocol protocol,
+             bool read_for_write)
     {
+        assert(hd_res.Value().is_local_);
+
         TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
             &tbl_name, &hd_res, ng_id, tx_number, protocol, iso_level);
 
         range_id_ = range_id;
+
+        if (start_key_type_ == RangeKeyType::UniquePtr)
+        {
+            start_key_uptr_ = nullptr;
+        }
         start_key_ = start_key;
-        inclusive_ = inclusive;
-        direction_ = scanner->Direction();
-        scanner_ = scanner;
+        start_key_type_ = RangeKeyType::RawPtr;
+        start_inclusive_ = start_inclusive;
+
+        if (end_key_type_ == RangeKeyType::UniquePtr)
+        {
+            end_key_uptr_ = nullptr;
+        }
+        end_key_ = end_key;
+        end_key_type_ = RangeKeyType::RawPtr;
+        end_inclusive_ = end_inclusive;
+
+        direction_ = hd_res.Value().ccm_scanner_->Direction();
         ts_ = read_ts;
         tx_term_ = tx_term;
-        is_local_ = true;
+        cc_ng_term_ = ng_term;
+        read_for_write_ = read_for_write;
+
         range_slice_id_.Reset();
+    }
+
+    void Set(const TableName &tbl_name,
+             uint32_t range_id,
+             uint32_t ng_id,
+             int64_t ng_term,
+             const std::string *start_key_str,
+             bool start_inclusive,
+             const std::string *end_key_str,
+             bool end_inclusive,
+             ScanDirection direction,
+             uint64_t read_ts,
+             TxNumber tx_number,
+             int64_t tx_term,
+             CcHandlerResult<RangeScanSliceResult> &hd_res,
+             IsolationLevel iso_level,
+             CcProtocol protocol,
+             bool read_for_write)
+    {
+        assert(!hd_res.Value().is_local_);
+
+        TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>::Reset(
+            &tbl_name, &hd_res, ng_id, tx_number, protocol, iso_level);
+
+        range_id_ = range_id;
+
+        if (start_key_type_ == RangeKeyType::UniquePtr)
+        {
+            start_key_uptr_ = nullptr;
+        }
+        start_key_str_ = start_key_str;
+        start_key_type_ = RangeKeyType::Binary;
+        start_inclusive_ = start_inclusive;
+
+        if (end_key_type_ == RangeKeyType::UniquePtr)
+        {
+            end_key_uptr_ = nullptr;
+        }
+        end_key_str_ = end_key_str;
+        end_key_type_ = RangeKeyType::Binary;
+        end_inclusive_ = end_inclusive;
+
+        direction_ = direction;
+        ts_ = read_ts;
+        tx_term_ = tx_term;
+        cc_ng_term_ = ng_term;
+        read_for_write_ = read_for_write;
+
+        range_slice_id_.Reset();
+    }
+
+    bool IsLocal() const
+    {
+        return start_key_type_ == RangeKeyType::RawPtr;
     }
 
     uint32_t RangeId() const
@@ -1508,14 +1592,108 @@ public:
         return range_id_;
     }
 
-    const TxKey *StartKey() const
+    int64_t RangeCcNgTerm() const
     {
-        return start_key_;
+        return cc_ng_term_;
     }
 
-    bool Inclusive() const
+    /**
+     * @brief Set the term of the cc node group where the range resides. The
+     * method is used by the first scan of the range to notify the sender the
+     * range's hosting cc ng's term. The remaining scans in the range are
+     * expected to observe the same term, as they rely on pointer stability to
+     * resume a scan where last scan batch stops.
+     *
+     * @param cc_ng_term
+     */
+    void SetRangeCcNgTerm(int64_t cc_ng_term)
     {
-        return inclusive_;
+        assert(cc_ng_term_ < 0 || cc_ng_term_ == cc_ng_term);
+        cc_ng_term_ = cc_ng_term;
+
+        if (IsLocal())
+        {
+            res_->Value().ccm_scanner_->SetPartitionNgTerm(cc_ng_term);
+        }
+    }
+
+    const TxKey *StartKey() const
+    {
+        switch (start_key_type_)
+        {
+        case RangeKeyType::RawPtr:
+            return start_key_;
+        case RangeKeyType::Binary:
+            return nullptr;
+        case RangeKeyType::UniquePtr:
+            return start_key_uptr_.get();
+        default:
+            return nullptr;
+        }
+    }
+
+    const TxKey *EndKey() const
+    {
+        switch (end_key_type_)
+        {
+        case RangeKeyType::RawPtr:
+            return end_key_;
+        case RangeKeyType::Binary:
+            return nullptr;
+        case RangeKeyType::UniquePtr:
+            return end_key_uptr_.get();
+        default:
+            return nullptr;
+        }
+    }
+
+    const std::string *StartKeyStr() const
+    {
+        return start_key_type_ == RangeKeyType::Binary ? start_key_str_
+                                                       : nullptr;
+    }
+
+    const std::string *EndKeyStr() const
+    {
+        return end_key_type_ == RangeKeyType::Binary ? end_key_str_ : nullptr;
+    }
+
+    void SetStartKey(std::unique_ptr<TxKey> start_key)
+    {
+        if (start_key_type_ == RangeKeyType::UniquePtr)
+        {
+            start_key_uptr_ = std::move(start_key);
+        }
+        else
+        {
+            start_key_type_ = RangeKeyType::UniquePtr;
+            start_key_uptr_.release();
+            start_key_uptr_ = std::move(start_key);
+        }
+    }
+
+    void SetEndKey(std::unique_ptr<TxKey> end_key)
+    {
+        if (end_key_type_ == RangeKeyType::UniquePtr)
+        {
+            end_key_uptr_ = std::move(end_key);
+        }
+        else
+        {
+            end_key_type_ = RangeKeyType::UniquePtr;
+            end_key_uptr_.release();
+            end_key_uptr_ = std::move(end_key);
+        }
+    }
+
+    bool StartInclusive() const
+    {
+        return start_inclusive_;
+    }
+
+    bool EndInclusive() const
+    {
+        return end_inclusive_;
     }
 
     ScanDirection Direction() const
@@ -1533,10 +1711,22 @@ public:
         return tx_term_;
     }
 
-    ScanCache *GetScanCache(size_t shard_id)
+    ScanCache *GetLocalScanCache(size_t shard_id)
     {
-        assert(is_local_);
-        return scanner_->Cache(shard_id);
+        return IsLocal() ? res_->Value().ccm_scanner_->Cache(shard_id)
+                         : nullptr;
+    }
+
+    RemoteScanCache *GetRemoteScanCache(size_t shard_id)
+    {
+        if (IsLocal())
+        {
+            return nullptr;
+        }
+
+        RangeScanSliceResult &slice_result = res_->Value();
+        assert(shard_id < slice_result.remote_scan_caches_->size());
+        return &slice_result.remote_scan_caches_->at(shard_id);
     }
 
     uint64_t PriorCceAddr(uint16_t shard_id)
@@ -1633,21 +1823,39 @@ public:
     }
 
 private:
-    uint32_t range_id_;
-    const TxKey *start_key_{nullptr};
-    bool inclusive_{false};
-    ScanDirection direction_;
+    uint32_t range_id_{0};
+
+    enum struct RangeKeyType
+    {
+        RawPtr,
+        Binary,
+        UniquePtr
+    };
+
+    union
+    {
+        const TxKey *start_key_;
+        const std::string *start_key_str_;
+        std::unique_ptr<TxKey> start_key_uptr_;
+    };
+    RangeKeyType start_key_type_;
+    bool start_inclusive_{false};
+
+    union
+    {
+        const TxKey *end_key_;
+        const std::string *end_key_str_;
+        std::unique_ptr<TxKey> end_key_uptr_;
+    };
+    RangeKeyType end_key_type_;
+    bool end_inclusive_{false};
+
+    ScanDirection direction_{ScanDirection::Forward};
     uint64_t ts_{0};
     int64_t tx_term_{-1};
     bool read_for_write_{false};
     bool is_wait_for_post_write_{false};
-
-    union
-    {
-        CcScanner *scanner_;
-        std::vector<std::vector<remote::ScanTuple_msg *>> *scan_msg_vec_;
-    };
-    bool is_local_{true};
+    int64_t cc_ng_term_{-1};
 
     std::vector<ScanType> blocked_scan_types_;
 
@@ -1743,9 +1951,9 @@ struct CkptScanCc : public TemplatedCcRequest<CkptScanCc, Void>
 {
 public:
     // how many pages to scan one time
-    static constexpr size_t CkptScanBatch = 20;
+    // static constexpr size_t CkptScanBatch = 20;
     // todo: limit scan by scanned size
-    // static constexpr size_t CkptScanBatchSize = 32 * 1024;
+    static constexpr size_t CkptScanBatchSize = 32 * 1024;
 
     CkptScanCc() = default;
 

@@ -200,7 +200,7 @@ public:
                           const Schema *key_schema,
                           const Schema *rec_schema,
                           uint64_t schema_ts,
-                          uint64_t last_ckpt_ts,
+                          uint64_t snapshot_ts,
                           const KVCatalogInfo *kv_info,
                           CcRequestBase *cc_request,
                           CcShard *cc_shard,
@@ -212,7 +212,7 @@ public:
                                 const Schema *key_schema,
                                 const Schema *rec_schema,
                                 uint64_t schema_ts,
-                                uint64_t last_ckpt_ts,
+                                uint64_t snapshot_ts,
                                 const KVCatalogInfo *kv_info,
                                 CcRequestBase *cc_request,
                                 CcShard *cc_shard,
@@ -225,7 +225,6 @@ public:
                      int32_t partition_id);
 
     bool UpdateRangeSlicesInStore(const TableName &table_name,
-                                  const KVCatalogInfo *kv_info,
                                   uint64_t schema_ts,
                                   bool update_slice_keys,
                                   store::DataStoreHandler *store_hd);
@@ -265,7 +264,8 @@ public:
 
     StoreSlice *FindSlice(const TxKey &key);
 
-    void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys);
+    void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys,
+                    bool fully_cached = false);
 
     const std::vector<std::unique_ptr<StoreSlice>> &Slices() const
     {
@@ -316,7 +316,7 @@ public:
         }
         boundary_keys_ = std::move(remain_boundary);
         slices_ = std::move(remain_slices);
-        range_end_key_ = new_end;
+        range_end_key_ = removed_slices.front().first.get();
         return removed_slices;
     }
 
@@ -332,7 +332,7 @@ private:
                    const Schema *key_schema,
                    const Schema *rec_schema,
                    uint64_t schema_ts,
-                   uint64_t last_ckpt_ts,
+                   uint64_t snapshot_ts,
                    const KVCatalogInfo *kv_info,
                    CcRequestBase *cc_request,
                    CcShard *cc_shard,

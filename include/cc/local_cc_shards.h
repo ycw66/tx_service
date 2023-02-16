@@ -341,7 +341,8 @@ public:
      */
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges,
-                         const NodeGroupId ng_id);
+                         const NodeGroupId ng_id,
+                         bool fully_cached = false);
 
     /**
      * @brief Get the All Table Ranges for a table.
@@ -372,13 +373,13 @@ public:
      * from local cc shards. This result in a binary search with key in
      * table_ranges_.
      */
-    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
-                                        const NodeGroupId ng_id,
-                                        const TxKey *key);
+    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                              const NodeGroupId ng_id,
+                                              const TxKey *key);
 
-    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
-                                        const NodeGroupId ng_id,
-                                        int32_t range_id);
+    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                              const NodeGroupId ng_id,
+                                              int32_t range_id);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,

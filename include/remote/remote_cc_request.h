@@ -331,9 +331,7 @@ private:
     const std::string *start_key_str_{nullptr};
     bool inclusive_{true};
     ScanDirection direct_{ScanDirection::Forward};
-    std::vector<std::vector<ScanTuple_msg *>> scan_caches_;
-    // tuple index of every core's scan_cache in {scan_caches_}
-    std::vector<size_t> scan_caches_idxs_;
+    std::vector<RemoteScanCache> scan_caches_;
     bool is_ckpt_delta_{false};
     CcHandlerResult<Void> cc_res_{nullptr};
     std::atomic<uint32_t> unfinish_cnt_{0};
@@ -354,9 +352,6 @@ private:
 
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
-
-    template <typename SkT, typename PkT>
-    friend class ::txservice::SkCcMap;
 
     friend class ::txservice::CcMap;
 };
@@ -432,8 +427,7 @@ private:
 
     uint64_t prior_cce_addr_{0};
     ScanDirection direct_{ScanDirection::Forward};
-    std::vector<ScanTuple_msg *> scan_cache_;
-    size_t scan_cache_idx_;
+    RemoteScanCache scan_cache_;
     bool is_ckpt_delta_{false};
     // The address of the CC map of the blocked core.
     CcHandlerResult<Void> cc_res_{nullptr};
@@ -454,10 +448,23 @@ private:
     template <typename KeyT, typename ValueT>
     friend class ::txservice::TemplateCcMap;
 
-    template <typename SkT, typename PkT>
-    friend class ::txservice::SkCcMap;
-
     friend class ::txservice::CcMap;
+};
+
+struct RemoteScanSlice : public ScanSliceCc
+{
+public:
+    RemoteScanSlice();
+    void Reset(std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt);
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+
+    TableName remote_tbl_name_{empty_sv, TableType::Primary};
+    CcHandlerResult<RangeScanSliceResult> cc_res_{nullptr};
+    std::vector<RemoteScanCache> scan_cache_vec_;
 };
 
 struct RemoteFaultInjectCC : public FaultInjectCC

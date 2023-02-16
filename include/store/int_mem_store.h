@@ -164,23 +164,6 @@ public:
         return nullptr;
     }
 
-    bool GetRangeSize(const txservice::TableName &table_name,
-                      const TableSchema *table_schema,
-                      int32_t partition_id,
-                      int64_t *size) override
-    {
-        return true;
-    }
-
-    bool FindRangeMedianKey(const txservice::TableName &table_name,
-                            int32_t partition_id,
-                            const txservice::TableSchema *table_schema,
-                            txservice::CcHandlerResult<RangeMedianKeyResult>
-                                *out_median_key_result) override
-    {
-        return true;
-    }
-
     bool UpsertRanges(
         const TableName &table_name,
         std::vector<

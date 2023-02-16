@@ -19,12 +19,13 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       ckpt_cv_(),
       request_ckpt_(false),
       store_hd_(write_hd),
-      status_(Status::Active),
+      ckpt_thd_status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent),
       worker_mux_(),
-      worker_cv_()
+      worker_cv_(),
+      worker_thd_status_(Status::Active)
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -125,8 +126,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             local_shards_.GetCatalogTableNamesForCkpt(node_group);
         auto total_table = tables.size();
 
-        std::vector<TransactionExecution *> txms;
-        uint16_t work_done = 0;
+        std::mutex work_sender_mux;
+        std::condition_variable work_sender_cv;
+        uint16_t finish_work_cnt = 0;
         uint16_t work_started = 0;
 #ifdef RANGE_PARTITION_ENABLED
         std::vector<std::thread> range_split_workers;
@@ -216,7 +218,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 }
                 continue;
             }
-            txms.push_back(ckpt_txm);
             std::unique_ptr<std::vector<FlushRecord>> ckpt_vec =
                 std::make_unique<std::vector<FlushRecord>>();
             std::unique_ptr<std::vector<FlushRecord>> archive_vec =
@@ -241,7 +242,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 abort_req.Reset();
                 ckpt_txm->Execute(&abort_req);
                 abort_req.Wait();
-                txms.pop_back();
                 tables.push_back(std::move(table_name));
                 continue;
             }
@@ -266,12 +266,11 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 abort_req.Reset();
                 ckpt_txm->Execute(&abort_req);
                 abort_req.Wait();
-                txms.pop_back();
                 tables.push_back(std::move(table_name));
                 continue;
             }
 
-            if (!is_last_ckpt)
+            if (!is_last_ckpt && !splitting_info.empty())
             {
                 // Remove splitting ranges from ckpt_vec and archive_vec.
                 // Records in the splitting ranges will be flushed by the
@@ -286,6 +285,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                      range_it++)
                 {
                     const StoreRange *range = range_it->first;
+                    // Move flush record to new ckpt vector if it is not
+                    // in the splitting range.
                     while (ckpt_it != ckpt_vec->end() &&
                            *ckpt_it->Key() < *range->RangeStartKey())
                     {
@@ -293,6 +294,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         ckpt_it++;
                     }
 
+                    // Leave the flush record in the old ckpt vec if it is
+                    // going to be splitted.
                     while (ckpt_it != ckpt_vec->end() &&
                            (range->RangeEndKey() == nullptr ||
                             *ckpt_it->Key() < *range->RangeEndKey()))
@@ -300,6 +303,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         ckpt_it++;
                     }
                 }
+                // Overwrite the old ckpt vec
                 ckpt_vec = std::move(flush_ckpt_vec);
 
                 std::unique_ptr<std::vector<FlushRecord>> flush_archive_vec =
@@ -337,6 +341,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             }
 #endif
 
+            if (ckpt_vec->size() != 0 || archive_vec->size() != 0 ||
+                mv_base_vec->size() != 0)
             {
                 std::unique_lock<std::mutex> worker_lk(worker_mux_);
                 work_started++;
@@ -348,8 +354,20 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                            std::move(ckpt_vec),
                                            std::move(archive_vec),
                                            std::move(mv_base_vec),
-                                           &work_done,
+                                           ckpt_txm,
+                                           &work_sender_mux,
+                                           &work_sender_cv,
+                                           &finish_work_cnt,
                                            &worker_failed_);
+                worker_cv_.notify_one();
+            }
+            else
+            {
+                CommitTxRequest commit_req;
+
+                commit_req.Reset();
+                ckpt_txm->Execute(&commit_req);
+                commit_req.Wait();
             }
         }
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
@@ -360,23 +378,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         }
 
         {
-            std::unique_lock<std::mutex> worker_lk(worker_mux_);
-
-            if (pending_work_.size() != 0)
-            {
-                worker_cv_.notify_all();
-                worker_cv_.wait(worker_lk,
-                                [this, &work_done, &work_started]
-                                { return work_done == work_started; });
-            }
-        }
-        for (auto &txm : txms)
-        {
-            CommitTxRequest commit_req;
-
-            commit_req.Reset();
-            txm->Execute(&commit_req);
-            commit_req.Wait();
+            std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
+            work_sender_cv.wait(work_sender_lk,
+                                [&finish_work_cnt, &work_started]
+                                { return finish_work_cnt == work_started; });
         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -392,6 +397,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         if (!worker_failed_.load(std::memory_order_relaxed) &&
             Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
+            LOG(INFO) << "Checkpoint of node group #" << node_group
+                      << " succeeded with timestamp: " << ckpt_ts;
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
@@ -406,34 +413,21 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 void Checkpointer::FlushDataWorker()
 {
     std::unique_lock<std::mutex> worker_lk(worker_mux_);
-    while (true)
+    while (worker_thd_status_ == Status::Active)
     {
-        std::unique_lock<std::mutex> status_lk(ckpt_mux_);
-        if (pending_work_.size() == 0 && status_ != Status::Terminated)
+        worker_cv_.wait(worker_lk,
+                        [this] {
+                            return !pending_work_.empty() ||
+                                   worker_thd_status_ == Status::Terminated;
+                        });
+
+        if (pending_work_.empty())
         {
-            status_lk.unlock();
-            worker_cv_.notify_all();
-            worker_cv_.wait(
-                worker_lk,
-                [this]
-                {
-                    std::unique_lock<std::mutex> status_lk(ckpt_mux_);
-                    return pending_work_.size() != 0 ||
-                           status_ == Status::Terminated;
-                });
-        }
-        else
-        {
-            status_lk.unlock();
+            continue;
         }
 
-        if (pending_work_.size() == 0)
-        {
-            // Checkpointer is terminating
-            return;
-        }
         // Retrieve first pending work and pop it.
-        FlushDataWork &cur_work = pending_work_.front();
+        FlushDataWork &cur_work = pending_work_.back();
 #ifdef RANGE_PARTITION_ENABLED
         uint64_t ckpt_ts = cur_work.ckpt_ts_;
 #endif
@@ -460,11 +454,14 @@ void Checkpointer::FlushDataWorker()
             archive_vec = cur_work.archive_vec_ptr_;
             mv_base_vec = cur_work.mv_base_vec_ptr_;
         }
-        uint16_t *work_done = cur_work.work_done_;
+        TransactionExecution *txm = cur_work.txm_;
+        std::mutex *sender_mux = cur_work.sender_mux_;
+        std::condition_variable *sender_cv = cur_work.sender_cv_;
+        uint16_t *finish_work_cnt = cur_work.finish_work_cnt_;
         std::atomic_bool *fail = cur_work.fail_;
         CcHandlerResult<Void> *hand_res = cur_work.hand_res_;
 
-        pending_work_.erase(pending_work_.begin());
+        pending_work_.pop_back();
         worker_lk.unlock();
 
         bool succ = true;
@@ -540,6 +537,7 @@ void Checkpointer::FlushDataWorker()
                                      *ckpt_vec,
                                      ckpt_ts);
                 }
+#ifdef STATISTICS_ENABLED
                 // Flush statistics based on primary table.
                 if (table_name.Type() == TableType::Primary)
                 {
@@ -556,22 +554,34 @@ void Checkpointer::FlushDataWorker()
                     }
                 }
 #endif
+#endif
             }
             else
             {
                 succ = false;
             }
         }
-        worker_lk.lock();
-        // Update the work result after acquiring the lock.
-        if (work_done)
+        if (txm != nullptr)
         {
-            (*work_done)++;
+            CommitTxRequest commit_req;
+
+            commit_req.Reset();
+            txm->Execute(&commit_req);
+            commit_req.Wait();
+        }
+
+        // Update the work count if the work's sender is waiting.
+        if (sender_mux != nullptr)
+        {
+            std::unique_lock<std::mutex> lk(*sender_mux);
+            uint16_t &cnt = *finish_work_cnt;
+            ++cnt;
+            sender_cv->notify_one();
         }
 
         if (fail != nullptr && !succ)
         {
-            bool false_ref = true;
+            bool false_ref = false;
             fail->compare_exchange_strong(false_ref, true);
         }
 
@@ -586,6 +596,8 @@ void Checkpointer::FlushDataWorker()
                 hand_res->SetFinished();
             }
         }
+
+        worker_lk.lock();
     }
 }
 
@@ -608,6 +620,8 @@ void Checkpointer::SplitFlushRange(
         int32_t new_part_id;
         if (!store_hd_->GetNextRangePartitionId(table_name, &new_part_id))
         {
+            LOG(INFO)
+                << "Split range failed due to unable to get next partition id.";
             worker_failed_.compare_exchange_strong(fail, true);
             return;
         }
@@ -691,7 +705,7 @@ void Checkpointer::SplitFlushRange(
                                   std::move(new_range_ids));
     split_txm->Execute(&split_req);
     split_req.Wait();
-    if (split_req.IsError())
+    if (split_req.IsError() || !split_req.Result())
     {
         LOG(INFO) << "Split range on table " << table_name.StringView()
                   << " partition " << entry->GetRangeInfo()->partition_id_
@@ -709,6 +723,9 @@ void Checkpointer::SplitFlushRange(
     commit_req.Reset();
     split_txm->Execute(&commit_req);
     commit_req.Wait();
+    LOG(INFO) << "Split range on table " << table_name.StringView()
+              << " partition " << split_info.first->PartitionId()
+              << " succeeded.";
 }
 
 void Checkpointer::Run()
@@ -720,38 +737,45 @@ void Checkpointer::Run()
     }
 
     std::unique_lock<std::mutex> lk(ckpt_mux_);
-    while (status_ == Status::Active)
+    while (ckpt_thd_status_ == Status::Active)
     {
-        if (!request_ckpt_ && status_ == Status::Active)
-        {
-            ckpt_cv_.wait_for(
-                lk,
-                std::chrono::seconds(checkpoint_interval_),
-                [this] { return status_ != Status::Active || request_ckpt_; });
-        }
+        ckpt_cv_.wait_for(
+            lk,
+            std::chrono::seconds(checkpoint_interval_),
+            [this]
+            { return ckpt_thd_status_ != Status::Active || request_ckpt_; });
 
         CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", { continue; });
 
-        lk.unlock();
-        Ckpt();
-        lk.lock();
+        if (ckpt_thd_status_ == Status::Active)
+        {
+            lk.unlock();
+            Ckpt();
+            lk.lock();
 
-        request_ckpt_ = false;
+            request_ckpt_ = false;
+        }
     }
 
     // ensure normal shutdown execute checkpoint since we could receive
     // terminating request during the last checkpoint.
     lk.unlock();
     Ckpt(true);
-    lk.lock();
-    status_ = Status::Terminated;
-    lk.unlock();
+
+    {
+        std::unique_lock<std::mutex> worker_lk(worker_mux_);
+        worker_thd_status_ = Status::Terminated;
+    }
     worker_cv_.notify_all();
+
     // Collect worker threads. They should quit after the Ckpt call.
     for (int id = 0; id < checkpointer_worker_num_; id++)
     {
         worker_thds_.at(id).join();
     }
+
+    lk.lock();
+    ckpt_thd_status_ = Status::Terminated;
     ckpt_cv_.notify_all();
 }
 
@@ -770,15 +794,15 @@ void Checkpointer::Notify()
 bool Checkpointer::IsTerminated()
 {
     std::scoped_lock<std::mutex> lk(ckpt_mux_);
-    return status_ == Status::Terminated;
+    return ckpt_thd_status_ == Status::Terminated;
 }
 
 void Checkpointer::Terminate()
 {
     {
-        std::scoped_lock<std::mutex> lk(ckpt_mux_);
-        assert(status_ == Status::Active);
-        status_ = Status::Terminating;
+        std::unique_lock<std::mutex> lk(ckpt_mux_);
+        assert(ckpt_thd_status_ == Status::Active);
+        ckpt_thd_status_ = Status::Terminating;
     }
     ckpt_cv_.notify_one();
 
@@ -788,7 +812,8 @@ void Checkpointer::Terminate()
     // caller of this method, i.e., the destructor of the tx
     // service, is blocked until last flushing finishes.
     std::unique_lock<std::mutex> lk(ckpt_mux_);
-    ckpt_cv_.wait(lk, [this] { return status_ == Status::Terminated; });
+    ckpt_cv_.wait(lk,
+                  [this] { return ckpt_thd_status_ == Status::Terminated; });
 }
 
 void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
@@ -853,7 +878,7 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                 if (curr_range != nullptr && range_updated)
                 {
                     bool ret = curr_range->UpdateRangeSlicesInStore(
-                        table_name, kv_info, schema_ts, true, store_hd_);
+                        table_name, schema_ts, true, store_hd_);
                     success = ret && success;
                 }
 
@@ -900,7 +925,7 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
     if (range_updated)
     {
         bool ret = curr_range->UpdateRangeSlicesInStore(
-            table_name, kv_info, schema_ts, true, store_hd_);
+            table_name, schema_ts, true, store_hd_);
         success = success && ret;
     }
     return success;
@@ -1210,9 +1235,7 @@ void Checkpointer::FlushData(const TableName &table_name,
                                ckpt_vec,
                                archive_vec,
                                mv_vec,
-                               nullptr,
-                               nullptr,
                                res);
-    worker_cv_.notify_all();
+    worker_cv_.notify_one();
 }
 }  // namespace txservice

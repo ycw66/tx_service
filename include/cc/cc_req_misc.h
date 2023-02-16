@@ -82,13 +82,14 @@ public:
                        NodeGroupId ng_id);
 
     bool Execute(CcShard &ccs) override;
+    void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
     void SetFinish(std::vector<InitRangeEntry> &&ranges, int err);
+    void SetFinish(int err);
 
 public:
     const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
-    NodeGroupId ng_id_;
 };
 
 /**
@@ -130,14 +131,19 @@ struct SliceDataItem
 
     SliceDataItem(txservice::TxKey::Uptr key,
                   txservice::TxRecord::Uptr rec,
-                  uint64_t version_ts)
-        : key_(std::move(key)), record_(std::move(rec)), version_ts_(version_ts)
+                  uint64_t version_ts,
+                  bool is_deleted)
+        : key_(std::move(key)),
+          record_(std::move(rec)),
+          version_ts_(version_ts),
+          is_deleted_(is_deleted)
     {
     }
 
     txservice::TxKey::Uptr key_;
     txservice::TxRecord::Uptr record_;
     uint64_t version_ts_;
+    bool is_deleted_;
 };
 
 struct FillStoreSliceCc;
@@ -153,7 +159,7 @@ public:
                           uint64_t schema_ts,
                           const TxKey *start_key,
                           const TxKey *end_key,
-                          uint64_t last_ckpt_ts,
+                          uint64_t snapshot_ts,
                           FillStoreSliceCc *fill_slice_cc = nullptr)
         : table_name_(&tbl_name),
           key_schema_(key_schema),
@@ -161,7 +167,7 @@ public:
           schema_ts_(schema_ts),
           start_key_(start_key),
           end_key_(end_key),
-          last_ckpt_ts_(last_ckpt_ts),
+          snapshot_ts_(snapshot_ts),
           slice_size_(0),
           fill_slice_cc_(fill_slice_cc)
     {
@@ -169,11 +175,13 @@ public:
 
     void AddDataItem(txservice::TxKey::Uptr key,
                      txservice::TxRecord::Uptr record,
-                     uint64_t version_ts)
+                     uint64_t version_ts,
+                     bool is_deleted)
     {
         slice_size_ += key->Size();
         slice_size_ += record->Size();
-        slice_data_.emplace_back(std::move(key), std::move(record), version_ts);
+        slice_data_.emplace_back(
+            std::move(key), std::move(record), version_ts, is_deleted);
     }
 
     std::vector<SliceDataItem> &SliceData()
@@ -219,9 +227,9 @@ public:
         return slice_size_;
     }
 
-    uint64_t LastCkptTs() const
+    uint64_t SnapshotTs() const
     {
-        return last_ckpt_ts_;
+        return snapshot_ts_;
     }
 
 private:
@@ -233,7 +241,7 @@ private:
     const uint64_t schema_ts_;
     const TxKey *start_key_;
     const TxKey *end_key_;
-    uint64_t last_ckpt_ts_;
+    uint64_t snapshot_ts_;
     uint32_t slice_size_;
 
     FillStoreSliceCc *fill_slice_cc_;
@@ -249,7 +257,7 @@ public:
                      uint64_t schema_ts,
                      StoreSlice &slice,
                      StoreRange &range,
-                     uint64_t last_ckpt_ts,
+                     uint64_t snapshot_ts,
                      LocalCcShards &cc_shards);
 
     ~FillStoreSliceCc() = default;
@@ -264,7 +272,8 @@ public:
 
     void AddDataItem(txservice::TxKey::Uptr key,
                      txservice::TxRecord::Uptr record,
-                     uint64_t version_ts);
+                     uint64_t version_ts,
+                     bool is_deleted);
 
     void SetFinish();
     void SetError();
@@ -328,11 +337,6 @@ public:
     }
 
     RangeSliceId SliceId();
-
-    uint64_t LastCkptTs() const
-    {
-        return last_ckpt_ts_;
-    }
 
     uint64_t CkptTs() const
     {

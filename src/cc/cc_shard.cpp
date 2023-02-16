@@ -106,12 +106,19 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
             // cc maps when the cc shard is initialized. The cc map in failed
             // over cc node is initialized lazily, when the cc node becomes the
             // leader.
-            auto catalog_it =
-                ng_ccm.try_emplace(node_group,
+            auto catalog_it = ng_ccm.find(node_group);
+            if (catalog_it != ng_ccm.end())
+            {
+                return catalog_it->second.get();
+            }
+            else
+            {
+                auto insert_it =
+                    ng_ccm.emplace(node_group,
                                    std::make_unique<CatalogCcMap>(
                                        this, node_group, catalog_ccm_name));
-
-            return catalog_it.first->second.get();
+                return insert_it.first->second.get();
+            }
         }
         else
         {
@@ -626,9 +633,11 @@ CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
 
 void CcShard::InitTableRanges(const TableName &range_table_name,
                               std::vector<InitRangeEntry> &init_ranges,
-                              NodeGroupId ng_id)
+                              NodeGroupId ng_id,
+                              bool fully_cached)
 {
-    local_shards_.InitTableRanges(range_table_name, init_ranges, ng_id);
+    local_shards_.InitTableRanges(
+        range_table_name, init_ranges, ng_id, fully_cached);
 }
 
 std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
@@ -642,11 +651,19 @@ void CcShard::FetchCatalog(const TableName &table_name,
                            NodeGroupId cc_ng_id,
                            CcRequestBase *requester)
 {
-    auto tab_it = fetch_reqs_.try_emplace(
-        table_name,
-        std::make_unique<FetchCatalogCc>(table_name, *this, cc_ng_id));
-    FetchCatalogCc *fetch_req =
-        static_cast<FetchCatalogCc *>(tab_it.first->second.get());
+    FetchCatalogCc *fetch_req = nullptr;
+    auto tab_it = fetch_reqs_.find(table_name);
+    if (tab_it != fetch_reqs_.end())
+    {
+        fetch_req = static_cast<FetchCatalogCc *>(tab_it->second.get());
+    }
+    else
+    {
+        std::unique_ptr<FetchCatalogCc> fetch_catalog_cc =
+            std::make_unique<FetchCatalogCc>(table_name, *this, cc_ng_id);
+        fetch_req = fetch_catalog_cc.get();
+        fetch_reqs_.emplace(table_name, std::move(fetch_catalog_cc));
+    }
 
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
@@ -661,18 +678,21 @@ void CcShard::FetchTableRanges(const TableName &table_name,
                                NodeGroupId ng_id)
 {
     FetchTableRangesCc *fetch_req = nullptr;
-    auto find_it = fetch_reqs_.find(table_name);
-    if (find_it != fetch_reqs_.end())
+    auto table_it = fetch_reqs_.find(table_name);
+    if (table_it != fetch_reqs_.end())
     {
-        fetch_req = static_cast<FetchTableRangesCc *>(find_it->second.get());
+        fetch_req = static_cast<FetchTableRangesCc *>(table_it->second.get());
     }
     else
     {
-        auto emplace_it = fetch_reqs_.emplace(
-            table_name,
-            std::make_unique<FetchTableRangesCc>(table_name, *this, ng_id));
-        fetch_req =
-            static_cast<FetchTableRangesCc *>(emplace_it.first->second.get());
+        auto insert_it = fetch_reqs_.try_emplace(table_name, nullptr);
+
+        std::unique_ptr<FetchTableRangesCc> fetch_range_cc =
+            std::make_unique<FetchTableRangesCc>(
+                insert_it.first->first, *this, ng_id);
+        fetch_req = fetch_range_cc.get();
+
+        insert_it.first->second = std::move(fetch_range_cc);
     }
 
     fetch_req->AddRequester(requester);
@@ -712,14 +732,15 @@ const TableRangeEntry *CcShard::CreateTableRange(
                                           slice_keys);
 }
 
-void CcShard::CleanTableRange(const TableName &table_name, uint32_t ng_id)
+void CcShard::CleanTableRange(const TableName &table_name,
+                              const NodeGroupId ng_id)
 {
     local_shards_.CleanTableRange(table_name, ng_id);
 }
 
-TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
-                                             const NodeGroupId ng_id,
-                                             const TxKey *key)
+const TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
+                                                   const NodeGroupId ng_id,
+                                                   const TxKey *key)
 {
     return local_shards_.GetTableRangeEntry(table_name, ng_id, key);
 }
@@ -1040,7 +1061,7 @@ uint64_t CcShard::LocalMinSiTxStartTs()
     }
 }
 
-uint64_t CcShard::GlobalMinSiTxStartTs()
+uint64_t CcShard::GlobalMinSiTxStartTs() const
 {
     return TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
 }

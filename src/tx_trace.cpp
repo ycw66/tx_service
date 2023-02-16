@@ -193,11 +193,6 @@ template std::string tx_trace_associate(
     std::string,
     std::function<std::string()> context_func);
 template std::string tx_trace_associate(
-    txservice::DsOp<RangeMedianKeyResult> *,
-    txservice::CcHandlerResult<RangeMedianKeyResult> *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
     txservice::DsOp<Void> *,
     txservice::CcHandlerResult<Void> *,
     std::string,
@@ -222,36 +217,6 @@ template std::string tx_trace_associate(
 template std::string tx_trace_associate(
     txservice::UpsertTableOp *,
     txservice::DsUpsertTableOp *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::AcquireAllOp *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::NoOp *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::PostWriteAllOp *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::DsOp<RangeMedianKeyResult> *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::DsOp<Void> *,
-    std::string,
-    std::function<std::string()> context_func);
-template std::string tx_trace_associate(
-    txservice::DsSplitRangeOp *,
-    txservice::WriteToLogOp *,
     std::string,
     std::function<std::string()> context_func);
 
@@ -429,10 +394,6 @@ template std::string tx_trace_action(txservice::TransactionExecution *,
 template std::string tx_trace_action(txservice::TransactionExecution *,
                                      std::string,
                                      txservice::CleanCcEntryForTestTxRequest *,
-                                     std::function<std::string()>);
-template std::string tx_trace_action(txservice::TransactionExecution *,
-                                     std::string,
-                                     txservice::SplitRangeTxRequest *,
                                      std::function<std::string()>);
 
 // Tx and Op
@@ -757,16 +718,6 @@ template std::string tx_trace_action(txservice::CcHandlerResult<int8_t> *,
                                      std::string,
                                      int8_t,
                                      std::function<std::string()>);
-template std::string tx_trace_action(
-    txservice::CcHandlerResult<txservice::RangeMedianKeyResult> *,
-    std::string,
-    txservice::RangeMedianKeyResult *,
-    std::function<std::string()>);
-template std::string tx_trace_action(
-    txservice::CcHandlerResult<txservice::RangeMedianKeyResult> *,
-    std::string,
-    int8_t,
-    std::function<std::string()>);
 template std::string tx_trace_action(
     txservice::CcHandlerResult<txservice::RangeScanSliceResult> *,
     std::string,
