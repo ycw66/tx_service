@@ -500,6 +500,24 @@ void Checkpointer::FlushDataWorker()
                 }
             }
 
+            if (ckpt_ret && local_shards_.EnableMvcc())
+            {
+                ckpt_ret = store_hd_->PutArchivesAll(node_group,
+                                                     table_name,
+                                                     schema->GetKVCatalogInfo(),
+                                                     *archive_vec);
+
+                if (!ckpt_ret)
+                {
+                    // If ckpt succeeds and flushing undo fails, it is safe
+                    // to update the local checkpoint timestamp, but not
+                    // safe to truncate the redo log.
+                    succ = false;
+                    LOG(INFO) << "checkpointer PutArchivesAll flush to "
+                                 "kv storage failed";
+                }
+            }
+
             // If flush to data store succeeds, update the ckpt_ts for each
             // entry in ccmap to latest checkpoint version's commit_ts.
             if (ckpt_ret)
@@ -542,26 +560,6 @@ void Checkpointer::FlushDataWorker()
             else
             {
                 succ = false;
-            }
-
-            bool flush_undo_ret = true;
-            if (ckpt_ret && local_shards_.EnableMvcc())
-            {
-                flush_undo_ret =
-                    store_hd_->PutArchivesAll(node_group,
-                                              table_name,
-                                              schema->GetKVCatalogInfo(),
-                                              *archive_vec);
-
-                if (!flush_undo_ret)
-                {
-                    // If ckpt succeeds and flushing undo fails, it is safe
-                    // to update the local checkpoint timestamp, but not
-                    // safe to truncate the redo log.
-                    succ = false;
-                    LOG(INFO) << "checkpointer PutArchivesAll flush to "
-                                 "kv storage failed";
-                }
             }
         }
         worker_lk.lock();

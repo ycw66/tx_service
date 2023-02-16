@@ -564,18 +564,22 @@ public:
 
                 cce.commit_ts_ = commit_ts;
 
-                shard_->DecrementMemory(cce.PayloadMemUsage());
-                if (payload_str == nullptr && !is_del)
+                if (Type() != TableType::Secondary ||
+                    cce.payload_status_ == RecordStatus::Unknown)
                 {
-                    cce.payload_ = std::make_unique<ValueT>(*commit_val);
+                    shard_->DecrementMemory(cce.PayloadMemUsage());
+                    if (payload_str == nullptr && !is_del)
+                    {
+                        cce.payload_ = std::make_unique<ValueT>(*commit_val);
+                    }
+                    else if (!is_del)
+                    {
+                        size_t offset = 0;
+                        cce.payload_ = std::make_unique<ValueT>();
+                        cce.payload_->Deserialize(payload_str->data(), offset);
+                    }
+                    shard_->mem_usage_ += cce.PayloadMemUsage();
                 }
-                else if (!is_del)
-                {
-                    size_t offset = 0;
-                    cce.payload_ = std::make_unique<ValueT>();
-                    cce.payload_->Deserialize(payload_str->data(), offset);
-                }
-                shard_->mem_usage_ += cce.PayloadMemUsage();
 
                 // todo: get key from cce_addr
                 size_t key_size = cce.Key()->SerializedLength();

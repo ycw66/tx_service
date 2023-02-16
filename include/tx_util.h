@@ -115,6 +115,7 @@ static inline bool TxReadCatalog(TransactionExecution *txm,
     {
         assert(rec_status == RecordStatus::Normal);
         exists = true;
+        assert(catalog_rec->Schema() != nullptr);
         catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
     }
 
