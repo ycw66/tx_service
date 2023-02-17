@@ -75,17 +75,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 
     if (lock_type != LockType::NoLock)
     {
-        if (lock_type == LockType::WriteLock ||
-            lock_type == LockType::WriteIntent ||
-            cce_payload_status != RecordStatus::Deleted)
-        {
-            lock_op_status =
-                cce->GetKeyLock().AcquireLock(req, protocol, lock_type);
-        }
-        else
-        {
-            lock_type = LockType::NoLock;
-        }
+        lock_op_status =
+            cce->GetKeyLock().AcquireLock(req, protocol, lock_type);
     }
 
     if (lock_op_status == LockOpStatus::Successful)

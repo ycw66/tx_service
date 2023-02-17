@@ -300,9 +300,7 @@ void txservice::remote::RemotePostRead::Reset(
                       req.commit_ts(),
                       req.key_ts(),
                       req.gap_ts(),
-                      &cc_res_,
-                      ToLocalType::ConvertProtocol(req.protocol()),
-                      ToLocalType::ConvertLockType(req.lock_type()));
+                      &cc_res_);
 
     input_msg_ = std::move(input_msg);
 
@@ -526,15 +524,13 @@ void txservice::remote::RemotePostWrite::Reset(
     uint64_t commit_ts = post_commit.commit_ts();
     const std::string *rec_str =
         commit_ts > 0 ? &post_commit.record() : nullptr;
-    proto_ = ToLocalType::ConvertProtocol(post_commit.protocol());
     PostWriteCc::Reset(&cce_addr_,
                        input_msg->tx_number(),
                        commit_ts,
                        rec_str,
                        static_cast<OperationType>(post_commit.operation_type()),
                        post_commit.key_shard_code(),
-                       &cc_res_,
-                       proto_);
+                       &cc_res_);
 
     input_msg_ = std::move(input_msg);
 

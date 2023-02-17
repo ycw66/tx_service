@@ -82,8 +82,6 @@ public:
      */
     bool AddRead(const CcEntryAddr &cce_addr,
                  uint64_t read_ts,
-                 CcProtocol proto,
-                 LockType lock_type,
                  const TableName *table_name)
     {
         auto iter = rset_.find(*table_name);
@@ -100,46 +98,20 @@ public:
 
         assert(!iter->first.IsStringOwner());
 
-        auto [it, inserted] =
-            iter->second.try_emplace(cce_addr, read_ts, proto, lock_type);
+        auto [it, inserted] = iter->second.try_emplace(cce_addr, read_ts);
         if (!inserted)
         {
-            // Under Occ/OccRead protocol and RepeatableRead/Serializable
-            // isolation level, the read operation adds ReadIntent locktype,
-            // not read lock. So, we must verify whether the record has been
-            // changed between current read and previous.
             // (read_ts == 0) means it is a boundary key added gap lock or its
             // payload status is Unkonwn.
-            if (it->second.version_ts_ != read_ts &&
-                it->second.version_ts_ != 0 && read_ts != 0)
+            if (it->second.version_ts_ < read_ts && it->second.version_ts_ != 0)
             {
-                if (it->second.lock_type_ == LockType::ReadIntent)
-                {
-                    // breaks repeatable read isolation level under
-                    // Occ/OccRead protocol, return error.
-                    it->second.lock_type_ = lock_type;
-                    return false;
-                }
-                else
-                {
-                    // ReadLock and WriteIntent always block update.
-                    // Case enter this branch, must be a bug.
-                    assert(false);
-                }
+                // breaks repeatable read isolation level under
+                // Occ/OccRead protocol, return error.
+                return false;
             }
-            // Case (it->second.version_ts_>0 and read_ts==0), means read_set
-            // has been updated by ReadOutside request, but ccmap has not
-            // received ReadOutside CcRequest.
-            // Case (it->second.version_ts_==0 and read_ts>0), means the entry
-            // maybe has been backfilled by other tx.
-            if (it->second.version_ts_ < read_ts)
+            else if (read_ts > 0)
             {
                 it->second.version_ts_ = read_ts;
-            }
-            if (lock_type >= it->second.lock_type_)
-            {
-                it->second.lock_type_ = lock_type;
-                it->second.protocol_ = proto;
             }
 
             it->second.is_relock = true;

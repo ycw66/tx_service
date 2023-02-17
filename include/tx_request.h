@@ -257,8 +257,7 @@ struct ScanBatchTuple
           record_(rec),
           status_(status),
           version_ts_(version),
-          cce_addr_(cce_addr),
-          lock_type_(lock_type)
+          cce_addr_(cce_addr)
     {
     }
 
@@ -267,8 +266,7 @@ struct ScanBatchTuple
           record_(rhs.record_),
           status_(rhs.status_),
           version_ts_(rhs.version_ts_),
-          cce_addr_(rhs.cce_addr_),
-          lock_type_(rhs.lock_type_)
+          cce_addr_(rhs.cce_addr_)
     {
     }
 
@@ -277,7 +275,6 @@ struct ScanBatchTuple
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
     const CcEntryAddr cce_addr_;
-    LockType lock_type_{LockType::NoLock};
 };
 
 struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
@@ -308,7 +305,6 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
           scan_batch_idx_(scan_batch_idx),
           alias_(alias),
           end_key_(end_key),
-          //   lock_type_(lock_type),
           table_name_(table_name)
     {
     }

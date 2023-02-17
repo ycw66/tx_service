@@ -112,7 +112,6 @@ public:
      * @param record Pointer to the committed record. Null, if the tx aborts.
      * @param is_deleted Whether or not the write deletes a record
      * @param hres Result handler of the request
-     * @param protocol Concurrency control protocol
      */
     virtual void PostWrite(TxNumber tx_number,
                            int64_t tx_term,
@@ -122,8 +121,7 @@ public:
                            const TxRecord *record,
                            OperationType operation_type,
                            uint32_t key_shard_code,
-                           CcHandlerResult<PostProcessResult> &hres,
-                           CcProtocol protocol) = 0;
+                           CcHandlerResult<PostProcessResult> &hres) = 0;
 
     /**
      * @brief Post-processes a read/scan key. Post-processing clears the read
@@ -144,7 +142,6 @@ public:
      * @param commit_ts Commit timestamp of the tx. 0, if the tx aborts.
      * @param ccentry_addr Address of the cc entry
      * @param hres Result handler of the request
-     * @param protocol Concurrency control protocol
      */
     virtual void PostRead(uint64_t tx_number,
                           int64_t tx_term,
@@ -153,9 +150,7 @@ public:
                           uint64_t gap_ts,
                           uint64_t commit_ts,
                           const CcEntryAddr &ccentry_addr,
-                          CcHandlerResult<PostProcessResult> &hres,
-                          CcProtocol protocol,
-                          LockType lock_type) = 0;
+                          CcHandlerResult<PostProcessResult> &hres) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts

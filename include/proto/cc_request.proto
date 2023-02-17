@@ -198,8 +198,6 @@ message ValidateRequest {
 	uint64 commit_ts = 5;
 	uint64 key_ts = 6;
 	uint64 gap_ts = 7;
-	CcProtocolType protocol = 8;
-	CcLockType lock_type = 9;
 }
 
 message ValidateResponse {
@@ -263,8 +261,7 @@ message PostCommitRequest {
 	uint64 commit_ts = 4;
 	bytes record = 5;
 	uint32 operation_type = 6;
-	CcProtocolType protocol = 7;
-	uint32 key_shard_code = 8;
+	uint32 key_shard_code = 7;
 }
 
 message PostWriteAllRequest {

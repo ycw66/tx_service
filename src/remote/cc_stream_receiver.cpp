@@ -489,16 +489,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         read_outside->Reset(std::move(msg));
 
         const CcEntryAddr &cce_addr = read_outside->CceAddr();
-        if (Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                cce_addr.Term()))
-        {
-            read_outside->Ccm()->shard_->Enqueue(read_outside);
-        }
-        else
-        {
-            read_outside->Finish();
-            read_outside->Free();
-        }
+        local_shards_.EnqueueCcRequest(cce_addr.CoreId(), read_outside);
 
         break;
     }
@@ -936,6 +927,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                           tuple_msg.gap_ts(),
                                           tuple_msg.cce_addr().cce_ptr(),
                                           tuple_msg.cce_addr().term(),
+                                          tuple_msg.cce_addr().core_id(),
                                           scan_slice_result.cc_ng_id_);
             }
         }

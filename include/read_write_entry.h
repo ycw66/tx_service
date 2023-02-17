@@ -54,26 +54,11 @@ struct WriteSetEntry
 struct ReadSetEntry
 {
     ReadSetEntry() = delete;
-    ReadSetEntry(uint64_t ts, CcProtocol proto, LockType lock_type)
-        : version_ts_(ts), protocol_(proto), lock_type_(lock_type)
+    explicit ReadSetEntry(uint64_t ts) : version_ts_(ts)
     {
     }
 
     uint64_t version_ts_;
-    /**
-     * @brief The concurrency control protocol used when this read is performed.
-     * A tx reads two types of data: catalogs when the query is compiled, and
-     * data items when the query is executed. Data items are read under the
-     * concurrency control protocol specified by the tx. Catalogs are read under
-     * a fixed protocol irrespective of the tx's. The tx relies on this
-     * parameter to perform appropriate post-processing operations for read
-     * data.
-     *
-     */
-    CcProtocol protocol_;
-    // TODO: compact protocol and lock type to save memory.
-    LockType lock_type_;
-    // To save if the entry has been locked twice or more times
     bool is_relock = false;
 };
 

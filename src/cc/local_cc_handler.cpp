@@ -211,8 +211,7 @@ void txservice::LocalCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    CcProtocol protocol)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -235,8 +234,7 @@ void txservice::LocalCcHandler::PostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres,
-                   protocol);
+                   &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -256,8 +254,7 @@ void txservice::LocalCcHandler::PostWrite(
                              record,
                              operation_type,
                              key_shard_code,
-                             hres,
-                             protocol);
+                             hres);
     }
 }
 
@@ -269,9 +266,7 @@ void txservice::LocalCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<PostProcessResult> &hres,
-    CcProtocol protocol,
-    LockType lock_type)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -288,14 +283,7 @@ void txservice::LocalCcHandler::PostRead(
         }
 
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Reset(&cce_addr,
-                   tx_number,
-                   commit_ts,
-                   key_ts,
-                   gap_ts,
-                   &hres,
-                   protocol,
-                   lock_type);
+        req->Reset(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         const LruEntry *lru_entry =
@@ -314,9 +302,7 @@ void txservice::LocalCcHandler::PostRead(
                             gap_ts,
                             commit_ts,
                             cce_addr,
-                            hres,
-                            protocol,
-                            lock_type);
+                            hres);
     }
 }
 

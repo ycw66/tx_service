@@ -59,8 +59,7 @@ public:
                    const TxRecord *record,
                    OperationType operation_type,
                    uint32_t key_shard_code,
-                   CcHandlerResult<PostProcessResult> &hres,
-                   CcProtocol protocol);
+                   CcHandlerResult<PostProcessResult> &hres);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,
@@ -83,9 +82,7 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &cce_addr,
-                  CcHandlerResult<PostProcessResult> &hres,
-                  CcProtocol protocol,
-                  LockType lock_type);
+                  CcHandlerResult<PostProcessResult> &hres);
 
     void Read(uint32_t src_node_id,
               NodeGroupId dest_ng_id,

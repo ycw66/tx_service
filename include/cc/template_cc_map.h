@@ -1246,12 +1246,6 @@ public:
             ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
              (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_)))
         {
-            // 2PL is a blocking protocol. Once a read lock is acquired, no one
-            // can possibly change the key. So, this branch is only reachable
-            // for OCC/OccRead protocol validating version stability.
-            assert(req.Protocol() == CcProtocol::OCC ||
-                   req.Protocol() == CcProtocol::OccRead);
-
             ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
             ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
             // broken repeatable read, set error.
@@ -1266,9 +1260,19 @@ public:
                 << " ,gap_ts: " << gap_ts
                 << " ,cc_entry.gap_commit_ts_: " << cc_entry.gap_commit_ts_;
         }
-        else if (req.Protocol() == CcProtocol::OCC ||
-                 req.Protocol() == CcProtocol::OccRead)
+        else
         {
+            // For 2PL, read validation is equivalent to releasing the read
+            // lock. In contrast to the conventional 2PL where read locks
+            // are released after logging, our protocol releases the read
+            // lock before the log is persisted. This difference demands
+            // that future write transactions modifying this key cannot commit
+            // prior to this read tx. This is achieved via updating the
+            // last_read_ts field of the cc entry, which pushes future
+            // transactions' commit timestamps larger than the largest commit
+            // timestamp of all read transactions that have released the read
+            // lock on the key.
+
             PostProcessResult &conflicting_txs = hd_res->Value();
 
             if (gap_ts > 0)
@@ -1294,6 +1298,7 @@ public:
                 cc_entry.last_read_ts_ =
                     std::max(cc_entry.last_read_ts_, commit_ts);
 
+                // Using locking protocol, this never happens.
                 if (cc_entry.key_lock_ptr_ != nullptr &&
                     cc_entry.key_lock_ptr_->HasWriteLock() &&
                     cc_entry.key_lock_ptr_->WriteLockTx() != txn)
@@ -1326,35 +1331,6 @@ public:
             {
                 hd_res->SetFinished();
             }
-        }
-        else if (req.Protocol() == CcProtocol::Locking)
-        {
-            // For 2PL, read validation is equivalent to releasing the read
-            // lock. In contrast to the conventional 2PL where read locks
-            // are released after logging, our protocol releases the read
-            // lock before the log is persisted. This difference demands
-            // that future write transactions modifying this key cannot commit
-            // prior to this read tx. This is achieved via updating the
-            // last_read_ts field of the cc entry, which pushes future
-            // transactions' commit timestamps larger than the largest commit
-            // timestamp of all read transactions that have released the read
-            // lock on the key.
-
-            if (gap_ts > 0)
-            {
-                cc_entry.gap_last_read_ts_ =
-                    std::max(cc_entry.gap_last_read_ts_, commit_ts);
-            }
-
-            if (key_ts > 0)
-            {
-                cc_entry.last_read_ts_ =
-                    std::max(cc_entry.last_read_ts_, commit_ts);
-            }
-
-            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
-            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
-            hd_res->SetFinished();
         }
 
         return true;

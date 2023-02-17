@@ -74,8 +74,7 @@ public:
                    const TxRecord *record,
                    OperationType operation_type,
                    uint32_t key_shard_code,
-                   CcHandlerResult<PostProcessResult> &hres,
-                   CcProtocol protocol) override;
+                   CcHandlerResult<PostProcessResult> &hres) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the prior
@@ -94,9 +93,7 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &ccentry_addr,
-                  CcHandlerResult<PostProcessResult> &hres,
-                  CcProtocol protocol,
-                  LockType lock_type) override;
+                  CcHandlerResult<PostProcessResult> &hres) override;
 
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's

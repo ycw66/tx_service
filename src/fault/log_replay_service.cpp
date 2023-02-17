@@ -401,11 +401,13 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             CcEntryAddr catalog_cce_addr =
                 catalog_read_cc_result.Value().cce_addr_;
-            LockType catalog_lock_type =
-                catalog_read_cc_result.Value().lock_type_;
+            // LockType catalog_lock_type =
+            //     catalog_read_cc_result.Value().lock_type_;
             uint64_t catalog_version_ts = catalog_read_cc_result.Value().ts_;
-            ReadSetEntry catalog_read_set_entry = ReadSetEntry(
-                catalog_version_ts, CcProtocol::Locking, catalog_lock_type);
+            ReadSetEntry catalog_read_set_entry =
+                ReadSetEntry(catalog_version_ts);
+            // ReadSetEntry catalog_read_set_entry = ReadSetEntry(
+            //     catalog_version_ts, CcProtocol::Locking, catalog_lock_type);
 
             // Replay Split
             blob_offset += table_name_len;

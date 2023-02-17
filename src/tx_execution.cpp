@@ -1055,19 +1055,13 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                 if (read_res.rec_status_ == RecordStatus::Unknown)
                 {
                     // Only used to release lock.
-                    add_res = rw_set_.AddRead(read_res.cce_addr_,
-                                              0,
-                                              read_.protocol_,
-                                              read_res.lock_type_,
-                                              table_name);
+                    add_res =
+                        rw_set_.AddRead(read_res.cce_addr_, 0, table_name);
                 }
                 else
                 {
-                    add_res = rw_set_.AddRead(read_res.cce_addr_,
-                                              read_res.ts_,
-                                              read_.protocol_,
-                                              read_res.lock_type_,
-                                              table_name);
+                    add_res = rw_set_.AddRead(
+                        read_res.cce_addr_, read_res.ts_, table_name);
                 }
                 if (!add_res)
                 {
@@ -1612,11 +1606,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->rec_status_ != RecordStatus::Unknown
                             ? cc_scan_tuple->key_ts_
                             : 0;
-                    bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                                   read_ts,
-                                                   scanner.protocol_,
-                                                   scan_tuple_lock_type,
-                                                   &table_name);
+                    bool add_res = rw_set_.AddRead(
+                        cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
                         void_resp_->FinishError(
@@ -1828,11 +1819,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->rec_status_ != RecordStatus::Unknown
                             ? cc_scan_tuple->key_ts_
                             : 0;
-                    bool add_res = rw_set_.AddRead(cc_scan_tuple->cce_addr_,
-                                                   read_ts,
-                                                   scanner.protocol_,
-                                                   scan_tuple_lock_type,
-                                                   &table_name);
+                    bool add_res = rw_set_.AddRead(
+                        cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
                         void_resp_->FinishError(
@@ -2128,11 +2116,8 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
 
     const ReadKeyResult &read_res =
         lock_write_ranges.lock_range_result_.Value();
-    rw_set_.AddRead(read_res.cce_addr_,
-                    read_res.ts_,
-                    CcProtocol::Locking,
-                    LockType::ReadLock,
-                    &lock_write_ranges.range_table_name_);
+    rw_set_.AddRead(
+        read_res.cce_addr_, read_res.ts_, &lock_write_ranges.range_table_name_);
 
     const TxKey *write_key = lock_write_ranges.write_key_it_->first;
     assert(range_start_key == nullptr || !(*write_key < *range_start_key));
@@ -2377,9 +2362,7 @@ void TransactionExecution::Process(ValidateOperation &validate)
                               0,
                               commit_ts_,
                               cce_addr,
-                              validate.hd_result_,
-                              read_entry.protocol_,
-                              read_entry.lock_type_);
+                              validate.hd_result_);
         }
     }
 
@@ -2770,8 +2753,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    write_entry.rec_.get(),
                                    write_entry.op_,
                                    write_entry.key_shard_code_,
-                                   post_process.hd_result_,
-                                   protocol_);
+                                   post_process.hd_result_);
                 ++idx;
             }
         }
@@ -2818,8 +2800,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                         nullptr,
                         write_entry.op_,
                         write_entry.key_shard_code_,
-                        post_process.hd_result_,
-                        protocol_);
+                        post_process.hd_result_);
 
                     ++idx;
                 }
@@ -2846,9 +2827,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                   0,
                                   0,
                                   cce_addr,
-                                  post_process.hd_result_,
-                                  read_entry.protocol_,
-                                  read_entry.lock_type_);
+                                  post_process.hd_result_);
                 ++idx;
             }
         }
@@ -3030,9 +3009,7 @@ void TransactionExecution::ReleaseCatalogLock(
                           0,
                           commit_ts_,
                           cce_addr,
-                          catalog_hd_result,
-                          read_entry.protocol_,
-                          read_entry.lock_type_);
+                          catalog_hd_result);
     }
     assert(ref_cnt == 0);
 }
@@ -3364,9 +3341,7 @@ void TransactionExecution::Process(PostReadOperation &post_read_operation)
                       0,
                       commit_ts_,
                       *cce_addr,
-                      post_read_operation.hd_result_,
-                      read_set_entry->protocol_,
-                      read_set_entry->lock_type_);
+                      post_read_operation.hd_result_);
 }
 
 void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
@@ -3504,9 +3479,7 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &lock_op)
                           0,
                           commit_ts_,
                           tpl.cce_addr_,
-                          lock_op.hd_result_,
-                          lock_op.scanner_->protocol_,
-                          tpl.lock_type_);
+                          lock_op.hd_result_);
     }
 }
 

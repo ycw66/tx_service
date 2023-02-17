@@ -126,8 +126,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    CcProtocol protocol)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     CcMessage send_msg;
 
@@ -169,7 +168,6 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
     post_commit->set_key_shard_code(key_shard_code);
-    post_commit->set_protocol(ToRemoteType::ConvertProtocol(protocol));
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -251,9 +249,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<PostProcessResult> &hres,
-    CcProtocol protocol,
-    LockType lock_type)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     CcMessage send_msg;
 
@@ -274,8 +270,6 @@ void txservice::remote::RemoteCcHandler::PostRead(
     vali->set_commit_ts(commit_ts);
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
-    vali->set_protocol(ToRemoteType::ConvertProtocol(protocol));
-    vali->set_lock_type(ToRemoteType::ConvertLockType(lock_type));
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }

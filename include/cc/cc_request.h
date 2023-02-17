@@ -492,11 +492,6 @@ public:
         return cc_op_;
     }
 
-    // LockType GetLockType() const
-    // {
-    //     return lock_type_;
-    // }
-
     TxKey *DecodedKey() const
     {
         return decoded_key_ == nullptr ? nullptr : decoded_key_.get();
@@ -566,11 +561,10 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res,
-               CcProtocol proto)
+               CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number, proto);
+            nullptr, res, addr->NodeGroupId(), tx_number);
 
         cce_addr_ = addr;
         commit_ts_ = ts;
@@ -599,11 +593,10 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res,
-               CcProtocol proto)
+               CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number, proto);
+            nullptr, res, addr->NodeGroupId(), tx_number);
 
         cce_addr_ = addr;
         commit_ts_ = ts;
@@ -871,18 +864,15 @@ public:
                uint64_t commit_ts,
                uint64_t key_ts,
                uint64_t gap_ts,
-               CcHandlerResult<PostProcessResult> *res,
-               CcProtocol protocol,
-               LockType lock_type)
+               CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostReadCc, PostProcessResult>::Reset(
-            nullptr, res, addr->NodeGroupId(), tx_number, protocol);
+            nullptr, res, addr->NodeGroupId(), tx_number);
 
         cce_addr_ = addr;
         commit_ts_ = commit_ts;
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
-        lock_type_ = lock_type;
         res->Value().Clear();
 
         const LruEntry *lru_entry =
@@ -910,22 +900,11 @@ public:
         return gap_ts_;
     }
 
-    LockType GetLockType() const
-    {
-        return lock_type_;
-    }
-
-    void SetLockType(LockType lock_type)
-    {
-        lock_type_ = lock_type;
-    }
-
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
     uint64_t key_ts_;
     uint64_t gap_ts_;
-    LockType lock_type_;
 };
 
 struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>

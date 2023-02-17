@@ -113,7 +113,7 @@ public:
                                     uint64_t cce_ptr,
                                     int64_t term,
                                     uint32_t core_id,
-                                    uint32_t shard_id,
+                                    uint32_t ng_id,
                                     bool is_ckpt_delta = false) = 0;
 
     virtual const ScanTuple *LastTuple() const = 0;
