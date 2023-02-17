@@ -69,7 +69,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
 
 void TransactionExecution::Reset(CcProtocol proto)
 {
-    cache_miss_read_cce_addr_.SetCce(0, -1, 0);
+    cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
     tx_term_ = -1;
@@ -150,10 +150,6 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::REQUESTED_NODE_NOT_LEADER:
         return TxErrorCode::CC_REQ_FOLLOWER;
 
-    case CcErrorCode::UNDEFINED_ERR:
-    default:
-        return TxErrorCode::UNDEFINED_ERR;
-
     case CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH:
     case CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS:
         return TxErrorCode::OCC_BREAK_REPEATABLE_READ;
@@ -173,6 +169,16 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 
     case CcErrorCode::DUPLICATE_INSERT_ERR:
         return TxErrorCode::DUPLICATE_KEY;
+
+    case CcErrorCode::NG_TERM_CHANGED:
+        return TxErrorCode::NG_TERM_CHANGED;
+
+    case CcErrorCode::REQUEST_LOST:
+        return TxErrorCode::REQUEST_LOST;
+
+    case CcErrorCode::UNDEFINED_ERR:
+    default:
+        return TxErrorCode::UNDEFINED_ERR;
     }
 }
 
@@ -1090,7 +1096,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
         else
         {
-            cache_miss_read_cce_addr_.SetCce(0, -1, 0);
+            cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
         }
 
         rec_resp_->Finish(read_res.rec_status_);
@@ -2230,7 +2236,8 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
         else
         {
             DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
-                        << acquire_write.hd_result_.ErrorMsg();
+                        << acquire_write.hd_result_.ErrorMsg() << "  "
+                        << (int) acquire_write.hd_result_.ErrorCode();
             bool_resp_->SetErrorCode(
                 ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         }

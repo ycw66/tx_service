@@ -224,7 +224,8 @@ public:
                     {
                         cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                         ng_term,
-                                        req.NodeGroupId());
+                                        req.NodeGroupId(),
+                                        shard_->LocalCoreId());
                     }
                     else
                     {
@@ -253,7 +254,8 @@ public:
                 assert(cce_ptr != nullptr);
                 cce_addr.SetCce(reinterpret_cast<uint64_t>(cce_ptr),
                                 ng_term,
-                                req.NodeGroupId());
+                                req.NodeGroupId(),
+                                shard_->LocalCoreId());
                 req.SetCcePtr(cce_ptr);
             }
         }
@@ -292,7 +294,8 @@ public:
                     *target_key, req.Txn(), cce_ptr);
             cce_addr.SetInsert(reinterpret_cast<uint64_t>(insert_entry.get()),
                                ng_term,
-                               req.NodeGroupId());
+                               req.NodeGroupId(),
+                               shard_->LocalCoreId());
 
             cc_entry.insert_intention_set_.emplace(&insert_entry->key_,
                                                    std::move(insert_entry));
@@ -752,7 +755,8 @@ public:
                             acquire_all_result.local_cce_addr_.SetCce(
                                 reinterpret_cast<uint64_t>(cce_ptr),
                                 ng_term,
-                                req.NodeGroupId());
+                                req.NodeGroupId(),
+                                shard_->LocalCoreId());
                         }
 
                         req.SetCcePtr(cce_ptr);
@@ -873,7 +877,8 @@ public:
                     acquire_all_result.local_cce_addr_.SetCce(
                         reinterpret_cast<uint64_t>(cce_ptr),
                         ng_term,
-                        req.NodeGroupId());
+                        req.NodeGroupId(),
+                        shard_->LocalCoreId());
                     acquire_all_result.commit_ts_ = cc_entry.commit_ts_;
                     acquire_all_result.node_term_ = ng_term;
                 }
@@ -1380,6 +1385,28 @@ public:
             }
         });
 
+        // To avoid lock the record and simulate message missed.
+        CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+            if (req.CcePtr() != nullptr)
+            {
+                LOG(INFO) << "FaultInject  remote_read_msg_missed"
+                          << "txID: " << req.Txn();
+                hd_res->SetFinished();
+
+                return true;
+            }
+        });
+
+        // To avoid lock the record and simulate term changed.
+        CODE_FAULT_INJECTOR("block_req_term_changed", {
+            if (req.CcePtr() != nullptr)
+            {
+                LOG(INFO) << "FaultInject  block_req_term_changed";
+                hd_res->SetFinished();
+                return true;
+            }
+        });
+
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = -1;
         if (req.IsInRecovering())
@@ -1596,7 +1623,8 @@ public:
                 req.SetCcePtr(cce);
                 cce_addr.SetCce(reinterpret_cast<uint64_t>(cce),
                                 ng_term,
-                                req.NodeGroupId());
+                                req.NodeGroupId(),
+                                shard_->LocalCoreId());
 
                 // Try to acquire lock
                 std::tie(acquired_lock, err_code) =
@@ -1819,7 +1847,7 @@ public:
         hd_res->SetFinished();
 
         return true;
-    }
+    }  // namespace txservice
 
     bool Execute(remote::RemoteReadOutside &req) override
     {
@@ -1994,9 +2022,9 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        // Before the scan open request is enqueued, the local node's term is
-        // obtained and kept in the cc request. This is to avoid getting the
-        // node's terms repeatedly in each core, as the scan request is
+        // Before the scan open request is enqueued, the local node's term
+        // is obtained and kept in the cc request. This is to avoid getting
+        // the node's terms repeatedly in each core, as the scan request is
         // dispatched to all cores.
 
         uint32_t ng_id = req.NodeGroupId();
@@ -5462,9 +5490,9 @@ protected:
     }
 
     /**
-     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map scan.
-     * For template_cc_map, start from it's gap;
-     * for range_cc_map, start from it's key and gap.
+     * Whether ScanGap or ScanBoth depends on whether this is range_cc_map
+     * scan. For template_cc_map, start from it's gap; for range_cc_map,
+     * start from it's key and gap.
      * @param it
      * @param is_include_floor_cce
      * @return
@@ -5609,9 +5637,9 @@ protected:
      *
      * @param key Search key
      * @param inclusive Whether or not the start key is included in the scan
-     * @param is_include_floor_cce This param is used only by range_cc_map scan,
-     * and is always true. Range scan searches for the floor of the search key
-     * and returns both its key and gap.
+     * @param is_include_floor_cce This param is used only by range_cc_map
+     * scan, and is always true. Range scan searches for the floor of the
+     * search key and returns both its key and gap.
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
      * ValueT>>::const_iterator, ScanType> A pair of a forward map iterator
      * starting from the start cc entry and whether the scan includes the
@@ -5678,8 +5706,8 @@ protected:
      * @param inclusive Whether or not the start key is included in the scan
      * @return std::pair<typename std::map<KeyT, CcEntry<KeyT,
      * ValueT>>::const_iterator, ScanType> A pair of a backward map iterator
-     * starting from the start cc entry and whether the scan includes the start
-     * cc entry's key or gap or both.
+     * starting from the start cc entry and whether the scan includes the
+     * start cc entry's key or gap or both.
      */
     std::pair<Iterator, ScanType> BackwardScanStart(const KeyT &key,
                                                     bool inclusive)
@@ -5823,8 +5851,10 @@ protected:
         }
 
         tuple->gap_ts_ = include_gap ? cce->gap_commit_ts_ : 0;
-        tuple->cce_addr_.SetCce(
-            reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
+        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
+                                ng_term,
+                                ng_id,
+                                shard_->LocalCoreId());
 
         typed_cache->AddScanTupleSize(tuple_size);
     }
@@ -5937,8 +5967,10 @@ protected:
     {
         tuple->key_ts_ = 0;
         tuple->gap_ts_ = cce->gap_commit_ts_;
-        tuple->cce_addr_.SetCce(
-            reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
+        tuple->cce_addr_.SetCce(reinterpret_cast<uint64_t>(cce),
+                                ng_term,
+                                ng_id,
+                                shard_->LocalCoreId());
     }
 
     void ScanGap(const KeyT *key,

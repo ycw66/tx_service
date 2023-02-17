@@ -112,6 +112,7 @@ public:
                                     uint64_t gap_ts,
                                     uint64_t cce_ptr,
                                     int64_t term,
+                                    uint32_t core_id,
                                     uint32_t shard_id,
                                     bool is_ckpt_delta = false) = 0;
 
@@ -184,6 +185,7 @@ public:
                             uint64_t gap_ts,
                             uint64_t cce_ptr,
                             int64_t term,
+                            uint32_t core_id,
                             uint32_t ng_id,
                             bool is_ckpt_delta = false) override
     {
@@ -219,7 +221,7 @@ public:
         }
 
         scan_tuple->gap_ts_ = gap_ts;
-        scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id);
+        scan_tuple->cce_addr_.SetCce(cce_ptr, term, ng_id, core_id);
 
         ++size_;
         return scan_tuple;

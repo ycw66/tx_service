@@ -291,10 +291,11 @@ public:
                 if (tx_pair.second.wlock_ts_ != 0)
                 {
                     min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
-                    // check and recover holding write lock transactions.
-                    CheckRecoverTx(
-                        tx_pair.first, tx_pair.second, cc_ng_id, cc_ng_term);
                 }
+
+                // check and recover holding write lock transactions.
+                CheckRecoverTx(
+                    tx_pair.first, tx_pair.second, cc_ng_id, cc_ng_term);
             }
         }
 

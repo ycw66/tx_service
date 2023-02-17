@@ -570,5 +570,23 @@ private:
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
 };
+
+struct RemoteBlockReqCheckCc : public CcRequestBase
+{
+public:
+    RemoteBlockReqCheckCc()
+    {
+    }
+    virtual ~RemoteBlockReqCheckCc() = default;
+    RemoteBlockReqCheckCc(const RemoteBlockReqCheckCc &rhs) = delete;
+    RemoteBlockReqCheckCc(RemoteBlockReqCheckCc &&rhs) = delete;
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    bool Execute(CcShard &ccs) override;
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+};
 }  // namespace remote
 }  // namespace txservice

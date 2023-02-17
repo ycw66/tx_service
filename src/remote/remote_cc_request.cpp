@@ -2,6 +2,7 @@
 
 #include <string_view>
 
+#include "cc/cc_handler_result.h"
 #include "cc/ccm_scanner.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_cc_handler.h"
@@ -18,6 +19,13 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
     cc_res_.post_lambda_ =
         [this](CcHandlerResult<std::vector<AcquireKeyResult>> *res)
     {
+        CODE_FAULT_INJECTOR("remote_acquire_msg_missed", {
+            LOG(INFO) << "FaultInject  remote_acquire_msg_missed";
+            FaultInject::Instance().InjectFault("remote_acquire_msg_missed",
+                                                "remove");
+            return;
+        });
+
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
@@ -48,6 +56,7 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
                 resp_addr->set_insert_ptr(addr.InsertPtr());
             }
             resp_addr->set_term(addr.Term());
+            resp_addr->set_core_id(addr.CoreId());
         }
 
         ACTION_FAULT_INJECTOR("remote_acquire_before_sendmessage");
@@ -65,7 +74,7 @@ void txservice::remote::RemoteAcquire::Reset(
 
     cc_res_.Reset();
     cc_res_.Value().resize(1);
-    cc_res_.Value()[0].cce_addr_.SetCce(0, -1);
+    cc_res_.Value()[0].cce_addr_.SetCce(0, -1, 0);
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
@@ -124,6 +133,7 @@ void txservice::remote::RemoteAcquire::Acknowledge()
         resp_addr->set_insert_ptr(addr.InsertPtr());
     }
     resp_addr->set_term(addr.Term());
+    resp_addr->set_core_id(addr.CoreId());
 
     const AcquireRequest &req = input_msg_->acquire_req();
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -280,7 +290,10 @@ void txservice::remote::RemotePostRead::Reset(
     const ValidateRequest &req = input_msg->validate_req();
     const CceAddr_msg &cce_addr = req.cce_addr();
 
-    cce_addr_.SetCce(cce_addr.cce_ptr(), cce_addr.term(), req.node_group_id());
+    cce_addr_.SetCce(cce_addr.cce_ptr(),
+                     cce_addr.term(),
+                     req.node_group_id(),
+                     cce_addr.core_id());
 
     PostReadCc::Reset(&cce_addr_,
                       input_msg->tx_number(),
@@ -308,6 +321,13 @@ txservice::remote::RemoteRead::RemoteRead()
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
     {
+        CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+            LOG(INFO) << "FaultInject  remote_read_msg_missed";
+            FaultInject::Instance().InjectFault("remote_read_msg_missed",
+                                                "remove");
+            return;
+        });
+
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
@@ -330,6 +350,7 @@ txservice::remote::RemoteRead::RemoteRead()
             CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
             cce_addr_msg->set_cce_ptr(read_result.cce_addr_.CcePtr());
             cce_addr_msg->set_term(read_result.cce_addr_.Term());
+            cce_addr_msg->set_core_id(read_result.cce_addr_.CoreId());
         }
 
         const ReadRequest &req = input_msg_->read_req();
@@ -370,7 +391,7 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
         break;
     }
 
-    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10);
+    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10, 0);
 
     ReadResponse *resp = output_msg_.mutable_read_resp();
     resp->clear_record();
@@ -443,6 +464,7 @@ void txservice::remote::RemoteRead::Acknowledge()
         resp_addr->set_insert_ptr(addr.InsertPtr());
     }
     resp_addr->set_term(addr.Term());
+    resp_addr->set_core_id(addr.CoreId());
 
     const ReadRequest &req = input_msg_->read_req();
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);
@@ -490,13 +512,15 @@ void txservice::remote::RemotePostWrite::Reset(
     {
         cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
                             cce_addr_msg.term(),
-                            post_commit.node_group_id());
+                            post_commit.node_group_id(),
+                            cce_addr_msg.core_id());
     }
     else
     {
         cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
                          cce_addr_msg.term(),
-                         post_commit.node_group_id());
+                         post_commit.node_group_id(),
+                         cce_addr_msg.core_id());
     }
 
     uint64_t commit_ts = post_commit.commit_ts();
@@ -991,8 +1015,10 @@ void txservice::remote::RemoteReadOutside::Reset(
     const ReadOutsideRequest &req = input_msg->read_outside_req();
 
     assert(req.cce_addr().cce_ptr() != 0);
-    cce_addr_.SetCce(
-        req.cce_addr().cce_ptr(), req.cce_addr().term(), req.node_group_id());
+    cce_addr_.SetCce(req.cce_addr().cce_ptr(),
+                     req.cce_addr().term(),
+                     req.node_group_id(),
+                     req.cce_addr().core_id());
     rec_status_ = ToLocalType::ConvertRecordStatusType(req.rec_status());
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
@@ -1266,6 +1292,74 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
     resp->set_error_code(err);
 
     const AbortTransactionRequest &req = input_msg_->abort_tran_req();
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+    hd_->RecycleCcMsg(std::move(input_msg_));
+    return true;
+}
+
+void txservice::remote::RemoteBlockReqCheckCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_blocked_check_req());
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
+{
+    const BlockedCcReqCheckRequest &req = input_msg_->blocked_check_req();
+    const CceAddr_msg &caddr = req.cce_addr();
+    AckStatus status;
+
+    if (!Sharder::Instance().CheckLeaderTerm(req.node_group_id(), caddr.term()))
+    {
+        status = AckStatus::ErrorTerm;
+    }
+    else
+    {
+        LruEntry *lru_entry = nullptr;
+        if (caddr.entry_ptr_case() == CceAddr_msg::EntryPtrCase::kInsertPtr)
+        {
+            lru_entry = reinterpret_cast<LruEntry *>(caddr.insert_ptr());
+        }
+        else
+        {
+            lru_entry = reinterpret_cast<LruEntry *>(caddr.cce_ptr());
+        }
+
+        NonBlockingLock &block = lru_entry->GetKeyLock();
+        bool b = block.FindQueueRequest(input_msg_->tx_number());
+        status = (b ? AckStatus::BlockQueue : AckStatus::Finished);
+    }
+
+    CODE_FAULT_INJECTOR("block_req_term_changed", {
+        LOG(INFO) << "FaultInject  block_req_term_changed";
+        status = AckStatus::ErrorTerm;
+        FaultInject::Instance().InjectFault("block_req_term_changed", "remove");
+    });
+
+    output_msg_.set_type(tr::CcMessage::MessageType::
+                             CcMessage_MessageType_BlockedCcReqCheckResponse);
+
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
+
+    BlockedCcReqCheckResponse *resp = output_msg_.mutable_blocked_check_resp();
+    resp->set_req_status((int32_t) status);
+    resp->set_result_temp_type(
+        input_msg_->blocked_check_req().result_temp_type());
+
     hd_->SendMessageToNode(req.src_node_id(), output_msg_);
     hd_->RecycleCcMsg(std::move(input_msg_));
     return true;

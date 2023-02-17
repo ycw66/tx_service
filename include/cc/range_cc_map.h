@@ -226,7 +226,8 @@ public:
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
             cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
                             ng_term,
-                            req.NodeGroupId());
+                            req.NodeGroupId(),
+                            shard_->LocalCoreId());
 
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
             *range_rec = *(floor_cce->payload_);

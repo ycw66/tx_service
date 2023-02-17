@@ -213,41 +213,61 @@ void ReadOperation::Forward(TransactionExecution *txm)
         txm->PostProcess(*this);
 #endif
     }
-    else if (cce_addr.Term() < 0 && txm->IsTimeOut() ||
-             !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                  txm->TxTerm()))
+    else
     {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.Term<0,IsTimeout || TxNodeFail",
-            txm,
-            (
-                [txm]() -> std::string
-                {
-                    return std::string(",\"tx_number\":")
-                        .append(std::to_string(txm->TxNumber()))
-                        .append(",\"term\":")
-                        .append(std::to_string(txm->TxTerm()));
-                }));
-        // For non-blocking concurrency control protocols, the read request
-        // is expected to return instantly. For lock-based protocols, if the
-        // read request is blocked, the cc node will send an acknowledgement to
-        // update the key's term. In either case, if the read key's term is not
-        // set, the tx has not received any response or acknowledgement from the
-        // key's cc node group. The read request is forced to be errored upon
-        // timeout.
-        // FIXME(lzx): Is it more appropriate to retry?
-        // If the tx node fails, also force the tx to abort instantly.
-        bool force_success = hd_result_.ForceError();
-        if (force_success)
+        bool timeout = txm->IsTimeOut();
+        CODE_FAULT_INJECTOR("read_operation_timeout", {
+            LOG(INFO) << "FaultInject  read_operation_timeout";
+            timeout = true;
+            FaultInject::Instance().InjectFault("read_operation_timeout",
+                                                "remove");
+        });
+
+        if (cce_addr.Term() < 0 && timeout ||
+            !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                 txm->TxTerm()))
         {
-            txm->PostProcess(*this);
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.Term<0,IsTimeout || TxNodeFail",
+                txm,
+                (
+                    [txm]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(txm->TxNumber()))
+                            .append(",\"term\":")
+                            .append(std::to_string(txm->TxTerm()));
+                    }));
+            // For non-blocking concurrency control protocols, the read request
+            // is expected to return instantly. For lock-based protocols, if the
+            // read request is blocked, the cc node will send an acknowledgement
+            // to update the key's term. In either case, if the read key's term
+            // is not set, the tx has not received any response or
+            // acknowledgement from the key's cc node group. The read request is
+            // forced to be errored upon timeout.
+            // FIXME(lzx): Is it more appropriate to retry?
+            // If the tx node fails, also force the tx to abort instantly.
+            bool force_success = hd_result_.ForceError();
+            if (force_success)
+            {
+                txm->PostProcess(*this);
+            }
+            // If forcing error fails, it means that the remote response returns
+            // normally and the tx has been moved from the waiting queue to the
+            // execution queue. Does not continue execution. The tx will be
+            // re-executed when the tx processor visits it in the execution
+            // queue.
         }
-        // If forcing error fails, it means that the remote response returns
-        // normally and the tx has been moved from the waiting queue to the
-        // execution queue. Does not continue execution. The tx will be
-        // re-executed when the tx processor visits it in the execution
-        // queue.
+        else if (cce_addr.Term() > 0 && timeout)
+        {
+            txm->handler->BlockCcReqCheck(txm->TxNumber(),
+                                          txm->TxTerm(),
+                                          txm->CommandId(),
+                                          cce_addr,
+                                          &hd_result_,
+                                          ResultTemplateType::ReadKeyResult);
+        }
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
     // arbitrarily long after the read request is acknowledged, we still
@@ -328,7 +348,7 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
         int64_t term = addr.Term();
         if (term < 0)
         {
-            write_entry.cce_addr_.SetCce(0, -1);
+            write_entry.cce_addr_.SetCce(0, -1, 0);
             continue;
         }
         else
@@ -377,26 +397,57 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
         AggregateAcquiredKeys(txm);
         txm->PostProcess(*this);
     }
-    else if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 &&
-                 txm->IsTimeOut() ||
-             !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                  txm->TxTerm()))
+    else
     {
-        // FIXME(lzx): Is it more appropriate to retry if remote_ack_cnt_>0 ?
-        // If the tx node fails, force the tx to abort instantly.
-        // TODO: for 2PL, the tx may be blocked arbitrarily long, even after all
-        // acquire requests are acknowledged. We still need to periodically
-        // check liveness of the remote node.
-        bool success = hd_result_.ForceError();
-        if (success)
+        bool timeout = txm->IsTimeOut();
+        CODE_FAULT_INJECTOR("acquire_operation_timeout", {
+            LOG(INFO)
+                << "FaultInject  acquire_operation_timeout remote_ack_cnt_:"
+                << remote_ack_cnt_;
+            timeout = true;
+            FaultInject::Instance().InjectFault("acquire_operation_timeout",
+                                                "remove");
+        });
+
+        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout ||
+            !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
+                                                 txm->TxTerm()))
         {
-            AggregateAcquiredKeys(txm);
-            txm->PostProcess(*this);
+            // FIXME(lzx): Is it more appropriate to retry if remote_ack_cnt_>0
+            // ? If the tx node fails, force the tx to abort instantly.
+            // TODO: for 2PL, the tx may be blocked arbitrarily long, even after
+            // all acquire requests are acknowledged. We still need to
+            // periodically check liveness of the remote node.
+            bool success = hd_result_.ForceError();
+            if (success)
+            {
+                AggregateAcquiredKeys(txm);
+                txm->PostProcess(*this);
+            }
+            // Else, all acquire-write requests finish normally. The tx must
+            // have been moved from the waiting queue to the execution queue.
+            // Does not forword the tx now, as it will be re-executed when the
+            // tx processor visits the execution queue.
         }
-        // Else, all acquire-write requests finish normally. The tx must
-        // have been moved from the waiting queue to the execution queue.
-        // Does not forword the tx now, as it will be re-executed when the
-        // tx processor visits the execution queue.
+        else if (timeout)
+        {
+            std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
+            for (size_t i = 0; i < vct_akr.size(); i++)
+            {
+                AcquireKeyResult &akr = vct_akr[i];
+
+                if (akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                {
+                    txm->handler->BlockCcReqCheck(
+                        txm->TxNumber(),
+                        txm->TxTerm(),
+                        txm->CommandId(),
+                        akr.cce_addr_,
+                        &hd_result_,
+                        ResultTemplateType::AcquireKeyResult);
+                }
+            }
+        }
     }
 }
 

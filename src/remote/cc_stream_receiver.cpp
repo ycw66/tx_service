@@ -29,6 +29,7 @@ thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
 thread_local CcRequestPool<RemoteAbortTransactionCc> abort_tran_pool_;
+thread_local CcRequestPool<RemoteBlockReqCheckCc> blocked_req_check_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -214,12 +215,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     CceAddr_msg::EntryPtrCase::kInsertPtr)
                 {
                     acq_res.cce_addr_.SetInsert(cce_addr_res.insert_ptr(),
-                                                cce_addr_res.term());
+                                                cce_addr_res.term(),
+                                                cce_addr_res.core_id());
                 }
                 else
                 {
                     acq_res.cce_addr_.SetCce(cce_addr_res.cce_ptr(),
-                                             cce_addr_res.term());
+                                             cce_addr_res.term(),
+                                             cce_addr_res.core_id());
                 }
 
                 // Even though the role of remote_ack_cnt_ is to bookkeep how
@@ -243,6 +246,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
                 hd_res->SetFinished();
+            }
+            else
+            {
+                acq_res.last_vali_ts_ = 0;
+                acq_res.commit_ts_ = 0;
             }
         }
 
@@ -365,7 +373,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             RemotePostRead *vali_req = postread_pool_.NextRequest();
             TX_TRACE_ASSOCIATE(msg.get(), vali_req);
             vali_req->Reset(std::move(msg));
-            vali_req->Ccm()->shard_->Enqueue(vali_req);
+            local_shards_.EnqueueCcRequest(cce_addr.core_id(), vali_req);
         }
 
         break;
@@ -539,7 +547,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             {
                 const CceAddr_msg &cce_addr_msg = read_res.cce_addr();
                 read_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                                             cce_addr_msg.term());
+                                             cce_addr_msg.term(),
+                                             cce_addr_msg.core_id());
                 // CC entry's shard Id has been set when the read request was
                 // sent.
             }
@@ -629,7 +638,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
             TX_TRACE_ASSOCIATE(msg.get(), post_commit);
             post_commit->Reset(std::move(msg));
-            post_commit->Ccm()->shard_->Enqueue(post_commit);
+            local_shards_.EnqueueCcRequest(cce_addr_msg.core_id(), post_commit);
         }
 
         break;
@@ -730,6 +739,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                               tuple_msg.gap_ts(),
                                               tuple_msg.cce_addr().cce_ptr(),
                                               tuple_msg.cce_addr().term(),
+                                              tuple_msg.cce_addr().core_id(),
                                               ng_id,
                                               scanner.is_ckpt_delta_);
                 }
@@ -824,6 +834,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                           tuple_msg.gap_ts(),
                                           tuple_msg.cce_addr().cce_ptr(),
                                           tuple_msg.cce_addr().term(),
+                                          tuple_msg.cce_addr().core_id(),
                                           ng_id);
             }
         }
@@ -1081,7 +1092,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             local_shards_.EnqueueCcRequest(i, dead_lock_req);
         }
 
-        LOG(INFO) << "Receive DeadLockRequest";
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse:
@@ -1119,6 +1129,65 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionResponse:
     {
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest:
+    {
+        RemoteBlockReqCheckCc *req = blocked_req_check_pool_.NextRequest();
+        uint32_t core_id = msg->blocked_check_req().cce_addr().core_id();
+        req->Reset(std::move(msg));
+        local_shards_.EnqueueCcRequest(core_id, req);
+        break;
+    }
+    case CcMessage::MessageType::
+        CcMessage_MessageType_BlockedCcReqCheckResponse:
+    {
+        assert(msg->has_blocked_check_resp());
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx node has failed. Pointer stability does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+
+        const BlockedCcReqCheckResponse &resp = msg->blocked_check_resp();
+        ResultTemplateType type = (ResultTemplateType) resp.result_temp_type();
+
+        if (type == ResultTemplateType::AcquireKeyResult)
+        {
+            CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res =
+                reinterpret_cast<
+                    CcHandlerResult<std::vector<AcquireKeyResult>> *>(
+                    msg->handler_addr());
+            AckStatus status = (AckStatus) resp.req_status();
+            if (status == AckStatus::ErrorTerm)
+            {
+                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
+            }
+            else if (status == AckStatus::Finished)
+            {
+                hd_res->SetError(CcErrorCode::REQUEST_LOST);
+            }
+        }
+        else if (type == ResultTemplateType::ReadKeyResult)
+        {
+            CcHandlerResult<ReadKeyResult> *hd_res =
+                reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
+                    msg->handler_addr());
+            AckStatus status = (AckStatus) resp.req_status();
+            if (status == AckStatus::ErrorTerm)
+            {
+                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
+            }
+            else if (status == AckStatus::Finished)
+            {
+                hd_res->SetError(CcErrorCode::REQUEST_LOST);
+            }
+        }
+
         msg_pool_.enqueue(std::move(msg));
         break;
     }

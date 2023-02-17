@@ -1391,7 +1391,8 @@ const TxKey *CcEntry<KeyT, ValueT>::Key() const
 struct CcEntryAddr
 {
 public:
-    CcEntryAddr() : cce_ptr_(0), insert_ptr_(0), node_group_id_(0), term_(-1)
+    CcEntryAddr()
+        : cce_ptr_(0), insert_ptr_(0), node_group_id_(0), core_id_(0), term_(-1)
     {
     }
 
@@ -1399,6 +1400,7 @@ public:
         : cce_ptr_(rhs.cce_ptr_),
           insert_ptr_(rhs.insert_ptr_),
           node_group_id_(rhs.node_group_id_),
+          core_id_(rhs.core_id_),
           term_(rhs.term_.load(std::memory_order_acquire))
     {
     }
@@ -1424,6 +1426,7 @@ public:
         node_group_id_ = rhs.node_group_id_;
         term_.store(rhs.term_.load(std::memory_order_acquire),
                     std::memory_order_release);
+        core_id_ = rhs.core_id_;
 
         return *this;
     }
@@ -1453,34 +1456,43 @@ public:
         return term_.load(std::memory_order_acquire);
     }
 
-    void SetCce(uint64_t addr, int64_t term)
+    uint32_t CoreId() const
+    {
+        return core_id_;
+    }
+
+    void SetCce(uint64_t addr, int64_t term, uint32_t core_id)
     {
         cce_ptr_ = addr;
         insert_ptr_ = 0;
         term_.store(term, std::memory_order_release);
+        core_id_ = core_id;
     }
 
-    void SetCce(uint64_t addr, int64_t term, uint32_t ng)
+    void SetCce(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
     {
         cce_ptr_ = addr;
         insert_ptr_ = 0;
         node_group_id_ = ng;
         term_.store(term, std::memory_order_release);
+        core_id_ = core_id;
     }
 
-    void SetInsert(uint64_t addr, int64_t term)
+    void SetInsert(uint64_t addr, int64_t term, uint32_t core_id)
     {
         insert_ptr_ = addr;
         cce_ptr_ = 0;
         term_.store(term, std::memory_order_release);
+        core_id_ = core_id;
     }
 
-    void SetInsert(uint64_t addr, int64_t term, uint32_t ng)
+    void SetInsert(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
     {
         insert_ptr_ = addr;
         cce_ptr_ = 0;
         node_group_id_ = ng;
         term_.store(term, std::memory_order_release);
+        core_id_ = core_id;
     }
 
     void SetNodeGroupId(uint32_t ng_id)
@@ -1497,6 +1509,7 @@ private:
     uint64_t cce_ptr_;
     uint64_t insert_ptr_;
     uint32_t node_group_id_;
+    uint32_t core_id_;
     // The term of the cc node group to which the cc entry belongs. The variable
     // needs to be std::atomic, because for locking-based protocols the remote
     // node will send an acknowledge message to notify the tx when the

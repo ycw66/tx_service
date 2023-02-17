@@ -39,6 +39,7 @@ void CcHandlerResult<T>::SetFinished()
             }
         });
     TX_TRACE_DUMP(static_cast<T *>(&result_));
+
     if (ref_cnted_)
     {
         auto r = ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);

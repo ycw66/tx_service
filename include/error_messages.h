@@ -43,6 +43,8 @@ enum struct TxErrorCode
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,
+    NG_TERM_CHANGED,
+    REQUEST_LOST,
 };
 
 static const std::map<TxErrorCode, std::string> tx_error_messages{
@@ -75,6 +77,9 @@ static const std::map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
      "Failed at acquire write intent."},
     {TxErrorCode::DEAD_LOCK_ABORT, "Abort the transaction due to dead lock."},
+    {TxErrorCode::NG_TERM_CHANGED,
+     "The node group term changed and the related ccrequest was discarded."},
+    {TxErrorCode::REQUEST_LOST, "The returned message of ccrequest missed."},
 };
 
 enum struct CcErrorCode
@@ -136,6 +141,9 @@ enum struct CcErrorCode
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,
+
+    // Lost the request result
+    REQUEST_LOST,
 
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,

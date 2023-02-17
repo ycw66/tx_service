@@ -306,6 +306,13 @@ public:
      */
     uint64_t GetTsBaseValue() const;
 
+    void BlockCcReqCheck(uint64_t tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         const CcEntryAddr &cce_addr,
+                         CcHandlerResultBase *hres,
+                         ResultTemplateType type) override;
+
 private:
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is

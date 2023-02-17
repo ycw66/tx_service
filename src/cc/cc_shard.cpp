@@ -1196,7 +1196,7 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
                  itset++)
             {
                 std::vector<uint64_t> vct =
-                    (*itset)->GetKeyLock().GetBlockTxIds();
+                    (*itset)->GetKeyLock().GetBlockTxIds(iter->first);
                 if (vct.size() == 0)
                     continue;
 

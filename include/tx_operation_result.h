@@ -13,6 +13,20 @@ namespace txservice
 {
 class CcScanner;
 
+enum class AckStatus : unsigned char
+{
+    Unknown = 0,  // Not set ack status;
+    BlockQueue,   // The cc request is in block queue
+    Finished,     // THe cc request has been executed.
+    ErrorTerm     // cc node group term has changed
+};
+
+enum class ResultTemplateType
+{
+    AcquireKeyResult = 1,
+    ReadKeyResult
+};
+
 struct AcquireKeyResult
 {
     uint64_t last_vali_ts_{0};

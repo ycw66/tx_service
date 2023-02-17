@@ -399,6 +399,13 @@ public:
                           const TxKey *range_start_key = nullptr,
                           const TxKey *range_end_key = nullptr) = 0;
 
+    virtual void BlockCcReqCheck(uint64_t tx_number,
+                                 int64_t tx_term,
+                                 uint16_t command_id,
+                                 const CcEntryAddr &cce_addr,
+                                 CcHandlerResultBase *hres,
+                                 ResultTemplateType type) = 0;
+
     // table_schema_op_pool_ is introduced to ensure the CcHandlerResult pointer
     // validation: if failover didn't happen, the pointer receivied from remote
     // PostWriteAll response CcMessage should always be valid(memory not freed).

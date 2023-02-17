@@ -200,6 +200,13 @@ public:
                              int64_t tx_term,
                              uint16_t command_id,
                              CcHandlerResult<bool> &hres);
+    void BlockCcReqCheck(uint32_t src_node_id,
+                         uint64_t tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         const CcEntryAddr &cce_addr,
+                         CcHandlerResultBase *hres,
+                         ResultTemplateType type);
 
 private:
     CcStreamSender &stream_sender_;

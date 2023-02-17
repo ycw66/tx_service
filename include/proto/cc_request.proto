@@ -78,6 +78,7 @@ message CceAddr_msg {
 		uint64 insert_ptr = 2;
 	}
 	int64 term = 3;
+	uint32 core_id = 4;
 }
 
 enum IsolationType {
@@ -454,6 +455,22 @@ message AbortTransactionResponse {
   int32 error_code = 1;
 }
 
+message BlockedCcReqCheckRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	CceAddr_msg cce_addr = 3;
+	// CcHandlerResult template type 
+	uint32 result_temp_type = 4;
+}
+
+message BlockedCcReqCheckResponse {
+	// To return the status of cc_request varified.
+    // Value from AckStatus
+	int32 req_status = 1;
+	// CcHandlerResult template type 
+	uint32 result_temp_type = 2;
+}
+
 message CcMessage {
 	enum MessageType {
 		Shutdown = 0;
@@ -486,6 +503,8 @@ message CcMessage {
 		DeadLockResponse = 38;
 		AbortTransactionRequest = 39;
 		AbortTransactionResponse = 40;
+		BlockedCcReqCheckRequest = 41;
+        BlockedCcReqCheckResponse = 42;
 	}
 
 	MessageType type = 1;
@@ -524,5 +543,7 @@ message CcMessage {
 		DeadLockResponse dead_lock_response = 46;
 		AbortTransactionRequest abort_tran_req = 47;
 		AbortTransactionResponse abort_tran_resp = 48;
+		BlockedCcReqCheckRequest blocked_check_req = 49;
+		BlockedCcReqCheckResponse blocked_check_resp = 50;
 	}
 }

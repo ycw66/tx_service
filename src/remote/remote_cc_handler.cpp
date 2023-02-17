@@ -146,11 +146,13 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     {
         cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
         cce_addr_msg->set_term(cce_addr.Term());
+        cce_addr_msg->set_core_id(cce_addr.CoreId());
     }
     else
     {
         cce_addr_msg->set_insert_ptr(cce_addr.InsertPtr());
         cce_addr_msg->set_term(cce_addr.Term());
+        cce_addr_msg->set_core_id(cce_addr.CoreId());
     }
 
     post_commit->clear_record();
@@ -268,6 +270,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     CceAddr_msg *cce_addr_msg = vali->mutable_cce_addr();
     cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
     cce_addr_msg->set_term(cce_addr.Term());
+    cce_addr_msg->set_core_id(cce_addr.CoreId());
     vali->set_commit_ts(commit_ts);
     vali->set_key_ts(key_ts);
     vali->set_gap_ts(gap_ts);
@@ -368,6 +371,7 @@ void txservice::remote::RemoteCcHandler::ReadOutside(
     CceAddr_msg *cce_msg = read_outside->mutable_cce_addr();
     cce_msg->set_cce_ptr(cce_addr.CcePtr());
     cce_msg->set_term(cce_addr.Term());
+    cce_msg->set_core_id(cce_addr.CoreId());
 
     read_outside->set_rec_status(is_deleted ? RecordStatusType::DELETED
                                             : RecordStatusType::NORMAL);
@@ -643,4 +647,44 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
 
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hres);
+}
+
+void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
+    uint32_t src_node_id,
+    uint64_t tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    const CcEntryAddr &cce_addr,
+    CcHandlerResultBase *hres,
+    ResultTemplateType type)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_tx_number(tx_number);
+
+    BlockedCcReqCheckRequest *req = send_msg.mutable_blocked_check_req();
+    req->set_src_node_id(src_node_id);
+    req->set_result_temp_type((uint32_t) type);
+
+    req->set_node_group_id(cce_addr.NodeGroupId());
+    CceAddr_msg *cce_addr_msg = req->mutable_cce_addr();
+    if (cce_addr.CcePtr() != 0)
+    {
+        cce_addr_msg->set_cce_ptr(cce_addr.CcePtr());
+        cce_addr_msg->set_term(cce_addr.Term());
+        cce_addr_msg->set_core_id(cce_addr.CoreId());
+    }
+    else
+    {
+        cce_addr_msg->set_insert_ptr(cce_addr.InsertPtr());
+        cce_addr_msg->set_term(cce_addr.Term());
+        cce_addr_msg->set_core_id(cce_addr.CoreId());
+    }
+
+    stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, hres);
 }

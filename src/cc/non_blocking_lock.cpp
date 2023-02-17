@@ -19,6 +19,11 @@ namespace txservice
  */
 void NonBlockingLock::UpgradeLock(TxNumber tx_number, LockType lock_type)
 {
+    CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+        LOG(INFO) << "FaultInject  remote_read_msg_missed";
+        return;
+    });
+
     // write lock needs to upgrade write intent as well.
     if (lock_type == LockType::WriteLock)
     {
@@ -343,7 +348,6 @@ void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
     // If releasing the current read lock may unblock anything, it may be the
     // write lock who is the head of the blocking queue, or a no lock pk read
     // directed from a sk scan.
-
     TryPopBlockingQueue(ccs);
 }
 
@@ -535,12 +539,17 @@ const std::unordered_set<TxNumber> &NonBlockingLock::ReadIntents() const
     return read_intentions_;
 }
 
-std::vector<TxNumber> NonBlockingLock::GetBlockTxIds()
+std::vector<TxNumber> NonBlockingLock::GetBlockTxIds(TxNumber exclude_id)
 {
     std::vector<uint64_t> vct;
     for (size_t i = 0; i < blocking_queue_.Size(); i++)
     {
         LockQueueEntry &lqe = blocking_queue_.Get(i);
+        if (lqe.req_->Txn() == exclude_id)
+        {
+            continue;
+        }
+
         vct.push_back(lqe.req_->Txn());
     }
 
@@ -559,5 +568,19 @@ void NonBlockingLock::AbortQueueRequest(TxNumber txid)
             i--;
         }
     }
+}
+
+bool NonBlockingLock::FindQueueRequest(TxNumber txid)
+{
+    for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)
+    {
+        const LockQueueEntry &ety = blocking_queue_.Get(i);
+        if (ety.req_->Txn() == txid)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 }  // namespace txservice

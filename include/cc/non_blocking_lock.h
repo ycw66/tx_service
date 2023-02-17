@@ -230,8 +230,9 @@ public:
 
         return debug_string;
     }
-    std::vector<TxNumber> GetBlockTxIds();
+    std::vector<TxNumber> GetBlockTxIds(TxNumber exclude_id);
     void AbortQueueRequest(TxNumber txid);
+    bool FindQueueRequest(TxNumber txid);
 
 private:
     struct LockQueueEntry

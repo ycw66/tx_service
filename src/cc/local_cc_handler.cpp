@@ -38,7 +38,7 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
     acquire_result.cce_addr_.SetNodeGroupId(ng_id);
-    acquire_result.cce_addr_.SetCce(0, -1);
+    acquire_result.cce_addr_.SetCce(0, -1, 0);
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -338,7 +338,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     CcEntryAddr &cce_addr = hres.Value().cce_addr_;
     cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, -1);
+    cce_addr.SetCce(0, -1, 0);
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -403,8 +403,10 @@ void txservice::LocalCcHandler::ReadOutside(
         ReadType read_type =
             is_deleted ? ReadType::OutsideDeleted : ReadType::OutsideNormal;
 
-        hres.Value().cce_addr_.SetCce(
-            cce_addr.CcePtr(), cce_addr.Term(), cce_addr.NodeGroupId());
+        hres.Value().cce_addr_.SetCce(cce_addr.CcePtr(),
+                                      cce_addr.Term(),
+                                      cce_addr.NodeGroupId(),
+                                      cce_addr.CoreId());
 
         ReadCc *req = read_pool.NextRequest();
         // A read-outside request brings a record into the cc map for caching.
@@ -473,7 +475,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
     cce_addr.SetNodeGroupId(cc_ng_id);
-    cce_addr.SetCce(0, term);
+    cce_addr.SetCce(0, term, 0);
 
     if (term < 0)
     {
@@ -1198,4 +1200,28 @@ uint32_t txservice::LocalCcHandler::GetNodeId() const
 uint64_t txservice::LocalCcHandler::GetTsBaseValue() const
 {
     return cc_shards_.TsBase();
+}
+
+void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
+                                                int64_t tx_term,
+                                                uint16_t command_id,
+                                                const CcEntryAddr &cce_addr,
+                                                CcHandlerResultBase *hres,
+                                                ResultTemplateType type)
+{
+    uint32_t ng_id = cce_addr.NodeGroupId();
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+    // If the ccrequest is in same node, it is not need to check. We think one
+    // node is stable and and it will always ok or the entire process crash.
+    if (dest_node_id != cc_shards_.node_id_)
+    {
+        remote_hd_.BlockCcReqCheck(cc_shards_.node_id_,
+                                   tx_number,
+                                   tx_term,
+                                   command_id,
+                                   cce_addr,
+                                   hres,
+                                   type);
+    }
 }
