@@ -7,6 +7,7 @@
 #include "tx_record.h"  // RecordStatus;
 #include "type.h"
 
+// NOTICE: The Conversion of Enum Type must not use default case.
 namespace txservice
 {
 
@@ -122,6 +123,10 @@ public:
             return RecordStatusType::UNDEFINED;
         case RecordStatus::VersionUnknown:
             return RecordStatusType::VERSIONUNDEFIND;
+        case RecordStatus::BaseVersionMiss:
+            return RecordStatusType::BaseVersionMiss;
+        case RecordStatus::ArchiveVersionMiss:
+            return RecordStatusType::ArchiveVersionMiss;
         default:
             assert(false);
             return RecordStatusType::UNDEFINED;
@@ -190,6 +195,7 @@ public:
         case IsolationType::Serializable:
             return IsolationLevel::Serializable;
         default:
+            assert(false);
             return IsolationLevel::ReadCommitted;
         }
     }
@@ -197,16 +203,16 @@ public:
     static txservice::CcProtocol ConvertProtocol(
         txservice::remote::CcProtocolType proto)
     {
-        if (proto == CcProtocolType::Locking)
+        switch (proto)
         {
-            return CcProtocol::Locking;
-        }
-        else if (proto == CcProtocolType::OccRead)
-        {
+        case CcProtocolType::Occ:
+            return CcProtocol::OCC;
+        case CcProtocolType::OccRead:
             return CcProtocol::OccRead;
-        }
-        else
-        {
+        case CcProtocolType::Locking:
+            return CcProtocol::Locking;
+        default:
+            assert(false);
             return CcProtocol::OCC;
         }
     }
@@ -214,25 +220,21 @@ public:
     static txservice::LockType ConvertLockType(
         txservice::remote::CcLockType lock_type)
     {
-        if (lock_type == CcLockType::NoLock)
+        switch (lock_type)
         {
+        case CcLockType::NoLock:
             return LockType::NoLock;
-        }
-        else if (lock_type == CcLockType::ReadIntent)
-        {
+        case CcLockType::ReadIntent:
             return LockType::ReadIntent;
-        }
-        else if (lock_type == CcLockType::ReadLock)
-        {
+        case CcLockType::ReadLock:
             return LockType::ReadLock;
-        }
-        else if (lock_type == CcLockType::WriteIntent)
-        {
+        case CcLockType::WriteIntent:
             return LockType::WriteIntent;
-        }
-        else
-        {
+        case CcLockType::WriteLock:
             return LockType::WriteLock;
+        default:
+            assert(false);
+            return LockType::NoLock;
         }
     }
 
@@ -258,13 +260,14 @@ public:
     static txservice::PostWriteType ConvertCommitType(
         txservice::remote::CommitType commit_type)
     {
-        if (commit_type == CommitType::PrepareCommit)
+        switch (commit_type)
         {
+        case CommitType::PrepareCommit:
             return PostWriteType::PrepareCommit;
-        }
-        else
-        {
-            assert(commit_type == CommitType::PostCommit);
+        case CommitType::PostCommit:
+            return PostWriteType::PostCommit;
+        default:
+            assert(false);
             return PostWriteType::PostCommit;
         }
     }
@@ -282,7 +285,12 @@ public:
             return RecordStatus::Unknown;
         case RecordStatusType::VERSIONUNDEFIND:
             return RecordStatus::VersionUnknown;
+        case RecordStatusType::BaseVersionMiss:
+            return RecordStatus::BaseVersionMiss;
+        case RecordStatusType::ArchiveVersionMiss:
+            return RecordStatus::ArchiveVersionMiss;
         default:
+            assert(false);
             return RecordStatus::Unknown;
         }
     }
@@ -298,8 +306,11 @@ public:
             return TableType::Secondary;
         case CcTableType::Catalog:
             return TableType::Catalog;
-        default:
+        case CcTableType::RangePartition:
             return TableType::RangePartition;
+        default:
+            assert(false);
+            return TableType::Primary;
         }
     }
 

@@ -453,18 +453,20 @@ public:
      * @param parent Pointer of the cc map to which the cc entry belongs
      */
     CcEntry(CcMap *parent)
-        : LruEntry(parent), payload_status_(RecordStatus::Unknown), archives_()
+        : LruEntry(parent),
+          payload_(nullptr),
+          payload_status_(RecordStatus::Unknown),
+          archives_()
     {
-        payload_ = std::make_unique<ValueT>();
     }
 
     CcEntry(CcMap *parent_map, CcPage<KeyT, ValueT> *parent_page)
         : LruEntry(parent_map),
+          payload_(nullptr),
           payload_status_(RecordStatus::Unknown),
           archives_(),
           parent_page_(parent_page)
     {
-        payload_ = std::make_unique<ValueT>();
     }
 
     ~CcEntry() = default;
@@ -530,7 +532,7 @@ public:
      */
     size_t ArchiveBeforeUpdate(TableType tbl_type)
     {
-        if (payload_status_ == RecordStatus::Unknown || commit_ts_ == 1U)
+        if (payload_status_ == RecordStatus::Unknown)
         {
             return 0;
         }
@@ -765,32 +767,34 @@ public:
         }
 
         rec.commit_ts_ = 1U;
-        if (ckpt_ts_ == 1U)
+        if (ckpt_ts_ == 0U)
         {
-            rec.payload_status_ = RecordStatus::Deleted;
+            // need fetch base table and archive table.
+            rec.payload_status_ = RecordStatus::VersionUnknown;
+        }
+        else if (ckpt_ts_ <= ts)
+        {
+            // only need fetch base table.
+            rec.payload_status_ = RecordStatus::BaseVersionMiss;
         }
         else
         {
-            if (ckpt_ts_ <= ts)
-            {
-                // need fetch base table
-                rec.payload_status_ = RecordStatus::Unknown;
-            }
-            else
-            {
-                rec.payload_status_ = RecordStatus::VersionUnknown;
-            }
+            // only need fetch archive table.
+            rec.payload_status_ = RecordStatus::ArchiveVersionMiss;
         }
     }
 
-    bool HasVisibleVersion(uint64_t ts) const
+    /**
+     * @brief For a read timestamp, is there a visible version in memory?
+     */
+    bool HasVisibleVersion(uint64_t read_ts) const
     {
-        if (commit_ts_ <= ts || ckpt_ts_ == 1U)
+        if (commit_ts_ <= read_ts)
         {
             return true;
         }
         if (archives_ != nullptr && !archives_->empty() &&
-            archives_->back().commit_ts_ <= ts)
+            archives_->back().commit_ts_ <= read_ts)
         {
             return true;
         }
@@ -832,13 +836,16 @@ public:
             ref.SetKey(std::move(key_uptr));
             ref.cce_ =
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
-            if (mvcc_enabled)
+            if (payload_status_ == RecordStatus::Normal)
             {
-                ref.SetPayload(payload_.get());
-            }
-            else
-            {
-                ref.SetPayload(std::make_unique<ValueT>(*payload_));
+                if (mvcc_enabled)
+                {
+                    ref.SetPayload(payload_.get());
+                }
+                else
+                {
+                    ref.SetPayload(std::make_unique<ValueT>(*payload_));
+                }
             }
             ref.payload_status_ = payload_status_;
             ref.commit_ts_ = commit_ts_;
@@ -889,13 +896,16 @@ public:
                             ref.SetKey(std::move(key_uptr));
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
-                            if (tbl_type != TableType::Secondary)
+                            if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                ref.SetPayload(it->payload_.get());  // pk
-                            }
-                            else
-                            {
-                                ref.SetPayload(payload_.get());  // sk
+                                if (tbl_type != TableType::Secondary)
+                                {
+                                    ref.SetPayload(it->payload_.get());  // pk
+                                }
+                                else
+                                {
+                                    ref.SetPayload(payload_.get());  // sk
+                                }
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
@@ -927,13 +937,16 @@ public:
                             ref.SetKey(key_ptr);
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
-                            if (tbl_type != TableType::Secondary)
+                            if (it->payload_status_ == RecordStatus::Normal)
                             {
-                                ref.SetPayload(it->payload_.get());  // pk
-                            }
-                            else
-                            {
-                                ref.SetPayload(payload_.get());  // sk
+                                if (tbl_type != TableType::Secondary)
+                                {
+                                    ref.SetPayload(it->payload_.get());  // pk
+                                }
+                                else
+                                {
+                                    ref.SetPayload(payload_.get());  // sk
+                                }
                             }
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;

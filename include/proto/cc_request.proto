@@ -114,6 +114,8 @@ enum RecordStatusType {
 	UNDEFINED = 1;
 	DELETED = 2;
 	VERSIONUNDEFIND=3;
+	BaseVersionMiss=4;
+	ArchiveVersionMiss=5;
 }
 
 enum CommitType {

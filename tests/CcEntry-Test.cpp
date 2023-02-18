@@ -325,33 +325,33 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     entry.payload_ = std::make_unique<CompositeRecord<int>>(12);
     //== CcEntry has been filled, but has no historical version.
 
-    // (read_ts: 5, ckpt_ts:0)->... => Unknown
-    {
-        uint64_t ts = 5;
-        VersionResultRecord<CompositeRecord<int>> rec;
-
-        entry.MvccGet(ts, TableType::Primary, rec);
-        REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
-    }
-
-    // (read_ts: 5, ckpt_ts=3, ckpt_ts<=read_ts)->... => Unknown
-    entry.ckpt_ts_ = 3;
-    {
-        uint64_t ts = 5;
-        VersionResultRecord<CompositeRecord<int>> rec;
-
-        entry.MvccGet(ts, TableType::Primary, rec);
-        REQUIRE(rec.payload_status_ == RecordStatus::Unknown);
-    }
-
-    // (read_ts: 5, ckpt_ts=8, ckpt_ts>read_ts)->... =>VesionUnknown
-    entry.ckpt_ts_ = 8;
+    // (read_ts: 5, ckpt_ts:0)->... => VersionUnknown
     {
         uint64_t ts = 5;
         VersionResultRecord<CompositeRecord<int>> rec;
 
         entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
+    }
+
+    // (read_ts: 5, ckpt_ts=3, ckpt_ts<=read_ts)->... => BaseVersionMiss
+    entry.ckpt_ts_ = 3;
+    {
+        uint64_t ts = 5;
+        VersionResultRecord<CompositeRecord<int>> rec;
+
+        entry.MvccGet(ts, TableType::Primary, rec);
+        REQUIRE(rec.payload_status_ == RecordStatus::BaseVersionMiss);
+    }
+
+    // (read_ts: 5, ckpt_ts=8, ckpt_ts>read_ts)->... =>ArchiveVesionMiss
+    entry.ckpt_ts_ = 8;
+    {
+        uint64_t ts = 5;
+        VersionResultRecord<CompositeRecord<int>> rec;
+
+        entry.MvccGet(ts, TableType::Primary, rec);
+        REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
 
     // (read_ts: 15)->... => 12 (latest version)
@@ -379,7 +379,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
     entry.AddArchiveRecords(records);
     REQUIRE(entry.ArchiveRecordsCount() == nums.size());
 
-    // (read_ts: 1)->... => VersionUnknown
+    // (read_ts: 1, ckpt_ts=8)->... => ArchiveVersionMiss
     {
         uint64_t ts = 1;
         uint64_t target = 1;
@@ -387,7 +387,7 @@ TEST_CASE("CcEntry MvccGet", "[cc-entry]")
 
         entry.MvccGet(ts, TableType::Primary, rec);
         REQUIRE(rec.commit_ts_ == static_cast<uint64_t>(target));
-        REQUIRE(rec.payload_status_ == RecordStatus::VersionUnknown);
+        REQUIRE(rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
     }
 
     // (read_ts: 2)->... => 2

@@ -546,37 +546,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             if (!read_res.is_ack())
             {
-                switch (read_res.rec_status())
+                read_result.rec_status_ =
+                    ToLocalType::ConvertRecordStatusType(read_res.rec_status());
+                if (read_res.rec_status() == RecordStatusType::NORMAL)
                 {
-                case RecordStatusType::NORMAL:
-                {
-                    read_result.rec_status_ = RecordStatus::Normal;
-
                     size_t offset = 0;
                     read_result.rec_->Deserialize(read_res.record().data(),
                                                   offset);
-
-                    break;
                 }
-                case RecordStatusType::DELETED:
-                {
-                    read_result.rec_status_ = RecordStatus::Deleted;
-                    break;
-                }
-                case RecordStatusType::UNDEFINED:
-                {
-                    read_result.rec_status_ = RecordStatus::Unknown;
-                    break;
-                }
-                case RecordStatusType::VERSIONUNDEFIND:
-                {
-                    read_result.rec_status_ = RecordStatus::VersionUnknown;
-                    break;
-                }
-                default:
-                    break;
-                }
-
                 read_result.ts_ = read_res.ts();
                 read_result.lock_type_ =
                     ToLocalType::ConvertLockType(read_res.lock_type());

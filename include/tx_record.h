@@ -32,13 +32,24 @@ enum struct RecordStatus
     /// </summary>
     RemoteUnknown,
     /// <summary>
-    /// Under MVCC-SnapshotIsolation, a tx read one of the historical
-    /// versions of a key, but the historical version is unknown and needs
-    /// to be retrieved from the data store.
-    //  Also, the historical version may be not in data store if the historical
-    //  versions are not flushed into data store before node crashing.
+    /// Under SnapshotIsolation, a transaction needs to read a historical
+    /// version of ccentry but the version is not in memory.
+    /// Case the checkpoint timestamp of ccentry was not set (eg. created
+    /// through log replay), we don't know whether the version to be read is in
+    /// "base table" or "mvcc_archives tables" in the data store.
     /// </summary>
-    VersionUnknown
+    VersionUnknown,
+    /// <summary>
+    /// Case the checkpoint timestamp of ccentry has been set and the checkpoint
+    /// version (the version in "base table") is just the expected version.
+    /// </summary>
+    BaseVersionMiss,
+    /// <summary>
+    /// Case the checkpoint timestamp of ccentry has been set but the checkpoint
+    /// timestamp is bigger than read timestamp. Then, the expected version may
+    /// be in "mvcc_archives tables".
+    /// </summary>
+    ArchiveVersionMiss,
 };
 
 struct TxRecord

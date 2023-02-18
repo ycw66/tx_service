@@ -557,39 +557,39 @@ public:
                     // checkpoint.
                     uint64_t recycle_ts = std::min(
                         shard_->GlobalMinSiTxStartTs(), cce.ckpt_ts_.load());
-
-                    const ValueT *curr_rec = cce.payload_.get();
-
                     shard_->DecrementMemory(
                         cce.KickOutArchiveRecords(recycle_ts));
                     size_t added_mem_usage = cce.ArchiveBeforeUpdate(Type());
                     shard_->mem_usage_ += added_mem_usage;
-
-                    // FIXME: when working with MySQL, the key contains a binary
-                    // image and a sturcture for unpack info. Unfortunately, the
-                    // unpack info is stored as part of the record. As a result,
-                    // if we want to preserve the full encoding of the key in
-                    // the data store when the row is deleted, we'd have to keep
-                    // the whole record in the cc entry. This is a bad design
-                    // and should be fixed: the unpack info is part of the key,
-                    // not the record.
-                    if (is_del)
-                    {
-                        cce.payload_ = std::make_unique<ValueT>(*curr_rec);
-                    }
                 }
 
                 cce.commit_ts_ = commit_ts;
 
-                if (Type() != TableType::Secondary ||
-                    cce.payload_status_ == RecordStatus::Unknown)
+                // FIXME: when working with MySQL, the key contains a binary
+                // image and a sturcture for unpack info. Unfortunately, the
+                // unpack info is stored as part of the record. As a result,
+                // if we want to preserve the full encoding of the key in
+                // the data store when the row is deleted, we'd have to keep
+                // the whole record in the cc entry. This is a bad design
+                // and should be fixed: the unpack info is part of the key,
+                // not the record.
+                //
+                // Now, all versions of SecondaryIndex key shared the unpack
+                // info in current version's payload, though the unpack info
+                // will not be used for deleted key, we must not change the
+                // payload of secondary key ccentry if it is not null.
+                if (Type() != TableType::Secondary || cce.payload_ == nullptr)
                 {
                     shard_->DecrementMemory(cce.PayloadMemUsage());
-                    if (payload_str == nullptr && !is_del)
+                    if (is_del)
+                    {
+                        cce.payload_ = nullptr;
+                    }
+                    else if (payload_str == nullptr)
                     {
                         cce.payload_ = std::make_unique<ValueT>(*commit_val);
                     }
-                    else if (!is_del)
+                    else
                     {
                         size_t offset = 0;
                         cce.payload_ = std::make_unique<ValueT>();
@@ -4364,6 +4364,10 @@ public:
                 }
                 else
                 {
+                    if (Type() != TableType::Secondary)
+                    {
+                        cce->payload_ = nullptr;
+                    }
                     cce->payload_status_ = RecordStatus::Deleted;
                 }
                 cce->commit_ts_ = req.CommitTs();
@@ -5791,8 +5795,11 @@ protected:
                 (is_ckpt_delta &&
                  v_rec.payload_status_ == RecordStatus::Deleted))
             {
-                tuple->RecordObj() = *v_rec.payload_ptr_;
-                tuple_size += v_rec.payload_ptr_->Size();
+                if (v_rec.payload_ptr_ != nullptr)
+                {
+                    tuple->RecordObj() = *v_rec.payload_ptr_;
+                    tuple_size += v_rec.payload_ptr_->Size();
+                }
             }
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
@@ -5819,8 +5826,11 @@ protected:
                 (is_ckpt_delta &&
                  cce->payload_status_ == RecordStatus::Deleted))
             {
-                tuple->RecordObj() = *(cce->payload_);
-                tuple_size += cce->payload_->Size();
+                if (cce->payload_ != nullptr)
+                {
+                    tuple->RecordObj() = *(cce->payload_);
+                    tuple_size += cce->payload_->Size();
+                }
             }
             tuple->rec_status_ = cce->payload_status_;
             tuple->key_ts_ = cce->commit_ts_;
@@ -5879,8 +5889,11 @@ protected:
                  v_rec.payload_status_ == RecordStatus::Deleted))
             {
                 tuple->clear_record();
-                v_rec.payload_ptr_->Serialize(*tuple->mutable_record());
-                tuple_size += v_rec.payload_ptr_->Size();
+                if (v_rec.payload_ptr_ != nullptr)
+                {
+                    v_rec.payload_ptr_->Serialize(*tuple->mutable_record());
+                    tuple_size += v_rec.payload_ptr_->Size();
+                }
             }
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 v_rec.payload_status_));
@@ -5909,8 +5922,11 @@ protected:
                  cce->payload_status_ == RecordStatus::Deleted))
             {
                 tuple->clear_record();
-                cce->payload_->Serialize(*tuple->mutable_record());
-                tuple_size += cce->payload_->Size();
+                if (cce->payload_ != nullptr)
+                {
+                    cce->payload_->Serialize(*tuple->mutable_record());
+                    tuple_size += cce->payload_->Size();
+                }
             }
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 cce->payload_status_));

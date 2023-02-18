@@ -5,8 +5,7 @@
 #include <thread>
 #include <unordered_map>
 
-#include "cc/cc_entry.h"  // LruEntry
-#include "cc/local_cc_shards.h"
+#include "cc/local_cc_shards.h"  // LocalCcShards
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 
 namespace txservice
