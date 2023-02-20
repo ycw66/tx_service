@@ -126,11 +126,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
                     // be a post read on the key in this range. The range cannot
                     // be changed before this tx finishes post-processing.
                     const ReadKeyResult &read_res = lock_range_result_.Value();
-                    txm->rw_set_.AddRead(read_res.cce_addr_,
-                                         read_res.ts_,
-                                         CcProtocol::Locking,
-                                         LockType::ReadLock,
-                                         &range_table_name_);
+                    txm->rw_set_.AddRead(
+                        read_res.cce_addr_, read_res.ts_, &range_table_name_);
                 }
 
                 txm->Process(*this);
@@ -189,9 +186,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
                                        0,
                                        0,
                                        lock_range_result_.Value().cce_addr_,
-                                       unlock_range_result_,
-                                       CcProtocol::Locking,
-                                       LockType::ReadLock);
+                                       unlock_range_result_);
 
                 // After the unlock range request is sent,
                 // lock_range_result_ is reset, so that when the tx machine
@@ -960,11 +955,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                     // be a post read on the key in this range. The range cannot
                     // be split or merged before the tx finishes
                     // post-processing.
-                    txm->rw_set_.AddRead(read_res.cce_addr_,
-                                         read_res.ts_,
-                                         CcProtocol::Locking,
-                                         LockType::ReadLock,
-                                         &range_table_name_);
+                    txm->rw_set_.AddRead(
+                        read_res.cce_addr_, read_res.ts_, &range_table_name_);
                 }
 
                 scan_state_->range_cce_addr_ = read_res.cce_addr_;
@@ -1042,9 +1034,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                                            0,
                                            0,
                                            scan_state_->range_cce_addr_,
-                                           unlock_range_result_,
-                                           CcProtocol::Locking,
-                                           LockType::ReadLock);
+                                           unlock_range_result_);
 
                     // After the unlock range request is sent,
                     // lock_range_result_ is reset. When the tx machine is
