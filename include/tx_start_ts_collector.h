@@ -27,10 +27,7 @@ public:
 
     uint64_t GlobalMinSiTxStartTs()
     {
-        CODE_FAULT_INJECTOR("stop_safely_clean_archives", {
-            std::cout << "stop_safely_clean_archives" << std::endl;
-            return 1U;
-        });
+        CODE_FAULT_INJECTOR("stop_safely_clean_archives", { return 1U; });
         return min_start_ts_.load(std::memory_order_relaxed);
     }
 

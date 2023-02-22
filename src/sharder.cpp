@@ -23,6 +23,8 @@ namespace txservice
 Sharder::Sharder(uint32_t node_id,
                  const std::vector<std::string> *ips,
                  const std::vector<uint16_t> *ports,
+                 const std::vector<std::string> *txlog_ips,
+                 const std::vector<uint16_t> *txlog_ports,
                  LocalCcShards &local_shards,
                  std::unique_ptr<TxLog> log_agent)
     : node_id_(node_id),
@@ -53,9 +55,15 @@ Sharder::Sharder(uint32_t node_id,
         ng_leader_cache_.try_emplace(0, 0);
     }
 
+    if (txlog_ips != nullptr)
+    {
+        txlog_ips_ = *txlog_ips;
+        txlog_ports_ = *txlog_ports;
+    }
+
     if (log_agent_ != nullptr)
     {
-        log_agent_->Init(ips_, ports_);
+        log_agent_->Init(txlog_ips_, txlog_ports_, 0);
     }
 }
 

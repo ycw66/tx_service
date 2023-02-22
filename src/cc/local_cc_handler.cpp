@@ -493,11 +493,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
 
     if (ccm != nullptr)
     {  //__catalog table will be preloaded when ccshard constructed
-        bool finished = ccm->Execute(*read_req);
-        if (finished)
-        {
-            read_req->Free();
-        }
+        ccm->Execute(*read_req);
     }
     else
     {  // otherwise, let the TemplateCcRequest load in the data
@@ -782,11 +778,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     if (ccm != nullptr)
     {
-        bool finished = ccm->Execute(*scan_open_cc_req);
-        if (finished)
-        {
-            scan_open_cc_req->Free();
-        }
+        ccm->Execute(*scan_open_cc_req);
     }
     else
     {

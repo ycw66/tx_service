@@ -15,8 +15,7 @@ public:
     MockLogAgent() = delete;
     MockLogAgent(const MockLogAgent &rhs) = delete;
 
-    MockLogAgent(uint32_t lg_cnt, uint32_t lg_rep_num)
-        : log_agent_(lg_cnt, lg_rep_num)
+    MockLogAgent(uint32_t lg_cnt, uint32_t lg_rep_num) : log_agent_()
     {
     }
 
@@ -62,8 +61,14 @@ public:
                                          const std::string &source_ip,
                                          uint16_t source_port) override
     {
-        ::txlog::RecoverTxResponse_TxStatus status = log_agent_.RecoverTx(
-            tx_number, tx_term, cc_ng_id, cc_ng_term, source_ip, source_port);
+        ::txlog::RecoverTxResponse_TxStatus status =
+            log_agent_.RecoverTx(tx_number,
+                                 tx_term,
+                                 cc_ng_id,
+                                 cc_ng_term,
+                                 source_ip,
+                                 source_port,
+                                 0);
 
         switch (status)
         {
@@ -93,9 +98,9 @@ public:
         return log_agent_.LogGroupReplicaNum();
     }
 
-    uint32_t GetLogGroupId(uint32_t cc_node_id) const override
+    uint32_t GetLogGroupId(uint64_t tx_number) const override
     {
-        return cc_node_id / log_agent_.LogGroupReplicaNum();
+        return tx_number % log_agent_.LogGroupCount();
     }
 
     void RefreshLeader(uint32_t log_group_id) override
@@ -108,9 +113,10 @@ public:
      * ip_list and port_list.
      */
     void Init(std::vector<std::string> &ip_list,
-              std::vector<uint16_t> &port_list) override
+              std::vector<uint16_t> &port_list,
+              const uint32_t start_log_group_id) override
     {
-        log_agent_.Init(ip_list, port_list);
+        log_agent_.Init(ip_list, port_list, start_log_group_id);
     }
 
     void UpdateLeaderCache(uint32_t lg_id, uint32_t node_id) override

@@ -53,7 +53,8 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     LocalCcShards local_cc_shards(
         0, 1, 10000, 10000, nullptr, nullptr, nullptr, nullptr, true);
     CcShard shard(0, 1, 10000, 10000, 0, local_cc_shards, nullptr);
-    Sharder::Instance(0, nullptr, nullptr, &local_cc_shards, nullptr);
+    Sharder::Instance(
+        0, nullptr, nullptr, nullptr, nullptr, &local_cc_shards, nullptr);
 
     const size_t MAP_NUM = 20;
     const size_t MAP_SIZE = 10000;

@@ -2583,8 +2583,11 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     // equal to the actual ccshard node id. But from txservice layer's view,
     // only txid is available. Txservice get txid from the bottom layer
     // (ccshard).
-    uint32_t tx_cc_node_id = TxCcNodeId();
-    write_log.log_group_id_ = txlog_->GetLogGroupId(tx_cc_node_id);
+    write_log.log_group_id_ = txlog_->GetLogGroupId(tx_number_);
+    ::txlog::WriteLogRequest *wlog_req =
+        write_log.log_closure_.LogRequest().mutable_write_log_request();
+    wlog_req->set_log_group_id(write_log_.log_group_id_);
+
     txlog_->WriteLog(write_log.log_group_id_,
                      write_log.log_closure_.Controller(),
                      write_log.log_closure_.LogRequest(),

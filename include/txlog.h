@@ -70,12 +70,13 @@ public:
 
     virtual uint32_t LogGroupReplicaNum() const = 0;
 
-    virtual uint32_t GetLogGroupId(uint32_t cc_node_id) const = 0;
+    virtual uint32_t GetLogGroupId(uint64_t tx_number) const = 0;
 
     virtual void RefreshLeader(uint32_t log_group_id) = 0;
 
     virtual void Init(std::vector<std::string> &ips,
-                      std::vector<uint16_t> &ports) = 0;
+                      std::vector<uint16_t> &ports,
+                      const uint32_t start_log_group_id) = 0;
     virtual void UpdateLeaderCache(uint32_t lg_id, uint32_t node_id) = 0;
 };
 }  // namespace txservice

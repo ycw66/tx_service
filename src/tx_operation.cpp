@@ -1298,15 +1298,20 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                 CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[nid];
                 if (hd_result.IsError())
                 {
-                    if (retry_num_ == 0)
+                    if (hd_result.ErrorCode() ==
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
-                        Sharder::Instance().UpdateLeader(nid);
+                        if (retry_num_ == 0)
+                        {
+                            Sharder::Instance().UpdateLeader(nid);
+                        }
+                        else if (retry_num_ > 0)
+                        {
+                            ReRunOp(txm);
+                            return;
+                        }
                     }
-                    else if (retry_num_ > 0)
-                    {
-                        ReRunOp(txm);
-                        return;
-                    }
+                    fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                 }
                 else
                 {

@@ -677,11 +677,13 @@ void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
     // bound log group, and tx_processor thread in CcShard::NewTx().
     // They are coordinated by the point when native cc node's `leader_term_`
     // atomic variable becomes positive so no lock is needed.
+    uint32_t next_tx_ident = latest_committed_tx_no + 1;
     for (const auto &cc_shard : cc_shards_)
     {
-        LOG(INFO) << "cc shard on core: " << cc_shard->core_id_
-                  << " set next_tx_ident_ to " << latest_committed_tx_no + 1;
-        cc_shard->next_tx_ident_ = latest_committed_tx_no + 1;
+        if (cc_shard->next_tx_ident_ < next_tx_ident)
+        {
+            cc_shard->next_tx_ident_ = latest_committed_tx_no + 1;
+        }
     }
 }
 

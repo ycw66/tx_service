@@ -313,6 +313,8 @@ public:
               uint32_t node_id = 0,
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
+              std::vector<std::string> *txlog_ips = nullptr,
+              std::vector<uint16_t> *txlog_ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
               metrics::MetricsRegistry *metrics_registry = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr,
@@ -336,8 +338,13 @@ public:
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
 
-        Sharder::Instance(
-            node_id, ips, ports, &local_cc_shards_, std::move(log_hd));
+        Sharder::Instance(node_id,
+                          ips,
+                          ports,
+                          txlog_ips,
+                          txlog_ports,
+                          &local_cc_shards_,
+                          std::move(log_hd));
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
 #if defined(METRICS_COLLECTOR_ENABLE)
@@ -365,6 +372,8 @@ public:
               uint32_t node_id = 0,
               std::vector<std::string> *ips = nullptr,
               std::vector<uint16_t> *ports = nullptr,
+              std::vector<std::string> *txlog_ips = nullptr,
+              std::vector<uint16_t> *txlog_ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr,
               bool enable_mvcc = true)
@@ -374,6 +383,8 @@ public:
                     node_id,
                     ips,
                     ports,
+                    txlog_ips,
+                    txlog_ports,
                     store_hd,
                     nullptr,
                     std::move(log_hd),

@@ -195,8 +195,10 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
     // start transaction.
     // each ccshard reads tx_ident_ in NewTx(), which is concurrent with this
     // write, native cc node's leader_term_ synchronizes them.
-    if (node_idx_ == 0 &&
-        log_group_id == Sharder::Instance().LogGroupId(ng_id_))
+    // Since cc_node is not bound to specific log node group, finally the
+    // cc_shard will be setup with the MAX last_committed_txn_no from all log
+    // groups
+    if (node_idx_ == 0)
     {
         local_cc_shards_.SetTxIdent(latest_committed_txn_no);
     }

@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <iostream>
 
-#include "log_service/include/log_server.h"
+#include "../log_service/include/log_server.h"
 #include "mock/mock_catalog_factory.h"
 #include "mock/mock_log_agent.h"
 #include "store/int_mem_store.h"
@@ -19,7 +19,9 @@ static std::unique_ptr<store::IntMemoryStore> store_hd =
     std::make_unique<store::IntMemoryStore>();
 static MockCatalogFactory mock_catalog_factory{};
 static std::vector<std::string> ips{"127.0.0.1"};
+static std::vector<std::string> tx_ips{"127.0.0.1"};
 static std::vector<uint16_t> ports{8600};
+static std::vector<uint16_t> tx_ports{8602};
 
 TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
 {
@@ -56,7 +58,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
 
     std::unique_ptr<::txlog::LogServer> txlog_server =
         std::make_unique<::txlog::LogServer>(
-            node_id, log_server_port, ips, log_instance_ports, txlog_path);
+            node_id, log_server_port, ips, log_instance_ports, txlog_path, 0);
     int err = txlog_server->Start();
     if (err != 0)
     {
@@ -72,6 +74,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
         node_id,
         &ips,
         &ports,
+        &tx_ips,
+        &tx_ports,
         store_hd.get(),
         std::make_unique<MockLogAgent>(txlog_server->LogGroupCount(),
                                        txlog_server->LogGroupReplicaNum()));

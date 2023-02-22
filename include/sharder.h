@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
@@ -48,14 +50,22 @@ class CcStreamReceiver;
 class Sharder
 {
 public:
-    static Sharder &Instance(uint32_t node_id = 0,
-                             const std::vector<std::string> *ips = nullptr,
-                             const std::vector<uint16_t> *ports = nullptr,
-                             LocalCcShards *local_shards = nullptr,
-                             std::unique_ptr<TxLog> log_agent = nullptr)
+    static Sharder &Instance(
+        uint32_t node_id = 0,
+        const std::vector<std::string> *ips = nullptr,
+        const std::vector<uint16_t> *ports = nullptr,
+        const std::vector<std::string> *txlog_ips = nullptr,
+        const std::vector<uint16_t> *txlog_ports = nullptr,
+        LocalCcShards *local_shards = nullptr,
+        std::unique_ptr<TxLog> log_agent = nullptr)
     {
-        static Sharder instance_(
-            node_id, ips, ports, *local_shards, std::move(log_agent));
+        static Sharder instance_(node_id,
+                                 ips,
+                                 ports,
+                                 txlog_ips,
+                                 txlog_ports,
+                                 *local_shards,
+                                 std::move(log_agent));
         return instance_;
     }
 
@@ -260,11 +270,6 @@ public:
         recovered_leader_set.emplace(ng_id);
     }
 
-    uint32_t LogGroupId(uint32_t cc_ng_id)
-    {
-        return log_agent_->GetLogGroupId(cc_ng_id);
-    }
-
     LocalCcShards *GetLocalCcShards()
     {
         return &local_shards_;
@@ -308,6 +313,8 @@ private:
     Sharder(uint32_t node_id,
             const std::vector<std::string> *ips,
             const std::vector<uint16_t> *ports,
+            const std::vector<std::string> *txlog_ips,
+            const std::vector<uint16_t> *txlog_ports,
             LocalCcShards &local_shards,
             std::unique_ptr<TxLog> log_agent);
 
@@ -325,6 +332,8 @@ private:
     uint32_t node_id_;
     std::vector<std::string> ips_;
     std::vector<uint16_t> ports_;
+    std::vector<std::string> txlog_ips_;
+    std::vector<uint16_t> txlog_ports_;
     // We have one raft group for each logical shard(specified by ip & port)
     // each group's current leader is stored in ng_leader_cache_.
     std::unordered_map<uint32_t, std::atomic<uint32_t>> ng_leader_cache_;
