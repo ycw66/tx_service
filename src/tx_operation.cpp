@@ -205,6 +205,16 @@ void ReadOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
 #else
+        if (hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
+        {
+            // If shard is full, keep retrying since checkpoint will
+            // clean up memory for new insert.
+            retry_num_++;
+            hd_result_.Value().Reset();
+            hd_result_.Reset();
+            ReRunOp(txm);
+            return;
+        }
         txm->PostProcess(*this);
 #endif
     }
@@ -478,12 +488,36 @@ void LockWriteRangesOp::Advance()
     uint32_t range_id = range_rec_.GetRangeInfo()->partition_id_;
     // Updates the sharding codes of the write-set keys belonging to this
     // range. The higher 22 bits represent the range ID.
+    int32_t new_range_id = -1;
+    size_t new_range_idx = 0;
+    const RangeInfo *range_info = range_rec_.GetRangeInfo();
     while (write_key_it_ != next_range_start)
     {
         WriteSetEntry &write_entry = write_key_it_->second;
         size_t hash = write_entry.key_->Hash();
         write_entry.key_shard_code_ = (range_id << 10) | (hash & 0x3FF);
 
+        // If range is splitting and the key will fall on a new range after
+        // split is finished, register forward_key_shard_code_ to indicate entry
+        // needs to be double written.
+        if (new_range_idx < range_info->new_key_.size() &&
+            !(*write_entry.key_ < *range_info->new_key_.at(new_range_idx)))
+        {
+            new_range_id = range_info->new_partition_id_.at(new_range_idx);
+            new_range_idx++;
+        }
+        if (new_range_id > 0)
+        {
+            NodeGroupId orig_dest = Sharder::Instance().ShardToCcNodeGroup(
+                write_entry.key_shard_code_);
+            NodeGroupId forward_dest =
+                new_range_id % Sharder::Instance().NodeGroupCount();
+            if (orig_dest != forward_dest)
+            {
+                write_entry.forward_key_shard_code_ =
+                    (new_range_id << 10) | (hash & 0x3FF);
+            }
+        }
         ++write_key_it_;
     }
 
@@ -2454,7 +2488,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       range_table_name_(table_name.StringView(), TableType::RangePartition),
       node_group_(node_group),
       range_info_(*old_range_info),
-      range_record_(&range_info_, old_end_key),
+      range_record_(&range_info_, nullptr, old_end_key),
       old_end_key_(old_end_key),
       new_range_info_(std::move(new_range_info)),
       prepare_acquire_all_write_op_(txm),
@@ -2700,7 +2734,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &post_all_lock_op_);
             return;
         }
-        LOG(INFO) << "ckpt scan for " << txm->TxNumber();
         ckpt_scan_op_.ckpt_ts_ = txm->commit_ts_;
         ForwardToSubOperation(txm, &ckpt_scan_op_);
     }
@@ -2747,6 +2780,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &post_all_lock_op_);
             return;
         }
+        CODE_FAULT_INJECTOR("term_SplitFlushOp_FlushOp_Continue", {
+            LOG(INFO) << "FaultInject  term_SplitFlushOp_FlushOp_Continue";
+            return;
+        });
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
     }
@@ -2868,7 +2905,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &ds_upsert_range_op_);
             return;
         }
+        // Now broadcast slice info to all nodes through PostWriteAll. New
+        // ranges might land on other nodes.
         post_all_lock_op_.rec_ = &range_record_;
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        range_record_.range_slices_ =
+            shards->FindRange(table_name_, node_group_, *old_start_key_);
         ForwardToSubOperation(txm, &post_all_lock_op_);
     }
     else if (op_ == &post_all_lock_op_)
@@ -3040,6 +3082,21 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
         std::string new_range_key;
         new_range.first->Serialize(new_range_key);
         prepare_split_msg->add_new_range_key(new_range_key.data());
+    }
+
+    // Fill the slice info
+    LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+    StoreRange *old_range =
+        shards->FindRange(table_name_, node_group_, *old_start_key_);
+    auto &slices = old_range->Slices();
+    auto slice_it = slices.begin();
+    prepare_split_msg->add_slice_sizes((*slice_it)->Size());
+    for (; slice_it != slices.end(); slice_it++)
+    {
+        std::string slice_key;
+        (*slice_it)->StartKey()->Serialize(slice_key);
+        prepare_split_msg->add_slice_keys(slice_key.data());
+        prepare_split_msg->add_slice_sizes((*slice_it)->Size());
     }
 }
 

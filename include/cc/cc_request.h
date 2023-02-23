@@ -547,8 +547,9 @@ public:
     PostWriteCc()
         : cce_addr_(nullptr),
           commit_ts_(0),
+          is_remote_(false),
           payload_(nullptr),
-          payload_str_(nullptr)
+          key_(nullptr)
     {
     }
 
@@ -569,9 +570,10 @@ public:
         cce_addr_ = addr;
         commit_ts_ = ts;
         payload_ = rec;
-        payload_str_ = nullptr;
         operation_type_ = operation_type;
         key_shard_code_ = key_shard_code;
+        key_ = nullptr;
+        is_remote_ = false;
 
         if (addr->InsertPtr() != 0)
         {
@@ -585,6 +587,28 @@ public:
                 reinterpret_cast<const LruEntry *>(addr->CcePtr());
             ccm_ = lru_entry->parent_map_;
         }
+    }
+
+    void Reset(const TxKey *key,
+               const TableName &table_name,
+               uint32_t ng_id,
+               uint64_t tx_number,
+               uint64_t ts,
+               const TxRecord *rec,
+               OperationType operation_type,
+               uint32_t key_shard_code,
+               CcHandlerResult<PostProcessResult> *res)
+    {
+        TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
+            &table_name, res, ng_id, tx_number);
+
+        cce_addr_ = nullptr;
+        key_ = key;
+        commit_ts_ = ts;
+        payload_ = rec;
+        operation_type_ = operation_type;
+        key_shard_code_ = key_shard_code;
+        is_remote_ = false;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -599,11 +623,12 @@ public:
             nullptr, res, addr->NodeGroupId(), tx_number);
 
         cce_addr_ = addr;
+        key_str_ = nullptr;
         commit_ts_ = ts;
-        payload_ = nullptr;
         payload_str_ = rec;
         operation_type_ = operation_type;
         key_shard_code_ = key_shard_code;
+        is_remote_ = true;
 
         if (addr->InsertPtr() != 0)
         {
@@ -619,6 +644,27 @@ public:
         }
     }
 
+    void Reset(const TableName *table_name,
+               const std::string *key_str,
+               uint32_t node_group_id,
+               uint64_t tx_number,
+               uint64_t ts,
+               const std::string *rec,
+               OperationType operation_type,
+               uint32_t key_shard_code,
+               CcHandlerResult<PostProcessResult> *res)
+    {
+        TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
+            table_name, res, node_group_id, tx_number);
+        cce_addr_ = nullptr;
+        key_str_ = key_str;
+        commit_ts_ = ts;
+        payload_str_ = rec;
+        operation_type_ = operation_type;
+        key_shard_code_ = key_shard_code;
+        is_remote_ = true;
+    }
+
     const CcEntryAddr *CceAddr() const
     {
         return cce_addr_;
@@ -631,12 +677,12 @@ public:
 
     const TxRecord *Payload() const
     {
-        return payload_;
+        return is_remote_ ? nullptr : payload_;
     }
 
     const std::string *PayloadStr() const
     {
-        return payload_str_;
+        return is_remote_ ? payload_str_ : nullptr;
     }
 
     OperationType GetOperationType() const
@@ -649,13 +695,32 @@ public:
         return key_shard_code_;
     }
 
+    const TxKey *Key() const
+    {
+        return is_remote_ ? nullptr : key_;
+    }
+
+    const std::string *KeyStr() const
+    {
+        return is_remote_ ? key_str_ : nullptr;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
-    const TxRecord *payload_;
-    const std::string *payload_str_;
+    bool is_remote_;
+    union
+    {
+        const TxRecord *payload_;
+        const std::string *payload_str_;
+    };
     OperationType operation_type_;
     uint32_t key_shard_code_;
+    union
+    {
+        const TxKey *key_;
+        const std::string *key_str_;
+    };
 };
 
 struct PostWriteAllCc

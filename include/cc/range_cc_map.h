@@ -72,6 +72,8 @@ public:
         auto ranges =
             CcMap::shard_->GetTableRangesForATable(range_table_name, ng_id);
         assert(ranges != nullptr);
+        neg_inf_.payload_ = std::make_unique<RangeRecord>();
+        pos_inf_.payload_ = std::make_unique<RangeRecord>();
 
         for (auto &[key, table_range] : *ranges)
         {
@@ -89,6 +91,7 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
                 cce->commit_ts_ = range_info->version_ts_;
+                cce->payload_ = std::make_unique<RangeRecord>();
                 cce->payload_.get()->range_info_ = range_info;
                 cce->payload_status_ = RecordStatus::Normal;
             }
@@ -273,6 +276,10 @@ public:
         // Prepare RangeRecord
         RangeRecord *upload_range_rec = nullptr;
         const TxKey *target_key = nullptr;
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> range_slices;
+        bool is_remote_req = false;
+        // Place holder for decoded range info if req is remote
+        RangeInfo tmp_info(nullptr, 0, 0);
         if (req.Key() != nullptr)
         {
             upload_range_rec = static_cast<RangeRecord *>(req.Payload());
@@ -282,6 +289,7 @@ public:
         {
             // Request comes from a remote node and is processed for the first
             // time. Deserialize the keys and payloads.
+            is_remote_req = true;
             switch (*req.KeyStrType())
             {
             case KeyType::NegativeInf:
@@ -300,12 +308,12 @@ public:
                 req.SetDecodedKey(std::move(decoded_key));
                 break;
             }
-            // TODO{liunyl}: update record deserialize with multiple new keys
             assert(req.PayloadStr() != nullptr);
             std::unique_ptr<RangeRecord> decoded_rec =
                 std::make_unique<RangeRecord>();
-            size_t offset = 0;
-            decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
+            decoded_rec->range_info_ = &tmp_info;
+            DeserializeRangeRecord(
+                *req.PayloadStr(), decoded_rec.get(), range_slices);
             upload_range_rec = decoded_rec.get();
             req.SetDecodedPayload(std::move(decoded_rec));
         }
@@ -342,20 +350,33 @@ public:
             if (shard_->core_id_ == 0)
             {
                 // Update table_ranges_ in local cc shard on the first core
-                const TxKey *old_end_key =
-                    old_entry->RangeSlices()->RangeEndKey();
-
-                // TODO{liunyl}: If node is not owner of data, store slice will
-                // be nullptr in TableRangeEntry. Also we need to load
-                // StoreRange and StoreSlice from data store if this ng is the
-                // new owner of the splitted range.
+                const KeyT *key = static_cast<const KeyT *>(target_key);
+                CcEntry<KeyT, RangeRecord> *cce = Find(*key).second;
+                assert(cce != nullptr);
+                RangeRecord *old_record = cce->payload_.get();
+                const TxKey *old_end_key = old_record->end_key_;
 
                 // Split the StoreRange struct in old TableRangeEntry and get
                 // the removed slice keys and sizes. These keys will be reused
                 // as the slice keys in the new ranges.
-                std::vector<std::pair<TxKey::Uptr, uint32_t>> new_slice_keys =
-                    old_entry->RangeSlices()->SplitRange(
+                std::vector<std::pair<TxKey::Uptr, uint32_t>> new_slice_keys;
+                if (is_remote_req)
+                {
+                    std::unique_ptr<StoreRange> store_range =
+                        std::make_unique<StoreRange>(
+                            old_info->start_key_.get(),
+                            old_end_key,
+                            old_info->partition_id_,
+                            *Sharder::Instance().GetLocalCcShards());
+                    store_range->InitSlices(range_slices);
+                    new_slice_keys = store_range->SplitRange(
                         old_info->new_key_.front().get());
+                }
+                else
+                {
+                    new_slice_keys = old_entry->RangeSlices()->SplitRange(
+                        old_info->new_key_.front().get());
+                }
                 assert(!new_slice_keys.empty());
                 auto cur_slice = new_slice_keys.begin();
 
@@ -381,7 +402,12 @@ public:
                             std::move(cur_slice->first), cur_slice->second);
                         cur_slice++;
                     }
+                    // Check which node group the new range falls on.
+                    uint32_t cc_ng_id = old_info->new_partition_id_.at(idx) %
+                                        Sharder::Instance().NodeGroupCount();
 
+                    // If the new range falls on this ng, keep the range slices
+                    // info, otherwise pass in nullptr
                     const TableRangeEntry *new_range = shard_->CreateTableRange(
                         this->table_name_,
                         this->cc_ng_id_,
@@ -391,7 +417,8 @@ public:
                             ? old_end_key
                             : cur_slice->first.get(),
                         old_info->dirty_ts_,
-                        &cur_range_slices);
+                        cc_ng_id == this->cc_ng_id_ ? &cur_range_slices
+                                                    : nullptr);
                     new_range_infos.push_back(new_range->GetRangeInfo());
                 }
 
@@ -437,9 +464,11 @@ public:
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
                 cce->commit_ts_ = new_range_info->version_ts_;
+                cce->payload_ = std::make_unique<RangeRecord>();
                 cce->payload_.get()->range_info_ = new_range_info;
                 cce->payload_.get()->end_key_ = end_key;
                 cce->payload_status_ = RecordStatus::Normal;
+                shard_->mem_usage_ += cce->PayloadMemUsage();
             }
             // Now that every core has inserted new range entries into ccmap, we
             // don't need the new keys anymore. Remove new keys from the
@@ -651,6 +680,67 @@ public:
     TableType Type() const override
     {
         return TableType::RangePartition;
+    }
+
+private:
+    void DeserializeRangeRecord(
+        const std::string &payload,
+        RangeRecord *range_record,
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> &range_slices)
+    {
+        const char *buf = payload.data();
+        size_t offset = 0;
+        RangeInfo *range_info =
+            const_cast<RangeInfo *>(range_record->range_info_);
+        bool is_normal;
+        DesrializeFrom(buf, offset, &is_normal);
+        if (is_normal)
+        {
+            std::unique_ptr<TxKey> start_key = std::make_unique<KeyT>();
+            start_key->Deserialize(buf, offset, nullptr);
+            range_info->start_key_ = std::move(start_key);
+        }
+        else
+        {
+            range_info->start_key_ = nullptr;
+        }
+        DesrializeFrom(buf, offset, &range_info->partition_id_);
+        DesrializeFrom(buf, offset, &range_info->version_ts_);
+        uint16_t new_part_size;
+        DesrializeFrom(buf, offset, &new_part_size);
+        for (size_t idx = 0; idx < new_part_size; idx++)
+        {
+            TxKey::Uptr new_key = std::make_unique<KeyT>();
+            new_key->Deserialize(buf, offset, nullptr);
+            range_info->new_key_.push_back(std::move(new_key));
+        }
+        for (size_t idx = 0; idx < new_part_size; idx++)
+        {
+            int32_t new_part_id;
+            DesrializeFrom(buf, offset, &new_part_id);
+            range_info->new_partition_id_.push_back(new_part_id);
+        }
+        DesrializeFrom(buf, offset, &range_info->dirty_ts_);
+
+        uint16_t slice_cnt;
+        DesrializeFrom(buf, offset, &slice_cnt);
+        if (slice_cnt > 0)
+        {
+            uint32_t slice_size;
+            DesrializeFrom(buf, offset, &slice_size);
+            range_slices.emplace_back(nullptr, slice_size);
+            for (size_t idx = 1; idx < slice_cnt; idx++)
+            {
+                DesrializeFrom(buf, offset, &slice_size);
+                range_slices.emplace_back(nullptr, slice_size);
+            }
+            for (size_t idx = 1; idx < slice_cnt; idx++)
+            {
+                TxKey::Uptr slice_key = std::make_unique<KeyT>();
+                slice_key->Deserialize(buf, offset, nullptr);
+                range_slices.at(idx).first = std::move(slice_key);
+            }
+        }
     }
 };
 }  // namespace txservice

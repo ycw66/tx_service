@@ -513,14 +513,18 @@ const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
     const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-    return GetTableRangeEntryInternal(table_name, ng_id, key);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    return GetTableRangeEntryInternal(range_table_name, ng_id, key);
 }
 
 const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
     const TableName &table_name, const NodeGroupId ng_id, int32_t range_id)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-    return GetTableRangeEntryInternal(table_name, ng_id, range_id);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    return GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 }
 
 const TableRangeEntry *LocalCcShards::CreateTableRange(

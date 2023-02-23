@@ -53,6 +53,27 @@ enum struct RangeSliceOpStatus
     Errored,
 };
 
+struct SliceChangeInfo
+{
+    SliceChangeInfo()
+        : slice_start_key_(nullptr),
+          cur_slice_size_(0),
+          post_update_slice_size_(0)
+    {
+    }
+    SliceChangeInfo(const TxKey *start_key,
+                    uint32_t cur_slice_size,
+                    uint32_t post_update_slice_size)
+        : slice_start_key_(start_key),
+          cur_slice_size_(cur_slice_size),
+          post_update_slice_size_(post_update_slice_size)
+    {
+    }
+    const TxKey *slice_start_key_;
+    uint32_t cur_slice_size_;
+    uint32_t post_update_slice_size_;
+};
+
 class StoreSlice
 {
 public:
@@ -126,6 +147,27 @@ public:
         size_ = slice_size;
     }
 
+    bool UpdateSize()
+    {
+        if (post_ckpt_size_ >= 0)
+        {
+            size_ = post_ckpt_size_;
+            post_ckpt_size_ = -1;
+            return true;
+        }
+        return false;
+    }
+
+    int32_t PostCkptSize() const
+    {
+        return post_ckpt_size_;
+    }
+
+    void SetPostCkptSize(int32_t size)
+    {
+        post_ckpt_size_ = size;
+    }
+
     uint16_t PinCount()
     {
         std::unique_lock<std::mutex> lk(slice_mux_);
@@ -137,6 +179,7 @@ private:
     const TxKey *end_key_{nullptr};
 
     uint32_t size_{0};
+    int32_t post_ckpt_size_{-1};
 
     SliceStatus status_{SliceStatus::PartiallyCached};
 
@@ -183,7 +226,12 @@ public:
      * is (8*1024) * (16*1024) = 128MB
      *
      */
+#ifdef SMALL_RANGE
+    static constexpr uint32_t range_max_size =
+        1024 * 1024;  // 1MB range size for testing range split
+#else
     static constexpr uint32_t range_max_size = 134217728;
+#endif
 
     StoreRange(const TxKey *start_key,
                const TxKey *end_key,
@@ -239,9 +287,8 @@ public:
      * @param split_slices Sub-slices after splitting, specified by slices'
      * start keys and their sizes.
      */
-    void UpdateSlice(
-        StoreSlice *slice,
-        std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> &sub_slices);
+    void UpdateSlice(StoreSlice *slice,
+                     std::vector<SliceChangeInfo> &sub_slices);
 
     void SetLoadError(uint64_t load_ts);
 
@@ -272,10 +319,7 @@ public:
         return slices_;
     }
 
-    bool NeedSplit(uint64_t new_range_size) const
-    {
-        return new_range_size > StoreRange::range_max_size;
-    }
+    bool NeedSplit();
 
     /**
      * @brief Split the range with new_end. new_end will be the new

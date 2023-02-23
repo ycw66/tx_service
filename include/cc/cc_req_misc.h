@@ -330,8 +330,7 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
-    std::vector<std::tuple<const TxKey *, uint32_t, uint32_t>>
-        &SliceRecordCollection()
+    std::vector<SliceChangeInfo> &SliceRecordCollection()
     {
         return slice_items_;
     }
@@ -406,7 +405,7 @@ private:
      * the slice in the data store.
      *
      */
-    std::vector<std::tuple<const TxKey *, uint32_t, uint32_t>> slice_items_;
+    std::vector<SliceChangeInfo> slice_items_;
 
     bool is_finished_{false};
     bool is_errored_{false};

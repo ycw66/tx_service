@@ -258,6 +258,64 @@ void txservice::LocalCcHandler::PostWrite(
     }
 }
 
+void txservice::LocalCcHandler::ForwardPostWrite(
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    uint64_t commit_ts,
+    const TableName &table_name,
+    const TxKey *key,
+    const TxRecord *record,
+    OperationType operation_type,
+    uint32_t key_shard_code,
+    CcHandlerResult<PostProcessResult> &hres)
+{
+    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        if (!Sharder::Instance().CheckLeaderTerm(ng_id, tx_term))
+        {
+            // Term mismatch means this PostWrite is failovered to the current
+            // node, and locks are already lost during failover hence no need to
+            // release the lock again.
+            hres.SetFinished();
+            return;
+        }
+
+        PostWriteCc *req = postwrite_pool.NextRequest();
+
+        req->Reset(key,
+                   table_name,
+                   ng_id,
+                   tx_number,
+                   commit_ts,
+                   record,
+                   operation_type,
+                   key_shard_code,
+                   &hres);
+
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+        cc_shards_.EnqueueCcRequest(key_shard_code, req);
+    }
+    else
+    {
+        remote_hd_.ForwardPostWrite(cc_shards_.node_id_,
+                                    tx_number,
+                                    tx_term,
+                                    command_id,
+                                    commit_ts,
+                                    key,
+                                    table_name,
+                                    record,
+                                    operation_type,
+                                    key_shard_code,
+                                    hres);
+    }
+}
+
 void txservice::LocalCcHandler::PostRead(
     uint64_t tx_number,
     int64_t tx_term,

@@ -124,6 +124,34 @@ public:
                            CcHandlerResult<PostProcessResult> &hres) = 0;
 
     /**
+     * @brief Forward a post-process cc to a cc ng. Usually used during online
+     * DDL when commits need to be double written. Unlike regular post-process,
+     * we have not sent AcquireCC to the target ng so we don't have cce addr,
+     * instead include the table name and target key.
+     *
+     * @param tx_number
+     * @param tx_term
+     * @param command_id
+     * @param commit_ts
+     * @param table_name
+     * @param key
+     * @param record
+     * @param operation_type
+     * @param key_shard_code
+     * @param hres
+     */
+    virtual void ForwardPostWrite(TxNumber tx_number,
+                                  int64_t tx_term,
+                                  uint16_t command_id,
+                                  uint64_t commit_ts,
+                                  const TableName &table_name,
+                                  const TxKey *key,
+                                  const TxRecord *record,
+                                  OperationType operation_type,
+                                  uint32_t key_shard_code,
+                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+
+    /**
      * @brief Post-processes a read/scan key. Post-processing clears the read
      * lock or intention on the key's cc entry, matches the input key/gap
      * timestamps against those of the cc entry and updates the cc entry's

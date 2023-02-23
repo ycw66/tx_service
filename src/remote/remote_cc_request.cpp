@@ -495,7 +495,8 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
 void txservice::remote::RemotePostWrite::Reset(
     std::unique_ptr<CcMessage> input_msg)
 {
-    assert(input_msg->has_postcommit_req());
+    assert(input_msg->has_postcommit_req() ||
+           input_msg->has_forward_post_commit_req());
 
     cc_res_.Reset();
 
@@ -503,35 +504,60 @@ void txservice::remote::RemotePostWrite::Reset(
     output_msg_.clear_handler_addr();
     output_msg_.clear_post_resp();
 
-    const PostCommitRequest &post_commit = input_msg->postcommit_req();
-    const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
-
-    if (cce_addr_msg.entry_ptr_case() == CceAddr_msg::EntryPtrCase::kInsertPtr)
+    if (input_msg->has_postcommit_req())
     {
-        cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
-                            cce_addr_msg.term(),
-                            post_commit.node_group_id(),
-                            cce_addr_msg.core_id());
+        const PostCommitRequest &post_commit = input_msg->postcommit_req();
+        uint64_t commit_ts = post_commit.commit_ts();
+        const std::string *rec_str =
+            commit_ts > 0 ? &post_commit.record() : nullptr;
+        const CceAddr_msg &cce_addr_msg = post_commit.cce_addr();
+
+        if (cce_addr_msg.entry_ptr_case() ==
+            CceAddr_msg::EntryPtrCase::kInsertPtr)
+        {
+            cce_addr_.SetInsert(cce_addr_msg.insert_ptr(),
+                                cce_addr_msg.term(),
+                                post_commit.node_group_id(),
+                                cce_addr_msg.core_id());
+        }
+        else
+        {
+            cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                             cce_addr_msg.term(),
+                             post_commit.node_group_id(),
+                             cce_addr_msg.core_id());
+        }
+        PostWriteCc::Reset(
+            &cce_addr_,
+            input_msg->tx_number(),
+            commit_ts,
+            rec_str,
+            static_cast<OperationType>(post_commit.operation_type()),
+            post_commit.key_shard_code(),
+            &cc_res_);
     }
     else
     {
-        cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
-                         cce_addr_msg.term(),
-                         post_commit.node_group_id(),
-                         cce_addr_msg.core_id());
+        const ForwardPostCommitRequest &post_commit =
+            input_msg->forward_post_commit_req();
+        uint64_t commit_ts = post_commit.commit_ts();
+        const std::string *rec_str =
+            commit_ts > 0 ? &post_commit.record() : nullptr;
+        std::string_view table_name_sv{post_commit.table_name_str()};
+        remote_table_name_ = TableName(
+            table_name_sv,
+            ToLocalType::ConvertCcTableType(post_commit.table_type()));
+        PostWriteCc::Reset(
+            &remote_table_name_,
+            &post_commit.key(),
+            post_commit.node_group_id(),
+            input_msg->tx_number(),
+            commit_ts,
+            rec_str,
+            static_cast<OperationType>(post_commit.operation_type()),
+            post_commit.key_shard_code(),
+            &cc_res_);
     }
-
-    uint64_t commit_ts = post_commit.commit_ts();
-    const std::string *rec_str =
-        commit_ts > 0 ? &post_commit.record() : nullptr;
-    PostWriteCc::Reset(&cce_addr_,
-                       input_msg->tx_number(),
-                       commit_ts,
-                       rec_str,
-                       static_cast<OperationType>(post_commit.operation_type()),
-                       post_commit.key_shard_code(),
-                       &cc_res_);
-
     input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)

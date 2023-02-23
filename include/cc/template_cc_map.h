@@ -245,10 +245,9 @@ public:
                 if (cce_ptr == nullptr)
                 {
                     // The acquire request needs a new cc entry but the cc map
-                    // has reached the maximal capacity. Blocks the request by
-                    // putting it back to the cc request queue.
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
+                    // has reached the maximal capacity.
+                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
 
                 assert(cce_ptr != nullptr);
@@ -396,7 +395,8 @@ public:
             }
         });
 
-        const CcEntryAddr &cce_addr = *req.CceAddr();
+        const CcEntryAddr *cce_addr = req.CceAddr();
+        bool is_forward = cce_addr == nullptr;
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_PostWriteCc", {
             if (table_name_.Type() == TableType::Primary)
@@ -408,8 +408,8 @@ public:
             }
         });
 
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()))
+        if (!is_forward && !Sharder::Instance().CheckLeaderTerm(
+                               cce_addr->NodeGroupId(), cce_addr->Term()))
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
@@ -422,8 +422,9 @@ public:
         OperationType op_type = req.GetOperationType();
         bool is_del = op_type == OperationType::Delete;
 
-        if (cce_addr.InsertPtr() != 0)
+        if (!is_forward && cce_addr->InsertPtr() != 0)
         {
+            // DEAD BRANCH FOR NOW
             if (table_name_.Type() == TableType::Secondary)
             {
                 // TODO: Sk Insert branch needs rethinking, currently useless.
@@ -436,7 +437,7 @@ public:
 
             InsertEntry<KeyT, ValueT> &insert_entry =
                 *reinterpret_cast<InsertEntry<KeyT, ValueT> *>(
-                    cce_addr.InsertPtr());
+                    cce_addr->InsertPtr());
             CcEntry<KeyT, ValueT> &prior_cce = *insert_entry.parent_entry_;
 
             if (commit_ts == 0)
@@ -460,8 +461,8 @@ public:
                 if (new_cce == nullptr)
                 {
                     // The cc map has reached the maximal capacity.
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
+                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
 
                 auto ite =
@@ -521,30 +522,68 @@ public:
         else
         {
             // upsert and delete branch.
-            assert(cce_addr.CcePtr() != 0);
-
-            CcEntry<KeyT, ValueT> &cce =
-                *reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-
-            if (cce.key_lock_ptr_ != nullptr &&
-                cce.key_lock_ptr_->HasWriteLock() &&
-                cce.key_lock_ptr_->WriteLockTx() != txn)
+            CcEntry<KeyT, ValueT> *cce;
+            if (is_forward)
             {
-                req.Result()->SetFinished();
-                return true;
+                // Find the cce location first
+                const TxKey *req_key = req.Key();
+                const KeyT *key;
+                KeyT decoded_key;
+                if (req_key != nullptr)
+                {
+                    key = static_cast<const KeyT *>(req_key);
+                }
+                else
+                {
+                    const std::string *key_str = req.KeyStr();
+
+                    assert(key_str != nullptr);
+
+                    size_t offset = 0;
+                    decoded_key.Deserialize(
+                        key_str->data(), offset, KeySchema());
+                    key = &decoded_key;
+                }
+
+                Iterator it = FindEmplace(*key);
+                cce = it->second;
+
+                if (cce == nullptr)
+                {
+                    // The acquire request needs a new cc entry but the cc map
+                    // has reached the maximal capacity. Blocks the request by
+                    // putting it back to the cc request queue.
+                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
+                }
+                // Since this is a forward req, we assume this entry is not
+                // visible on this ng yet so no need to check for lock.
+            }
+            else
+            {
+                cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                    cce_addr->CcePtr());
+
+                if (cce->key_lock_ptr_ != nullptr &&
+                    cce->key_lock_ptr_->HasWriteLock() &&
+                    cce->key_lock_ptr_->WriteLockTx() != txn)
+                {
+                    req.Result()->SetFinished();
+                    return true;
+                }
             }
 
             if (commit_ts > 0)
             {
 #ifdef RANGE_PARTITION_ENABLED
                 if (req.GetOperationType() == OperationType::Insert &&
-                    cce.commit_ts_ == 1)
+                    cce->commit_ts_ == 1)
                 {
                     // At post write we have already loaded the latest version
                     // of cce into memory. So if commit ts is 1 (entry does not
                     // exist and has no previous version), that means it does
                     // not exist in data store at all.
-                    cce.data_store_size_.store(0, std::memory_order_relaxed);
+                    cce->data_store_size_.store(0, std::memory_order_relaxed);
                 }
 #endif
 
@@ -556,14 +595,14 @@ public:
                     // here. These expired archives will be deleted at next
                     // checkpoint.
                     uint64_t recycle_ts = std::min(
-                        shard_->GlobalMinSiTxStartTs(), cce.ckpt_ts_.load());
+                        shard_->GlobalMinSiTxStartTs(), cce->ckpt_ts_.load());
                     shard_->DecrementMemory(
-                        cce.KickOutArchiveRecords(recycle_ts));
-                    size_t added_mem_usage = cce.ArchiveBeforeUpdate(Type());
+                        cce->KickOutArchiveRecords(recycle_ts));
+                    size_t added_mem_usage = cce->ArchiveBeforeUpdate(Type());
                     shard_->mem_usage_ += added_mem_usage;
                 }
 
-                cce.commit_ts_ = commit_ts;
+                cce->commit_ts_ = commit_ts;
 
                 // FIXME: when working with MySQL, the key contains a binary
                 // image and a sturcture for unpack info. Unfortunately, the
@@ -578,37 +617,37 @@ public:
                 // info in current version's payload, though the unpack info
                 // will not be used for deleted key, we must not change the
                 // payload of secondary key ccentry if it is not null.
-                if (Type() != TableType::Secondary || cce.payload_ == nullptr)
+                if (Type() != TableType::Secondary || cce->payload_ == nullptr)
                 {
-                    shard_->DecrementMemory(cce.PayloadMemUsage());
+                    shard_->DecrementMemory(cce->PayloadMemUsage());
                     if (is_del)
                     {
-                        cce.payload_ = nullptr;
+                        cce->payload_ = nullptr;
                     }
                     else if (payload_str == nullptr)
                     {
-                        cce.payload_ = std::make_unique<ValueT>(*commit_val);
+                        cce->payload_ = std::make_unique<ValueT>(*commit_val);
                     }
                     else
                     {
                         size_t offset = 0;
-                        cce.payload_ = std::make_unique<ValueT>();
-                        cce.payload_->Deserialize(payload_str->data(), offset);
+                        cce->payload_ = std::make_unique<ValueT>();
+                        cce->payload_->Deserialize(payload_str->data(), offset);
                     }
-                    shard_->mem_usage_ += cce.PayloadMemUsage();
+                    shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
 
                 // todo: get key from cce_addr
-                size_t key_size = cce.Key()->SerializedLength();
-                size_t payload_size = cce.PayloadSerializedLength();
-                shard_->UpdateEstimateLogSize(&cce, key_size, payload_size);
+                size_t key_size = cce->Key()->SerializedLength();
+                size_t payload_size = cce->PayloadSerializedLength();
+                shard_->UpdateEstimateLogSize(cce, key_size, payload_size);
 
-                cce.payload_status_ =
+                cce->payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
-                TryInsertCkptList(&cce);
+                TryInsertCkptList(cce);
 
                 DLOG_IF(INFO, TRACE_OCC_ERR)
-                    << "PostWriteCc, txn:" << txn << " ,cce: " << &cce
+                    << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
 
                 if (maintain_statistics_)
@@ -616,17 +655,17 @@ public:
                     if (op_type == OperationType::Insert)
                     {
                         shard_profile_->OnInsert(
-                            *static_cast<const KeyT *>(cce.Key()));
+                            *static_cast<const KeyT *>(cce->Key()));
                     }
                     else if (op_type == OperationType::Delete)
                     {
                         shard_profile_->OnDelete(
-                            *static_cast<const KeyT *>(cce.Key()));
+                            *static_cast<const KeyT *>(cce->Key()));
                     }
                 }
             }
 
-            ReleaseCceKeyLock(&cce, txn, req.NodeGroupId());
+            ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
             req.Result()->SetFinished();
             return true;
         }
@@ -777,8 +816,8 @@ public:
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity. Blocks the request by
                     // putting it back to the cc request queue.
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
 
                 req.SetCcePtr(cce_ptr);
@@ -1029,8 +1068,8 @@ public:
 
         if (cce_ptr == nullptr)
         {
-            shard_->Enqueue(shard_->LocalCoreId(), &req);
-            return false;
+            req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+            return true;
         }
 
         TxNumber txn = req.Txn();
@@ -1060,8 +1099,8 @@ public:
                     if (new_cce == nullptr)
                     {
                         // The cc map has reached the maximal capacity.
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
+                        req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
                     }
 
                     shard_->DecrementMemory(new_cce->PayloadMemUsage());
@@ -1518,9 +1557,9 @@ public:
                                 cce = it->second;
                                 if (cce == nullptr)
                                 {
-                                    shard_->Enqueue(shard_->LocalCoreId(),
-                                                    &req);
-                                    return false;
+                                    hd_res->SetError(
+                                        CcErrorCode::OUT_OF_MEMORY);
+                                    return true;
                                 }
 
                                 if (cce->payload_status_ ==
@@ -1569,6 +1608,11 @@ public:
                     {
                         Iterator it = FindEmplace(*look_key);
                         cce = it->second;
+                        if (cce == nullptr)
+                        {
+                            hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                            return true;
+                        }
                     }
                 }
 #else
@@ -1579,8 +1623,8 @@ public:
                 // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
                 {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
 
                 // if ccm contains all the ccentries, then unknown status means
@@ -4316,8 +4360,8 @@ public:
 
             if (cce == nullptr)
             {
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
-                return false;
+                req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                return true;
             }
 
             if (cce->commit_ts_ >= req.CommitTs())
@@ -4468,8 +4512,8 @@ public:
             {
                 // Memory reaches capacity while bringing a range slice into
                 // memory.
-                shard_->Enqueue(shard_->LocalCoreId(), &req);
-                return false;
+                req.SetError();
+                return true;
             }
 
             uint32_t rec_store_size =
@@ -4502,6 +4546,10 @@ public:
                 continue;
             }
 
+            if (cce->payload_ == nullptr)
+            {
+                cce->payload_ = std::make_unique<ValueT>();
+            }
             shard_->DecrementMemory(cce->payload_->MemUsage());
             *cce->payload_ = *record;
             cce->commit_ts_ = data_item.version_ts_;
@@ -4520,8 +4568,7 @@ public:
     bool Execute(GetPostCkptSlice &req) override
     {
         RangeSliceId slice_id = req.SliceId();
-        std::vector<std::tuple<const TxKey *, uint32_t, uint32_t>> &item_vec =
-            req.SliceRecordCollection();
+        std::vector<SliceChangeInfo> &item_vec = req.SliceRecordCollection();
 
         if (shard_->core_id_ == 0)
         {
@@ -4656,16 +4703,14 @@ public:
         if (shard_->core_id_ == shard_->core_cnt_ - 1)
         {
             slice_id.Unpin();
-            std::sort(
-                item_vec.begin(),
-                item_vec.end(),
-                [](const std::tuple<const TxKey *, uint32_t, uint32_t> &lhs,
-                   const std::tuple<const TxKey *, uint32_t, uint32_t> &rhs)
-                {
-                    const TxKey *l_key = std::get<0>(lhs);
-                    const TxKey *r_key = std::get<0>(rhs);
-                    return *l_key < *r_key;
-                });
+            std::sort(item_vec.begin(),
+                      item_vec.end(),
+                      [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
+                      {
+                          const TxKey *l_key = lhs.slice_start_key_;
+                          const TxKey *r_key = rhs.slice_start_key_;
+                          return *l_key < *r_key;
+                      });
             req.SetFinish();
         }
         else
@@ -5337,7 +5382,8 @@ protected:
 
         // catalog ccmap bypass shard memory limit. since checkpointer may
         // emplace ccentry into ccmap.
-        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog))
+        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog) &&
+            !(table_name_.Type() == TableType::RangePartition))
         {
             // The shard has reached the maximal capacity. Tries to clean cc
             // entries that have been checkpointed but are not being

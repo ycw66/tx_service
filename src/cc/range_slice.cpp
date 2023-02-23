@@ -230,9 +230,8 @@ void StoreRange::UpdateRange(const TxKey *start_key,
     }
 }
 
-void StoreRange::UpdateSlice(
-    StoreSlice *slice,
-    std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> &split_keys)
+void StoreRange::UpdateSlice(StoreSlice *slice,
+                             std::vector<SliceChangeInfo> &split_keys)
 {
     assert(split_keys.size() > 1);
 
@@ -256,26 +255,36 @@ void StoreRange::UpdateSlice(
                            : SearchSlice(*slice->start_key_, true);
 
     const TxKey *slice_end_key = slice->EndKey();
-    slice->end_key_ = split_keys[1].first.get();
-    slice->size_ = split_keys[0].second;
+    TxKey::Uptr next_slice_start_key = split_keys[1].slice_start_key_->Clone();
+    slice->end_key_ = next_slice_start_key.get();
+    slice->size_ = split_keys[0].cur_slice_size_;
+    slice->post_ckpt_size_ = split_keys[0].post_update_slice_size_;
 
     for (size_t idx = 1; idx < split_keys.size(); ++idx)
     {
         std::unique_ptr<StoreSlice> sub_slice = std::make_unique<StoreSlice>();
-        sub_slice->start_key_ = split_keys[idx].first.get();
+        sub_slice->start_key_ = next_slice_start_key.get();
+
+        // Inserts the new boundary keys.
+        boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
+                               std::move(next_slice_start_key));
 
         if (idx < split_keys.size() - 1)
         {
-            sub_slice->end_key_ = split_keys[idx + 1].first.get();
+            next_slice_start_key =
+                split_keys[idx + 1].slice_start_key_->Clone();
+            sub_slice->end_key_ = next_slice_start_key.get();
         }
         else
         {
             // The last sub-slice's end key points to that of the original
             // slice.
+            next_slice_start_key = nullptr;
             sub_slice->end_key_ = slice_end_key;
         }
 
-        sub_slice->size_ = split_keys[idx].second;
+        sub_slice->size_ = split_keys[idx].cur_slice_size_;
+        sub_slice->post_ckpt_size_ = split_keys[idx].post_update_slice_size_;
         // Sub-slices inherit the original slice's status, e.g., if the original
         // slice is fully cached, all sub-slices are too cached.
         sub_slice->status_ = slice->status_;
@@ -284,10 +293,6 @@ void StoreRange::UpdateSlice(
         // Inserts the new sub-slices following the first sub-slice.
         slices_.emplace(slices_.begin() + slice_idx + idx,
                         std::move(sub_slice));
-
-        // Inserts the new boundary keys.
-        boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
-                               std::move(split_keys[idx].first));
     }
 
     slice->to_alter_ = false;
@@ -467,6 +472,26 @@ StoreSlice *StoreRange::FindSlice(const TxKey &key)
 {
     size_t slice_idx = SearchSlice(key, true);
     return slices_[slice_idx].get();
+}
+
+bool StoreRange::NeedSplit()
+{
+    std::shared_lock<std::shared_mutex> s_lk(mux_);
+    size_t size = 0;
+    for (size_t idx = 0;
+         idx < slices_.size() && size <= StoreRange::range_max_size;
+         idx++)
+    {
+        if (slices_.at(idx)->post_ckpt_size_ >= 0)
+        {
+            size += slices_.at(idx)->PostCkptSize();
+        }
+        else
+        {
+            size += slices_.at(idx)->Size();
+        }
+    }
+    return size > StoreRange::range_max_size;
 }
 
 void StoreRange::InitSlices(

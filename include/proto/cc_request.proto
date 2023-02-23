@@ -266,6 +266,18 @@ message PostCommitRequest {
 	uint32 key_shard_code = 7;
 }
 
+message ForwardPostCommitRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	bytes key = 4;
+	string table_name_str = 5;
+	CcTableType table_type = 6;
+	uint64 commit_ts = 7;
+	bytes record = 8;
+	uint32 operation_type = 9;
+	uint32 key_shard_code = 10;
+}
+
 message PostWriteAllRequest {
 	uint32 src_node_id = 1;
 	string table_name_str = 2;
@@ -503,7 +515,8 @@ message CcMessage {
 		AbortTransactionRequest = 39;
 		AbortTransactionResponse = 40;
 		BlockedCcReqCheckRequest = 41;
-        BlockedCcReqCheckResponse = 42;
+    	BlockedCcReqCheckResponse = 42;
+		ForwardPostCommitRequest = 43;
 	}
 
 	MessageType type = 1;
@@ -544,5 +557,6 @@ message CcMessage {
 		AbortTransactionResponse abort_tran_resp = 48;
 		BlockedCcReqCheckRequest blocked_check_req = 49;
 		BlockedCcReqCheckResponse blocked_check_resp = 50;
+		ForwardPostCommitRequest forward_post_commit_req = 51;
 	}
 }

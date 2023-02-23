@@ -2173,6 +2173,11 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 #ifndef RANGE_PARTITION_ENABLED
             size_t hash = write_entry.key_->Hash();
             write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
+#else
+            if (write_entry.forward_key_shard_code_ != 0)
+            {
+                rw_set_.IncreaseFowardWriteCnt();
+            }
 #endif
             acquire_write.acquire_write_entries_[idx] = &write_entry;
 
@@ -2488,6 +2493,26 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 std::forward_as_tuple(std::vector<const WriteSetEntry *>()));
 
             rec_vec_it.first->second.emplace_back(&wset_entry);
+
+            if (wset_entry.forward_key_shard_code_ != 0)
+            {
+                // If the wset entry needs to be double written into different
+                // ngs, write log for both ngs.
+                uint32_t forward_ng_id = Sharder::Instance().ShardToCcNodeGroup(
+                    wset_entry.forward_key_shard_code_);
+                auto table_rec_it = ng_table_rec_set.try_emplace(forward_ng_id);
+                std::unordered_map<TableName,
+                                   std::vector<const WriteSetEntry *>>
+                    &table_rec_set = table_rec_it.first->second;
+
+                auto rec_vec_it = table_rec_set.emplace(
+                    std::piecewise_construct,
+                    std::forward_as_tuple(table_name.StringView(),
+                                          table_name.Type()),
+                    std::forward_as_tuple(
+                        std::vector<const WriteSetEntry *>()));
+                rec_vec_it.first->second.emplace_back(&wset_entry);
+            }
         }
     }
 
@@ -2703,8 +2728,9 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // The tx is committed. The tx must have finished validation.
         // Post-processing includes both primary keys that have locks and
         // secondary keys without locks.
-        post_process_.Reset(
-            rw_set_.WriteSetSize(), 0, rw_set_.CatalogSetSize());
+        post_process_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
+                            0,
+                            rw_set_.CatalogSetSize());
     }
     else if (status == TxnStatus::Aborted)
     {
@@ -2757,6 +2783,20 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                    write_entry.op_,
                                    write_entry.key_shard_code_,
                                    post_process.hd_result_);
+                if (write_entry.forward_key_shard_code_ != 0)
+                {
+                    handler->ForwardPostWrite(
+                        tx_number_.load(std::memory_order_relaxed),
+                        tx_term_,
+                        command_id_.load(std::memory_order_relaxed),
+                        commit_ts_,
+                        table_name,
+                        key,
+                        write_entry.rec_.get(),
+                        write_entry.op_,
+                        write_entry.forward_key_shard_code_,
+                        post_process.hd_result_);
+                }
                 ++idx;
             }
         }

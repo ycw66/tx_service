@@ -79,14 +79,15 @@ public:
 private:
     /**
      * @brief Called after checkpoint is done. Update data store slice size
-     * in memory and in data store.
+     * in memory and in data store. Reset post ckpt size in store slice.
      */
     bool UpdateStoreSlice(const TableName &tbl_name,
                           const KVCatalogInfo *kv_info,
                           uint64_t schema_ts,
                           NodeGroupId node_group_id,
                           std::vector<FlushRecord> &flush_batch,
-                          uint64_t ckpt_ts);
+                          uint64_t ckpt_ts,
+                          bool flush_res);
 
     /**
      * @brief Called before checkpoint to calculate the storage slice size after

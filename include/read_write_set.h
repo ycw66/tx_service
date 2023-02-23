@@ -26,7 +26,12 @@ class ReadWriteSet
 
 public:
     ReadWriteSet()
-        : rset_(), wset_(), wset_cnt_(0), data_rset_cnt_(0), wset_bytes_cnt_(0)
+        : rset_(),
+          wset_(),
+          wset_cnt_(0),
+          data_rset_cnt_(0),
+          wset_bytes_cnt_(0),
+          forward_write_cnt_(0)
     //, sset_(), sset_cnt_(0)
     {
     }
@@ -39,6 +44,7 @@ public:
         read_cache_.clear();
         wset_bytes_cnt_ = 0;
         data_rset_cnt_ = 0;
+        forward_write_cnt_ = 0;
 
         // sset_cnt_ = 0;
         // sset_.clear();
@@ -63,6 +69,16 @@ public:
     size_t WriteSetSize() const
     {
         return wset_cnt_;
+    }
+
+    size_t ForwardWriteCnt() const
+    {
+        return forward_write_cnt_;
+    }
+
+    void IncreaseFowardWriteCnt()
+    {
+        forward_write_cnt_++;
     }
 
     const std::unordered_map<TableName,
@@ -312,6 +328,7 @@ public:
         wset_.clear();
         wset_cnt_ = 0;
         wset_bytes_cnt_ = 0;
+        forward_write_cnt_ = 0;
     }
 
     void ClearTable(const TableName &table_name)
@@ -327,6 +344,10 @@ public:
                 wset_bytes_cnt_ -=
                     (key_it.second.key_.get()->SerializedLength() +
                      key_it.second.rec_.get()->SerializedLength());
+                if (key_it.second.forward_key_shard_code_ != 0)
+                {
+                    forward_write_cnt_--;
+                }
             }
             wset_.erase(tab_it);
         }
@@ -426,6 +447,7 @@ private:
     std::unordered_map<TableName, std::pair<TxKey::Uptr, TxRecord::Uptr>>
         read_cache_;
     size_t wset_bytes_cnt_;
+    size_t forward_write_cnt_;
     /*std::unordered_map<TableName,
         std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>>
         sset_;

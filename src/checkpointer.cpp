@@ -535,7 +535,8 @@ void Checkpointer::FlushDataWorker()
                                      schema->Version(),
                                      node_group,
                                      *ckpt_vec,
-                                     ckpt_ts);
+                                     ckpt_ts,
+                                     true);
                 }
 #ifdef STATISTICS_ENABLED
                 // Flush statistics based on primary table.
@@ -558,6 +559,16 @@ void Checkpointer::FlushDataWorker()
             }
             else
             {
+#ifdef RANGE_PARTITION_ENABLED
+                // Reset the post ckpt size if flush failed
+                UpdateStoreSlice(table_name,
+                                 schema->GetKVCatalogInfo(),
+                                 schema->Version(),
+                                 node_group,
+                                 *ckpt_vec,
+                                 ckpt_ts,
+                                 false);
+#endif
                 succ = false;
             }
         }
@@ -856,17 +867,18 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                                     uint64_t schema_ts,
                                     NodeGroupId node_group_id,
                                     std::vector<FlushRecord> &ckpt_vec,
-                                    uint64_t ckpt_ts)
+                                    uint64_t ckpt_ts,
+                                    bool flush_res)
 {
     bool success = true;
     bool range_updated = false;
     StoreRange *curr_range = nullptr;
     StoreSlice *curr_slice = nullptr;
-    size_t slice_first_idx = 0;
+    bool new_slice = true;
 
     for (size_t idx = 0; idx < ckpt_vec.size(); ++idx)
     {
-        if (slice_first_idx == idx)
+        if (new_slice)
         {
             const TxKey &ckpt_key = *ckpt_vec[idx].Key();
 
@@ -875,7 +887,7 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                     (*curr_range->RangeEndKey() < ckpt_key ||
                      *curr_range->RangeEndKey() == ckpt_key))
             {
-                if (curr_range != nullptr && range_updated)
+                if (curr_range != nullptr && flush_res && range_updated)
                 {
                     bool ret = curr_range->UpdateRangeSlicesInStore(
                         table_name, schema_ts, true, store_hd_);
@@ -904,25 +916,21 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
             curr_slice->EndKey() != nullptr &&
                 !(*ckpt_vec[idx + 1].Key() < *curr_slice->EndKey()))
         {
-            int32_t slice_delta_size = 0;
-
-            for (size_t pos = slice_first_idx; pos <= idx; ++pos)
+            if (flush_res)
             {
-                slice_delta_size += ckpt_vec.at(pos).delta_size_;
+                range_updated |= curr_slice->UpdateSize();
             }
-
-            if (slice_delta_size)
+            else
             {
-                curr_slice->UpdateSize(curr_slice->Size() + slice_delta_size);
-                range_updated = true;
+                curr_slice->SetPostCkptSize(-1);
             }
 
             // The next entry falls into a new slice.
-            slice_first_idx = idx + 1;
+            new_slice = true;
         }
     }
 
-    if (range_updated)
+    if (flush_res && range_updated)
     {
         bool ret = curr_range->UpdateRangeSlicesInStore(
             table_name, schema_ts, true, store_hd_);
@@ -945,13 +953,11 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
     bool success = true;
     StoreRange *curr_range = nullptr;
     StoreSlice *curr_slice = nullptr;
-    uint64_t curr_range_size = 0;
-    std::vector<uint32_t> post_ckpt_slice_sizes;
     size_t slice_first_idx = 0;
 
     for (size_t idx = 0; idx < ckpt_vec.size(); ++idx)
     {
-        if (slice_first_idx == idx)
+        if (curr_range == nullptr || slice_first_idx == idx)
         {
             const TxKey &ckpt_key = *ckpt_vec[idx].Key();
 
@@ -962,11 +968,10 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
             {
                 // The current ckpt key falls into a new range. Finds
                 // the range.
-                curr_range = local_shards_.FindRange(
-                    table_name, node_group_id, ckpt_key);
-                curr_range_size = 0;
-                post_ckpt_slice_sizes.clear();
-                if (curr_range == nullptr)
+                TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
+                    local_shards_.GetTableRangeEntry(
+                        table_name, node_group_id, &ckpt_key));
+                if (range_entry == nullptr)
                 {
                     // Range table not initialized yet. Issue a read request
                     // to range table to create it and initialize its range
@@ -1016,11 +1021,20 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                     commit_req.Reset();
                     txm->Execute(&commit_req);
                     commit_req.Wait();
-                    curr_range = local_shards_.FindRange(
-                        table_name, node_group_id, ckpt_key);
+                    range_entry = const_cast<TableRangeEntry *>(
+                        local_shards_.GetTableRangeEntry(
+                            table_name, node_group_id, &ckpt_key));
+                }
+                assert(range_entry != nullptr);
+                curr_range = range_entry->RangeSlices();
+                if (curr_range == nullptr)
+                {
+                    // Range does not belong to this ng, skip it
+                    continue;
                 }
             }
             curr_slice = curr_range->FindSlice(ckpt_key);
+            slice_first_idx = idx;
         }
 
         // Have iterated all flushed data items falling into the
@@ -1039,7 +1053,6 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
 
             int32_t sum = curr_slice->Size() + slice_delta_size;
             slice_size = sum >= 0 ? sum : 0;
-            curr_range_size += slice_size;
 
             // If the slice needs to be split, calculate splitting keys and
             // sub-slices' sizes.
@@ -1069,8 +1082,7 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                 uint32_t subslice_cnt =
                     slice_size / StoreSlice::slice_upper_bound + 1;
                 uint32_t avg_subslice_size = slice_size / subslice_cnt;
-                std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>>
-                    splitting_keys;
+                std::vector<SliceChangeInfo> splitting_keys;
                 splitting_keys.reserve(subslice_cnt);
 
                 uint32_t post_ckpt_subslice_size = 0;
@@ -1078,8 +1090,9 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                 uint32_t subslice_start = 0;
                 for (size_t pos = 0; pos < item_vec.size(); ++pos)
                 {
-                    post_ckpt_subslice_size += std::get<2>(item_vec[pos]);
-                    curr_subslice_size += std::get<1>(item_vec[pos]);
+                    post_ckpt_subslice_size +=
+                        item_vec[pos].post_update_slice_size_;
+                    curr_subslice_size += item_vec[pos].cur_slice_size_;
 
                     if (post_ckpt_subslice_size >= avg_subslice_size ||
                         pos == item_vec.size() - 1)
@@ -1089,17 +1102,18 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                             // The first sub-slice's start key re-uses
                             // the old slice's start key, so there is no
                             // need to allocate a new key.
-                            splitting_keys.emplace_back(nullptr,
-                                                        curr_subslice_size);
+                            splitting_keys.emplace_back(
+                                nullptr,
+                                curr_subslice_size,
+                                post_ckpt_subslice_size);
                         }
                         else
                         {
                             splitting_keys.emplace_back(
-                                std::get<0>(item_vec[subslice_start])->Clone(),
-                                curr_subslice_size);
+                                item_vec[subslice_start].slice_start_key_,
+                                curr_subslice_size,
+                                post_ckpt_subslice_size);
                         }
-                        post_ckpt_slice_sizes.push_back(
-                            post_ckpt_subslice_size);
                         post_ckpt_subslice_size = 0;
                         curr_subslice_size = 0;
                         subslice_start = pos + 1;
@@ -1114,7 +1128,7 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
             }
             else
             {
-                post_ckpt_slice_sizes.push_back(slice_size);
+                curr_slice->SetPostCkptSize(slice_size);
             }
 
             // At the end of current range
@@ -1123,12 +1137,12 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                     (*curr_range->RangeEndKey() < *ckpt_vec[idx + 1].Key() ||
                      *curr_range->RangeEndKey() == *ckpt_vec[idx + 1].Key()))
             {
-                if (curr_range->NeedSplit(curr_range_size))
+                if (curr_range->NeedSplit())
                 {
                     auto &slices = curr_range->Slices();
                     std::vector<const TxKey *> new_range_keys;
                     uint32_t slice_idx = 0;
-                    bool first_subrange = true;
+                    uint32_t subrange_slice_idx = 0;
                     while (slice_idx < slices.size())
                     {
                         for (uint32_t curr_subrange_size = 0;
@@ -1136,20 +1150,25 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                              slice_idx < slices.size();
                              slice_idx++)
                         {
-                            curr_subrange_size +=
-                                post_ckpt_slice_sizes[slice_idx];
+                            if (slices.at(slice_idx)->PostCkptSize() >= 0)
+                            {
+                                curr_subrange_size +=
+                                    slices.at(slice_idx)->PostCkptSize();
+                            }
+                            else
+                            {
+                                curr_subrange_size +=
+                                    slices.at(slice_idx)->Size();
+                            }
                         }
                         // Skip the first subrange since it will reuse the
                         // current range entry
-                        if (first_subrange)
-                        {
-                            first_subrange = false;
-                        }
-                        else if (slice_idx < slices.size())
+                        if (subrange_slice_idx != 0)
                         {
                             new_range_keys.emplace_back(
-                                slices[slice_idx]->StartKey());
+                                slices[subrange_slice_idx]->StartKey());
                         }
+                        subrange_slice_idx = slice_idx;
                     }
 
                     // Pass todo splitting ranges to caller through

@@ -186,29 +186,29 @@ template void serialize_to(const uint8_t *v,
                            size_t &offset);
 
 template <typename T>
-void serialize_to_str(const T *v, std::string &str)
+void SerializeToStr(const T *v, std::string &str)
 {
     const char *v_ptr = static_cast<const char *>(static_cast<const void *>(v));
     str.append(v_ptr, sizeof(T));
 }
 
-template void serialize_to_str(const uint64_t *v, std::string &str);
-template void serialize_to_str(const int32_t *v, std::string &str);
-template void serialize_to_str(const uint16_t *v, std::string &str);
-template void serialize_to_str(const uint8_t *v, std::string &str);
+template void SerializeToStr(const uint64_t *v, std::string &str);
+template void SerializeToStr(const int32_t *v, std::string &str);
+template void SerializeToStr(const uint16_t *v, std::string &str);
+template void SerializeToStr(const uint8_t *v, std::string &str);
 
 // Deserialize helpers
 template <typename T>
-void deserialize_from(const char *buf, size_t &offset, T *v)
+void DesrializeFrom(const char *buf, size_t &offset, T *v)
 {
     const T *ptr = reinterpret_cast<const T *>(buf + offset);
     *v = *ptr;
     offset += sizeof(T);
 }
 
-template void deserialize_from(const char *buf, size_t &offset, uint64_t *v);
-template void deserialize_from(const char *buf, size_t &offset, int32_t *v);
-template void deserialize_from(const char *buf, size_t &offset, uint16_t *v);
-template void deserialize_from(const char *buf, size_t &offset, uint8_t *v);
+template void DesrializeFrom(const char *buf, size_t &offset, uint64_t *v);
+template void DesrializeFrom(const char *buf, size_t &offset, int32_t *v);
+template void DesrializeFrom(const char *buf, size_t &offset, uint16_t *v);
+template void DesrializeFrom(const char *buf, size_t &offset, uint8_t *v);
 
 }  // namespace txservice

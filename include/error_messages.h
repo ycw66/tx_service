@@ -145,6 +145,9 @@ enum struct CcErrorCode
     // Lost the request result
     REQUEST_LOST,
 
+    // Shard memory full
+    OUT_OF_MEMORY,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 

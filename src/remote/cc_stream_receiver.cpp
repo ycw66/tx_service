@@ -608,7 +608,42 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             post_commit->Reset(std::move(msg));
             local_shards_.EnqueueCcRequest(cce_addr_msg.core_id(), post_commit);
         }
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ForwardPostCommitRequest:
+    {
+        assert(msg->has_forward_post_commit_req());
 
+        const ForwardPostCommitRequest &post_commit =
+            msg->forward_post_commit_req();
+        if (Sharder::Instance().LeaderTerm(post_commit.node_group_id()) < 0)
+        {
+            CcMessage return_msg;
+            return_msg.set_type(CcMessage::MessageType::
+                                    CcMessage_MessageType_PostprocessResponse);
+            return_msg.set_tx_number(msg->tx_number());
+            return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_tx_term(msg->tx_term());
+            return_msg.set_command_id(msg->command_id());
+
+            PostprocessResponse *resp = return_msg.mutable_post_resp();
+            resp->set_error_code(ToRemoteType::ConvertCcErrorCode(
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER));
+
+            CcStreamSender *cc_stream_sender =
+                Sharder::Instance().GetCcStreamSender();
+            cc_stream_sender->SendMessageToNode(post_commit.src_node_id(),
+                                                return_msg);
+            msg_pool_.enqueue(std::move(msg));
+        }
+        else
+        {
+            RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
+            TX_TRACE_ASSOCIATE(msg.get(), post_commit);
+            post_commit->Reset(std::move(msg));
+            local_shards_.EnqueueCcRequest(post_commit->KeyShardCode(),
+                                           post_commit);
+        }
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostWriteAllRequest:

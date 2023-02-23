@@ -76,9 +76,20 @@ public:
                    uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres) override;
 
+    void ForwardPostWrite(TxNumber tx_number,
+                          int64_t tx_term,
+                          uint16_t command_id,
+                          uint64_t commit_ts,
+                          const TableName &table_name,
+                          const TxKey *key,
+                          const TxRecord *record,
+                          OperationType operation_type,
+                          uint32_t key_shard_code,
+                          CcHandlerResult<PostProcessResult> &hres);
+
     /// <summary>
-    /// For OCC, validates whether or not the key has changed since the prior
-    /// read.
+    /// For OCC, validates whether or not the key has changed since the
+    /// prior read.
     /// </summary>
     /// <param name="table_name"></param>
     /// <param name="key"></param>
