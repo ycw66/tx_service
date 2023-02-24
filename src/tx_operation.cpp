@@ -2510,7 +2510,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
                          : old_start_key;
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
-    prepare_acquire_all_write_op_.protocol_ = CcProtocol::OCC;
+    prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
     prepare_acquire_all_write_op_.key_ = old_start_key_;
 
     install_new_range_op_.table_name_ = &range_table_name_;
