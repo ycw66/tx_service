@@ -1,7 +1,7 @@
 #pragma once
 
 #include <chrono>
-#include <memory>
+#include <memory>  // std::shared_ptr
 #include <mutex>
 #include <queue>
 #include <unordered_map>
@@ -217,7 +217,9 @@ public:
             (rec_status == RecordStatus::Deleted && is_ckpt_delta))
         {
             size_t offset = 0;
-            scan_tuple->RecordObj().Deserialize(record_str.data(), offset);
+            std::shared_ptr<ValueT> tmp_ptr = std::make_shared<ValueT>();
+            tmp_ptr->Deserialize(record_str.data(), offset);
+            scan_tuple->SetRecord(tmp_ptr);
         }
 
         scan_tuple->gap_ts_ = gap_ts;

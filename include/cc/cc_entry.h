@@ -7,7 +7,7 @@
 #include <cassert>
 #include <list>
 #include <map>
-#include <memory>  // std::make_unique
+#include <memory>  // std::make_unique, make_shared, shared_ptr
 #include <unordered_set>
 #include <utility>  // std::move
 #include <vector>
@@ -74,20 +74,13 @@ struct FlushRecord
         }
     };
 
-    union PayloadPtr
-    {
-        const TxRecord *ptr_;
-        std::unique_ptr<TxRecord> uptr_;
-        ~PayloadPtr()
-        {
-        }
-    };
-
+private:
     KeyPtr key_{nullptr};
     bool is_key_owner_{false};
+    std::shared_ptr<TxRecord> payload_{nullptr};
+
+public:
     RecordStatus payload_status_{RecordStatus::Unknown};
-    bool is_rec_owner_{false};
-    PayloadPtr payload_{nullptr};
     uint64_t commit_ts_{1U};
     // todo: remove cce_
     LruEntry *cce_;
@@ -101,10 +94,6 @@ struct FlushRecord
         if (is_key_owner_)
         {
             key_.uptr_.reset();
-        }
-        if (is_rec_owner_)
-        {
-            payload_.uptr_.reset();
         }
     }
 
@@ -128,15 +117,7 @@ struct FlushRecord
             SetKey(rhs.key_.ptr_);
         }
 
-        if (rhs.is_rec_owner_)
-        {
-            SetPayload(std::move(rhs.payload_.uptr_));
-            rhs.is_rec_owner_ = false;
-        }
-        else
-        {
-            SetPayload(rhs.payload_.ptr_);
-        }
+        SetPayload(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         cce_ = rhs.cce_;
@@ -156,17 +137,7 @@ struct FlushRecord
             SetKey(rhs.key_.ptr_);
         }
 
-        if (rhs.is_rec_owner_)
-        {
-            SetPayload(std::move(rhs.payload_.uptr_));
-            is_rec_owner_ = rhs.is_rec_owner_;
-            rhs.is_rec_owner_ = false;
-        }
-        else
-        {
-            SetPayload(rhs.payload_.ptr_);
-            is_rec_owner_ = false;
-        }
+        payload_ = rhs.payload_;
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         delta_size_ = rhs.delta_size_;
@@ -201,42 +172,18 @@ struct FlushRecord
         is_key_owner_ = true;
     }
 
-    void SetPayload(const TxRecord *ptr)
+    void SetPayload(std::shared_ptr<TxRecord> sptr)
     {
-        if (is_rec_owner_)
-        {
-            payload_.uptr_.reset();  // de-allocate the original record
-        }
-        payload_.ptr_ = ptr;
-        is_rec_owner_ = false;
-    }
-
-    void SetPayload(std::unique_ptr<TxRecord> uptr)
-    {
-        if (is_rec_owner_)
-        {
-            // The move op will de-allocate the old record and obtain the
-            // ownership of the input record.
-            payload_.uptr_ = std::move(uptr);
-        }
-        else
-        {
-            // Need to call release() first, because the memory address stored
-            // in payload_.uptr_ is not heap-allocated and payload_.uptr_ does
-            // not own it.
-            payload_.uptr_.release();
-            payload_.uptr_ = std::move(uptr);
-        }
-        is_rec_owner_ = true;
+        payload_ = sptr;
     }
 
     const TxRecord *Payload() const
     {
-        if (is_rec_owner_)
+        if (payload_ == nullptr)
         {
-            return payload_.uptr_.get();
+            return nullptr;
         }
-        return payload_.ptr_;
+        return payload_.get();
     }
 
     size_t PayloadSize() const
@@ -359,7 +306,7 @@ template <typename ValueT>
 struct VersionResultRecord
 {
 public:
-    const ValueT *payload_ptr_;
+    std::shared_ptr<ValueT> payload_ptr_;
     RecordStatus payload_status_;
     uint64_t commit_ts_;
 
@@ -375,7 +322,7 @@ template <typename ValueT>
 struct VersionRecord
 {
 public:
-    std::unique_ptr<ValueT> payload_;
+    std::shared_ptr<ValueT> payload_;
     uint64_t commit_ts_;
     RecordStatus payload_status_;
 
@@ -386,7 +333,7 @@ public:
     {
     }
 
-    VersionRecord(std::unique_ptr<ValueT> payload,
+    VersionRecord(std::shared_ptr<ValueT> payload,
                   uint64_t commit_ts,
                   RecordStatus status)
         : payload_(std::move(payload)),
@@ -397,13 +344,13 @@ public:
 
     VersionRecord(const VersionRecord<ValueT> &rhs)
     {
-        payload_ = std::make_unique<ValueT>(*rhs.payload_);
+        payload_ = rhs.payload_;
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
     }
     VersionRecord &operator=(const VersionRecord<ValueT> &rhs)
     {
-        payload_ = std::make_unique<ValueT>(*rhs.payload_);
+        payload_ = rhs.payload_;
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         return *this;
@@ -503,7 +450,7 @@ public:
         return payload_ == nullptr ? 0 : payload_->SerializedLength();
     }
 
-    std::unique_ptr<ValueT> payload_;
+    std::shared_ptr<ValueT> payload_;
     RecordStatus payload_status_;
 
     std::map<const KeyT *,
@@ -607,7 +554,7 @@ public:
         return mem_usage;
     }
 
-    size_t AddArchiveRecord(std::unique_ptr<ValueT> payload_ptr,
+    size_t AddArchiveRecord(std::shared_ptr<ValueT> payload_ptr,
                             RecordStatus payload_status,
                             uint64_t commit_ts)
     {
@@ -635,7 +582,7 @@ public:
             it = archives_->emplace(it);
             it->commit_ts_ = commit_ts;
             it->payload_status_ = payload_status;
-            it->payload_ = std::move(payload_ptr);
+            it->payload_ = payload_ptr;
             mem_usage += it->MemUsage();
         }
 
@@ -661,7 +608,6 @@ public:
         if (commit_ts_ <= oldest_active_tx_ts)
         {
             size_t mem_usage = GetArchiveMemUsage();
-            // archives_->clear();
             archives_.reset(nullptr);
             return mem_usage;
         }
@@ -734,7 +680,7 @@ public:
             last_read_ts_ = std::max(ts, last_read_ts_);
             if (payload_status_ == RecordStatus::Normal)
             {
-                rec.payload_ptr_ = payload_.get();
+                rec.payload_ptr_ = payload_;
             }
             rec.commit_ts_ = commit_ts_;
             rec.payload_status_ = payload_status_;
@@ -752,11 +698,11 @@ public:
                     {
                         if (tbl_type == TableType::Secondary)
                         {
-                            rec.payload_ptr_ = payload_.get();
+                            rec.payload_ptr_ = payload_;
                         }
                         else
                         {
-                            rec.payload_ptr_ = it->payload_.get();
+                            rec.payload_ptr_ = it->payload_;
                         }
                     }
                     rec.commit_ts_ = it->commit_ts_;
@@ -838,14 +784,7 @@ public:
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
             if (payload_status_ == RecordStatus::Normal)
             {
-                if (mvcc_enabled)
-                {
-                    ref.SetPayload(payload_.get());
-                }
-                else
-                {
-                    ref.SetPayload(std::make_unique<ValueT>(*payload_));
-                }
+                ref.SetPayload(payload_);
             }
             ref.payload_status_ = payload_status_;
             ref.commit_ts_ = commit_ts_;
@@ -900,11 +839,11 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-                                    ref.SetPayload(it->payload_.get());  // pk
+                                    ref.SetPayload(it->payload_);  // pk
                                 }
                                 else
                                 {
-                                    ref.SetPayload(payload_.get());  // sk
+                                    ref.SetPayload(payload_);  // sk
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -941,11 +880,11 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-                                    ref.SetPayload(it->payload_.get());  // pk
+                                    ref.SetPayload(it->payload_);  // pk
                                 }
                                 else
                                 {
-                                    ref.SetPayload(payload_.get());  // sk
+                                    ref.SetPayload(payload_);  // sk
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;

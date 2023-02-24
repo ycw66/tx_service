@@ -72,8 +72,8 @@ public:
         auto ranges =
             CcMap::shard_->GetTableRangesForATable(range_table_name, ng_id);
         assert(ranges != nullptr);
-        neg_inf_.payload_ = std::make_unique<RangeRecord>();
-        pos_inf_.payload_ = std::make_unique<RangeRecord>();
+        neg_inf_.payload_ = std::make_shared<RangeRecord>();
+        pos_inf_.payload_ = std::make_shared<RangeRecord>();
 
         for (auto &[key, table_range] : *ranges)
         {
@@ -91,7 +91,7 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
                 cce->commit_ts_ = range_info->version_ts_;
-                cce->payload_ = std::make_unique<RangeRecord>();
+                cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = range_info;
                 cce->payload_status_ = RecordStatus::Normal;
             }
@@ -464,7 +464,7 @@ public:
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
                 cce->commit_ts_ = new_range_info->version_ts_;
-                cce->payload_ = std::make_unique<RangeRecord>();
+                cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = new_range_info;
                 cce->payload_.get()->end_key_ = end_key;
                 cce->payload_status_ = RecordStatus::Normal;

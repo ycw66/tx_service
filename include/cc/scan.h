@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>  // shared_ptr
 
 #include "cc_entry.h"
 #include "tx_key.h"
@@ -63,14 +64,14 @@ template <typename KeyT, typename ValueT>
 struct TemplateScanTuple : public ScanTuple
 {
 public:
-    TemplateScanTuple() : ScanTuple(), key_obj_(), rec_obj_()
+    TemplateScanTuple() : ScanTuple(), key_obj_(), rec_ptr_(nullptr)
     {
     }
 
     TemplateScanTuple(TemplateScanTuple<KeyT, ValueT> &&rhs)
         : ScanTuple(rhs.key_ts_, rhs.gap_ts_, rhs.rec_status_, rhs.cce_addr_),
           key_obj_(std::move(rhs.key_obj_)),
-          rec_obj_(std::move(rhs.rec_obj_))
+          rec_ptr_(std::move(rhs.rec_ptr_))
     {
     }
 
@@ -83,7 +84,7 @@ public:
 
     const TxRecord *Record() const override
     {
-        return &rec_obj_;
+        return rec_ptr_.get();
     }
 
     KeyT &KeyObj()
@@ -96,9 +97,15 @@ public:
         return key_obj_;
     }
 
-    ValueT &RecordObj()
+    const ValueT &RecordObj()
     {
-        return rec_obj_;
+        assert(rec_ptr_.get() != nullptr);
+        return *rec_ptr_;
+    }
+
+    void SetRecord(std::shared_ptr<ValueT> &ptr)
+    {
+        rec_ptr_ = ptr;
     }
 
     friend bool operator<(const TemplateScanTuple<KeyT, ValueT> &lhs,
@@ -111,7 +118,7 @@ public:
 
 private:
     KeyT key_obj_;
-    ValueT rec_obj_;
+    std::shared_ptr<ValueT> rec_ptr_;
 
     template <typename KT, typename VT>
     friend class TemplateCcScanner;
