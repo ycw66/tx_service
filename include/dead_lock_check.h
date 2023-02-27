@@ -14,8 +14,8 @@ namespace txservice
 const uint64_t MICRO_SECOND = 1000000;
 
 class LocalCcShards;
-class CheckDeadLockResult;
-class CheckDeadLockCc;
+struct CheckDeadLockResult;
+struct CheckDeadLockCc;
 
 struct LockNode
 {

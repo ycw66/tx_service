@@ -4548,10 +4548,9 @@ public:
 
             if (cce->payload_ == nullptr)
             {
-                cce->payload_ = std::make_unique<ValueT>();
+                cce->payload_ = std::make_shared<ValueT>(*record);
             }
             shard_->DecrementMemory(cce->payload_->MemUsage());
-            *cce->payload_ = *record;
             cce->commit_ts_ = data_item.version_ts_;
             cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
                                                          : RecordStatus::Normal;

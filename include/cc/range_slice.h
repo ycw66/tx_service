@@ -426,7 +426,7 @@ private:
     LocalCcShards &local_cc_shards_;
 
     friend class StoreSlice;
-    friend class TableRangeEntry;
+    friend struct TableRangeEntry;
 };
 
 /**

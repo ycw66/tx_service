@@ -34,7 +34,7 @@ class SingleShardScanner;
 class CcMapScanner;
 class Checkpointer;
 class LocalCcShards;
-class CheckDeadLockResult;
+struct CheckDeadLockResult;
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
 #define RESIZE_LOCK_LIMIT 3u
