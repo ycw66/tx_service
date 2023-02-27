@@ -303,7 +303,7 @@ bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
                                           bool update_slice_keys,
                                           store::DataStoreHandler *store_hd)
 {
-    std::unique_lock<std::shared_mutex> range_lk(mux_);
+    // no range lock is needed since it is updated only by checkpointer.
     return store_hd->UpdateRangeSlices(
         table_name, schema_ts, range_start_key_, slices_, update_slice_keys);
 }
@@ -470,6 +470,7 @@ bool StoreRange::KickoutSlice(const TxKey &kickout_key)
 
 StoreSlice *StoreRange::FindSlice(const TxKey &key)
 {
+    // no range lock is needed since it is only called by checkpointer.
     size_t slice_idx = SearchSlice(key, true);
     return slices_[slice_idx].get();
 }
