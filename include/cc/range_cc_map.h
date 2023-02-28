@@ -81,7 +81,7 @@ public:
             const KeyT *start_key = static_cast<const KeyT *>(key);
             if (start_key->Type() == KeyType::NegativeInf)
             {
-                neg_inf_.payload_.get()->range_info_ = range_info;
+                neg_inf_.payload_->range_info_ = range_info;
                 neg_inf_.commit_ts_ = range_info->version_ts_;
                 neg_inf_.payload_status_ = RecordStatus::Normal;
             }
@@ -94,6 +94,9 @@ public:
                 cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = range_info;
                 cce->payload_status_ = RecordStatus::Normal;
+                shard_->mem_usage_ += cce->PayloadSize();
+                it--;
+                it->second->payload_->end_key_ = range_info->start_key_.get();
             }
         }
     }
@@ -350,11 +353,7 @@ public:
             if (shard_->core_id_ == 0)
             {
                 // Update table_ranges_ in local cc shard on the first core
-                const KeyT *key = static_cast<const KeyT *>(target_key);
-                CcEntry<KeyT, RangeRecord> *cce = Find(*key).second;
-                assert(cce != nullptr);
-                RangeRecord *old_record = cce->payload_.get();
-                const TxKey *old_end_key = old_record->end_key_;
+                const TxKey *old_end_key = upload_range_rec->end_key_;
 
                 // Split the StoreRange struct in old TableRangeEntry and get
                 // the removed slice keys and sizes. These keys will be reused
@@ -449,24 +448,36 @@ public:
             for (uint idx = 0; idx < new_range_infos.size(); idx++)
             {
                 auto new_range_info = new_range_infos.at(idx);
-                // Make a copy of the start key in TableRangeEntry. FindEmplace
-                // will std::move(start_key).
-                KeyT start_key(*static_cast<const KeyT *>(
+                const KeyT *start_key = (static_cast<const KeyT *>(
                     new_range_info->start_key_.get()));
-                const TxKey *end_key = nullptr;
-                if (idx != new_range_infos.size() - 1)
-                {
-                    end_key = new_range_infos.at(idx + 1)->start_key_.get();
-                }
-
                 auto it =
-                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(start_key);
+                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
                 cce->commit_ts_ = new_range_info->version_ts_;
                 cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = new_range_info;
-                cce->payload_.get()->end_key_ = end_key;
+                if (idx != new_range_infos.size() - 1)
+                {
+                    cce->payload_.get()->end_key_ =
+                        new_range_infos.at(idx + 1)->start_key_.get();
+                }
+                else
+                {
+                    // Do not point end key to the map key (it->first) since
+                    // it does not have pointer stability.
+                    it++;
+                    if (it->second)
+                    {
+                        cce->payload_.get()->end_key_ =
+                            it->second->payload_->range_info_->start_key_.get();
+                    }
+                    else
+                    {
+                        // end key is pos inf
+                        cce->payload_.get()->end_key_ = it->first;
+                    }
+                }
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
@@ -721,6 +732,20 @@ private:
             range_info->new_partition_id_.push_back(new_part_id);
         }
         DesrializeFrom(buf, offset, &range_info->dirty_ts_);
+
+        DesrializeFrom(buf, offset, &is_normal);
+        if (is_normal)
+        {
+            KeyT end_key;
+            end_key.Deserialize(buf, offset, nullptr);
+            range_record->end_key_ =
+                Find(end_key).second->payload_->range_info_->start_key_.get();
+            assert(range_record->end_key_ != nullptr);
+        }
+        else
+        {
+            range_record->end_key_ = PositiveInfinity<KeyT>::Instance();
+        }
 
         uint16_t slice_cnt;
         DesrializeFrom(buf, offset, &slice_cnt);

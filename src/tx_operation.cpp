@@ -500,8 +500,8 @@ void LockWriteRangesOp::Advance()
         // If range is splitting and the key will fall on a new range after
         // split is finished, register forward_key_shard_code_ to indicate entry
         // needs to be double written.
-        if (new_range_idx < range_info->new_key_.size() &&
-            !(*write_entry.key_ < *range_info->new_key_.at(new_range_idx)))
+        while (new_range_idx < range_info->new_key_.size() &&
+               !(*write_entry.key_ < *range_info->new_key_.at(new_range_idx)))
         {
             new_range_id = range_info->new_partition_id_.at(new_range_idx);
             new_range_idx++;
@@ -2911,6 +2911,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
         range_record_.range_slices_ =
             shards->FindRange(table_name_, node_group_, *old_start_key_);
+        range_record_.end_key_ = range_record_.range_slices_->RangeEndKey();
         ForwardToSubOperation(txm, &post_all_lock_op_);
     }
     else if (op_ == &post_all_lock_op_)

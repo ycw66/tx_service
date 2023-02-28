@@ -317,7 +317,13 @@ public:
             SerializeToStr(&new_id, str);
         }
         SerializeToStr(&range_info_->dirty_ts_, str);
-
+        // Serialize end key
+        is_normal = end_key_ != nullptr && end_key_->Type() == KeyType::Normal;
+        SerializeToStr(&is_normal, str);
+        if (is_normal)
+        {
+            end_key_->Serialize(str);
+        }
         uint16_t slice_cnt;
         if (range_slices_ == nullptr)
         {
@@ -391,6 +397,7 @@ public:
         const RangeRecord &that = static_cast<const RangeRecord &>(rhs);
         range_info_ = that.range_info_;
         range_slices_ = that.range_slices_;
+        end_key_ = that.end_key_;
     }
 
     std::string ToString() const override
@@ -406,6 +413,7 @@ public:
         }
         range_info_ = rhs.range_info_;
         range_slices_ = rhs.range_slices_;
+        end_key_ = rhs.end_key_;
         return *this;
     }
 
