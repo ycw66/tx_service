@@ -1515,7 +1515,11 @@ struct ScanSliceCc
     : public TemplatedCcRequest<ScanSliceCc, RangeScanSliceResult>
 {
 public:
-    ScanSliceCc() : start_key_(nullptr), start_key_type_(RangeKeyType::RawPtr)
+    ScanSliceCc()
+        : start_key_(nullptr),
+          start_key_type_(RangeKeyType::RawPtr),
+          end_key_(nullptr),
+          end_key_type_(RangeKeyType::RawPtr)
     {
         parallel_req_ = true;
     }
@@ -1525,6 +1529,9 @@ public:
         if (start_key_type_ == RangeKeyType::UniquePtr)
         {
             start_key_uptr_ = nullptr;
+        }
+        if (end_key_type_ == RangeKeyType::UniquePtr)
+        {
             end_key_uptr_ = nullptr;
         }
     }
