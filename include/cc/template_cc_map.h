@@ -4674,7 +4674,7 @@ public:
                                 ckpt_vec[ckpt_idx].PayloadSize();
                 }
                 item_vec.emplace_back(
-                    cce_key,
+                    ckpt_vec[ckpt_idx].Key(),
                     ckpt_size - ckpt_vec[ckpt_idx].delta_size_,
                     ckpt_size);
 
@@ -4695,7 +4695,7 @@ public:
                 // This entry is not going to be flushed in this checkpoint, so
                 // the data store size before and post ckpt are the same.
                 item_vec.emplace_back(
-                    cce_key, data_store_size, data_store_size);
+                    cce_key->Clone(), data_store_size, data_store_size);
             }
         }
 
@@ -4706,8 +4706,8 @@ public:
                       item_vec.end(),
                       [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
                       {
-                          const TxKey *l_key = lhs.slice_start_key_;
-                          const TxKey *r_key = rhs.slice_start_key_;
+                          const TxKey *l_key = lhs.SliceStartKey();
+                          const TxKey *r_key = rhs.SliceStartKey();
                           return *l_key < *r_key;
                       });
             req.SetFinish();

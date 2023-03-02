@@ -371,7 +371,11 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>>
         &ranges_of_all_ngs = table_it.first->second;
     auto ngs_it = ranges_of_all_ngs.try_emplace(ng_id);
-    assert(ngs_it.second);
+    if (!ngs_it.second)
+    {
+        // Table range already initialized by another FecthTableRangesCc
+        return;
+    }
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
         ngs_it.first->second;
     auto &ids = id_table_it.first->second.try_emplace(ng_id).first->second;

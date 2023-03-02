@@ -55,23 +55,117 @@ enum struct RangeSliceOpStatus
 
 struct SliceChangeInfo
 {
-    SliceChangeInfo()
-        : slice_start_key_(nullptr),
-          cur_slice_size_(0),
-          post_update_slice_size_(0)
-    {
-    }
+    SliceChangeInfo(const SliceChangeInfo &rhs) = delete;
+    SliceChangeInfo &operator=(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo(const TxKey *start_key,
                     uint32_t cur_slice_size,
                     uint32_t post_update_slice_size)
-        : slice_start_key_(start_key),
+        : is_key_owner_(false),
           cur_slice_size_(cur_slice_size),
           post_update_slice_size_(post_update_slice_size)
     {
+        key_.ptr_ = std::move(start_key);
     }
-    const TxKey *slice_start_key_;
-    uint32_t cur_slice_size_;
-    uint32_t post_update_slice_size_;
+    SliceChangeInfo(TxKey::Uptr start_key,
+                    uint32_t cur_slice_size,
+                    uint32_t post_update_slice_size)
+        : is_key_owner_(true),
+          cur_slice_size_(cur_slice_size),
+          post_update_slice_size_(post_update_slice_size)
+    {
+        key_.uptr_ = std::move(start_key);
+    }
+
+    SliceChangeInfo &operator=(SliceChangeInfo &&rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        if (rhs.is_key_owner_)
+        {
+            SetKey(std::move(rhs.key_.uptr_));
+            rhs.is_key_owner_ = false;
+        }
+        else
+        {
+            SetKey(rhs.key_.ptr_);
+        }
+
+        cur_slice_size_ = rhs.cur_slice_size_;
+        post_update_slice_size_ = rhs.post_update_slice_size_;
+        return *this;
+    }
+
+    SliceChangeInfo(SliceChangeInfo &&rhs)
+    {
+        if (rhs.is_key_owner_)
+        {
+            SetKey(std::move(rhs.key_.uptr_));
+            rhs.is_key_owner_ = false;
+        }
+        else
+        {
+            SetKey(rhs.key_.ptr_);
+        }
+        cur_slice_size_ = rhs.cur_slice_size_;
+        post_update_slice_size_ = rhs.post_update_slice_size_;
+    }
+
+    void SetKey(const TxKey *ptr)
+    {
+        if (is_key_owner_)
+        {
+            key_.uptr_.reset();
+        }
+        key_.ptr_ = ptr;
+        is_key_owner_ = false;
+    }
+
+    void SetKey(std::unique_ptr<TxKey> uptr)
+    {
+        if (is_key_owner_)
+        {
+            // The move op will de-allocate the old record and obtain the
+            // ownership of the input record.
+            key_.uptr_ = std::move(uptr);
+        }
+        else
+        {
+            // key_ is treated as a unique_ptr, first release ownership,
+            // otherwise ptr_ will be deleted
+            key_.uptr_.release();
+            key_.uptr_ = std::move(uptr);
+        }
+        is_key_owner_ = true;
+    }
+
+    const TxKey *SliceStartKey() const
+    {
+        return is_key_owner_ ? key_.uptr_.get() : key_.ptr_;
+    }
+
+    ~SliceChangeInfo()
+    {
+        if (is_key_owner_)
+        {
+            key_.uptr_.reset();
+        }
+    }
+
+    union KeyPtr
+    {
+        const TxKey *ptr_;
+        std::unique_ptr<TxKey> uptr_;
+        ~KeyPtr()
+        {
+        }
+    };
+    KeyPtr key_{nullptr};
+    bool is_key_owner_{false};
+    uint32_t cur_slice_size_{0};
+    uint32_t post_update_slice_size_{0};
 };
 
 class StoreSlice

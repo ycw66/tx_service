@@ -1075,7 +1075,7 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                     // There is a data store error when loading the slice.
                 }
 
-                const auto &item_vec = post_ckpt_slice.SliceRecordCollection();
+                auto &item_vec = post_ckpt_slice.SliceRecordCollection();
                 // Split the slice based on post checkpoint item size, but do
                 // not update the slice size with the post checkpoint size yet
                 // since the data is still not flushed into data store yet.
@@ -1109,10 +1109,22 @@ bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
                         }
                         else
                         {
-                            splitting_keys.emplace_back(
-                                item_vec[subslice_start].slice_start_key_,
-                                curr_subslice_size,
-                                post_ckpt_subslice_size);
+                            if (item_vec[subslice_start].is_key_owner_)
+                            {
+                                splitting_keys.emplace_back(
+                                    std::move(
+                                        item_vec[subslice_start].key_.uptr_),
+                                    curr_subslice_size,
+                                    post_ckpt_subslice_size);
+                                item_vec[subslice_start].is_key_owner_ = false;
+                            }
+                            else
+                            {
+                                splitting_keys.emplace_back(
+                                    item_vec[subslice_start].key_.ptr_,
+                                    curr_subslice_size,
+                                    post_ckpt_subslice_size);
+                            }
                         }
                         post_ckpt_subslice_size = 0;
                         curr_subslice_size = 0;

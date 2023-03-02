@@ -255,7 +255,17 @@ void StoreRange::UpdateSlice(StoreSlice *slice,
                            : SearchSlice(*slice->start_key_, true);
 
     const TxKey *slice_end_key = slice->EndKey();
-    TxKey::Uptr next_slice_start_key = split_keys[1].slice_start_key_->Clone();
+
+    TxKey::Uptr next_slice_start_key = nullptr;
+    if (split_keys[1].is_key_owner_)
+    {
+        next_slice_start_key = std::move(split_keys[1].key_.uptr_);
+        split_keys[1].is_key_owner_ = false;
+    }
+    else
+    {
+        next_slice_start_key = split_keys[1].key_.ptr_->Clone();
+    }
     slice->end_key_ = next_slice_start_key.get();
     slice->size_ = split_keys[0].cur_slice_size_;
     slice->post_ckpt_size_ = split_keys[0].post_update_slice_size_;
@@ -271,8 +281,16 @@ void StoreRange::UpdateSlice(StoreSlice *slice,
 
         if (idx < split_keys.size() - 1)
         {
-            next_slice_start_key =
-                split_keys[idx + 1].slice_start_key_->Clone();
+            if (split_keys[idx + 1].is_key_owner_)
+            {
+                next_slice_start_key =
+                    std::move(split_keys[idx + 1].key_.uptr_);
+                split_keys[idx + 1].is_key_owner_ = false;
+            }
+            else
+            {
+                next_slice_start_key = split_keys[idx + 1].key_.ptr_->Clone();
+            }
             sub_slice->end_key_ = next_slice_start_key.get();
         }
         else

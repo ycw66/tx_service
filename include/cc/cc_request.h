@@ -2004,7 +2004,7 @@ public:
     // how many pages to scan one time
     // static constexpr size_t CkptScanBatch = 20;
     // todo: limit scan by scanned size
-    static constexpr size_t CkptScanBatchSize = 32 * 1024;
+    static constexpr size_t CkptScanBatchSize = 1024;
 
     CkptScanCc() = default;
 
