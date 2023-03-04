@@ -504,10 +504,6 @@ public:
 
                 TryInsertCkptList(new_cce);
 
-                size_t key_size = key_ptr->SerializedLength();
-                size_t payload_size = new_cce->PayloadSerializedLength();
-                shard_->UpdateEstimateLogSize(new_cce, key_size, payload_size);
-
                 if (maintain_statistics_)
                 {
                     shard_profile_->OnInsert(*key_ptr);
@@ -636,11 +632,6 @@ public:
                     }
                     shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
-
-                // todo: get key from cce_addr
-                size_t key_size = cce->Key()->SerializedLength();
-                size_t payload_size = cce->PayloadSerializedLength();
-                shard_->UpdateEstimateLogSize(cce, key_size, payload_size);
 
                 cce->payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
@@ -4225,15 +4216,6 @@ public:
                                            recycle_ts,
                                            Type(),
                                            shard_->EnableMvcc());
-
-                        if (cce->commit_ts_ <= req.ckpt_ts_)
-                        {
-                            // todo: decrement log size after notify log service
-                            // of ckpt_ts
-                            shard_->estimate_ccshard_log_size_ -=
-                                cce->estimate_ccentry_log_size_;
-                            cce->estimate_ccentry_log_size_ = 0;
-                        }
                     }
                 }
                 scan_cnt++;

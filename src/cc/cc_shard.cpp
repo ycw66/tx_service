@@ -323,19 +323,6 @@ void CcShard::UpdateLruList(LruPage *page)
     page->lru_prev_ = second_tail;
 }
 
-void CcShard::UpdateEstimateLogSize(LruEntry *entry,
-                                    size_t key_size,
-                                    size_t payload_size)
-{
-    entry->estimate_ccentry_log_size_ += key_size + payload_size;
-    estimate_ccshard_log_size_ += key_size + payload_size;
-
-    if (estimate_ccshard_log_size_ >= log_limit_)
-    {
-        NotifyCkpt();
-    }
-}
-
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr,

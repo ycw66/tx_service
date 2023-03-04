@@ -275,9 +275,6 @@ public:
     uint64_t gap_commit_ts_{1};
     uint64_t gap_last_read_ts_{1};
 
-    // Accumulated size of key-value pairs committed since last checkpoint.
-    size_t estimate_ccentry_log_size_{0};
-
     // The commit timestamp of the latest checkpoint version record. Unlike
     // other fields that are read/modified via a single thread, this field is
     // updated by a separate checkpointing thread, after it flushes changes to

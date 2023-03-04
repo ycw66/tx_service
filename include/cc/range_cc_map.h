@@ -247,6 +247,8 @@ public:
         {
             // You don't need a remote acknowledge here, since range read is
             // a local read anyway
+            // Set CcePtr to indicate this is a resumed req.
+            req.SetCcePtr(floor_cce);
             return false;
         }
         default:
