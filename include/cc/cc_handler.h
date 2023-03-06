@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "catalog_factory.h"
@@ -411,16 +412,6 @@ public:
                                      int64_t tx_term,
                                      uint16_t command_id,
                                      CcHandlerResult<bool> &hres) = 0;
-
-    virtual void CkptScan(const TableName &table_name,
-                          uint64_t ckpt_ts,
-                          uint64_t node_group,
-                          std::vector<FlushRecord> &ckpt_vec,
-                          std::vector<FlushRecord> &archive_vec,
-                          std::vector<const TxKey *> &mv_vec,
-                          CcHandlerResult<Void> &hres,
-                          const TxKey *range_start_key = nullptr,
-                          const TxKey *range_end_key = nullptr) = 0;
 
     virtual void BlockCcReqCheck(uint64_t tx_number,
                                  int64_t tx_term,

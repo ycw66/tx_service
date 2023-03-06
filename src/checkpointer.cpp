@@ -218,33 +218,105 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 }
                 continue;
             }
+
             std::unique_ptr<std::vector<FlushRecord>> ckpt_vec =
                 std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_bucket =
+                std::make_unique<std::vector<FlushRecord>>();
+            ckpt_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
+
             std::unique_ptr<std::vector<FlushRecord>> archive_vec =
                 std::make_unique<std::vector<FlushRecord>>();
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec_bucket =
+                std::make_unique<std::vector<FlushRecord>>();
+            archive_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
+
             std::unique_ptr<std::vector<const TxKey *>> mv_base_vec =
                 std::make_unique<std::vector<const TxKey *>>();
+            std::unique_ptr<std::vector<const TxKey *>> mv_base_vec_bucket =
+                std::make_unique<std::vector<const TxKey *>>();
+            mv_base_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
 
-            CkptScanTxRequest scan_req(table_name,
-                                       ckpt_ts,
-                                       node_group,
-                                       *ckpt_vec,
-                                       *archive_vec,
-                                       *mv_base_vec);
-            ckpt_txm->Execute(&scan_req);
-            scan_req.Wait();
+            uint16_t scan_start_core_id = 0;
+            LruPage *scan_start_page = nullptr;
+            bool scan_data_drained = false;
+            int scan_round = 0;
 
-            if (scan_req.IsError())
+            while (!scan_data_drained)
             {
-                LOG(INFO) << "ckpt scan failed on table "
-                          << table_name.StringView();
-                AbortTxRequest abort_req;
-                abort_req.Reset();
-                ckpt_txm->Execute(&abort_req);
-                abort_req.Wait();
-                tables.push_back(std::move(table_name));
-                continue;
+                CkptScanCc scan_cc(table_name,
+                                   ckpt_ts,
+                                   node_group,
+                                   *ckpt_vec_bucket,
+                                   *archive_vec_bucket,
+                                   *mv_base_vec_bucket,
+                                   scan_start_core_id,
+                                   scan_start_page,
+                                   CKPT_SCAN_BATCH_SIZE);
+                auto &ccs = local_shards_.cc_shards_[scan_start_core_id];
+                ccs->Enqueue(&scan_cc);
+                scan_cc.Wait();
+                DLOG(INFO) << "Ckpt small step scan round: " << ++scan_round
+                           << " table_name: " << table_name.String()
+                           << " ckpt_vec_bucket size: "
+                           << ckpt_vec_bucket->size()
+                           << " core_id: " << scan_start_core_id
+                           << " scan_start_page: "
+                           << reinterpret_cast<std::uintptr_t>(scan_start_page);
+
+                if (scan_cc.IsError())
+                {
+                    LOG(INFO) << "ckpt scan failed on table "
+                              << table_name.StringView();
+                    AbortTxRequest abort_req;
+                    abort_req.Reset();
+                    ckpt_txm->Execute(&abort_req);
+                    abort_req.Wait();
+                    tables.push_back(std::move(table_name));
+                    break;
+                }
+                else
+                {
+                    auto res = scan_cc.Result();
+                    // make the current scan core as start core for the next
+                    // scan
+                    scan_start_core_id = std::get<0>(res);
+                    // make the current scan page as start page for the next
+                    // scan
+                    scan_start_page = std::get<1>(res);
+                    // if the data is drained
+                    scan_data_drained = std::get<2>(res);
+
+                    // move the bucket into the tank
+                    std::move(ckpt_vec_bucket->begin(),
+                              ckpt_vec_bucket->end(),
+                              std::back_inserter(*ckpt_vec));
+                    ckpt_vec_bucket->clear();
+
+                    std::move(archive_vec_bucket->begin(),
+                              archive_vec_bucket->end(),
+                              std::back_inserter(*archive_vec));
+                    archive_vec_bucket->clear();
+
+                    std::move(mv_base_vec_bucket->begin(),
+                              mv_base_vec_bucket->end(),
+                              std::back_inserter(*mv_base_vec));
+                    mv_base_vec_bucket->clear();
+                }
             }
+
+            DLOG(INFO) << "Ckpt scan " << table_name.String() << " finish with "
+                       << scan_round << " ckpt_vec size: " << ckpt_vec->size();
+
+            // Sort output vectors in key sorting order.
+            std::sort(ckpt_vec->begin(),
+                      ckpt_vec->end(),
+                      [](const FlushRecord &lhs, const FlushRecord &rhs)
+                      { return *lhs.Key() < *rhs.Key(); });
+            std::sort(archive_vec->begin(),
+                      archive_vec->end(),
+                      [](const FlushRecord &lhs, const FlushRecord &rhs)
+                      { return *lhs.Key() < *rhs.Key(); });
 
 #ifdef RANGE_PARTITION_ENABLED
             std::vector<

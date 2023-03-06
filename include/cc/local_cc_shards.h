@@ -233,6 +233,13 @@ public:
         return cc_shards_.at(core_id)->shard_mux_;
     }
 
+    void EnqueueToCcShard(uint16_t cc_shard_idx, CcRequestBase *req)
+    {
+        assert(cc_shard_idx < cc_shards_.size());
+        auto &ccs = cc_shards_[cc_shard_idx];
+        ccs->Enqueue(req);
+    }
+
     static uint64_t ClockTs();
     uint64_t TsBase();
     void UpdateTsBase(uint64_t timestamp);

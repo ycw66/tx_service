@@ -45,6 +45,9 @@ enum struct TxErrorCode
     DEAD_LOCK_ABORT,
     NG_TERM_CHANGED,
     REQUEST_LOST,
+
+    // Ckpt
+    CKPT_PIN_RANGE_SLICE_FAIL,
 };
 
 static const std::map<TxErrorCode, std::string> tx_error_messages{
@@ -80,7 +83,8 @@ static const std::map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::NG_TERM_CHANGED,
      "The node group term changed and the related ccrequest was discarded."},
     {TxErrorCode::REQUEST_LOST, "The returned message of ccrequest missed."},
-};
+    {TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL,
+     "The checkpoint error due to pin range slice failed."}};
 
 enum struct CcErrorCode
 {

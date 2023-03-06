@@ -646,10 +646,10 @@ public:
 };
 
 template <typename ResultType>
-struct DsOp : public TransactionOperation
+struct AsyncOp : public TransactionOperation
 {
-    DsOp() = delete;
-    DsOp(TransactionExecution *txm);
+    AsyncOp() = delete;
+    explicit AsyncOp(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
@@ -679,39 +679,6 @@ struct FlushDataOp : public TransactionOperation
     std::vector<FlushRecord> *ckpt_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
     std::vector<const TxKey *> *mv_vec_{nullptr};
-    CcHandlerResult<Void> hd_result_;
-};
-
-struct CkptScanOp : public TransactionOperation
-{
-    CkptScanOp(TransactionExecution *txm);
-    CkptScanOp(const TableName &table_name,
-               uint64_t ckpt_ts,
-               NodeGroupId node_group,
-               std::vector<FlushRecord> *ckpt_vec,
-               std::vector<FlushRecord> *archive_vec,
-               std::vector<const TxKey *> *mv_vec,
-               TransactionExecution *txm,
-               bool is_subop = false,
-               const TxKey *start_key = nullptr,
-               const TxKey *end_key = nullptr);
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    const TableName *tab_name_{nullptr};
-    uint64_t ckpt_ts_;
-    NodeGroupId node_group_;
-    std::vector<FlushRecord> *ckpt_vec_{nullptr};
-    std::vector<FlushRecord> *archive_vec_{nullptr};
-    std::vector<const TxKey *> *mv_vec_{nullptr};
-    // If this is a subop of another tx op. If not,
-    // CkptScanOp will set tx_result_ as finished after
-    // it is done.
-    bool is_subop_{false};
-    // Start/end key of the target range of the ckpt scan.
-    // nullptr if target is entire table.
-    const TxKey *start_key_{nullptr};
-    const TxKey *end_key_{nullptr};
     CcHandlerResult<Void> hd_result_;
 };
 
@@ -781,13 +748,13 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * Flush in-memory data that has smaller ts than commit ts to new KV
      * store.
      */
-    DsOp<Void> ds_migrate_old_partition_op_;
+    AsyncOp<Void> ds_migrate_old_partition_op_;
     /**
      * @brief Scan for data before commit_ts in the splitting range. We need to
      * make these data available to the new range before we commit the range
      * split.
      */
-    CkptScanOp ckpt_scan_op_;
+    AsyncOp<Void> ckpt_scan_op_;
     /**
      * @brief Flush data in memory before commit_ts to KV storage. These data
      * will be flushed into both old and new partitions.
@@ -805,7 +772,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     /**
      * @brief Upsert new ranges into range table in KV store.
      */
-    DsOp<Void> ds_upsert_range_op_;
+    AsyncOp<Void> ds_upsert_range_op_;
     /**
      * @brief 1. Insert new range into range tables on all nodes
      * 2. Remove new range info from old range entry.
@@ -817,7 +784,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * any lock here since these data will not be visible to anyone after the
      * new range info has been comitted.
      */
-    DsOp<Void> ds_clean_old_range_op_;
+    AsyncOp<Void> ds_clean_old_range_op_;
     /**
      * @brief Remove split-flush log.
      */
@@ -828,6 +795,7 @@ private:
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
+    void ClearCkptVec();
 };
 
 // To remove remainder records' lock when scan close

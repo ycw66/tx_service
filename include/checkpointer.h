@@ -22,6 +22,8 @@ namespace txservice
 class Checkpointer
 {
 public:
+    static const size_t CKPT_SCAN_BATCH_SIZE = 3 * 1024;
+
     Checkpointer(LocalCcShards &shards,
                  store::DataStoreHandler *write_hd,
                  const uint32_t &checkpoint_interval,

@@ -176,6 +176,9 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::REQUEST_LOST:
         return TxErrorCode::REQUEST_LOST;
 
+    case CcErrorCode::PIN_RANGE_SLICE_FAILED:
+        return TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL;
+
     case CcErrorCode::UNDEFINED_ERR:
     default:
         return TxErrorCode::UNDEFINED_ERR;
@@ -713,33 +716,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                             this);
 
     PushOperation(split_flush_op_.get());
-    Forward();
-}
-
-void TransactionExecution::ProcessTxRequest(CkptScanTxRequest &req)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &req,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    bool_resp_ = &req.tx_result_;
-    bool_resp_->Reset();
-
-    ckpt_scan_op_ = std::make_unique<CkptScanOp>(req.table_name_,
-                                                 req.ckpt_ts_,
-                                                 req.node_group_,
-                                                 &req.ckpt_vec_,
-                                                 &req.archive_vec_,
-                                                 &req.mv_vec_,
-                                                 this);
-    PushOperation(ckpt_scan_op_.get());
     Forward();
 }
 
@@ -3208,7 +3184,7 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
 }
 
 template <typename ResultType>
-void TransactionExecution::Process(DsOp<ResultType> &ds_op)
+void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -3229,10 +3205,10 @@ void TransactionExecution::Process(DsOp<ResultType> &ds_op)
     }
 }
 
-template void TransactionExecution::Process(DsOp<Void> &ds_op);
+template void TransactionExecution::Process(AsyncOp<Void> &ds_op);
 
 template <typename ResultType>
-void TransactionExecution::PostProcess(DsOp<ResultType> &ds_op)
+void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -3248,55 +3224,7 @@ void TransactionExecution::PostProcess(DsOp<ResultType> &ds_op)
     Forward();
 }
 
-template void TransactionExecution::PostProcess(DsOp<Void> &ds_op);
-
-void TransactionExecution::Process(CkptScanOp &scan_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &scan_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    scan_op.is_running_ = true;
-    scan_op.hd_result_.Reset();
-
-    handler->CkptScan(*scan_op.tab_name_,
-                      scan_op.ckpt_ts_,
-                      scan_op.node_group_,
-                      *scan_op.ckpt_vec_,
-                      *scan_op.archive_vec_,
-                      *scan_op.mv_vec_,
-                      scan_op.hd_result_,
-                      scan_op.start_key_,
-                      scan_op.end_key_);
-    StartTiming();
-}
-
-void TransactionExecution::PostProcess(CkptScanOp &scan_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &scan_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    state_stack_.pop_back();
-    if (!scan_op.is_subop_)
-    {
-        bool_resp_->Finish(!scan_op.hd_result_.IsError());
-    }
-    Forward();
-}
+template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
 
 void TransactionExecution::Process(FlushDataOp &flush_op)
 {

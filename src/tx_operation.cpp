@@ -6,6 +6,7 @@
 
 #include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
+#include "checkpointer.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
@@ -14,6 +15,7 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_request.h"
+#include "tx_service.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
 #include "util.h"
@@ -2313,13 +2315,13 @@ void NoOp::Forward(TransactionExecution *txm)
 }
 
 template <typename ResultType>
-DsOp<ResultType>::DsOp(TransactionExecution *txm) : hd_result_(txm)
+AsyncOp<ResultType>::AsyncOp(TransactionExecution *txm) : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 template <typename ResultType>
-void DsOp<ResultType>::Forward(TransactionExecution *txm)
+void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
     if (!is_running_)
@@ -2356,7 +2358,7 @@ void DsOp<ResultType>::Forward(TransactionExecution *txm)
 }
 
 template <typename ResultType>
-void DsOp<ResultType>::Reset()
+void AsyncOp<ResultType>::Reset()
 {
     hd_result_.Reset();
 }
@@ -2393,54 +2395,6 @@ bool CompositeTransactionOperation::CheckLeaderTerm(uint32_t ng_id,
     }
 
     return false;
-}
-
-CkptScanOp::CkptScanOp(TransactionExecution *txm) : hd_result_(txm)
-{
-    TX_TRACE_ASSOCIATE(this, &hd_result_);
-}
-
-CkptScanOp::CkptScanOp(const TableName &table_name,
-                       uint64_t ckpt_ts,
-                       NodeGroupId node_group,
-                       std::vector<FlushRecord> *ckpt_vec,
-                       std::vector<FlushRecord> *archive_vec,
-                       std::vector<const TxKey *> *mv_vec,
-                       TransactionExecution *txm,
-                       bool is_subop,
-                       const TxKey *start_key,
-                       const TxKey *end_key)
-    : tab_name_(&table_name),
-      ckpt_ts_(ckpt_ts),
-      node_group_(node_group),
-      ckpt_vec_(ckpt_vec),
-      archive_vec_(archive_vec),
-      mv_vec_(mv_vec),
-      is_subop_(is_subop),
-      start_key_(start_key),
-      end_key_(end_key),
-      hd_result_(txm)
-{
-    TX_TRACE_ASSOCIATE(this, &hd_result_);
-}
-
-void CkptScanOp::Forward(TransactionExecution *txm)
-{
-    // start the state machine if not running.
-    if (!is_running_)
-    {
-        txm->Process(*this);
-    }
-
-    if (hd_result_.IsFinished())
-    {
-        txm->PostProcess(*this);
-    }
-}
-
-void CkptScanOp::Reset()
-{
-    hd_result_.Reset();
 }
 
 FlushDataOp::FlushDataOp(TransactionExecution *txm) : hd_result_(txm)
@@ -2518,15 +2472,6 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     install_new_range_op_.op_type_ = OperationType::Update;
     install_new_range_op_.key_ = old_start_key_;
 
-    ckpt_scan_op_.tab_name_ = &table_name_;
-    ckpt_scan_op_.start_key_ = old_start_key_;
-    ckpt_scan_op_.end_key_ = old_end_key_;
-    ckpt_scan_op_.ckpt_vec_ = &ckpt_vec_;
-    ckpt_scan_op_.archive_vec_ = &archive_vec_;
-    ckpt_scan_op_.mv_vec_ = &mv_base_vec_;
-    ckpt_scan_op_.node_group_ = node_group_;
-    ckpt_scan_op_.is_subop_ = true;
-
     flush_op_.tab_name_ = &table_name_;
     flush_op_.ckpt_vec_ = &ckpt_vec_;
     flush_op_.archive_vec_ = &archive_vec_;
@@ -2557,6 +2502,10 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &ds_clean_old_range_op_, "ds_clean_old_range_op_");
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
+}
+
+void SplitFlushRangeOp::ClearCkptVec()
+{
 }
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
@@ -2734,13 +2683,125 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &post_all_lock_op_);
             return;
         }
-        ckpt_scan_op_.ckpt_ts_ = txm->commit_ts_;
+        ckpt_scan_op_.op_func_ =
+            [&table_name = table_name_,
+             start_key = old_start_key_,
+             end_key = old_end_key_,
+             ckpt_vec = &ckpt_vec_,
+             archive_vec = &archive_vec_,
+             mv_base_vec = &mv_base_vec_,
+             node_group = node_group_,
+             ckpt_ts = txm->commit_ts_,
+             &local_cc_shards = txm->GetTxProcessor()->local_cc_shards_,
+             &hd_res = ckpt_scan_op_.hd_result_]
+        {
+            TxWorkerPool *tx_worker_pool =
+                Sharder::Instance().GetTxWorkerPool();
+            tx_worker_pool->SubmitWork(
+                [table_name,
+                 start_key,
+                 end_key,
+                 ckpt_vec,
+                 archive_vec,
+                 mv_base_vec,
+                 node_group,
+                 ckpt_ts,
+                 &local_cc_shards,
+                 &hd_res]
+                {
+                    std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_bucket =
+                        std::make_unique<std::vector<FlushRecord>>();
+                    ckpt_vec_bucket->reserve(
+                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+
+                    std::unique_ptr<std::vector<FlushRecord>>
+                        archive_vec_bucket =
+                            std::make_unique<std::vector<FlushRecord>>();
+                    archive_vec_bucket->reserve(
+                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+
+                    std::unique_ptr<std::vector<const TxKey *>>
+                        mv_base_vec_bucket =
+                            std::make_unique<std::vector<const TxKey *>>();
+                    mv_base_vec_bucket->reserve(
+                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+
+                    uint16_t scan_start_core_id = 0;
+                    LruPage *scan_start_page = nullptr;
+                    bool scan_data_drained = false;
+
+                    while (!scan_data_drained)
+                    {
+                        CkptScanCc scan_cc(table_name,
+                                           ckpt_ts,
+                                           node_group,
+                                           *ckpt_vec_bucket,
+                                           *archive_vec_bucket,
+                                           *mv_base_vec_bucket,
+                                           scan_start_core_id,
+                                           scan_start_page,
+                                           Checkpointer::CKPT_SCAN_BATCH_SIZE,
+                                           start_key,
+                                           end_key);
+                        local_cc_shards.EnqueueToCcShard(scan_start_core_id,
+                                                         &scan_cc);
+                        scan_cc.Wait();
+
+                        if (scan_cc.IsError())
+                        {
+                            LOG(INFO) << "ckpt scan failed on table "
+                                      << table_name.StringView();
+                            hd_res.SetError(scan_cc.ErrorCode());
+                        }
+                        else
+                        {
+                            auto res = scan_cc.Result();
+                            // make the current scan core as start core for the
+                            // next scan
+                            scan_start_core_id = std::get<0>(res);
+                            // make the current scan page as start page for the
+                            // next scan
+                            scan_start_page = std::get<1>(res);
+                            // if the data is drained
+                            scan_data_drained = std::get<2>(res);
+
+                            // move the bucket into the tank
+                            std::move(ckpt_vec_bucket->begin(),
+                                      ckpt_vec_bucket->end(),
+                                      std::back_inserter(*ckpt_vec));
+                            ckpt_vec_bucket->clear();
+
+                            std::move(archive_vec_bucket->begin(),
+                                      archive_vec_bucket->end(),
+                                      std::back_inserter(*archive_vec));
+                            archive_vec_bucket->clear();
+
+                            std::move(mv_base_vec_bucket->begin(),
+                                      mv_base_vec_bucket->end(),
+                                      std::back_inserter(*mv_base_vec));
+                            mv_base_vec_bucket->clear();
+                        }
+                    }
+
+                    // Sort output vectors in key sorting order.
+                    std::sort(ckpt_vec->begin(),
+                              ckpt_vec->end(),
+                              [](const FlushRecord &lhs, const FlushRecord &rhs)
+                              { return *lhs.Key() < *rhs.Key(); });
+                    std::sort(archive_vec->begin(),
+                              archive_vec->end(),
+                              [](const FlushRecord &lhs, const FlushRecord &rhs)
+                              { return *lhs.Key() < *rhs.Key(); });
+                    hd_res.SetFinished();
+                });
+        };
         ForwardToSubOperation(txm, &ckpt_scan_op_);
     }
     else if (op_ == &ckpt_scan_op_)
     {
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
+            ClearCkptVec();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             ForceToFinish(txm);
             return;
@@ -2750,6 +2811,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Split Flush transaction failed to scan for "
                           "checkpoint, tx number "
                        << txm->TxNumber();
+            ClearCkptVec();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
@@ -2764,6 +2826,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
+            ClearCkptVec();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             ForceToFinish(txm);
             return;
@@ -2774,6 +2837,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 << "Split Flush transaction failed to flush data, tx number "
                 << txm->TxNumber();
 
+            ClearCkptVec();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
@@ -2784,6 +2848,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(INFO) << "FaultInject  term_SplitFlushOp_FlushOp_Continue";
             return;
         });
+        // clear and release ckpt vecs
+        ClearCkptVec();
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
     }

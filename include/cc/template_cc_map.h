@@ -5,8 +5,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_set>
-#include <utility>  // std::pair
 #include <vector>
 
 #include "cc_entry.h"
@@ -4118,7 +4118,7 @@ public:
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             return true;
         }
 
@@ -4138,7 +4138,9 @@ public:
         // page might get cleaned and become empty. To avoid dealing with empty
         // pages in ccmap, we do not clean the page ongoing CkptScan stops at.
         for (size_t scan_cnt = 0;
-             scan_cnt < CkptScanCc::CkptScanBatchSize && ccp != &pg_ps_inf_;)
+             scan_cnt < CkptScanCc::CkptScanBatchSize &&
+             req.accumulated_scan_cnt_ < req.scan_batch_size_ &&
+             ccp != &pg_ps_inf_;)
         {
             // a page is detached from the checkpoint list if all entries in it
             // have been flushed, i.e, a page is lazily detached from the
@@ -4202,7 +4204,7 @@ public:
                             }
                             else
                             {
-                                req.Result()->SetError(
+                                req.SetError(
                                     CcErrorCode::PIN_RANGE_SLICE_FAILED);
                                 return true;
                             }
@@ -4219,6 +4221,7 @@ public:
                     }
                 }
                 scan_cnt++;
+                req.accumulated_scan_cnt_++;
             }
 
             LruPage *next = ccp->ckpt_next_;
@@ -4236,19 +4239,10 @@ public:
         {
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
-                // Sort output vectors in key sorting order.
-                std::vector<FlushRecord> &ckpt_vec = *req.ckpt_vec_;
-                std::sort(ckpt_vec.begin(),
-                          ckpt_vec.end(),
-                          [](const FlushRecord &lhs, const FlushRecord &rhs)
-                          { return *lhs.Key() < *rhs.Key(); });
-                std::vector<FlushRecord> &archive_vec = *req.archive_vec_;
-                std::sort(archive_vec.begin(),
-                          archive_vec.end(),
-                          [](const FlushRecord &lhs, const FlushRecord &rhs)
-                          { return *lhs.Key() < *rhs.Key(); });
-
-                req.Result()->SetFinished();
+                // scan data drained
+                std::tuple<uint16_t, LruPage *, bool> ckpt_scan_result{
+                    shard_->core_id_, nullptr, true};
+                req.SetFinish(std::move(ckpt_scan_result));
                 return true;
             }
             else
@@ -4262,8 +4256,19 @@ public:
             // set the start_page_ and put the CkptScanCc request into CcQueue
             // again.
             ccp->PinPage();
-            req.start_page_ = ccp;
-            shard_->Enqueue(&req);
+            if (req.accumulated_scan_cnt_ < req.scan_batch_size_)
+            {
+                req.start_page_ = ccp;
+                shard_->Enqueue(&req);
+            }
+            else
+            {
+                // scan data is not drained
+                std::tuple<uint16_t, LruPage *, bool> ckpt_scan_result{
+                    shard_->core_id_, ccp, false};
+                req.SetFinish(std::move(ckpt_scan_result));
+                return true;
+            }
         }
 
         return false;

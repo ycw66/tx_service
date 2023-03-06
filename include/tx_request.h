@@ -353,31 +353,6 @@ struct UpsertTableTxRequest
     const std::string *alter_table_info_image_;
 };
 
-struct CkptScanTxRequest : public TemplateTxRequest<CkptScanTxRequest, bool>
-{
-    CkptScanTxRequest(const TableName &table_name,
-                      uint64_t ckpt_ts,
-                      uint64_t node_group,
-                      std::vector<FlushRecord> &ckpt_vec,
-                      std::vector<FlushRecord> &archive_vec,
-                      std::vector<const TxKey *> &mv_vec)
-        : table_name_(table_name),
-          ckpt_ts_(ckpt_ts),
-          node_group_(node_group),
-          ckpt_vec_(ckpt_vec),
-          archive_vec_(archive_vec),
-          mv_vec_(mv_vec)
-    {
-    }
-
-    const TableName &table_name_;
-    uint64_t ckpt_ts_;
-    uint64_t node_group_;
-    std::vector<FlushRecord> &ckpt_vec_;
-    std::vector<FlushRecord> &archive_vec_;
-    std::vector<const TxKey *> &mv_vec_;
-};
-
 struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
 {
     SplitFlushTxRequest(

@@ -10,9 +10,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include "../../log_service/include/fault_inject.h"
@@ -1998,9 +1998,16 @@ private:
     NodeGroupId cc_ng_id_;
 };
 
-struct CkptScanCc : public TemplatedCcRequest<CkptScanCc, Void>
+struct CkptScanCc : public CcRequestBase
 {
 public:
+    enum struct CkptScanStatus
+    {
+        Ongoing,
+        Finish,
+        Error
+    };
+
     // how many pages to scan one time
     // static constexpr size_t CkptScanBatch = 20;
     // todo: limit scan by scanned size
@@ -2014,7 +2021,9 @@ public:
                std::vector<FlushRecord> &ckpt_vec,
                std::vector<FlushRecord> &archive_vec,
                std::vector<const TxKey *> &mv_base_vec,
-               CcHandlerResult<Void> *res,
+               const uint16_t scan_start_core_id,
+               const LruPage *scan_start_page,
+               const size_t scan_batch_size,
                const TxKey *target_start_key = nullptr,
                const TxKey *target_end_key = nullptr)
         : ckpt_ts_(ckpt_ts),
@@ -2023,44 +2032,112 @@ public:
           mv_base_vec_(&mv_base_vec),
           start_key_(target_start_key),
           end_key_(target_end_key),
-          start_page_(nullptr)
+          scan_start_core_id_(scan_start_core_id),
+          start_page_(const_cast<LruPage *>(scan_start_page)),
+          scan_batch_size_(scan_batch_size),
+          mux_(),
+          cv_()
     {
+        assert(scan_batch_size_ > CkptScanBatchSize);
         this->table_name_ = &table_name;
         node_group_id_ = node_group;
-        res_ = res;
+        accumulated_scan_cnt_ = 0;
+        res_ = {0, nullptr, false};
+        err_ = CcErrorCode::NO_ERROR;
+        status_ = CkptScanStatus::Ongoing;
+    }
+
+    // CkptScanCc is always stack object and won't be reused, worse, it might be
+    // destructed before Execute returns, so always return false as caller
+    // should never access this object after Execute returns
+    bool Execute(CcShard &ccs) override
+    {
+        if (ccm_ == nullptr)
+        {
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+        }
+
+        if (ccm_ != nullptr)
+        {
+            ccm_->Execute(*this);
+        }
+        else
+        {
+            res_ = {0, nullptr, true};
+            Notify();
+        }
+        // return false since CkptScanCc is not re-used and does not need to
+        // call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (status_ != CkptScanStatus::Finish)
+        {
+            cv_.wait(lk, [this] { return status_ == CkptScanStatus::Finish; });
+        }
     }
 
     void Reset(uint32_t node_group)
     {
+        std::lock_guard<std::mutex> lk(mux_);
         ccm_ = nullptr;
         start_page_ = nullptr;
+        status_ = CkptScanStatus::Ongoing;
         node_group_id_ = node_group;
     }
 
-    void Reset(const TableName &table_name,
-               uint64_t ckpt_ts,
-               std::vector<FlushRecord> &ckpt_vec,
-               std::vector<FlushRecord> &archive_vec,
-               std::vector<const TxKey *> &mv_vec,
-               uint32_t node_group,
-               CcHandlerResult<Void> *res,
-               const TxKey *target_start_key = nullptr,
-               const TxKey *target_end_key = nullptr)
+    void SetError(CcErrorCode err)
     {
-        ccm_ = nullptr;
-        ckpt_ts_ = ckpt_ts;
-        node_group_id_ = node_group;
-        this->table_name_ = &table_name;
-        ckpt_vec_ = &ckpt_vec;
-        archive_vec_ = &archive_vec;
-        mv_base_vec_ = &mv_vec;
-        start_key_ = target_start_key;
-        end_key_ = target_end_key;
-        start_page_ = nullptr;
+        err_ = err;
+        Notify();
+    }
+
+    bool IsError()
+    {
+        return err_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        return err_;
+    }
+
+    void SetFinish(const std::tuple<uint16_t, LruPage *, bool> &res)
+    {
         res_ = res;
+        Notify();
+    }
+
+    void SetFinish(std::tuple<uint16_t, LruPage *, bool> &&res)
+    {
+        res_ = std::move(res);
+        Notify();
+    }
+
+    uint32_t NodeGroupId()
+    {
+        return node_group_id_;
+    }
+
+    std::tuple<uint16_t, LruPage *, bool> &Result()
+    {
+        return res_;
     }
 
 private:
+    void Notify()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        status_ = CkptScanCc::CkptScanStatus::Finish;
+        cv_.notify_one();
+    }
+
+    const TableName *table_name_{nullptr};
+    CcMap *ccm_{nullptr};
+    uint32_t node_group_id_;
     uint64_t ckpt_ts_;
     std::vector<FlushRecord> *ckpt_vec_;
     std::vector<FlushRecord> *archive_vec_;
@@ -2070,7 +2147,18 @@ private:
     // it's on entire table.
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
+    uint16_t scan_start_core_id_;
     LruPage *start_page_;
+    size_t scan_batch_size_;
+    size_t accumulated_scan_cnt_;
+
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    CkptScanStatus status_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+
+    // scan result
+    std::tuple<uint16_t, LruPage *, bool> res_;
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;

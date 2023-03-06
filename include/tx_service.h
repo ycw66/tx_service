@@ -297,6 +297,7 @@ public:
     TxLog *txlog_hd_;
 
     friend class TxService;
+    friend struct txservice::SplitFlushRangeOp;
 
 private:
 #ifdef METRICS_COLLECTOR_ENABLE

@@ -1213,31 +1213,6 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
     }
 }
 
-void txservice::LocalCcHandler::CkptScan(const TableName &table_name,
-                                         uint64_t ckpt_ts,
-                                         uint64_t node_group,
-                                         std::vector<FlushRecord> &ckpt_vec,
-                                         std::vector<FlushRecord> &archive_vec,
-                                         std::vector<const TxKey *> &mv_vec,
-                                         CcHandlerResult<Void> &hres,
-                                         const TxKey *start_key,
-                                         const TxKey *end_key)
-{
-    CkptScanCc *req = ckpt_scan_pool.NextRequest();
-    req->Reset(table_name,
-               ckpt_ts,
-               ckpt_vec,
-               archive_vec,
-               mv_vec,
-               node_group,
-               &hres,
-               start_key,
-               end_key);
-    TX_TRACE_ACTION(this, req);
-    TX_TRACE_DUMP(req);
-    cc_shards_.EnqueueCcRequest(thd_id_, 0, req);
-}
-
 /*
  * Get the node id which runs the current transaction.
  */

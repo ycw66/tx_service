@@ -186,6 +186,11 @@ public:
         start_ts_ = ts;
     }
 
+    TxProcessor *GetTxProcessor()
+    {
+        return tx_processor_;
+    }
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to
@@ -264,9 +269,6 @@ private:
     void Process(PostReadOperation &post_read_operation);
     void PostProcess(PostReadOperation &post_read_operation);
 
-    void Process(CkptScanOp &scan_op);
-    void PostProcess(CkptScanOp &scan_op);
-
     void Process(FlushDataOp &flush_op);
     void PostProcess(FlushDataOp &flush_op);
 
@@ -274,9 +276,9 @@ private:
     void PostProcess(NoOp &no_op);
 
     template <typename ResultType>
-    void Process(DsOp<ResultType> &ds_op);
+    void Process(AsyncOp<ResultType> &ds_op);
     template <typename ResultType>
-    void PostProcess(DsOp<ResultType> &ds_op);
+    void PostProcess(AsyncOp<ResultType> &ds_op);
 
     void Process(ReleaseScanExtraLockOp &lock_op);
     void PostProcess(ReleaseScanExtraLockOp &lock_op);
@@ -373,8 +375,6 @@ private:
     std::unique_ptr<UpsertTableOp> schema_op_;
 
     std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
-
-    std::unique_ptr<CkptScanOp> ckpt_scan_op_;
 
     std::unordered_map<
         size_t,
@@ -476,12 +476,11 @@ private:
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;
     friend struct SplitFlushRangeOp;
-    friend struct CkptScanOp;
     friend struct FlushDataOp;
     friend struct DsSplitOp;
     friend struct NoOp;
     template <typename ResultType>
-    friend struct DsOp;
+    friend struct AsyncOp;
     friend struct PostReadOperation;
     friend class TxProcessor;
 };
