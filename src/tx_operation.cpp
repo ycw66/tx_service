@@ -2506,6 +2506,12 @@ SplitFlushRangeOp::SplitFlushRangeOp(
 
 void SplitFlushRangeOp::ClearCkptVec()
 {
+    ckpt_vec_.clear();
+    ckpt_vec_.shrink_to_fit();
+    archive_vec_.clear();
+    archive_vec_.shrink_to_fit();
+    mv_base_vec_.clear();
+    mv_base_vec_.shrink_to_fit();
 }
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
