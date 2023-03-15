@@ -113,6 +113,20 @@ void Sharder::Shutdown()
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
 }
 
+void Sharder::CloseBraft()
+{
+    LOG(INFO) << "Close braft at node #" << node_id_;
+
+    // shutdown braft node.
+    for (auto &cc_node : cc_nodes_)
+    {
+        cc_node.second->Shutdown();
+    }
+    cc_node_server_.Stop(0);
+
+    LOG(INFO) << "The braft at node #" << node_id_ << " shut down.";
+}
+
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
     assert(node_id < ips_.size());

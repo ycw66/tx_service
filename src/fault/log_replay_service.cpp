@@ -152,6 +152,7 @@ void ReplayService::Shutdown()
     {
         brpc::StreamClose(it->first);
     }
+
     inbound_cv_.wait(lk, [this]() { return active_stream_cnt_ == 0; });
 }
 

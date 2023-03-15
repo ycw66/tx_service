@@ -70,6 +70,7 @@ public:
     }
 
     void Shutdown();
+    void CloseBraft();
 
     /**
      * @brief Returns the ID of the leader node of the input cc node group.
