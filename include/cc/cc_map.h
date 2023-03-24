@@ -42,6 +42,7 @@ struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
 struct FillStoreSliceCc;
 struct GetPostCkptSlice;
+struct KickoutCcEntryCc;
 
 enum struct ScanType
 {
@@ -97,12 +98,16 @@ public:
     virtual bool Execute(CleanCcEntryForTestCc &req) = 0;
     virtual bool Execute(FillStoreSliceCc &req) = 0;
     virtual bool Execute(GetPostCkptSlice &req) = 0;
+    virtual bool Execute(KickoutCcEntryCc &req) = 0;
 
     virtual size_t size() const = 0;
 
     virtual void Clean(LruEntry *remove_entry) = 0;
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
-        LruPage *page) = 0;
+        LruPage *page,
+        uint64_t *ckpt_ts = nullptr,
+        bool is_single_ccmap = false,
+        bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;
 
     /**

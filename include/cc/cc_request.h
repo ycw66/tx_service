@@ -2916,4 +2916,114 @@ protected:
     std::vector<TxNumber> tx_id_lock_vct_;
     TxNumber tx_id_wait_;
 };
+
+/**
+ * @brief Kickout the cc entries whose commit_ts less than @ckpt_ts.
+ *
+ * NOTE: Should ensure that all entries already be flushed into data store
+ * before kickout them.
+ *
+ */
+struct KickoutCcEntryCc : public TemplatedCcRequest<KickoutCcEntryCc, Void>
+{
+public:
+    static constexpr size_t KickoutPageBatchSize = 32;
+
+    enum struct KickoutStatus
+    {
+        Ongoing,
+        Finished,
+        Error
+    };
+
+    KickoutCcEntryCc() = delete;
+
+    KickoutCcEntryCc(const TableName &table_name,
+                     const uint32_t ng_id,
+                     const uint64_t ckpt_ts,
+                     CcHandlerResult<Void> *res)
+        : ckpt_ts_(ckpt_ts),
+          start_page_(nullptr),
+          status_(KickoutStatus::Ongoing),
+          mux_(),
+          cv_()
+    {
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        res_ = res;
+    }
+
+    KickoutCcEntryCc(const KickoutCcEntryCc &rhs) = delete;
+    KickoutCcEntryCc(KickoutCcEntryCc &&rhs) = delete;
+
+    void Reset(uint32_t ng_id)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        node_group_id_ = ng_id;
+        start_page_ = nullptr;
+        status_ = KickoutStatus::Ongoing;
+        ccm_ = nullptr;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (ccm_ == nullptr)
+        {
+            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+        }
+
+        if (ccm_ != nullptr)
+        {
+            ccm_->Execute(*this);
+        }
+        else
+        {
+            // If no ccmap for this table, nothing to kickout, notify finish
+            // directly.
+            res_->SetFinished();
+            Notify();
+        }
+
+        return false;
+    }
+
+    uint64_t CkptTs() const
+    {
+        return ckpt_ts_;
+    }
+
+    LruPage *StartPage() const
+    {
+        return start_page_;
+    }
+
+    void SetStartPage(LruPage *start_page)
+    {
+        start_page_ = start_page;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (status_ != KickoutStatus::Finished)
+        {
+            cv_.wait(lk, [this] { return status_ == KickoutStatus::Finished; });
+        }
+    }
+
+    void Notify()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        status_ = KickoutStatus::Finished;
+        cv_.notify_one();
+    }
+
+private:
+    const uint64_t ckpt_ts_{0};
+    LruPage *start_page_{nullptr};
+    KickoutStatus status_;
+    // Protect the status_ and cv_
+    std::mutex mux_;
+    std::condition_variable cv_;
+};
 }  // namespace txservice

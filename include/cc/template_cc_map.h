@@ -4707,6 +4707,94 @@ public:
         return false;
     }
 
+    bool Execute(KickoutCcEntryCc &req)
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+
+        // Iterate the cc map using the original page list.
+        LruPage *lru_ccp = req.StartPage() == nullptr ? pg_ng_inf_.next_page_
+                                                      : req.StartPage();
+
+        CcPage<KeyT, ValueT> *ccp =
+            static_cast<CcPage<KeyT, ValueT> *>(lru_ccp);
+
+        // The page has be pinned at the end of the last round, unpin it when
+        // the request resumes.
+        if (req.StartPage() != nullptr)
+        {
+            ccp->UnpinPage();
+        }
+
+        uint64_t ckpt_ts = req.CkptTs();
+
+        // To avoid occupy the TxProcessor thread for a long time, only process
+        // KickoutPageBatchSize number of pages in each round.
+        size_t scan_page_cnt = 0;
+        bool is_success = true;
+        while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
+               ccp != &pg_ps_inf_)
+        {
+            auto [freed_cnt, next_page] =
+                CleanPageAndReBalance(ccp, &ckpt_ts, true, &is_success);
+            ++scan_page_cnt;
+            if (!is_success)
+            {
+                // Clean failed, retry in the next round.
+                DLOG(ERROR) << "Failed to clean all target ccentries on core: "
+                            << shard_->core_id_;
+                break;
+            }
+            // Move to next page
+            ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
+        }
+
+        if (ccp == &pg_ng_inf_)
+        {
+            // Reach the end.
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                // Finished on all cc shards
+                req.Result()->SetFinished();
+                req.Notify();
+                return true;
+            }
+            else
+            {
+                // Move the request to next ccshard
+                req.Reset(req.NodeGroupId());
+                MoveRequest(&req, shard_->core_id_ + 1);
+            }
+        }
+        else
+        {
+            // Set the start_page_ for next round, and should pin the cc page to
+            // avoid it be modified by other tx.
+            ccp->PinPage();
+            req.SetStartPage(ccp);
+            shard_->Enqueue(&req);
+        }
+
+        return false;
+    }
+
     size_t size() const override
     {
         return size_;
@@ -4750,18 +4838,42 @@ public:
      * Clean erasable entries in lru_page, re-balance pages after clean.
      *
      * @param lru_page
-     * @return free count and the lru_next_ of page
+     * @param ckpt_ts [optional]
+     * @param is_single_ccmap [optional]
+     * @param is_success [optional]
+     * @return result pair of which the first is free count and the second is
+     * the lru_next_ of the page or the next_page_ of the ccpage if
+     * @is_single_ccmap is true.
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
-        LruPage *lru_page) override
+        LruPage *lru_page,
+        uint64_t *ckpt_ts = nullptr,
+        bool is_single_ccmap = false,
+        bool *is_success = nullptr) override
     {
         size_t free_cnt = 0;
-        LruPage *next_in_lru = lru_page->lru_next_;
+        LruPage *next_page = nullptr;
+        if (is_single_ccmap)
+        {
+            // For target ccmap, go along with CcPage::next_page_
+            CcPage<KeyT, ValueT> *ccpage =
+                static_cast<CcPage<KeyT, ValueT> *>(lru_page);
+            next_page = ccpage->next_page_;
+        }
+        else
+        {
+            // go along with the lru list.
+            next_page = lru_page->lru_next_;
+        }
         if (lru_page->IsPinned())
         {
             // pinned page cannot be removed, skip cleaning pinned page to avoid
             // empty page
-            return {free_cnt, next_in_lru};
+            if (is_success != nullptr)
+            {
+                *is_success = false;
+            }
+            return {free_cnt, next_page};
         }
         size_t mem_decreased = 0;
 
@@ -4769,7 +4881,14 @@ public:
         CcPage<KeyT, ValueT> *page =
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
-        uint64_t last_read_ts = CleanPage(page, mem_decreased, free_cnt);
+        auto [success, last_read_ts] =
+            CleanPage(page, mem_decreased, free_cnt, ckpt_ts);
+
+        // Output the operation result if the caller care it.
+        if (is_success != nullptr)
+        {
+            *is_success = success;
+        }
 
         if (page->Empty())  // remove page if empty
         {
@@ -4866,12 +4985,13 @@ public:
                 }
 
                 // merge page1 and page2
-                next_in_lru = MergePages(page1_it,
-                                         page2_it,
-                                         page1_last_read_ts,
-                                         page2_last_read_ts,
-                                         page,
-                                         mem_decreased);
+                next_page = MergePages(page1_it,
+                                       page2_it,
+                                       page1_last_read_ts,
+                                       page2_last_read_ts,
+                                       page,
+                                       mem_decreased,
+                                       is_single_ccmap);
             }
         }
 
@@ -4882,7 +5002,7 @@ public:
             ccm_has_full_entries_ = false;
         }
 
-        return {free_cnt, next_in_lru};
+        return {free_cnt, next_page};
     }
 
     void Clean() override
@@ -6083,11 +6203,13 @@ protected:
      * @param page
      * @param mem_decreased
      * @param free_cnt
+     * @param ckpt_ts [optional]
      * @return
      */
-    uint64_t CleanPage(CcPage<KeyT, ValueT> *page,
-                       size_t &mem_decreased,
-                       size_t &free_cnt)
+    std::pair<bool, uint64_t> CleanPage(CcPage<KeyT, ValueT> *page,
+                                        size_t &mem_decreased,
+                                        size_t &free_cnt,
+                                        uint64_t *ckpt_ts = nullptr)
     {
         uint64_t last_read_ts = 0;
         std::vector<KeyT> &keys = page->keys_;
@@ -6097,6 +6219,8 @@ protected:
         auto entry_insert_it = entries.begin();
 
         bool detach_ckpt = true;
+        // Whether all ccentries whose commit_ts < @ckpt_ts have been cleaned.
+        bool clean_success = true;
         auto key_it = keys.begin();
         auto entry_it = entries.begin();
         for (; key_it != keys.end(); key_it++, entry_it++)
@@ -6117,6 +6241,11 @@ protected:
             else
             {
                 detach_ckpt = false;
+                // The ccentry that expect to clean cannot be kick out.
+                if (ckpt_ts != nullptr && cce->commit_ts_ < *ckpt_ts)
+                {
+                    clean_success = false;
+                }
                 // keep the entries that are not free
                 *key_insert_it = std::move(*key_it);
                 *entry_insert_it = std::move(*entry_it);
@@ -6132,7 +6261,7 @@ protected:
             // detach page from the checkpoint list if it is not pinned
             DetachFromCkptList(page);
         }
-        return last_read_ts;
+        return {clean_success, last_read_ts};
     }
 
     /**
@@ -6280,7 +6409,9 @@ protected:
      * @param page
      * @param page_key
      * @param mem_decreased
-     * @return the lru_next_ of page
+     * @param is_single_ccmap [optional]
+     * @return the lru_next_ of page or the next_page_ of ccpage if
+     * @is_single_ccmap is true
      */
     LruPage *MergePages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
@@ -6288,7 +6419,8 @@ protected:
         uint64_t page1_last_read_ts,
         uint64_t page2_last_read_ts,
         CcPage<KeyT, ValueT> *page,
-        size_t &mem_decreased)
+        size_t &mem_decreased,
+        bool is_single_ccmap = false)
     {
         CcPage<KeyT, ValueT> *page1 = &page1_it->second;
         CcPage<KeyT, ValueT> *page2 = &page2_it->second;
@@ -6416,6 +6548,14 @@ protected:
         {
             // merged page key has changed
             TryUpdatePageKey(merged_page_it);
+        }
+
+        // If only clean a single table, use ccpage list.
+        if (is_single_ccmap)
+        {
+            // If merged with previous ccpage, return the next_page_ of the new
+            // merged page, otherwise, return the new merged page itself.
+            next = page2 == page ? merged_page->next_page_ : merged_page;
         }
 
         return next;
