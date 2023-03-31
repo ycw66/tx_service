@@ -530,7 +530,10 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_src_node_id(src_node_id);
     scan_next->set_node_group_id(ng_id);
     const CcEntryAddr &last_cce_addr = scan_cache->LastTuple()->cce_addr_;
-    scan_next->set_prior_cce_ptr(last_cce_addr.CcePtr());
+    CceAddr_msg *cce_addr_msg = scan_next->mutable_prior_cce_ptr();
+    cce_addr_msg->set_cce_ptr(last_cce_addr.CcePtr());
+    cce_addr_msg->set_term(last_cce_addr.Term());
+    cce_addr_msg->set_core_id(last_cce_addr.CoreId());
     scan_next->set_direction(scan_cache->Scanner()->Direction() ==
                              ScanDirection::Forward);
     scan_next->set_ts(start_ts);

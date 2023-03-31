@@ -769,7 +769,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         RemoteScanNextBatch *scan_next_req = scan_next_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), scan_next_req);
         scan_next_req->Reset(std::move(msg));
-        scan_next_req->Ccm()->shard_->Enqueue(scan_next_req);
+        local_shards_.EnqueueCcRequest(scan_next_req->PriorCceAddr().CoreId(),
+                                       scan_next_req);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse:

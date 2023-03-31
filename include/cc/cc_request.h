@@ -59,7 +59,12 @@ public:
     virtual bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (cc_ng_term < 0)
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
         {
             return false;
         }
@@ -238,6 +243,7 @@ public:
         table_name_ = tname;
         ccm_ = nullptr;
         node_group_id_ = node_group_id;
+        ng_term_ = -1;
 
         tx_number_ = tx_number;
         proto_ = proto;
@@ -260,6 +266,11 @@ protected:
     // whether request is running on multi threads in parallel. e.g.
     // RemoteScanOpen.
     bool parallel_req_{false};
+    // The term of the cc node group on which the request is first processed.
+    // The term is matched, when the request is blocked and resumed on the same
+    // cc node group. The request is terminated if the cc node group has failed
+    // since first execution and the term changes.
+    int64_t ng_term_{-1};
 };
 
 struct AcquireCc
@@ -556,6 +567,50 @@ public:
     PostWriteCc(const PostWriteCc &rhs) = delete;
     PostWriteCc(PostWriteCc &&rhs) = delete;
 
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cce_addr_ != nullptr)
+        {
+            if (cce_addr_->Term() != cc_ng_term)
+            {
+                return false;
+            }
+
+            if (cce_addr_->InsertPtr() != 0)
+            {
+                const UntypedInsertEntry *ins_ptr =
+                    reinterpret_cast<const UntypedInsertEntry *>(
+                        cce_addr_->InsertPtr());
+                ccm_ = ins_ptr->Parent().parent_map_;
+            }
+            else if (cce_addr_->CcePtr() != 0)
+            {
+                const LruEntry *lru_entry =
+                    reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                ccm_ = lru_entry->parent_map_;
+            }
+
+            return true;
+        }
+        else
+        {
+            if (ng_term_ < 0)
+            {
+                ng_term_ = cc_ng_term;
+            }
+
+            if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+            {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+    }
+
     void Reset(const CcEntryAddr *addr,
                uint64_t tx_number,
                uint64_t ts,
@@ -574,19 +629,7 @@ public:
         key_shard_code_ = key_shard_code;
         key_ = nullptr;
         is_remote_ = false;
-
-        if (addr->InsertPtr() != 0)
-        {
-            const UntypedInsertEntry *ins_ptr =
-                reinterpret_cast<const UntypedInsertEntry *>(addr->InsertPtr());
-            ccm_ = ins_ptr->Parent().parent_map_;
-        }
-        else
-        {
-            const LruEntry *lru_entry =
-                reinterpret_cast<const LruEntry *>(addr->CcePtr());
-            ccm_ = lru_entry->parent_map_;
-        }
+        ccm_ = nullptr;
     }
 
     void Reset(const TxKey *key,
@@ -609,6 +652,7 @@ public:
         operation_type_ = operation_type;
         key_shard_code_ = key_shard_code;
         is_remote_ = false;
+        ccm_ = nullptr;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -629,19 +673,7 @@ public:
         operation_type_ = operation_type;
         key_shard_code_ = key_shard_code;
         is_remote_ = true;
-
-        if (addr->InsertPtr() != 0)
-        {
-            const UntypedInsertEntry *ins_ptr =
-                reinterpret_cast<const UntypedInsertEntry *>(addr->InsertPtr());
-            ccm_ = ins_ptr->Parent().parent_map_;
-        }
-        else
-        {
-            const LruEntry *lru_entry =
-                reinterpret_cast<const LruEntry *>(addr->CcePtr());
-            ccm_ = lru_entry->parent_map_;
-        }
+        ccm_ = nullptr;
     }
 
     void Reset(const TableName *table_name,
@@ -663,6 +695,7 @@ public:
         operation_type_ = operation_type;
         key_shard_code_ = key_shard_code;
         is_remote_ = true;
+        ccm_ = nullptr;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -924,6 +957,20 @@ public:
     PostReadCc(const PostReadCc &rhs) = delete;
     PostReadCc(PostReadCc &&rhs) = delete;
 
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cce_addr_->Term() != cc_ng_term)
+        {
+            return false;
+        }
+
+        const LruEntry *lru_entry =
+            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        ccm_ = lru_entry->parent_map_;
+        return true;
+    }
+
     void Reset(const CcEntryAddr *addr,
                uint64_t tx_number,
                uint64_t commit_ts,
@@ -939,10 +986,7 @@ public:
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
         res->Value().Clear();
-
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(addr->CcePtr());
-        ccm_ = lru_entry->parent_map_;
+        ccm_ = nullptr;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -976,7 +1020,8 @@ struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
 {
 public:
     ReadCc()
-        : key_(nullptr),
+        : cce_addr_(nullptr),
+          key_(nullptr),
           key_str_(nullptr),
           rec_(nullptr),
           rec_str_(nullptr),
@@ -991,15 +1036,36 @@ public:
 
     bool ValidTermCheck() override
     {
+        int64_t cc_ng_term = -1;
         if (!is_in_recovering_)
         {
-            return TemplatedCcRequest<ReadCc, ReadKeyResult>::ValidTermCheck();
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         }
         else
         {
-            int64_t cterm =
+            cc_ng_term =
                 Sharder::Instance().CandidateLeaderTerm(node_group_id_);
-            if (cterm < 0)
+        }
+
+        if (cce_addr_->CcePtr() != 0)
+        {
+            if (cce_addr_->Term() != cc_ng_term)
+            {
+                return false;
+            }
+
+            const LruEntry *lru_entry =
+                reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+            ccm_ = lru_entry->parent_map_;
+        }
+        else
+        {
+            if (ng_term_ < 0)
+            {
+                ng_term_ = cc_ng_term;
+            }
+
+            if (cc_ng_term < 0 || cc_ng_term != ng_term_)
             {
                 return false;
             }
@@ -1008,6 +1074,8 @@ public:
                 return true;
             }
         }
+
+        return true;
     }
 
     void Reset(const TableName *tn,
@@ -1044,18 +1112,15 @@ public:
         is_wait_for_post_write_ = false;
         is_in_recovering_ = is_in_recovering;
 
-        const CcEntryAddr &cce_addr = res->Value().cce_addr_;
-        if (cce_addr.CcePtr() != 0)
+        ccm_ = nullptr;
+        cce_addr_ = &res->Value().cce_addr_;
+        if (cce_addr_->CcePtr() != 0)
         {
-            const LruEntry *entry =
-                reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-            ccm_ = entry->parent_map_;
             table_name_ = nullptr;
         }
         else
         {
             table_name_ = tn;
-            ccm_ = nullptr;
         }
     }
 
@@ -1092,18 +1157,15 @@ public:
         is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
 
-        const CcEntryAddr &cce_addr = res->Value().cce_addr_;
-        if (cce_addr.CcePtr() != 0)
+        ccm_ = nullptr;
+        cce_addr_ = &res->Value().cce_addr_;
+        if (cce_addr_->CcePtr() != 0)
         {
-            const LruEntry *entry =
-                reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-            ccm_ = entry->parent_map_;
             table_name_ = nullptr;
         }
         else
         {
             table_name_ = tn;
-            ccm_ = nullptr;
         }
     }
 
@@ -1220,6 +1282,7 @@ public:
     }
 
 private:
+    const CcEntryAddr *cce_addr_;
     const TxKey *key_;
     const std::string *key_str_;
     /**
@@ -1389,6 +1452,20 @@ struct ScanNextBatchCc
 public:
     ScanNextBatchCc() = default;
 
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cce_addr_->Term() != cc_ng_term)
+        {
+            return false;
+        }
+
+        const LruEntry *lru_entry =
+            reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+        ccm_ = lru_entry->parent_map_;
+        return true;
+    }
+
     void Reset(const uint32_t &ng_id,
                TxNumber tx_number,
                const uint64_t &ts,
@@ -1412,9 +1489,8 @@ public:
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
         const ScanTuple *last_tuple = cache->LastTuple();
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(last_tuple->cce_addr_.CcePtr());
-        ccm_ = lru_entry->parent_map_;
+        cce_addr_ = &last_tuple->cce_addr_;
+        ccm_ = nullptr;
     }
 
     int64_t TxTerm()
@@ -1463,6 +1539,7 @@ public:
     }
 
 private:
+    const CcEntryAddr *cce_addr_;
     uint64_t ts_{0};
     ScanCache *scan_cache_{nullptr};
     int64_t tx_term_{-1};

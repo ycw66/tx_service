@@ -230,9 +230,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
                                                 "remove");
         });
 
-        if (cce_addr.Term() < 0 && timeout ||
-            !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                 txm->TxTerm()))
+        if (cce_addr.Term() < 0 && timeout)
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
@@ -416,9 +414,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                                                 "remove");
         });
 
-        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout ||
-            !Sharder::Instance().CheckLeaderTerm(txm->TxCcNodeId(),
-                                                 txm->TxTerm()))
+        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
         {
             // FIXME(lzx): Is it more appropriate to retry if remote_ack_cnt_>0
             // ? If the tx node fails, force the tx to abort instantly.

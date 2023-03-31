@@ -336,14 +336,14 @@ message ScanOpenResponse {
 message ScanNextRequest {
 	uint32 src_node_id = 1;
 	uint32 node_group_id = 2;
-	uint64 prior_cce_ptr = 3;
+	CceAddr_msg prior_cce_ptr = 3;
 	bool direction = 4;
 	uint64 ts = 5;
 	uint64 scan_cache_ptr = 6;
 	bool ckpt = 7;
 	IsolationType iso_level = 8;
 	CcProtocolType protocol = 9;
-	bool is_for_write = 10;
+	bool is_for_write = 10;	
 }
 
 message ScanNextResponse {

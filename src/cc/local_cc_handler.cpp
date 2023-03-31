@@ -237,11 +237,7 @@ void txservice::LocalCcHandler::PostWrite(
                    &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-        CcMap *ccm = lru_entry->parent_map_;
-
-        ccm->shard_->Enqueue(thd_id_, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
     }
     else
     {
@@ -344,11 +340,7 @@ void txservice::LocalCcHandler::PostRead(
         req->Reset(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-        CcMap *ccm = lru_entry->parent_map_;
-
-        ccm->shard_->Enqueue(thd_id_, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
     }
     else
     {
@@ -478,11 +470,7 @@ void txservice::LocalCcHandler::ReadOutside(
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        const LruEntry *lru_entry =
-            reinterpret_cast<const LruEntry *>(cce_addr.CcePtr());
-        CcMap *ccm = lru_entry->parent_map_;
-
-        ccm->shard_->Enqueue(thd_id_, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
     }
     else
     {

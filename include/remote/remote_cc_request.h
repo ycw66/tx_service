@@ -161,6 +161,17 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
+        if (cce_addr_.Term() !=
+            Sharder::Instance().LeaderTerm(cce_addr_.NodeGroupId()))
+        {
+            LOG(INFO) << "RemoteReadOutside, node_group(#"
+                      << cce_addr_.NodeGroupId() << ") term < 0, tx:" << Txn()
+                      << " ,cce: "
+                      << reinterpret_cast<void *>(cce_addr_.CcePtr());
+            Finish();
+            return true;
+        }
+
         return Ccm()->Execute(*this);
     }
 
@@ -362,6 +373,7 @@ struct RemoteScanNextBatch
 public:
     RemoteScanNextBatch();
     void Reset(std::unique_ptr<CcMessage> input_msg);
+    bool ValidTermCheck() override;
 
     uint64_t handler_addr()
     {
@@ -420,12 +432,17 @@ public:
         return is_wait_for_post_write_;
     }
 
+    CcEntryAddr PriorCceAddr()
+    {
+        return prior_cce_addr_;
+    }
+
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    uint64_t prior_cce_addr_{0};
+    CcEntryAddr prior_cce_addr_;
     ScanDirection direct_{ScanDirection::Forward};
     RemoteScanCache scan_cache_;
     bool is_ckpt_delta_{false};

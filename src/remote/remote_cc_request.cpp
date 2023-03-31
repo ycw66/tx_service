@@ -784,6 +784,8 @@ void txservice::remote::RemoteScanOpen::Reset(
     {
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
+
+    ng_term_ = -1;
 }
 
 void txservice::remote::RemoteScanOpen::Free()
@@ -827,15 +829,16 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         {
             CcOperation cc_op =
                 IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+
             const LruEntry *prior_lru_entry =
-                reinterpret_cast<const LruEntry *>(prior_cce_addr_);
+                reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
             if (prior_lru_entry->parent_map_->Type() == TableType::Secondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
+
             LockType lock_type =
                 LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
-
             // When there is a scan error and the scan does not put locks on the
             // scanned entries, clears the scan cache and does not return them
             // back to the sender. If the scan puts locks on scanned entries,
@@ -853,6 +856,20 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
     };
 }
 
+bool txservice::remote::RemoteScanNextBatch::ValidTermCheck()
+{
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    if (prior_cce_addr_.Term() != cc_ng_term)
+    {
+        return false;
+    }
+
+    const LruEntry *lru_entry =
+        reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
+    ccm_ = lru_entry->parent_map_;
+    return true;
+}
+
 void txservice::remote::RemoteScanNextBatch::Reset(
     std::unique_ptr<CcMessage> input_msg)
 {
@@ -863,7 +880,9 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     const ScanNextRequest &scan_next = input_msg->scan_next_req();
 
     node_group_id_ = scan_next.node_group_id();
-    prior_cce_addr_ = scan_next.prior_cce_ptr();
+    const CceAddr_msg &cce_addr = scan_next.prior_cce_ptr();
+    ng_term_ = -1;
+
     direct_ = scan_next.direction() ? ScanDirection::Forward
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
@@ -874,9 +893,11 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     cce_ptr_ = nullptr;
     snapshot_ts_ = scan_next.ts();
 
-    const LruEntry *prior_lru_entry =
-        reinterpret_cast<const LruEntry *>(prior_cce_addr_);
-    ccm_ = prior_lru_entry->parent_map_;
+    prior_cce_addr_.SetCce(cce_addr.cce_ptr(),
+                           cce_addr.term(),
+                           node_group_id_,
+                           cce_addr.core_id());
+    ccm_ = nullptr;
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();

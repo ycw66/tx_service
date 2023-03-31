@@ -3126,8 +3126,8 @@ public:
         }
         else
         {
-            prior_cce =
-                reinterpret_cast<CcEntry<KeyT, ValueT> *>(req.prior_cce_addr_);
+            prior_cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                req.PriorCceAddr().CcePtr());
             scan_ccm_it = Iterator(prior_cce, &neg_inf_, &pos_inf_);
         }
 

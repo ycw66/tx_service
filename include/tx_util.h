@@ -90,7 +90,10 @@ static inline bool TxReadCatalog(TransactionExecution *txm,
 
     txm->Execute(&read_tx_req);
     read_tx_req.Wait();
-    assert(!read_tx_req.IsError());
+    if (read_tx_req.IsError())
+    {
+        return false;
+    }
 
     const RecordStatus &rec_status = read_tx_req.Result();
     if (rec_status == RecordStatus::Deleted)
@@ -115,7 +118,10 @@ static inline bool TxReadCatalog(TransactionExecution *txm,
     {
         assert(rec_status == RecordStatus::Normal);
         exists = true;
-        assert(catalog_rec->Schema() != nullptr);
+        if (catalog_rec->Schema() == nullptr)
+        {
+            return false;
+        }
         catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
     }
 
