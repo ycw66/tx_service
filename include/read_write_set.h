@@ -60,10 +60,19 @@ public:
         return data_rset_cnt_;
     }
 
-    size_t CatalogSetSize() const
+    size_t CatalogRangeSetSize() const
     {
-        auto catalog_it = rset_.find(catalog_ccm_name);
-        return catalog_it == rset_.end() ? 0 : catalog_it->second.size();
+        size_t set_size = 0;
+        for (auto &[tbl_name, rset] : rset_)
+        {
+            if (tbl_name.Type() == TableType::Catalog ||
+                tbl_name.Type() == TableType::RangePartition)
+            {
+                set_size += rset.size();
+            }
+        }
+
+        return set_size;
     }
 
     size_t WriteSetSize() const
@@ -132,7 +141,8 @@ public:
 
             it->second.is_relock = true;
         }
-        else if (!(*table_name == catalog_ccm_name))
+        else if (!(*table_name == catalog_ccm_name) &&
+                 (table_name->Type() != TableType::RangePartition))
         {
             ++data_rset_cnt_;
         }
@@ -181,7 +191,8 @@ public:
             auto cce_it = tbl_read_set.find(cce_addr);
             if (cce_it != tbl_read_set.end())
             {
-                if (!(table_name == catalog_ccm_name))
+                if (!(table_name == catalog_ccm_name) &&
+                    (table_name.Type() != TableType::RangePartition))
                 {
                     --data_rset_cnt_;
                 }
@@ -295,15 +306,16 @@ public:
     }
 
     /**
-     * @brief Removes all read-set entries of data items, keeping catalog read
-     * entries.
+     * @brief Removes all read-set entries of data items, keeping catalog and
+     * range read entries.
      *
      */
     void ClearReadSet()
     {
         for (auto tbl_it = rset_.begin(); tbl_it != rset_.end();)
         {
-            if (tbl_it->first == catalog_ccm_name)
+            if (tbl_it->first == catalog_ccm_name ||
+                tbl_it->first.Type() == TableType::RangePartition)
             {
                 ++tbl_it;
             }
@@ -410,7 +422,6 @@ public:
         tbl_it = rset_.find(range_tbl_name);
         if (tbl_it != rset_.end())
         {
-            data_rset_cnt_ -= tbl_it->second.size();
             rset_.erase(tbl_it);
         }
 #endif

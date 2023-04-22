@@ -297,6 +297,11 @@ public:
         return is_for_write_;
     }
 
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
+    }
+
     uint64_t ReadTimestamp() const
     {
         return snapshot_ts_;
@@ -348,6 +353,7 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
     int64_t tx_term_{0};
     bool is_for_write_{false};
+    bool is_covering_keys_{false};
 
     uint64_t snapshot_ts_{0};
     std::vector<bool> is_wait_for_post_write_;
@@ -395,6 +401,11 @@ public:
     bool IsForWrite() const
     {
         return is_for_write_;
+    }
+
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
     }
 
     uint64_t ReadTimestamp() const
@@ -450,6 +461,7 @@ private:
     CcHandlerResult<Void> cc_res_{nullptr};
     int64_t tx_term_{0};
     bool is_for_write_{false};
+    bool is_covering_keys_{false};
     uint64_t snapshot_ts_{0};
     bool is_wait_for_post_write_{false};
 

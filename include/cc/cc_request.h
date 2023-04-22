@@ -514,6 +514,11 @@ public:
         key_ = decoded_key_.get();
     }
 
+    void SetTxKey(const TxKey *key)
+    {
+        key_ = key;
+    }
+
     void SetCcePtr(LruEntry *ptr)
     {
         cce_ptr_ = ptr;
@@ -1259,26 +1264,14 @@ public:
         return is_wait_for_post_write_;
     }
 
-    enum struct BlockingType
-    {
-        None = 0,
-        OnLock,
-        OnLoading
-    };
-
-    BlockingType BlockType() const
-    {
-        return blocking_type_;
-    }
-
-    void SetBlockType(BlockingType type)
-    {
-        blocking_type_ = type;
-    }
-
     bool IsInRecovering() const
     {
         return is_in_recovering_;
+    }
+
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
     }
 
 private:
@@ -1316,8 +1309,8 @@ private:
     bool is_wait_for_post_write_{false};
     // Is issued in a recovering process
     bool is_in_recovering_{false};
-
-    BlockingType blocking_type_;
+    // Reserved for unique sk read
+    bool is_covering_keys_{false};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };
@@ -1343,6 +1336,7 @@ public:
                CcProtocol protocol,
                bool is_for_write,
                bool is_delta,
+               bool is_covering_keys,
                bool is_include_floor_cce = false)
     {
         TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
@@ -1357,6 +1351,7 @@ public:
         term_ = term;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
+        is_covering_keys_ = is_covering_keys;
         is_include_floor_cce_ = is_include_floor_cce;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
@@ -1370,6 +1365,11 @@ public:
     bool IsForWrite() const
     {
         return is_for_write_;
+    }
+
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1416,6 +1416,7 @@ private:
     ScanCache *scan_cache_{nullptr};
     int64_t term_{-1};
     bool is_for_write_{false};
+    bool is_covering_keys_{false};
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
@@ -1475,7 +1476,8 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                bool is_for_write,
-               bool is_delta)
+               bool is_delta,
+               bool is_covering_keys)
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
             nullptr, next_res, ng_id, tx_number, protocol, iso_level);
@@ -1485,6 +1487,7 @@ public:
         tx_term_ = tx_term;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
+        is_covering_keys_ = is_covering_keys;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
@@ -1501,6 +1504,11 @@ public:
     bool IsForWrite() const
     {
         return is_for_write_;
+    }
+
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1545,6 +1553,7 @@ private:
     int64_t tx_term_{-1};
 
     bool is_for_write_{false};
+    bool is_covering_keys_{false};
     bool is_ckpt_delta_{false};
     // Record the scan type of the blocked cce
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
@@ -1627,7 +1636,8 @@ public:
              CcHandlerResult<RangeScanSliceResult> &hd_res,
              IsolationLevel iso_level,
              CcProtocol protocol,
-             bool read_for_write)
+             bool read_for_write,
+             bool is_covering_keys)
     {
         assert(hd_res.Value().is_local_);
 
@@ -1657,6 +1667,7 @@ public:
         tx_term_ = tx_term;
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
+        is_covering_keys_ = is_covering_keys;
 
         range_slice_id_.Reset();
     }
@@ -1676,7 +1687,8 @@ public:
              CcHandlerResult<RangeScanSliceResult> &hd_res,
              IsolationLevel iso_level,
              CcProtocol protocol,
-             bool read_for_write)
+             bool read_for_write,
+             bool is_covering_keys)
     {
         assert(!hd_res.Value().is_local_);
 
@@ -1706,6 +1718,7 @@ public:
         tx_term_ = tx_term;
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
+        is_covering_keys_ = is_covering_keys;
 
         range_slice_id_.Reset();
     }
@@ -1868,6 +1881,7 @@ public:
         cce_addr_vec_.resize(shard_cnt);
         cce_ptr_vec_.resize(shard_cnt);
         blocked_scan_types_.resize(shard_cnt);
+        is_wait_for_post_write_.resize(shard_cnt, false);
         unfinished_core_cnt_.store(shard_cnt, std::memory_order_release);
     }
 
@@ -1940,14 +1954,19 @@ public:
         return blocked_scan_types_[core_id];
     }
 
-    void SetIsWaitForPostWrite(bool is_wait)
+    void SetIsWaitForPostWrite(bool is_wait, uint16_t core_id)
     {
-        is_wait_for_post_write_ = is_wait;
+        is_wait_for_post_write_[core_id] = is_wait;
     }
 
-    bool IsWaitForPostWrite() const
+    bool IsWaitForPostWrite(uint16_t core_id) const
     {
-        return is_wait_for_post_write_;
+        return is_wait_for_post_write_[core_id];
+    }
+
+    bool IsCoveringKeys() const
+    {
+        return is_covering_keys_;
     }
 
 private:
@@ -1982,7 +2001,8 @@ private:
     uint64_t ts_{0};
     int64_t tx_term_{-1};
     bool read_for_write_{false};
-    bool is_wait_for_post_write_{false};
+    std::vector<bool> is_wait_for_post_write_;
+    bool is_covering_keys_{false};
     int64_t cc_ng_term_{-1};
 
     std::vector<ScanType> blocked_scan_types_;
@@ -2007,7 +2027,6 @@ public:
         for (size_t i = 0; i < shard_cnt_; i++)
         {
             memory_usage_kb_vec_.emplace_back(0);
-            log_usage_kb_vec_.emplace_back(0);
         }
     }
 
@@ -2054,16 +2073,6 @@ public:
         return total_usage;
     }
 
-    uint64_t GetLogUsage() const
-    {
-        uint64_t total_usage = 0;
-        for (uint64_t shard_usage : log_usage_kb_vec_)
-        {
-            total_usage += shard_usage;
-        }
-        return total_usage;
-    }
-
 private:
     uint64_t ckpt_ts_;
     std::mutex mux_;
@@ -2071,7 +2080,6 @@ private:
     std::atomic<size_t> finish_cnt_;
     size_t shard_cnt_;
     std::vector<uint64_t> memory_usage_kb_vec_;
-    std::vector<uint64_t> log_usage_kb_vec_;
     NodeGroupId cc_ng_id_;
 };
 
@@ -2095,33 +2103,37 @@ public:
     CkptScanCc(const TableName &table_name,
                const uint64_t ckpt_ts,
                const uint64_t node_group,
-               std::vector<FlushRecord> &ckpt_vec,
-               std::vector<FlushRecord> &archive_vec,
-               std::vector<const TxKey *> &mv_base_vec,
-               const uint16_t scan_start_core_id,
-               const LruPage *scan_start_page,
+               const uint16_t core_cnt,
+               std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
                const size_t scan_batch_size,
                const TxKey *target_start_key = nullptr,
                const TxKey *target_end_key = nullptr)
-        : ckpt_ts_(ckpt_ts),
-          ckpt_vec_(&ckpt_vec),
-          archive_vec_(&archive_vec),
-          mv_base_vec_(&mv_base_vec),
+        : core_cnt_(core_cnt),
+          ckpt_ts_(ckpt_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
-          scan_start_core_id_(scan_start_core_id),
-          start_page_(const_cast<LruPage *>(scan_start_page)),
+          pause_key_(std::move(resume_pos)),
           scan_batch_size_(scan_batch_size),
+          unfinished_cnt_(core_cnt_),
           mux_(),
           cv_()
     {
         assert(scan_batch_size_ > CkptScanBatchSize);
         this->table_name_ = &table_name;
         node_group_id_ = node_group;
-        accumulated_scan_cnt_ = 0;
-        res_ = {0, nullptr, false};
         err_ = CcErrorCode::NO_ERROR;
-        status_ = CkptScanStatus::Ongoing;
+        for (size_t i = 0; i < core_cnt; i++)
+        {
+            ckpt_vec_.emplace_back();
+            ckpt_vec_.back().reserve(scan_batch_size);
+            archive_vec_.emplace_back();
+            archive_vec_.back().reserve(scan_batch_size);
+            mv_base_vec_.emplace_back();
+            mv_base_vec_.back().reserve(scan_batch_size);
+            res_.emplace_back(nullptr, false);
+            loading_slice_.emplace_back(RangeSliceId(nullptr, nullptr));
+            accumulated_scan_cnt_.emplace_back(0);
+        }
     }
 
     // CkptScanCc is always stack object and won't be reused, worse, it might be
@@ -2129,19 +2141,18 @@ public:
     // should never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
-        if (ccm_ == nullptr)
-        {
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-        }
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
-        if (ccm_ != nullptr)
+        if (ccm != nullptr)
         {
-            ccm_->Execute(*this);
+            ccm->Execute(*this);
         }
         else
         {
-            res_ = {0, nullptr, true};
-            Notify();
+            // ccmap for this table does not exist on this shard, skip
+            // scanning for this shard.
+            std::pair<TxKey::Uptr, bool> res{nullptr, true};
+            SetFinish(std::move(res), ccs.core_id_);
         }
         // return false since CkptScanCc is not re-used and does not need to
         // call CcRequestBase::Free
@@ -2151,47 +2162,62 @@ public:
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        if (status_ != CkptScanStatus::Finish)
+        if (unfinished_cnt_.load(std::memory_order_acquire) != 0)
         {
-            cv_.wait(lk, [this] { return status_ == CkptScanStatus::Finish; });
+            cv_.wait(
+                lk,
+                [this] {
+                    return unfinished_cnt_.load(std::memory_order_acq_rel) == 0;
+                });
         }
     }
 
-    void Reset(uint32_t node_group)
+    void Reset(std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos)
     {
         std::lock_guard<std::mutex> lk(mux_);
-        ccm_ = nullptr;
-        start_page_ = nullptr;
-        status_ = CkptScanStatus::Ongoing;
-        node_group_id_ = node_group;
+        pause_key_ = std::move(resume_pos);
+        unfinished_cnt_ = core_cnt_;
+        res_.clear();
+        for (size_t i = 0; i < core_cnt_; i++)
+        {
+            ckpt_vec_.at(i).clear();
+            archive_vec_.at(i).clear();
+            mv_base_vec_.at(i).clear();
+            loading_slice_.at(i) = RangeSliceId(nullptr, nullptr);
+            res_.emplace_back(nullptr, false);
+            accumulated_scan_cnt_.at(i) = 0;
+        }
     }
 
     void SetError(CcErrorCode err)
     {
+        std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
-        Notify();
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            Notify();
+        }
     }
 
     bool IsError()
     {
+        std::lock_guard<std::mutex> lk(mux_);
         return err_ != CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode()
     {
+        std::lock_guard<std::mutex> lk(mux_);
         return err_;
     }
 
-    void SetFinish(const std::tuple<uint16_t, LruPage *, bool> &res)
+    void SetFinish(std::pair<TxKey::Uptr, bool> &&res, size_t core_id)
     {
-        res_ = res;
-        Notify();
-    }
-
-    void SetFinish(std::tuple<uint16_t, LruPage *, bool> &&res)
-    {
-        res_ = std::move(res);
-        Notify();
+        res_.at(core_id) = std::move(res);
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            Notify();
+        }
     }
 
     uint32_t NodeGroupId()
@@ -2199,43 +2225,71 @@ public:
         return node_group_id_;
     }
 
-    std::tuple<uint16_t, LruPage *, bool> &Result()
+    std::vector<std::pair<TxKey::Uptr, bool>> &Result()
     {
         return res_;
+    }
+
+    void SetLoadingSlce(RangeSliceId slice_id, uint16_t core_id)
+    {
+        loading_slice_.at(core_id) = slice_id;
+    }
+
+    RangeSliceId LoadingSlice(uint16_t core_id) const
+    {
+        return loading_slice_.at(core_id);
+    }
+
+    std::vector<FlushRecord> &CkptVec(uint16_t core_id)
+    {
+        return ckpt_vec_.at(core_id);
+    }
+
+    std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
+    {
+        return archive_vec_.at(core_id);
+    }
+
+    std::vector<const TxKey *> &MoveBaseVec(uint16_t core_id)
+    {
+        return mv_base_vec_.at(core_id);
     }
 
 private:
     void Notify()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        status_ = CkptScanCc::CkptScanStatus::Finish;
         cv_.notify_one();
     }
 
     const TableName *table_name_{nullptr};
-    CcMap *ccm_{nullptr};
     uint32_t node_group_id_;
+    uint16_t core_cnt_;
     uint64_t ckpt_ts_;
-    std::vector<FlushRecord> *ckpt_vec_;
-    std::vector<FlushRecord> *archive_vec_;
+    std::vector<std::vector<FlushRecord>> ckpt_vec_;
+    std::vector<std::vector<FlushRecord>> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<const TxKey *> *mv_base_vec_;
+    std::vector<std::vector<const TxKey *>> mv_base_vec_;
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
-    uint16_t scan_start_core_id_;
-    LruPage *start_page_;
+    // Position that we left off during last round of ckpt scan. TxKey is the
+    // key that we stopped at (has not been scanned though), bool is if this
+    // core has finished scanning all keys already.
+    std::vector<std::pair<TxKey::Uptr, bool>> pause_key_;
     size_t scan_batch_size_;
-    size_t accumulated_scan_cnt_;
+    std::vector<size_t> accumulated_scan_cnt_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    CkptScanStatus status_;
+    std::atomic_uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
 
     // scan result
-    std::tuple<uint16_t, LruPage *, bool> res_;
+    std::vector<std::pair<TxKey::Uptr, bool>> res_;
+
+    std::vector<RangeSliceId> loading_slice_;
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
@@ -3018,9 +3072,14 @@ public:
     KickoutCcEntryCc(const TableName &table_name,
                      const uint32_t ng_id,
                      const uint64_t ckpt_ts,
-                     CcHandlerResult<Void> *res)
+                     uint16_t core_cnt,
+                     CcHandlerResult<Void> *res,
+                     const TxKey *start_key = nullptr,
+                     const TxKey *end_key = nullptr)
         : ckpt_ts_(ckpt_ts),
-          start_page_(nullptr),
+          start_key_(start_key),
+          end_key_(end_key),
+          unfinished_cnt_(core_cnt),
           status_(KickoutStatus::Ongoing),
           mux_(),
           cv_()
@@ -3028,26 +3087,32 @@ public:
         table_name_ = &table_name;
         node_group_id_ = ng_id;
         res_ = res;
+        for (uint16_t i = 0; i < core_cnt; ++i)
+        {
+            resume_key_.emplace_back(nullptr);
+        }
     }
 
     KickoutCcEntryCc(const KickoutCcEntryCc &rhs) = delete;
     KickoutCcEntryCc(KickoutCcEntryCc &&rhs) = delete;
 
-    void Reset(uint32_t ng_id)
+    void Reset(uint32_t ng_id, uint16_t core_cnt)
     {
         std::lock_guard<std::mutex> lk(mux_);
         node_group_id_ = ng_id;
-        start_page_ = nullptr;
         status_ = KickoutStatus::Ongoing;
         ccm_ = nullptr;
+        unfinished_cnt_ = core_cnt;
+        resume_key_.resize(core_cnt);
+        for (uint16_t i = 0; i < core_cnt; ++i)
+        {
+            resume_key_.at(i) = nullptr;
+        }
     }
 
     bool Execute(CcShard &ccs) override
     {
-        if (ccm_ == nullptr)
-        {
-            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-        }
+        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
 
         if (ccm_ != nullptr)
         {
@@ -3057,8 +3122,7 @@ public:
         {
             // If no ccmap for this table, nothing to kickout, notify finish
             // directly.
-            res_->SetFinished();
-            Notify();
+            SetFinish(ccs.core_id_);
         }
 
         return false;
@@ -3069,14 +3133,24 @@ public:
         return ckpt_ts_;
     }
 
-    LruPage *StartPage() const
+    TxKey *ResumeKey(uint16_t core_id) const
     {
-        return start_page_;
+        return resume_key_.at(core_id).get();
     }
 
-    void SetStartPage(LruPage *start_page)
+    void SetResumeKey(const TxKey *key, uint16_t core_id)
     {
-        start_page_ = start_page;
+        resume_key_.at(core_id) = key->Clone();
+    }
+
+    const TxKey *StartKey() const
+    {
+        return start_key_;
+    }
+
+    const TxKey *EndKey() const
+    {
+        return end_key_;
     }
 
     void Wait()
@@ -3088,19 +3162,61 @@ public:
         }
     }
 
-    void Notify()
+    void SetFinish(size_t core_id)
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        status_ = KickoutStatus::Finished;
-        cv_.notify_one();
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            Notify();
+        }
     }
 
 private:
+    void Notify()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        assert(unfinished_cnt_.load(std::memory_order_acq_rel) == 0);
+        status_ = KickoutStatus::Finished;
+        cv_.notify_one();
+    }
     const uint64_t ckpt_ts_{0};
-    LruPage *start_page_{nullptr};
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
+    std::vector<TxKey::Uptr> resume_key_;
+    std::atomic_uint16_t unfinished_cnt_;
     KickoutStatus status_;
     // Protect the status_ and cv_
     std::mutex mux_;
     std::condition_variable cv_;
+};
+
+struct ResetCleanStartPageCc : public CcRequestBase
+{
+public:
+    ResetCleanStartPageCc(size_t core_cnt)
+        : mux_(), cv_(), pending_shard_(core_cnt)
+    {
+    }
+    bool Execute(CcShard &ccs) override
+    {
+        ccs.ResetCleanStart();
+        {
+            std::unique_lock<std::mutex> lk(mux_);
+            if (--pending_shard_ == 0)
+            {
+                cv_.notify_one();
+            }
+        }
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return pending_shard_ == 0; });
+    }
+
+    std::mutex mux_;
+    std::condition_variable cv_;
+    size_t pending_shard_;
 };
 }  // namespace txservice

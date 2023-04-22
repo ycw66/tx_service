@@ -41,6 +41,7 @@ void StoreSlice::CommitLoading(uint32_t slice_size)
     {
         cc_shard->Enqueue(cc_req);
     }
+
     if (cc_queue_.size() > 128)
     {
         cc_queue_.resize(8);
@@ -56,16 +57,18 @@ FillStoreSliceCc *StoreSlice::FillCcRequest()
     return fetch_slice_cc_.get();
 }
 
-void StoreSlice::SetLoadingError(uint64_t load_ts)
+void StoreSlice::SetLoadingError(StoreRange &range)
 {
     std::lock_guard<std::mutex> lk(slice_mux_);
 
     assert(pins_ == 0);
+    status_ = SliceStatus::PartiallyCached;
 
-    last_load_ts_ = load_ts;
-    status_ = SliceStatus::Errored;
-
-    fetch_slice_cc_ = nullptr;
+    if (to_alter_)
+    {
+        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
+        range.wait_cv_.notify_one();
+    }
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
@@ -78,6 +81,14 @@ void StoreSlice::SetLoadingError(uint64_t load_ts)
         cc_queue_.shrink_to_fit();
     }
     cc_queue_.clear();
+
+    fetch_slice_cc_ = nullptr;
+}
+
+bool StoreSlice::IsRecentLoad() const
+{
+    int64_t delta = LocalCcShards::ClockTs() - last_load_ts_;
+    return delta < 4000000;
 }
 
 StoreRange::StoreRange(const TxKey *start_key,
@@ -107,7 +118,8 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   CcRequestBase *cc_request,
                                   CcShard *cc_shard,
                                   store::DataStoreHandler *store_hd,
-                                  RangeSliceOpStatus &pin_status)
+                                  RangeSliceOpStatus &pin_status,
+                                  bool force_load)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -116,11 +128,14 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
     StoreSlice *slice = slices_[slice_idx].get();
     std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
 
-    if (slice->to_alter_)
+    if (slice->to_alter_ && slice->pins_ == 0)
     {
         // The checkpointer is waiting to alter this slice. The calling tx is
-        // pushed back for re-execution.
-        pin_status = RangeSliceOpStatus::Blocked;
+        // pushed back for re-execution, if the request is processed for the
+        // first time. If the slice has been pinned, forcing the checkpointer to
+        // wait, the request must be allowed to proceed to finish and unpin the
+        // slice.
+        pin_status = RangeSliceOpStatus::Retry;
         return RangeSliceId(this, slice);
     }
 
@@ -131,19 +146,30 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
     }
     else
     {
-        slice_lk.unlock();
-        bool load_success = LoadSlice(tbl_name,
-                                      *slice,
-                                      key_schema,
-                                      rec_schema,
-                                      schema_ts,
-                                      snapshot_ts,
-                                      kv_info,
-                                      cc_request,
-                                      cc_shard,
-                                      store_hd);
-        pin_status = load_success ? RangeSliceOpStatus::Blocked
-                                  : RangeSliceOpStatus::Errored;
+        LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                             *slice,
+                                             key_schema,
+                                             rec_schema,
+                                             schema_ts,
+                                             snapshot_ts,
+                                             kv_info,
+                                             cc_request,
+                                             cc_shard,
+                                             store_hd,
+                                             force_load,
+                                             slice_lk);
+        switch (load_ret)
+        {
+        case LoadSliceStatus::Success:
+            pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            break;
+        case LoadSliceStatus::Delay:
+            pin_status = RangeSliceOpStatus::Delay;
+            break;
+        default:
+            pin_status = RangeSliceOpStatus::Error;
+            break;
+        }
     }
 
     return RangeSliceId(this, slice);
@@ -158,7 +184,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                         const KVCatalogInfo *kv_info,
                                         CcRequestBase *cc_request,
                                         CcShard *cc_shard,
-                                        store::DataStoreHandler *store_hd)
+                                        store::DataStoreHandler *store_hd,
+                                        bool force_load)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -177,19 +204,31 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
     }
     else
     {
-        slice_lk.unlock();
-        bool load_success = LoadSlice(tbl_name,
-                                      *slice,
-                                      key_schema,
-                                      rec_schema,
-                                      schema_ts,
-                                      snapshot_ts,
-                                      kv_info,
-                                      cc_request,
-                                      cc_shard,
-                                      store_hd);
-        return load_success ? RangeSliceOpStatus::Blocked
-                            : RangeSliceOpStatus::Errored;
+        LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                             *slice,
+                                             key_schema,
+                                             rec_schema,
+                                             schema_ts,
+                                             snapshot_ts,
+                                             kv_info,
+                                             cc_request,
+                                             cc_shard,
+                                             store_hd,
+                                             force_load,
+                                             slice_lk);
+
+        if (load_ret == LoadSliceStatus::Success)
+        {
+            return RangeSliceOpStatus::BlockedOnLoad;
+        }
+        else
+        {
+            // This method is only called by the checkpointer, who sets the
+            // force_load flag to true. So, LoadSlice() in this method always
+            // reads the slice from the data store, even if there is thrashing.
+            assert(load_ret == LoadSliceStatus::Error);
+            return RangeSliceOpStatus::Error;
+        }
     }
 }
 
@@ -230,90 +269,280 @@ void StoreRange::UpdateRange(const TxKey *start_key,
     }
 }
 
-void StoreRange::UpdateSlice(StoreSlice *slice,
-                             std::vector<SliceChangeInfo> &split_keys)
+bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
+                                 const TableName &table_name,
+                                 NodeGroupId ng_id,
+                                 uint64_t flush_ts,
+                                 const std::vector<FlushRecord> &flush_vec,
+                                 size_t slice_first_idx,
+                                 size_t slice_end_idx,
+                                 bool range_locked)
 {
-    assert(split_keys.size() > 1);
+    GetPostCkptSlice post_ckpt_slice(table_name,
+                                     ng_id,
+                                     slice,
+                                     this,
+                                     flush_vec,
+                                     slice_first_idx,
+                                     slice_end_idx,
+                                     flush_ts);
 
-    std::unique_lock<std::shared_mutex> range_lk(mux_);
-    std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
-
-    assert(!slice->to_alter_);
-    slice->to_alter_ = true;
-
-    // Unlocks the slice before checking the slice's pin count. If some tx's are
-    // pinning the slice, the calling thread, i.e., the checkpointer, is put
-    // into sleep on the condition variable.
-    slice_lk.unlock();
-    wait_cv_.wait(range_lk,
-                  [slice_ptr = slice] { return slice_ptr->PinCount() == 0; });
-
-    assert(slice->PinCount() == 0);
-
-    size_t slice_idx = slice->start_key_ == nullptr
-                           ? 0
-                           : SearchSlice(*slice->start_key_, true);
-
-    const TxKey *slice_end_key = slice->EndKey();
-
-    TxKey::Uptr next_slice_start_key = nullptr;
-    if (split_keys[1].is_key_owner_)
+    do
     {
-        next_slice_start_key = std::move(split_keys[1].key_.uptr_);
-        split_keys[1].is_key_owner_ = false;
+        post_ckpt_slice.Reset();
+        local_cc_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
+        post_ckpt_slice.Wait();
+    } while (post_ckpt_slice.ErrorCode() == CcErrorCode::OUT_OF_MEMORY);
+
+    if (post_ckpt_slice.ErrorCode() != CcErrorCode::NO_ERROR)
+    {
+        // There is a data store error when loading the slice.
+        LOG(ERROR) << "Get post ckpt slice failed " << table_name.StringView();
+        return false;
     }
-    else
+
+    auto &item_vec = post_ckpt_slice.SliceRecordCollection();
+    // Split the slice based on post checkpoint item size, but do
+    // not update the slice size with the post checkpoint yet since
+    // the data is still not flushed into data store yet.
+    int32_t post_flush_size = slice->PostCkptSize();
+    assert(post_flush_size > 0);
+    uint32_t subslice_cnt = post_flush_size / StoreSlice::slice_upper_bound + 1;
+    uint32_t avg_subslice_size = post_flush_size / subslice_cnt;
+    std::vector<SliceChangeInfo> split_keys;
+    split_keys.reserve(subslice_cnt);
+
+    uint32_t post_ckpt_subslice_size = 0;
+    uint32_t curr_subslice_size = 0;
+    uint32_t subslice_start = 0;
+    for (size_t pos = 0; pos < item_vec.size(); ++pos)
     {
-        next_slice_start_key = split_keys[1].key_.ptr_->Clone();
-    }
-    slice->end_key_ = next_slice_start_key.get();
-    slice->size_ = split_keys[0].cur_slice_size_;
-    slice->post_ckpt_size_ = split_keys[0].post_update_slice_size_;
+        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
+        curr_subslice_size += item_vec[pos].cur_slice_size_;
 
-    for (size_t idx = 1; idx < split_keys.size(); ++idx)
-    {
-        std::unique_ptr<StoreSlice> sub_slice = std::make_unique<StoreSlice>();
-        sub_slice->start_key_ = next_slice_start_key.get();
-
-        // Inserts the new boundary keys.
-        boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
-                               std::move(next_slice_start_key));
-
-        if (idx < split_keys.size() - 1)
+        if (post_ckpt_subslice_size >= avg_subslice_size ||
+            pos == item_vec.size() - 1)
         {
-            if (split_keys[idx + 1].is_key_owner_)
+            if (split_keys.empty())
             {
-                next_slice_start_key =
-                    std::move(split_keys[idx + 1].key_.uptr_);
-                split_keys[idx + 1].is_key_owner_ = false;
+                // The first sub-slice's start key re-uses
+                // the old slice's start key, so there is no
+                // need to allocate a new key.
+                split_keys.emplace_back(
+                    nullptr, curr_subslice_size, post_ckpt_subslice_size);
             }
             else
             {
-                next_slice_start_key = split_keys[idx + 1].key_.ptr_->Clone();
+                if (item_vec[subslice_start].is_key_owner_)
+                {
+                    split_keys.emplace_back(
+                        std::move(item_vec[subslice_start].key_.uptr_),
+                        curr_subslice_size,
+                        post_ckpt_subslice_size);
+                    item_vec[subslice_start].is_key_owner_ = false;
+                }
+                else
+                {
+                    split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
+                                            curr_subslice_size,
+                                            post_ckpt_subslice_size);
+                }
             }
-            sub_slice->end_key_ = next_slice_start_key.get();
+            post_ckpt_subslice_size = 0;
+            curr_subslice_size = 0;
+            subslice_start = pos + 1;
+        }
+    }
+    // Split StoreSlice in memory. Slice info in KV store
+    // will be updated after checkpoint.
+    if (split_keys.size() > 1)
+    {
+        std::unique_lock<std::shared_mutex> range_lk(mux_);
+        std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+
+        assert(!slice->to_alter_);
+        slice->to_alter_ = true;
+
+        // Unlocks the slice before checking the slice's pin count. If some
+        // tx's are pinning the slice, the calling thread, i.e., the
+        // checkpointer, is put into sleep on the condition variable.
+        slice_lk.unlock();
+        wait_cv_.wait(range_lk,
+                      [slice_ptr = slice]
+                      { return slice_ptr->ChangeAllowed(); });
+
+        slice_lk.lock();
+        assert(slice->pins_ == 0);
+
+        size_t slice_idx = slice->start_key_ == nullptr
+                               ? 0
+                               : SearchSlice(*slice->start_key_, true);
+        const TxKey *slice_end_key = slice->EndKey();
+
+        TxKey::Uptr next_slice_start_key = nullptr;
+        if (split_keys[1].is_key_owner_)
+        {
+            next_slice_start_key = std::move(split_keys[1].key_.uptr_);
+            split_keys[1].is_key_owner_ = false;
         }
         else
         {
-            // The last sub-slice's end key points to that of the original
-            // slice.
-            next_slice_start_key = nullptr;
-            sub_slice->end_key_ = slice_end_key;
+            next_slice_start_key = split_keys[1].key_.ptr_->Clone();
+        }
+        slice->end_key_ = next_slice_start_key.get();
+        slice->size_ = split_keys[0].cur_slice_size_;
+        slice->post_ckpt_size_ = split_keys[0].post_update_slice_size_;
+
+        for (size_t idx = 1; idx < split_keys.size(); ++idx)
+        {
+            std::unique_ptr<StoreSlice> sub_slice =
+                std::make_unique<StoreSlice>();
+            sub_slice->start_key_ = next_slice_start_key.get();
+
+            // Inserts the new boundary keys.
+            boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
+                                   std::move(next_slice_start_key));
+
+            if (idx < split_keys.size() - 1)
+            {
+                if (split_keys[idx + 1].is_key_owner_)
+                {
+                    next_slice_start_key =
+                        std::move(split_keys[idx + 1].key_.uptr_);
+                    split_keys[idx + 1].is_key_owner_ = false;
+                }
+                else
+                {
+                    next_slice_start_key =
+                        split_keys[idx + 1].key_.ptr_->Clone();
+                }
+                sub_slice->end_key_ = next_slice_start_key.get();
+            }
+            else
+            {
+                // The last sub-slice's end key points to that of the original
+                // slice.
+                next_slice_start_key = nullptr;
+                sub_slice->end_key_ = slice_end_key;
+            }
+
+            sub_slice->size_ = split_keys[idx].cur_slice_size_;
+            sub_slice->post_ckpt_size_ =
+                split_keys[idx].post_update_slice_size_;
+            // Sub-slices inherit the original slice's status, e.g., if the
+            // original slice is fully cached, all sub-slices are too cached.
+            sub_slice->status_ = slice->status_;
+            sub_slice->last_load_ts_ = slice->last_load_ts_;
+
+            // Inserts the new sub-slices following the first sub-slice.
+            slices_.emplace(slices_.begin() + slice_idx + idx,
+                            std::move(sub_slice));
         }
 
-        sub_slice->size_ = split_keys[idx].cur_slice_size_;
-        sub_slice->post_ckpt_size_ = split_keys[idx].post_update_slice_size_;
-        // Sub-slices inherit the original slice's status, e.g., if the original
-        // slice is fully cached, all sub-slices are too cached.
-        sub_slice->status_ = slice->status_;
-        sub_slice->last_load_ts_ = slice->last_load_ts_;
-
-        // Inserts the new sub-slices following the first sub-slice.
-        slices_.emplace(slices_.begin() + slice_idx + idx,
-                        std::move(sub_slice));
+        slice->to_alter_ = false;
     }
+    return true;
+}
 
-    slice->to_alter_ = false;
+std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    uint64_t flush_ts,
+    size_t post_ckpt_size,
+    std::vector<FlushRecord>::const_iterator range_start_it,
+    std::vector<FlushRecord>::const_iterator range_end_it,
+    const std::vector<FlushRecord> &flush_vec)
+{
+    auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
+    { return *rec.Key() < key; };
+
+    std::vector<const TxKey *> new_range_keys;
+    uint32_t slice_idx = 0;
+    uint32_t subrange_slice_idx = 0;
+    size_t subrange_cnt =
+        std::ceil(post_ckpt_size / (StoreRange::range_max_size * 0.7));
+    size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
+    auto slice_it = range_start_it;
+    auto slice_end_it = range_start_it;
+    while (slice_idx < slices_.size())
+    {
+        size_t curr_subrange_size = 0;
+        for (; curr_subrange_size < avg_subrange_size &&
+               slice_idx < slices_.size();
+             slice_idx++)
+        {
+            if (slices_.at(slice_idx)->PostCkptSize() >= 0)
+            {
+                curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
+            }
+            else
+            {
+                curr_subrange_size += slices_.at(slice_idx)->Size();
+            }
+        }
+        // This should be the last slice in the previous range. Check if
+        // the slice needs to be splitted, if so, split it here. This is
+        // to avoid a single hot slice being very big and putting it
+        // into the previous range will cause the range go way beyond
+        // range max limit.
+        if (slices_.at(slice_idx - 1)->PostCkptSize() >
+            (int32_t) StoreSlice::slice_upper_bound)
+        {
+            // New slice_it will be between last slice_end_it and
+            // range_end_it.
+            slice_it =
+                slices_.at(slice_idx - 1)->StartKey() == nullptr
+                    ? range_start_it
+                    : std::lower_bound(slice_end_it,
+                                       range_end_it,
+                                       *slices_.at(slice_idx - 1)->StartKey(),
+                                       lower_bound_cmp);
+
+            // New slice_end_it will be between current slice_it and
+            // range_end_it.
+            slice_end_it =
+                slices_.at(slice_idx - 1)->EndKey() == nullptr
+                    ? range_end_it
+                    : std::lower_bound(slice_it,
+                                       range_end_it,
+                                       *slices_.at(slice_idx - 1)->EndKey(),
+                                       lower_bound_cmp);
+            curr_subrange_size -= slices_.at(slice_idx - 1)->PostCkptSize();
+            UpdateSliceSpec(slices_.at(slice_idx - 1).get(),
+                            table_name,
+                            ng_id,
+                            flush_ts,
+                            flush_vec,
+                            std::distance(flush_vec.begin(), slice_it),
+                            std::distance(flush_vec.begin(), slice_end_it),
+                            true);
+            // Now that the slice has been splitted, find the new slice
+            // that will be the first slice in the new subrange.
+            for (; curr_subrange_size < avg_subrange_size &&
+                   slice_idx < slices_.size();
+                 slice_idx++)
+            {
+                if (slices_.at(slice_idx)->PostCkptSize() >= 0)
+                {
+                    curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
+                }
+                else
+                {
+                    curr_subrange_size += slices_.at(slice_idx)->Size();
+                }
+            }
+        }
+
+        // Skip the first subrange since it will reuse the
+        // current range entry
+        if (subrange_slice_idx != 0)
+        {
+            new_range_keys.emplace_back(
+                slices_[subrange_slice_idx]->StartKey());
+        }
+        subrange_slice_idx = slice_idx;
+    }
+    return new_range_keys;
 }
 
 bool StoreRange::UpdateRangeSlicesInStore(const TableName &table_name,
@@ -405,34 +634,29 @@ size_t StoreRange::SearchSlice(const TxKey &search_key, bool inclusive) const
     return slice_idx;
 }
 
-bool StoreRange::LoadSlice(const TableName &tbl_name,
-                           StoreSlice &slice,
-                           const Schema *key_schema,
-                           const Schema *rec_schema,
-                           uint64_t schema_ts,
-                           uint64_t snapshot_ts,
-                           const KVCatalogInfo *kv_info,
-                           CcRequestBase *cc_request,
-                           CcShard *cc_shard,
-                           store::DataStoreHandler *store_hd)
+StoreRange::LoadSliceStatus StoreRange::LoadSlice(
+    const TableName &tbl_name,
+    StoreSlice &slice,
+    const Schema *key_schema,
+    const Schema *rec_schema,
+    uint64_t schema_ts,
+    uint64_t snapshot_ts,
+    const KVCatalogInfo *kv_info,
+    CcRequestBase *cc_request,
+    CcShard *cc_shard,
+    store::DataStoreHandler *store_hd,
+    bool force_load,
+    std::unique_lock<std::mutex> &slice_lk)
 {
-    // The caller of LoadSlice() is holding an exclusive lock on the slice.
-
-    using namespace std::chrono_literals;
-    uint64_t now_ts = LocalCcShards::ClockTs();
-
-    // If the slice is in the errored state (because the previous load of the
-    // slice failed due to data store failures), only try reloading after a
-    // period.
-    if (slice.status_ == SliceStatus::Errored &&
-        (int64_t) (now_ts - slice.last_load_ts_) <
-            std::chrono::duration_cast<std::chrono::microseconds>(4s).count())
-    {
-        return false;
-    }
+    // The caller of this method has acquired the slice lock on the input mutex.
 
     if (slice.fetch_slice_cc_ == nullptr)
     {
+        if (!force_load && slice.IsRecentLoad())
+        {
+            return LoadSliceStatus::Delay;
+        }
+
         // Calls the data store's async API to load the slice
         // [slice_start, slice_end) into memory.
         slice.fetch_slice_cc_ =
@@ -443,6 +667,7 @@ bool StoreRange::LoadSlice(const TableName &tbl_name,
                                                schema_ts,
                                                slice,
                                                *this,
+                                               force_load,
                                                snapshot_ts,
                                                local_cc_shards_);
 
@@ -451,31 +676,48 @@ bool StoreRange::LoadSlice(const TableName &tbl_name,
             slice.cc_queue_.emplace_back(cc_request, cc_shard);
         }
 
+        slice_lk.unlock();
         bool success =
             store_hd->LoadRangeSlice(tbl_name,
                                      kv_info,
                                      partition_id_,
                                      slice.fetch_slice_cc_->LoadRequest());
+        slice_lk.lock();
+
+        // By the time LoadRangeSlice() returns, the slice's status is
+        // either BeingLoaded or PartiallyCached. This is because this
+        // method is called by PinSlice(), which is called by one of tx
+        // processors who will process the fill slice cc request. Hence,
+        // loading slice into memory cannot complete at this point.
+
+        slice.last_load_ts_ = LocalCcShards::ClockTs();
         if (success)
         {
-            return true;
+            return LoadSliceStatus::Success;
         }
         else
         {
-            slice.status_ = SliceStatus::Errored;
-            slice.last_load_ts_ = LocalCcShards::ClockTs();
             slice.fetch_slice_cc_ = nullptr;
-            return false;
+            return LoadSliceStatus::Error;
         }
     }
     else
     {
+        if (force_load && !slice.fetch_slice_cc_->ForceLoad() &&
+            slice.status_ != SliceStatus::BeingLoaded)
+        {
+            // If the demanding request sets the force_load flag and the
+            // fetching request does not, the demanding request is allowed to
+            // change the flag if filling into memory has not started.
+            slice.fetch_slice_cc_->SetForceLoad(true);
+        }
+
         if (cc_request != nullptr)
         {
             slice.cc_queue_.emplace_back(cc_request, cc_shard);
         }
 
-        return true;
+        return LoadSliceStatus::Success;
     }
 }
 
@@ -488,18 +730,16 @@ bool StoreRange::KickoutSlice(const TxKey &kickout_key)
 
 StoreSlice *StoreRange::FindSlice(const TxKey &key)
 {
-    // no range lock is needed since it is only called by checkpointer.
+    std::shared_lock<std::shared_mutex> s_lk(mux_);
     size_t slice_idx = SearchSlice(key, true);
     return slices_[slice_idx].get();
 }
 
-bool StoreRange::NeedSplit()
+size_t StoreRange::PostCkptSize()
 {
     std::shared_lock<std::shared_mutex> s_lk(mux_);
     size_t size = 0;
-    for (size_t idx = 0;
-         idx < slices_.size() && size <= StoreRange::range_max_size;
-         idx++)
+    for (size_t idx = 0; idx < slices_.size(); idx++)
     {
         if (slices_.at(idx)->post_ckpt_size_ >= 0)
         {
@@ -510,7 +750,7 @@ bool StoreRange::NeedSplit()
             size += slices_.at(idx)->Size();
         }
     }
-    return size > StoreRange::range_max_size;
+    return size;
 }
 
 void StoreRange::InitSlices(
@@ -551,4 +791,34 @@ void StoreRange::InitSlices(
     assert(slices_.size() == boundary_keys_.size() + 1);
 }
 
+void StoreRange::InitSlices(
+    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> &slice_keys)
+{
+    slices_.clear();
+    boundary_keys_.clear();
+    std::unique_ptr<StoreSlice> slice = std::make_unique<StoreSlice>();
+    slice->start_key_ = range_start_key_;
+    slice->end_key_ = slice_keys.size() > 1 ? std::get<0>(slice_keys[1]).get()
+                                            : range_end_key_;
+    slice->size_ = slice_keys.size() > 0 ? std::get<1>(slice_keys[0]) : 0;
+    slice->status_ = std::get<2>(slice_keys[0]);
+    slices_.emplace_back(std::move(slice));
+
+    for (size_t idx = 1; idx < slice_keys.size(); ++idx)
+    {
+        std::unique_ptr<StoreSlice> slice = std::make_unique<StoreSlice>();
+
+        slice->start_key_ = std::get<0>(slice_keys[idx]).get();
+        slice->end_key_ = idx == slice_keys.size() - 1
+                              ? range_end_key_
+                              : std::get<0>(slice_keys[idx + 1]).get();
+        slice->size_ = std::get<1>(slice_keys[idx]);
+        slice->status_ = std::get<2>(slice_keys[idx]);
+
+        slices_.emplace_back(std::move(slice));
+        boundary_keys_.emplace_back(std::move(std::get<0>(slice_keys[idx])));
+    }
+
+    assert(slices_.size() == boundary_keys_.size() + 1);
+}
 }  // namespace txservice

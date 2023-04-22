@@ -351,6 +351,12 @@ private:
     std::unordered_set<uint32_t> recovered_leader_set;
 
     std::unordered_map<uint32_t, std::unique_ptr<fault::CcNode>> cc_nodes_;
+    /**
+     * @brief Acts as a memory barrier such that initialized cc nodes are synced
+     * with following reads of cc nodes at all cores.
+     *
+     */
+    std::atomic<bool> cc_nodes_init_{false};
 
     moodycamel::ConcurrentQueue<std::unique_ptr<remote::CcMessage>> msg_pool_;
 

@@ -23,9 +23,12 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       checkpoint_interval_(checkpoint_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent),
-      worker_mux_(),
-      worker_cv_(),
-      worker_thd_status_(Status::Active)
+      flush_mux_(),
+      flush_cv_(),
+      worker_thd_status_(Status::Active),
+      slice_update_mux_(),
+      slice_update_cv_(),
+      slice_thd_status_(Status::Active)
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -113,13 +116,11 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         }
         LOG(INFO) << "Begin checkpoint with timestamp: " << ckpt_ts
                   << ". The memory usage of node is: " << ckpt_req.GetMemUsage()
-                  << " KB"
-                  << ". The log usage of node is: " << ckpt_req.GetLogUsage()
-                  << "KB.";
+                  << " KB.";
 
         // Reset result bool
         bool fail = true;
-        worker_failed_.compare_exchange_strong(fail, false);
+        flush_worker_failed_.compare_exchange_strong(fail, false);
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
         std::vector<TableName> tables =
@@ -219,50 +220,35 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 continue;
             }
 
-            std::unique_ptr<std::vector<FlushRecord>> ckpt_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_bucket =
-                std::make_unique<std::vector<FlushRecord>>();
-            ckpt_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
+            std::vector<std::vector<FlushRecord>> ckpt_vecs;
+            std::vector<std::vector<FlushRecord>> archive_vecs;
+            std::vector<std::vector<const TxKey *>> mv_base_vecs;
 
-            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<FlushRecord>> archive_vec_bucket =
-                std::make_unique<std::vector<FlushRecord>>();
-            archive_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
+            std::vector<std::pair<TxKey::Uptr, bool>> resume_pos;
+            bool scan_succ = true;
 
-            std::unique_ptr<std::vector<const TxKey *>> mv_base_vec =
-                std::make_unique<std::vector<const TxKey *>>();
-            std::unique_ptr<std::vector<const TxKey *>> mv_base_vec_bucket =
-                std::make_unique<std::vector<const TxKey *>>();
-            mv_base_vec_bucket->reserve(CKPT_SCAN_BATCH_SIZE);
+            for (size_t i = 0; i < local_shards_.cc_shards_.size(); i++)
+            {
+                ckpt_vecs.emplace_back();
+                archive_vecs.emplace_back();
+                mv_base_vecs.emplace_back();
+                resume_pos.emplace_back(nullptr, false);
+            }
 
-            uint16_t scan_start_core_id = 0;
-            LruPage *scan_start_page = nullptr;
             bool scan_data_drained = false;
-            int scan_round = 0;
-
+            CkptScanCc scan_cc(table_name,
+                               ckpt_ts,
+                               node_group,
+                               local_shards_.cc_shards_.size(),
+                               std::move(resume_pos),
+                               CKPT_SCAN_BATCH_SIZE);
             while (!scan_data_drained)
             {
-                CkptScanCc scan_cc(table_name,
-                                   ckpt_ts,
-                                   node_group,
-                                   *ckpt_vec_bucket,
-                                   *archive_vec_bucket,
-                                   *mv_base_vec_bucket,
-                                   scan_start_core_id,
-                                   scan_start_page,
-                                   CKPT_SCAN_BATCH_SIZE);
-                auto &ccs = local_shards_.cc_shards_[scan_start_core_id];
-                ccs->Enqueue(&scan_cc);
+                for (size_t i = 0; i < local_shards_.cc_shards_.size(); i++)
+                {
+                    local_shards_.EnqueueToCcShard(i, &scan_cc);
+                }
                 scan_cc.Wait();
-                DLOG(INFO) << "Ckpt small step scan round: " << ++scan_round
-                           << " table_name: " << table_name.String()
-                           << " ckpt_vec_bucket size: "
-                           << ckpt_vec_bucket->size()
-                           << " core_id: " << scan_start_core_id
-                           << " scan_start_page: "
-                           << reinterpret_cast<std::uintptr_t>(scan_start_page);
 
                 if (scan_cc.IsError())
                 {
@@ -273,56 +259,79 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     ckpt_txm->Execute(&abort_req);
                     abort_req.Wait();
                     tables.push_back(std::move(table_name));
+                    scan_succ = false;
                     break;
                 }
                 else
                 {
-                    auto res = scan_cc.Result();
-                    // make the current scan core as start core for the next
-                    // scan
-                    scan_start_core_id = std::get<0>(res);
-                    // make the current scan page as start page for the next
-                    // scan
-                    scan_start_page = std::get<1>(res);
-                    // if the data is drained
-                    scan_data_drained = std::get<2>(res);
+                    auto &res = scan_cc.Result();
+                    scan_data_drained = true;
 
-                    // move the bucket into the tank
-                    std::move(ckpt_vec_bucket->begin(),
-                              ckpt_vec_bucket->end(),
-                              std::back_inserter(*ckpt_vec));
-                    ckpt_vec_bucket->clear();
+                    for (size_t i = 0; i < local_shards_.cc_shards_.size(); i++)
+                    {
+                        // if the data is drained
+                        scan_data_drained =
+                            res.at(i).second && scan_data_drained;
+                        // move the bucket into the tank
+                        std::move(scan_cc.CkptVec(i).begin(),
+                                  scan_cc.CkptVec(i).end(),
+                                  std::back_inserter(ckpt_vecs.at(i)));
 
-                    std::move(archive_vec_bucket->begin(),
-                              archive_vec_bucket->end(),
-                              std::back_inserter(*archive_vec));
-                    archive_vec_bucket->clear();
+                        std::move(scan_cc.ArchiveVec(i).begin(),
+                                  scan_cc.ArchiveVec(i).end(),
+                                  std::back_inserter(archive_vecs.at(i)));
 
-                    std::move(mv_base_vec_bucket->begin(),
-                              mv_base_vec_bucket->end(),
-                              std::back_inserter(*mv_base_vec));
-                    mv_base_vec_bucket->clear();
+                        std::move(scan_cc.MoveBaseVec(i).begin(),
+                                  scan_cc.MoveBaseVec(i).end(),
+                                  std::back_inserter(mv_base_vecs.at(i)));
+                    }
+                    scan_cc.Reset(std::move(res));
                 }
             }
 
-            DLOG(INFO) << "Ckpt scan " << table_name.String() << " finish with "
-                       << scan_round << " ckpt_vec size: " << ckpt_vec->size();
+            if (!scan_succ)
+            {
+                continue;
+            }
+            std::unique_ptr<std::vector<FlushRecord>> ckpt_vec =
+                std::make_unique<std::vector<FlushRecord>>();
 
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
+                std::make_unique<std::vector<FlushRecord>>();
+
+            std::unique_ptr<std::vector<const TxKey *>> mv_base_vec =
+                std::make_unique<std::vector<const TxKey *>>();
             // Sort output vectors in key sorting order.
-            std::sort(ckpt_vec->begin(),
-                      ckpt_vec->end(),
-                      [](const FlushRecord &lhs, const FlushRecord &rhs)
-                      { return *lhs.Key() < *rhs.Key(); });
-            std::sort(archive_vec->begin(),
-                      archive_vec->end(),
-                      [](const FlushRecord &lhs, const FlushRecord &rhs)
-                      { return *lhs.Key() < *rhs.Key(); });
+            auto key_greater = [](const TxKey *r1, const TxKey *r2) -> bool
+            { return *r2 < *r1; };
+            MergeSortedVectors(
+                std::move(mv_base_vecs), *mv_base_vec, key_greater, true);
+            auto rec_greater = [](const FlushRecord &r1,
+                                  const FlushRecord &r2) -> bool
+            { return *r2.Key() < *r1.Key(); };
+            // To avoid repeatedly set the ckpt_ts_ of a cc entry, which might
+            // cause the ccentry become invalid in between, remove duplicate
+            // flush record from ckpt_vec.
+            MergeSortedVectors(
+                std::move(ckpt_vecs), *ckpt_vec, rec_greater, true);
+            // For archive vec we don't need to worry about duplicate causing
+            // issue since we're not visiting their cc entry. Also we cannot
+            // rely on key compare to dedup archive vec since a key could have
+            // multiple version of archive versions.
+            MergeSortedVectors(
+                std::move(archive_vecs), *archive_vec, rec_greater, false);
 
 #ifdef RANGE_PARTITION_ENABLED
-            std::vector<
-                std::pair<const StoreRange *, std::vector<const TxKey *>>>
-                splitting_info;
-            if (!UpdateSliceAndCalculateRangeUpdate(
+            std::vector<std::pair<const TxKey *, const TxKey *>> split_ranges;
+            size_t batch_idx = 0;
+
+            while (batch_idx < ckpt_vec->size())
+            {
+                std::pair<const StoreRange *, std::vector<const TxKey *>>
+                    split_pair;
+                split_pair.first = nullptr;
+
+                bool ret = UpdateSliceAndCalculateRangeUpdate(
                     table_name,
                     catalog_rec.Schema()->GetKVCatalogInfo(),
                     catalog_rec.SchemaTs(),
@@ -330,108 +339,99 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     *ckpt_vec,
                     last_ckpt_ts,
                     ckpt_ts,
-                    splitting_info))
-            {
-                LOG(INFO) << "Pre-checkpoint slice update failed on table "
-                          << table_name.StringView();
-                AbortTxRequest abort_req;
-                abort_req.Reset();
-                ckpt_txm->Execute(&abort_req);
-                abort_req.Wait();
-                tables.push_back(std::move(table_name));
-                continue;
+                    batch_idx,
+                    split_pair);
+
+                if (!ret)
+                {
+                    LOG(INFO) << "Pre-checkpoint slice update failed on table "
+                              << table_name.StringView();
+
+                    for (auto &split_thread : range_split_workers)
+                    {
+                        split_thread.join();
+                    }
+                    range_split_workers.clear();
+
+                    AbortTxRequest abort_req;
+                    ckpt_txm->Execute(&abort_req);
+                    abort_req.Wait();
+                    tables.push_back(std::move(table_name));
+                    continue;
+                }
+
+                if (!is_last_ckpt && split_pair.first != nullptr)
+                {
+                    const StoreRange *split_range = split_pair.first;
+                    split_ranges.emplace_back(split_range->RangeStartKey(),
+                                              split_range->RangeEndKey());
+
+                    range_split_workers.emplace_back(std::thread(
+                        [this,
+                         &table_name,
+                         split_info = std::move(split_pair),
+                         node_group] {
+                            SplitFlushRange(table_name, node_group, split_info);
+                        }));
+                }
             }
 
-            if (!is_last_ckpt && !splitting_info.empty())
+            if (!is_last_ckpt && !split_ranges.empty())
             {
-                // Remove splitting ranges from ckpt_vec and archive_vec.
-                // Records in the splitting ranges will be flushed by the
-                // SplitFlush transaction. We build a new vector here to
-                // avoid vecotr.erase() which might take O(n) time.
+                // Remove the records that are in the splitting ranges.
+                // They will  be handled by the splitting  worker.
+
+                // Remove mv base vec first since it contains raw pointers
+                // to the records in ckpt_vec and archive_vec
+                auto key_lower_bound_cmp =
+                    [](const TxKey *key1, const TxKey &key2)
+                { return *key1 < key2; };
+                std::unique_ptr<std::vector<const TxKey *>> flush_mv_base_vec =
+                    std::make_unique<std::vector<const TxKey *>>();
+                MoveNonSplittingRecords(*mv_base_vec,
+                                        *flush_mv_base_vec,
+                                        split_ranges,
+                                        key_lower_bound_cmp);
+                mv_base_vec = std::move(flush_mv_base_vec);
+
+                auto lower_bound_cmp =
+                    [](const FlushRecord &rec, const TxKey &key)
+                { return *rec.Key() < key; };
                 std::unique_ptr<std::vector<FlushRecord>> flush_ckpt_vec =
                     std::make_unique<std::vector<FlushRecord>>();
-                auto ckpt_it = ckpt_vec->begin();
-                for (auto range_it = splitting_info.begin();
-                     range_it != splitting_info.end() &&
-                     ckpt_it != ckpt_vec->end();
-                     range_it++)
-                {
-                    const StoreRange *range = range_it->first;
-                    // Move flush record to new ckpt vector if it is not
-                    // in the splitting range.
-                    while (ckpt_it != ckpt_vec->end() &&
-                           *ckpt_it->Key() < *range->RangeStartKey())
-                    {
-                        flush_ckpt_vec->push_back(std::move(*ckpt_it));
-                        ckpt_it++;
-                    }
-
-                    // Leave the flush record in the old ckpt vec if it is
-                    // going to be splitted.
-                    while (ckpt_it != ckpt_vec->end() &&
-                           (range->RangeEndKey() == nullptr ||
-                            *ckpt_it->Key() < *range->RangeEndKey()))
-                    {
-                        ckpt_it++;
-                    }
-                }
-                // Overwrite the old ckpt vec
+                MoveNonSplittingRecords(
+                    *ckpt_vec, *flush_ckpt_vec, split_ranges, lower_bound_cmp);
                 ckpt_vec = std::move(flush_ckpt_vec);
 
                 std::unique_ptr<std::vector<FlushRecord>> flush_archive_vec =
                     std::make_unique<std::vector<FlushRecord>>();
-                auto archive_it = archive_vec->begin();
-                for (auto range_it = splitting_info.begin();
-                     range_it != splitting_info.end() &&
-                     archive_it != archive_vec->end();
-                     range_it++)
-                {
-                    const StoreRange *range = range_it->first;
-                    while (archive_it != archive_vec->end() &&
-                           *archive_it->Key() < *range->RangeStartKey())
-                    {
-                        flush_archive_vec->push_back(std::move(*archive_it));
-                        archive_it++;
-                    }
-
-                    while (archive_it != archive_vec->end() &&
-                           (range->RangeEndKey() == nullptr ||
-                            *archive_it->Key() < *range->RangeEndKey()))
-                    {
-                        archive_it++;
-                    }
-                }
+                MoveNonSplittingRecords(*archive_vec,
+                                        *flush_archive_vec,
+                                        split_ranges,
+                                        lower_bound_cmp);
                 archive_vec = std::move(flush_archive_vec);
-
-                for (auto &info : splitting_info)
-                {
-                    // Init range split tx.
-                    range_split_workers.push_back(std::thread(
-                        [this, &table_name, info, &node_group]
-                        { SplitFlushRange(table_name, node_group, info); }));
-                }
             }
 #endif
 
             if (ckpt_vec->size() != 0 || archive_vec->size() != 0 ||
                 mv_base_vec->size() != 0)
             {
-                std::unique_lock<std::mutex> worker_lk(worker_mux_);
+                std::unique_lock<std::mutex> worker_lk(flush_mux_);
                 work_started++;
-                pending_work_.emplace_back(node_group,
-                                           leader_term,
-                                           ckpt_ts,
-                                           table_name,
-                                           catalog_rec.Schema(),
-                                           std::move(ckpt_vec),
-                                           std::move(archive_vec),
-                                           std::move(mv_base_vec),
-                                           ckpt_txm,
-                                           &work_sender_mux,
-                                           &work_sender_cv,
-                                           &finish_work_cnt,
-                                           &worker_failed_);
-                worker_cv_.notify_one();
+                pending_flush_work_.emplace_back(node_group,
+                                                 leader_term,
+                                                 ckpt_ts,
+                                                 table_name,
+                                                 catalog_rec.Schema(),
+                                                 std::move(ckpt_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 ckpt_txm,
+                                                 &work_sender_mux,
+                                                 &work_sender_cv,
+                                                 &finish_work_cnt,
+                                                 &flush_worker_failed_);
+                flush_cv_.notify_one();
             }
             else
             {
@@ -466,7 +466,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // ccmaps and catalogs if it is no longer leader
         Sharder::Instance().UnpinNodeGroupData(node_group);
 
-        if (!worker_failed_.load(std::memory_order_relaxed) &&
+        if (!flush_worker_failed_.load(std::memory_order_relaxed) &&
             Sharder::Instance().LeaderTerm(node_group) == leader_term)
         {
             LOG(INFO) << "Checkpoint of node group #" << node_group
@@ -474,9 +474,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
-
-        // LOG(INFO) << "End checkpoint node group #" << node_group
-        //           << " with timestamp: " << ckpt_ts;
     }
     // notify ccshard ckpt has finished and can re-check freeable ccentries.
     local_shards_.SetWaitingCkpt(false);
@@ -484,25 +481,24 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
 void Checkpointer::FlushDataWorker()
 {
-    std::unique_lock<std::mutex> worker_lk(worker_mux_);
+    std::unique_lock<std::mutex> worker_lk(flush_mux_);
     while (worker_thd_status_ == Status::Active)
     {
-        worker_cv_.wait(worker_lk,
-                        [this] {
-                            return !pending_work_.empty() ||
-                                   worker_thd_status_ == Status::Terminated;
-                        });
+        flush_cv_.wait(worker_lk,
+                       [this]
+                       {
+                           return !pending_flush_work_.empty() ||
+                                  worker_thd_status_ == Status::Terminated;
+                       });
 
-        if (pending_work_.empty())
+        if (pending_flush_work_.empty())
         {
             continue;
         }
 
         // Retrieve first pending work and pop it.
-        FlushDataWork &cur_work = pending_work_.back();
-#ifdef RANGE_PARTITION_ENABLED
+        FlushDataWork &cur_work = pending_flush_work_.back();
         uint64_t ckpt_ts = cur_work.ckpt_ts_;
-#endif
         uint32_t node_group = cur_work.node_group_;
         int64_t leader_term = cur_work.term_;
         TableName table_name = cur_work.table_name_;
@@ -533,7 +529,7 @@ void Checkpointer::FlushDataWorker()
         std::atomic_bool *fail = cur_work.fail_;
         CcHandlerResult<Void> *hand_res = cur_work.hand_res_;
 
-        pending_work_.pop_back();
+        pending_flush_work_.pop_back();
         worker_lk.unlock();
 
         bool succ = true;
@@ -594,10 +590,16 @@ void Checkpointer::FlushDataWorker()
                 for (auto &ref : *ckpt_vec)
                 {
                     // todo: remove cce_
+                    ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                     ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                              std::memory_order_release);
-                    ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                 }
+                ResetCleanStartPageCc reset_cc(local_shards_.Count());
+                for (auto &ccs : local_shards_.cc_shards_)
+                {
+                    ccs->Enqueue(&reset_cc);
+                }
+                reset_cc.Wait();
 #ifdef RANGE_PARTITION_ENABLED
                 // Update the slice size in data store.
                 if (ckpt_vec->size())
@@ -684,6 +686,63 @@ void Checkpointer::FlushDataWorker()
     }
 }
 
+void Checkpointer::UpdateSliceSpecWorker()
+{
+    std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
+    while (worker_thd_status_ == Status::Active)
+    {
+        slice_update_cv_.wait(worker_lk,
+                              [this]
+                              {
+                                  return !pending_slice_work_.empty() ||
+                                         slice_thd_status_ ==
+                                             Status::Terminated;
+                              });
+
+        if (pending_slice_work_.empty())
+        {
+            continue;
+        }
+
+        UpdateSliceSpecWork &cur_work = pending_slice_work_.back();
+
+        uint64_t ckpt_ts = cur_work.ckpt_ts_;
+        uint32_t node_group = cur_work.node_group_;
+        TableName table_name = cur_work.table_name_;
+        StoreRange *range = cur_work.range_;
+        StoreSlice *slice = cur_work.slice_;
+        size_t start_idx = cur_work.start_idx_;
+        size_t end_idx = cur_work.end_idx_;
+        const std::vector<FlushRecord> &flush_vec = cur_work.flush_vec_;
+        std::mutex &sender_mux = cur_work.sender_mux_;
+        std::condition_variable &sender_cv = cur_work.sender_cv_;
+        size_t &finish_work_cnt = cur_work.finish_work_cnt_;
+        bool &fail = cur_work.fail_;
+
+        pending_slice_work_.pop_back();
+        worker_lk.unlock();
+
+        bool res = range->UpdateSliceSpec(slice,
+                                          table_name,
+                                          node_group,
+                                          ckpt_ts,
+                                          flush_vec,
+                                          start_idx,
+                                          end_idx,
+                                          false);
+        {
+            std::unique_lock<std::mutex> lk(sender_mux);
+            finish_work_cnt++;
+            if (!res)
+            {
+                fail = true;
+            }
+            sender_cv.notify_one();
+        }
+        worker_lk.lock();
+    }
+}
+
 void Checkpointer::SplitFlushRange(
     const TableName &table_name,
     NodeGroupId node_group,
@@ -705,7 +764,7 @@ void Checkpointer::SplitFlushRange(
         {
             LOG(INFO)
                 << "Split range failed due to unable to get next partition id.";
-            worker_failed_.compare_exchange_strong(fail, true);
+            flush_worker_failed_.compare_exchange_strong(fail, true);
             return;
         }
         log_output.append(std::to_string(new_part_id) + ",");
@@ -731,7 +790,7 @@ void Checkpointer::SplitFlushRange(
 
     if (init_req.IsError())
     {
-        worker_failed_.compare_exchange_strong(fail, true);
+        flush_worker_failed_.compare_exchange_strong(fail, true);
         return;
     }
 
@@ -758,7 +817,7 @@ void Checkpointer::SplitFlushRange(
         LOG(INFO) << "checkpointer add read lock on table failed, "
                      "table name: "
                   << table_key.Name().StringView();
-        worker_failed_.compare_exchange_strong(fail, true);
+        flush_worker_failed_.compare_exchange_strong(fail, true);
         return;
     }
 
@@ -791,14 +850,14 @@ void Checkpointer::SplitFlushRange(
     if (split_req.IsError() || !split_req.Result())
     {
         LOG(INFO) << "Split range on table " << table_name.StringView()
-                  << " partition " << entry->GetRangeInfo()->partition_id_
+                  << " partition " << entry->GetRangeInfo()->PartitionId()
                   << " failed.";
         AbortTxRequest abort_req;
         abort_req.Reset();
         split_txm->Execute(&abort_req);
         abort_req.Wait();
         assert(abort_req.Result() == false);
-        worker_failed_.compare_exchange_strong(fail, true);
+        flush_worker_failed_.compare_exchange_strong(fail, true);
         return;
     }
     CommitTxRequest commit_req;
@@ -816,7 +875,10 @@ void Checkpointer::Run()
     // Starts checkpointer worker threads
     for (int id = 0; id < checkpointer_worker_num_; id++)
     {
-        worker_thds_.push_back(std::thread([this] { FlushDataWorker(); }));
+        flush_worker_thds_.push_back(
+            std::thread([this] { FlushDataWorker(); }));
+        update_slice_spec_thds_.push_back(
+            std::thread([this] { UpdateSliceSpecWorker(); }));
     }
 
     std::unique_lock<std::mutex> lk(ckpt_mux_);
@@ -846,15 +908,25 @@ void Checkpointer::Run()
     Ckpt(true);
 
     {
-        std::unique_lock<std::mutex> worker_lk(worker_mux_);
+        std::unique_lock<std::mutex> worker_lk(flush_mux_);
         worker_thd_status_ = Status::Terminated;
     }
-    worker_cv_.notify_all();
+    flush_cv_.notify_all();
 
     // Collect worker threads. They should quit after the Ckpt call.
     for (int id = 0; id < checkpointer_worker_num_; id++)
     {
-        worker_thds_.at(id).join();
+        flush_worker_thds_.at(id).join();
+    }
+    {
+        std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
+        slice_thd_status_ = Status::Terminated;
+    }
+
+    slice_update_cv_.notify_all();
+    for (int id = 0; id < checkpointer_worker_num_; id++)
+    {
+        update_slice_spec_thds_.at(id).join();
     }
 
     lk.lock();
@@ -952,12 +1024,12 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
     {
         if (new_slice)
         {
-            const TxKey &ckpt_key = *ckpt_vec[idx].Key();
+            const TxKey *ckpt_key = ckpt_vec[idx].Key();
 
             if (curr_range == nullptr ||
                 curr_range->RangeEndKey() != nullptr &&
-                    (*curr_range->RangeEndKey() < ckpt_key ||
-                     *curr_range->RangeEndKey() == ckpt_key))
+                    (*curr_range->RangeEndKey() < *ckpt_key ||
+                     *curr_range->RangeEndKey() == *ckpt_key))
             {
                 if (curr_range != nullptr && flush_res && range_updated)
                 {
@@ -967,8 +1039,21 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                 }
 
                 // The current ckpt key falls into a new range. Finds the range.
-                curr_range = local_shards_.FindRange(
-                    table_name, node_group_id, ckpt_key);
+                TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
+                    local_shards_.GetTableRangeEntry(
+                        table_name, node_group_id, ckpt_key));
+                while (range_entry->GetRangeInfo()->PartitionId() %
+                           Sharder::Instance().NodeGroupCount() !=
+                       node_group_id)
+                {
+                    if (idx == ckpt_vec.size() - 1)
+                    {
+                        return success;
+                    }
+
+                    ckpt_key = ckpt_vec[++idx].Key();
+                }
+                curr_range = range_entry->RangeSlices();
                 if (curr_range == nullptr)
                 {
                     LOG(ERROR) << "Fail to find the range for the "
@@ -979,7 +1064,7 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
                 range_updated = false;
             }
 
-            curr_slice = curr_range->FindSlice(ckpt_key);
+            curr_slice = curr_range->FindSlice(*ckpt_key);
         }
 
         // Have iterated all flushed data items falling into the
@@ -1012,265 +1097,278 @@ bool Checkpointer::UpdateStoreSlice(const TableName &table_name,
 }
 
 bool Checkpointer::UpdateSliceAndCalculateRangeUpdate(
-    const TableName &table_name,
+    const TableName &tbl_name,
     const KVCatalogInfo *kv_info,
     uint64_t schema_ts,
     NodeGroupId node_group_id,
-    std::vector<FlushRecord> &ckpt_vec,
+    std::vector<FlushRecord> &flush_batch,
     uint64_t last_ckpt_ts,
     uint64_t ckpt_ts,
-    std::vector<std::pair<const StoreRange *, std::vector<const TxKey *>>>
-        &splitting_info)
+    size_t &batch_idx,
+    std::pair<const StoreRange *, std::vector<const TxKey *>> &splitting_info)
 {
-    bool success = true;
-    StoreRange *curr_range = nullptr;
-    StoreSlice *curr_slice = nullptr;
-    size_t slice_first_idx = 0;
+    std::mutex work_sender_mux;
+    std::condition_variable work_sender_cv;
+    size_t slice_update_done = 0;
+    size_t slice_load_cnt = 0;
+    bool fail = false;
 
-    for (size_t idx = 0; idx < ckpt_vec.size(); ++idx)
+    auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
+    { return *rec.Key() < key; };
+
+    while (batch_idx < flush_batch.size())
     {
-        if (curr_range == nullptr || slice_first_idx == idx)
+        const TxKey &range_start_key = *flush_batch[batch_idx].Key();
+
+        // Finds the range.
+        TableRangeEntry *range_entry =
+            const_cast<TableRangeEntry *>(local_shards_.GetTableRangeEntry(
+                tbl_name, node_group_id, &range_start_key));
+        if (range_entry == nullptr)
         {
-            const TxKey &ckpt_key = *ckpt_vec[idx].Key();
+            // Range table not initialized yet. Issue a read request
+            // to range table to create it and initialize its range
+            // info in local cc shards.
+            // We need to release the read lock on range immediately
+            // after fetching the range info from data store so that it
+            // does not block potential split-flush tx.
+            TransactionExecution *txm = tx_service_->NewTx();
+            InitTxRequest init_req;
+            // Set isolation level to RepeatableRead to ensure the
+            // readlock will be set during the execution of the
+            // following ReadTxRequest.
+            init_req.iso_level_ = IsolationLevel::RepeatableRead;
+            init_req.protocol_ = CcProtocol::Locking;
+            init_req.Reset();
+            txm->Execute(&init_req);
+            init_req.Wait();
 
-            if (curr_range == nullptr ||
-                curr_range->RangeEndKey() != nullptr &&
-                    (*curr_range->RangeEndKey() < ckpt_key ||
-                     *curr_range->RangeEndKey() == ckpt_key))
+            if (init_req.IsError())
             {
-                // The current ckpt key falls into a new range. Finds
-                // the range.
-                TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
-                    local_shards_.GetTableRangeEntry(
-                        table_name, node_group_id, &ckpt_key));
-                if (range_entry == nullptr)
-                {
-                    // Range table not initialized yet. Issue a read request
-                    // to range table to create it and initialize its range
-                    // info in local cc shards.
-                    // We need to release the read lock on range immediately
-                    // after fetching the range info from data store so that it
-                    // does not block potential split-flush tx.
-                    TransactionExecution *txm = tx_service_->NewTx();
-                    InitTxRequest init_req;
-                    // Set isolation level to RepeatableRead to ensure the
-                    // readlock will be set during the execution of the
-                    // following ReadTxRequest.
-                    init_req.iso_level_ = IsolationLevel::RepeatableRead;
-                    init_req.protocol_ = CcProtocol::Locking;
-                    init_req.Reset();
-                    txm->Execute(&init_req);
-                    init_req.Wait();
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                txm->Execute(&abort_req);
+                abort_req.Wait();
 
-                    if (init_req.IsError())
-                    {
-                        AbortTxRequest abort_req;
-                        abort_req.Reset();
-                        txm->Execute(&abort_req);
-                        abort_req.Wait();
-
-                        LOG(ERROR) << "Fail to find the range for the "
-                                      "checkpoint key, "
-                                   << table_name.StringView();
-                        return false;
-                    }
-                    TableName range_table_name(table_name.StringView(),
-                                               TableType::RangePartition);
-                    RangeRecord rec;
-                    ReadTxRequest read_range_req(
-                        &range_table_name, &ckpt_key, &rec, false, false, true);
-                    txm->Execute(&read_range_req);
-                    read_range_req.Wait();
-                    if (read_range_req.IsError())
-                    {
-                        LOG(ERROR) << "Fail to find the range for the "
-                                      "checkpoint key, "
-                                   << table_name.StringView();
-                        return false;
-                    }
-                    CommitTxRequest commit_req;
-
-                    commit_req.Reset();
-                    txm->Execute(&commit_req);
-                    commit_req.Wait();
-                    range_entry = const_cast<TableRangeEntry *>(
-                        local_shards_.GetTableRangeEntry(
-                            table_name, node_group_id, &ckpt_key));
-                }
-                assert(range_entry != nullptr);
-                curr_range = range_entry->RangeSlices();
-                if (curr_range == nullptr)
-                {
-                    // Range does not belong to this ng, skip it
-                    continue;
-                }
+                LOG(ERROR) << "Fail to find the range for the checkpoint key, "
+                           << tbl_name.StringView();
+                return false;
             }
-            curr_slice = curr_range->FindSlice(ckpt_key);
-            slice_first_idx = idx;
+            TableName range_table_name(tbl_name.StringView(),
+                                       TableType::RangePartition);
+            RangeRecord rec;
+            ReadTxRequest read_range_req(
+                &range_table_name, &range_start_key, &rec, false, false, true);
+            txm->Execute(&read_range_req);
+            read_range_req.Wait();
+            if (read_range_req.IsError())
+            {
+                LOG(ERROR) << "Fail to find the range for the checkpoint key, "
+                           << tbl_name.StringView();
+                return false;
+            }
+
+            CommitTxRequest commit_req;
+            txm->Execute(&commit_req);
+            commit_req.Wait();
+            range_entry =
+                const_cast<TableRangeEntry *>(local_shards_.GetTableRangeEntry(
+                    tbl_name, node_group_id, &range_start_key));
         }
 
-        // Have iterated all flushed data items falling into the
-        // current slice. Re-calculates the slice's size.
-        if (idx == ckpt_vec.size() - 1 ||
-            curr_slice->EndKey() != nullptr &&
-                !(*ckpt_vec[idx + 1].Key() < *curr_slice->EndKey()))
+        assert(range_entry != nullptr);
+        StoreRange *curr_range = range_entry->RangeSlices();
+        if (curr_range == nullptr)
         {
+            // Range does not belong to this ng, skips flushing records
+            // belonging to this range.
+            // TODO: Jumps to the record greater than or equal to the end of the
+            // range.
+            ++batch_idx;
+            continue;
+        }
+
+        auto batch_it = flush_batch.begin() + batch_idx;
+        auto range_start_it = batch_it;
+        auto range_end_it = curr_range->RangeEndKey() == nullptr
+                                ? flush_batch.end()
+                                : std::lower_bound(batch_it,
+                                                   flush_batch.end(),
+                                                   *curr_range->RangeEndKey(),
+                                                   lower_bound_cmp);
+
+        while (batch_it != range_end_it)
+        {
+            const TxKey &slice_start_key = *batch_it->Key();
+            StoreSlice *curr_slice = curr_range->FindSlice(slice_start_key);
+
+            auto slice_end_it =
+                curr_slice->EndKey() == curr_range->RangeEndKey()
+                    ? range_end_it
+                    : std::lower_bound(batch_it,
+                                       range_end_it,
+                                       *curr_slice->EndKey(),
+                                       lower_bound_cmp);
+
             int32_t slice_delta_size = 0;
             uint32_t slice_size = 0;
 
-            for (size_t pos = slice_first_idx; pos <= idx; ++pos)
+            for (; batch_it != slice_end_it; ++batch_it)
             {
-                slice_delta_size += ckpt_vec[pos].delta_size_;
+                slice_delta_size += batch_it->delta_size_;
             }
 
             int32_t sum = curr_slice->Size() + slice_delta_size;
             slice_size = sum >= 0 ? sum : 0;
-
-            // If the slice needs to be split, calculate splitting keys and
-            // sub-slices' sizes.
-            if (slice_size > StoreSlice::slice_upper_bound)
-            {
-                GetPostCkptSlice post_ckpt_slice(table_name,
-                                                 node_group_id,
-                                                 curr_slice,
-                                                 curr_range,
-                                                 ckpt_vec,
-                                                 slice_first_idx,
-                                                 idx + 1,
-                                                 last_ckpt_ts,
-                                                 ckpt_ts);
-                local_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
-                post_ckpt_slice.Wait();
-
-                if (post_ckpt_slice.IsError())
-                {
-                    // There is a data store error when loading the slice.
-                }
-
-                auto &item_vec = post_ckpt_slice.SliceRecordCollection();
-                // Split the slice based on post checkpoint item size, but do
-                // not update the slice size with the post checkpoint size yet
-                // since the data is still not flushed into data store yet.
-                uint32_t subslice_cnt =
-                    slice_size / StoreSlice::slice_upper_bound + 1;
-                uint32_t avg_subslice_size = slice_size / subslice_cnt;
-                std::vector<SliceChangeInfo> splitting_keys;
-                splitting_keys.reserve(subslice_cnt);
-
-                uint32_t post_ckpt_subslice_size = 0;
-                uint32_t curr_subslice_size = 0;
-                uint32_t subslice_start = 0;
-                for (size_t pos = 0; pos < item_vec.size(); ++pos)
-                {
-                    post_ckpt_subslice_size +=
-                        item_vec[pos].post_update_slice_size_;
-                    curr_subslice_size += item_vec[pos].cur_slice_size_;
-
-                    if (post_ckpt_subslice_size >= avg_subslice_size ||
-                        pos == item_vec.size() - 1)
-                    {
-                        if (splitting_keys.empty())
-                        {
-                            // The first sub-slice's start key re-uses
-                            // the old slice's start key, so there is no
-                            // need to allocate a new key.
-                            splitting_keys.emplace_back(
-                                nullptr,
-                                curr_subslice_size,
-                                post_ckpt_subslice_size);
-                        }
-                        else
-                        {
-                            if (item_vec[subslice_start].is_key_owner_)
-                            {
-                                splitting_keys.emplace_back(
-                                    std::move(
-                                        item_vec[subslice_start].key_.uptr_),
-                                    curr_subslice_size,
-                                    post_ckpt_subslice_size);
-                                item_vec[subslice_start].is_key_owner_ = false;
-                            }
-                            else
-                            {
-                                splitting_keys.emplace_back(
-                                    item_vec[subslice_start].key_.ptr_,
-                                    curr_subslice_size,
-                                    post_ckpt_subslice_size);
-                            }
-                        }
-                        post_ckpt_subslice_size = 0;
-                        curr_subslice_size = 0;
-                        subslice_start = pos + 1;
-                    }
-                }
-                // Split StoreSlice in memory. Slice info in KV store
-                // will be updated after checkpoint.
-                if (splitting_keys.size() > 1)
-                {
-                    curr_range->UpdateSlice(curr_slice, splitting_keys);
-                }
-            }
-            else
-            {
-                curr_slice->SetPostCkptSize(slice_size);
-            }
-
-            // At the end of current range
-            if (idx == ckpt_vec.size() - 1 ||
-                curr_range->RangeEndKey() != nullptr &&
-                    (*curr_range->RangeEndKey() < *ckpt_vec[idx + 1].Key() ||
-                     *curr_range->RangeEndKey() == *ckpt_vec[idx + 1].Key()))
-            {
-                if (curr_range->NeedSplit())
-                {
-                    auto &slices = curr_range->Slices();
-                    std::vector<const TxKey *> new_range_keys;
-                    uint32_t slice_idx = 0;
-                    uint32_t subrange_slice_idx = 0;
-                    while (slice_idx < slices.size())
-                    {
-                        for (uint32_t curr_subrange_size = 0;
-                             curr_subrange_size < StoreRange::range_max_size &&
-                             slice_idx < slices.size();
-                             slice_idx++)
-                        {
-                            if (slices.at(slice_idx)->PostCkptSize() >= 0)
-                            {
-                                curr_subrange_size +=
-                                    slices.at(slice_idx)->PostCkptSize();
-                            }
-                            else
-                            {
-                                curr_subrange_size +=
-                                    slices.at(slice_idx)->Size();
-                            }
-                        }
-                        // Skip the first subrange since it will reuse the
-                        // current range entry
-                        if (subrange_slice_idx != 0)
-                        {
-                            new_range_keys.emplace_back(
-                                slices[subrange_slice_idx]->StartKey());
-                        }
-                        subrange_slice_idx = slice_idx;
-                    }
-
-                    // Pass todo splitting ranges to caller through
-                    // splitting_info
-                    if (new_range_keys.size())
-                    {
-                        splitting_info.emplace_back(curr_range,
-                                                    std::move(new_range_keys));
-                    }
-                }
-            }
-
-            // The next entry falls into a new slice.
-            slice_first_idx = idx + 1;
+            curr_slice->SetPostCkptSize(slice_size);
+            batch_it = slice_end_it;
         }
+
+        batch_idx = std::distance(flush_batch.begin(), range_end_it);
+
+        size_t post_ckpt_size = curr_range->PostCkptSize();
+        if (post_ckpt_size > StoreRange::range_max_size)
+        {
+            std::vector<const TxKey *> new_range_keys =
+                curr_range->CalculateRangeSplitKeys(tbl_name,
+                                                    node_group_id,
+                                                    ckpt_ts,
+                                                    post_ckpt_size,
+                                                    range_start_it,
+                                                    range_end_it,
+                                                    flush_batch);
+
+            // If the range is to be split, passes it to the caller via
+            // splitting_info and stops the iteration.
+            if (!new_range_keys.empty())
+            {
+                splitting_info.first = curr_range;
+                splitting_info.second = std::move(new_range_keys);
+                return true;
+            }
+        }
+        else
+        {
+            // Range does not need to be splitted, to through the slices and
+            // update their specs if necessary.
+            auto range_batch_it = range_start_it;
+            size_t slice_start_idx =
+                std::distance(flush_batch.begin(), range_start_it);
+            while (range_batch_it != range_end_it)
+            {
+                const TxKey &slice_start_key = *range_batch_it->Key();
+                StoreSlice *curr_slice = curr_range->FindSlice(slice_start_key);
+
+                auto slice_end_it =
+                    curr_slice->EndKey() == curr_range->RangeEndKey()
+                        ? range_end_it
+                        : std::lower_bound(range_batch_it,
+                                           range_end_it,
+                                           *curr_slice->EndKey(),
+                                           lower_bound_cmp);
+
+                size_t slice_end_idx =
+                    std::distance(flush_batch.begin(), slice_end_it);
+                int32_t slice_delta_size = 0;
+                uint32_t slice_size = 0;
+
+                for (; range_batch_it != slice_end_it; ++range_batch_it)
+                {
+                    slice_delta_size += range_batch_it->delta_size_;
+                }
+
+                int32_t sum = curr_slice->Size() + slice_delta_size;
+                slice_size = sum >= 0 ? sum : 0;
+                curr_slice->SetPostCkptSize(slice_size);
+                if (slice_size > StoreSlice::slice_upper_bound)
+                {
+                    // Since update slice specs might need loading from
+                    // data store, hand it off to the worker and move on
+                    // to the next slice.
+                    slice_load_cnt++;
+                    {
+                        std::unique_lock<std::mutex> worker_lk(
+                            slice_update_mux_);
+                        pending_slice_work_.emplace_back(node_group_id,
+                                                         ckpt_ts,
+                                                         tbl_name,
+                                                         flush_batch,
+                                                         curr_range,
+                                                         curr_slice,
+                                                         slice_start_idx,
+                                                         slice_end_idx,
+                                                         work_sender_mux,
+                                                         work_sender_cv,
+                                                         slice_update_done,
+                                                         fail);
+                        slice_update_cv_.notify_one();
+                    }
+                }
+                range_batch_it = slice_end_it;
+                slice_start_idx = slice_end_idx;
+            }
+        }
+
+        {
+            // Wait for all slice specs in this range are updated before moving
+            // on to the next range.
+            std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
+            work_sender_cv.wait(work_sender_lk,
+                                [&slice_update_done, &slice_load_cnt] {
+                                    return slice_load_cnt == slice_update_done;
+                                });
+            if (fail)
+            {
+                return false;
+            }
+        }
+
+        slice_load_cnt = 0;
+        slice_update_done = 0;
     }
 
-    return success;
+    return true;
+}
+
+template <typename T, class Compare>
+void Checkpointer::MoveNonSplittingRecords(
+    std::vector<T> &flush_vec,
+    std::vector<T> &non_split_vec,
+    const std::vector<std::pair<const TxKey *, const TxKey *>> &split_ranges,
+    Compare lower_bound_cmp)
+{
+    auto flush_vec_it = flush_vec.begin();
+
+    for (const auto &[start_key, end_key] : split_ranges)
+    {
+        // The inclusive start of the splitting range is the
+        // exclusive end of the gap preceding of the splitting
+        // range.
+        auto range_start_it = std::lower_bound(
+            flush_vec_it, flush_vec.end(), *start_key, lower_bound_cmp);
+
+        size_t copy_size = std::distance(flush_vec_it, range_start_it);
+        non_split_vec.reserve(non_split_vec.size() + copy_size);
+
+        // Moves the records in the gap preceding the splitting
+        // range.
+        std::move(
+            flush_vec_it, range_start_it, std::back_inserter(non_split_vec));
+
+        // Jumps to the exclusive end of the splitting range, which
+        // is the inclusive start of the gap succeeding the
+        // splitting range.
+        flush_vec_it = end_key == nullptr ? flush_vec.end()
+                                          : std::lower_bound(range_start_it,
+                                                             flush_vec.end(),
+                                                             *end_key,
+                                                             lower_bound_cmp);
+    }
+    // Moves the records in the gap succeeding the last splitting
+    // range.
+    size_t copy_size = std::distance(flush_vec_it, flush_vec.end());
+    non_split_vec.reserve(non_split_vec.size() + copy_size);
+    std::move(flush_vec_it, flush_vec.end(), std::back_inserter(non_split_vec));
 }
 
 void Checkpointer::SyncStatistics(Checkpointer *ckptr,
@@ -1329,16 +1427,16 @@ void Checkpointer::FlushData(const TableName &table_name,
                              std::vector<const TxKey *> *mv_vec,
                              CcHandlerResult<Void> *res)
 {
-    std::unique_lock<std::mutex> worker_lk(worker_mux_);
-    pending_work_.emplace_back(node_group,
-                               term,
-                               ckpt_ts,
-                               table_name,
-                               schema,
-                               ckpt_vec,
-                               archive_vec,
-                               mv_vec,
-                               res);
-    worker_cv_.notify_one();
+    std::unique_lock<std::mutex> worker_lk(flush_mux_);
+    pending_flush_work_.emplace_back(node_group,
+                                     term,
+                                     ckpt_ts,
+                                     table_name,
+                                     schema,
+                                     ckpt_vec,
+                                     archive_vec,
+                                     mv_vec,
+                                     res);
+    flush_cv_.notify_one();
 }
 }  // namespace txservice

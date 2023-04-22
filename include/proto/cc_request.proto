@@ -321,6 +321,7 @@ message ScanOpenRequest {
 	IsolationType iso_level = 12;
 	CcProtocolType protocol = 13;
 	bool is_for_write = 14;
+	bool is_covering_keys = 15;
 }
 
 message ScanCache_msg {
@@ -343,7 +344,8 @@ message ScanNextRequest {
 	bool ckpt = 7;
 	IsolationType iso_level = 8;
 	CcProtocolType protocol = 9;
-	bool is_for_write = 10;	
+	bool is_for_write = 10;
+	bool is_covering_keys = 11;
 }
 
 message ScanNextResponse {
@@ -372,6 +374,7 @@ message ScanSliceRequest {
 	IsolationType iso_level = 15;
 	CcProtocolType protocol = 16;
 	bool is_for_write = 17;
+	bool is_covering_keys = 18;
 }
 
 message ScanSliceResponse {

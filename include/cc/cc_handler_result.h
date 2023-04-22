@@ -98,18 +98,37 @@ public:
             return;
         }
         ref_cnted_ = true;
-        ref_cnt_.store(cnt, std::memory_order_release);
+        ref_cnt_.store(cnt, std::memory_order_relaxed);
+        remote_ref_cnt_.store(0, std::memory_order_relaxed);
     }
 
     void ClearRefCnt()
     {
         ref_cnted_ = false;
-        ref_cnt_.store(0, std::memory_order_release);
+        ref_cnt_.store(0, std::memory_order_relaxed);
+        remote_ref_cnt_.store(0, std::memory_order_relaxed);
     }
 
     uint32_t RefCnt() const
     {
         return ref_cnt_.load(std::memory_order_relaxed);
+    }
+
+    void IncrementRemoteRef()
+    {
+        remote_ref_cnt_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    uint32_t RemoteRefCnt()
+    {
+        return remote_ref_cnt_.load(std::memory_order_relaxed);
+    }
+
+    uint32_t LocalRefCnt()
+    {
+        uint32_t total = ref_cnt_.load(std::memory_order_relaxed);
+        uint32_t remote = remote_ref_cnt_.load(std::memory_order_relaxed);
+        return total - remote > 0 ? total - remote : 0;
     }
 
     void SetValue(const T &val) = delete;
@@ -130,7 +149,21 @@ public:
     }
 
     void SetFinished() override;
+
+    void SetRemoteFinished()
+    {
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        SetFinished();
+    }
+
     void SetError(CcErrorCode err_code) override;
+
+    void SetRemoteError(CcErrorCode err_code)
+    {
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        SetError(err_code);
+    }
+
     /**
      * @brief Forces the handler result to an error state.
      *
@@ -179,6 +212,7 @@ private:
     std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
     bool ref_cnted_{false};
     std::atomic<uint32_t> ref_cnt_;
+    std::atomic<uint32_t> remote_ref_cnt_{0};
     // The parent tx state machine who sends a cc request and waits on this
     // handler result. The handler result is bound to a fixed tx machine. The tx
     // machine, however, may be re-used repeatedly for different user-level

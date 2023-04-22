@@ -66,7 +66,8 @@ public:
     }
 
     /**
-     * @brief Put the passed into data into pending_work_ and notify workers.
+     * @brief Put the passed into data into pending_flush_work_ and notify
+     * workers.
      */
     void FlushData(const TableName &table_name,
                    const TableSchema *schema,
@@ -76,7 +77,7 @@ public:
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
                    std::vector<const TxKey *> *mv_vec,
-                   CcHandlerResult<Void> *res = nullptr);
+                   CcHandlerResult<Void> *res);
 
 private:
     /**
@@ -107,8 +108,27 @@ private:
         std::vector<FlushRecord> &flush_batch,
         uint64_t last_ckpt_ts,
         uint64_t ckpt_ts,
-        std::vector<std::pair<const StoreRange *, std::vector<const TxKey *>>>
+        size_t &batch_idx,
+        std::pair<const StoreRange *, std::vector<const TxKey *>>
             &splitting_info);
+
+    /**
+     * @brief Given a vector of checkpoint records and splitting ranges, moves
+     * the checkpoint records not in the splitting ranges into a new vector.
+     *
+     * @param flush_vec A vector of checkpoint records
+     * @param non_split_vec The new vector for checkpoint records not falling
+     * into splitting ranges
+     * @param split_ranges Ranges to be split
+     * @param lower_bound_cmp comapre func of type T and const TxKey *
+     */
+    template <typename T, class Compare>
+    void MoveNonSplittingRecords(
+        std::vector<T> &flush_vec,
+        std::vector<T> &non_split_vec,
+        const std::vector<std::pair<const TxKey *, const TxKey *>>
+            &split_ranges,
+        Compare lower_bound_cmp);
 
     /**
      * @brief Worker thread that split the target range and flush the data into
@@ -214,6 +234,53 @@ private:
         CcHandlerResult<Void> *hand_res_{nullptr};
     };
 
+    struct UpdateSliceSpecWork
+    {
+    public:
+        UpdateSliceSpecWork(uint32_t node_group,
+                            uint64_t ckpt_ts,
+                            const TableName &table_name,
+                            const std::vector<FlushRecord> &flush_vec,
+                            StoreRange *range,
+                            StoreSlice *slice,
+                            size_t start_idx,
+                            size_t end_idx,
+                            std::mutex &sender_mux,
+                            std::condition_variable &sender_cv,
+                            size_t &finish_work_cnt,
+                            bool &fail)
+            : node_group_(node_group),
+              ckpt_ts_(ckpt_ts),
+              table_name_(table_name),
+              flush_vec_(flush_vec),
+              range_(range),
+              slice_(slice),
+              start_idx_(start_idx),
+              end_idx_(end_idx),
+              sender_mux_(sender_mux),
+              sender_cv_(sender_cv),
+              finish_work_cnt_(finish_work_cnt),
+              fail_(fail)
+        {
+        }
+
+        uint32_t node_group_;
+        uint64_t ckpt_ts_;
+        TableName table_name_;
+        const std::vector<FlushRecord> &flush_vec_;
+        StoreRange *range_;
+        StoreSlice *slice_;
+        size_t start_idx_;
+        size_t end_idx_;
+
+        std::mutex &sender_mux_;
+        std::condition_variable &sender_cv_;
+        // Increased by worker after finishing the retrieved work.
+        size_t &finish_work_cnt_;
+        // Set by worker to indicate work result
+        bool &fail_;
+    };
+
     LocalCcShards &local_shards_;
     // protects request_ckpt_ and status_
     std::mutex ckpt_mux_;
@@ -227,13 +294,23 @@ private:
     uint32_t ckpt_delay_time_;  // unit: Microsecond
     TxService *tx_service_;
     TxLog *log_agent_;
-    // Protects pending_work_ and worker_failed_.
-    std::mutex worker_mux_;
-    std::condition_variable worker_cv_;
-    std::vector<FlushDataWork> pending_work_;
-    std::atomic_bool worker_failed_{false};
-    std::vector<std::thread> worker_thds_;
+    // Protects pending_flush_work_ and flush_worker_failed_.
+    std::mutex flush_mux_;
+    std::condition_variable flush_cv_;
+    std::vector<FlushDataWork> pending_flush_work_;
+    std::atomic_bool flush_worker_failed_{false};
+    std::vector<std::thread> flush_worker_thds_;
     Status worker_thd_status_;
+
+    // Workers for updating slice specs. Since update slice
+    // spec would cause potential data store read, we launched
+    // workers so we can have some degree of parallelism, but
+    // not to the degree where it slows down regular read from data store.
+    std::mutex slice_update_mux_;
+    std::condition_variable slice_update_cv_;
+    std::vector<UpdateSliceSpecWork> pending_slice_work_;
+    std::vector<std::thread> update_slice_spec_thds_;
+    Status slice_thd_status_;
     static const int checkpointer_worker_num_ = 5;
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
@@ -248,5 +325,6 @@ private:
                                const TableSchema *table_schema,
                                uint64_t table_schema_ts);
     void FlushDataWorker();
+    void UpdateSliceSpecWorker();
 };
 }  // namespace txservice

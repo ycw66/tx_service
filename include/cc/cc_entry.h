@@ -893,10 +893,13 @@ public:
             }
         }
 
-        if (exported_count > 0 && !HasVisibleVersion(oldest_active_tx_ts))
+        if (exported_count > 0 &&
+            ckpt_ts_.load(std::memory_order_relaxed) == 0 &&
+            !HasVisibleVersion(oldest_active_tx_ts))
         {
-            // last ckpt version is needed but not in memory, need copy record
-            // from "base table" into "mvcc_archives table".
+            // last ckpt version is needed but not in memory, and we're not sure
+            // if an older version exists, need to copy record from "base table"
+            // into "mvcc_archives table".
             mv_base_vec.push_back(key_ptr);
         }
         return exported_count;
@@ -940,30 +943,7 @@ struct LruPage
     LruPage *lru_prev_{nullptr};
     LruPage *lru_next_{nullptr};
 
-    // Checkpoint link which is used by CkptScanCc to iterate and generate the
-    // list of payload_ckpt_.
-    LruPage *ckpt_prev_{nullptr};
-    LruPage *ckpt_next_{nullptr};
-
     CcMap *parent_map_{nullptr};
-    // if page pinned, do not change this page and its position in checkpoint
-    // list when cleaning and merging pages
-    int pinned_{0};
-
-    bool IsPinned() const
-    {
-        return pinned_ > 0;
-    }
-
-    void PinPage()
-    {
-        pinned_++;
-    }
-
-    void UnpinPage()
-    {
-        pinned_--;
-    }
 };
 
 template <typename KeyT, typename ValueT>

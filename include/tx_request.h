@@ -140,6 +140,8 @@ public:
     TxRecord *rec_;
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
+    // TODO(ZX) unique_sk_read also needs is_covering_keys_
+    // bool is_covering_keys_;
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
 };
@@ -198,6 +200,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       bool is_ckpt = false,
                       bool is_for_write = false,
                       bool is_for_share = false,
+                      bool is_covering_keys = false,
                       bool is_read_local = false)
         : tab_name_(tabname),
           indx_type_(index_type),
@@ -209,6 +212,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_ckpt_delta_(is_ckpt),
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
+          is_covering_keys_(is_covering_keys),
           read_local_(is_read_local)
     {
     }
@@ -233,6 +237,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     bool is_ckpt_delta_;
     bool is_for_write_;
     bool is_for_share_;
+    bool is_covering_keys_;
     bool read_local_;
 };
 

@@ -889,7 +889,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 // Uses the lower 10 bits of the key's hash code to shard the
                 // key across CPU cores in a cc node.
                 uint32_t residual = key.Hash() & 0x3FF;
-                key_shard_code = read.range_rec_.GetRangeInfo()->partition_id_
+                key_shard_code = read.range_rec_.GetRangeInfo()->PartitionId()
                                      << 10 |
                                  residual;
             }
@@ -1093,6 +1093,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_ckpt_delta = scan_open.tx_req_->is_ckpt_delta_;
     bool is_for_write = scan_open.tx_req_->is_for_write_;
     bool is_for_share = scan_open.tx_req_->is_for_share_;
+    bool is_covering_keys = scan_open.tx_req_->is_covering_keys_;
 
     scan_open.Reset();
     scan_open.is_running_ = true;
@@ -1141,7 +1142,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                           iso_lvl,
                           protocol_,
                           is_for_write,
-                          is_ckpt_delta);
+                          is_ckpt_delta,
+                          is_covering_keys);
     }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -2087,7 +2089,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     }
 
     const TxKey *range_start_key =
-        lock_write_ranges.range_rec_.GetRangeInfo()->start_key_.get();
+        lock_write_ranges.range_rec_.GetRangeInfo()->StartKey();
     const TxKey *range_end_key = lock_write_ranges.range_rec_.end_key_;
 
     const ReadKeyResult &read_res =
@@ -2329,7 +2331,8 @@ void TransactionExecution::Process(ValidateOperation &validate)
 
     for (const auto &[tbl_name, tbl_read_set] : rset)
     {
-        if (tbl_name == catalog_ccm_name)
+        if (tbl_name == catalog_ccm_name ||
+            tbl_name.Type() == TableType::RangePartition)
         {
             continue;
         }
@@ -2706,16 +2709,18 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // secondary keys without locks.
         post_process_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
                             0,
-                            rw_set_.CatalogSetSize());
+                            rw_set_.CatalogRangeSetSize());
     }
     else if (status == TxnStatus::Aborted)
     {
-        post_process_.Reset(
-            acquire_write_cnt, rw_set_.ReadSetSize(), rw_set_.CatalogSetSize());
+        post_process_.Reset(acquire_write_cnt,
+                            rw_set_.ReadSetSize(),
+                            rw_set_.CatalogRangeSetSize());
     }
     else if (status == TxnStatus::Unknown)
     {
-        post_process_.Reset(0, rw_set_.ReadSetSize(), rw_set_.CatalogSetSize());
+        post_process_.Reset(
+            0, rw_set_.ReadSetSize(), rw_set_.CatalogRangeSetSize());
     }
     PushOperation(&post_process_);
     Process(post_process_);
@@ -2832,7 +2837,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
         for (const auto &[tbl_name, data_read_set] : rset)
         {
-            if (tbl_name == catalog_ccm_name)
+            if (tbl_name == catalog_ccm_name ||
+                tbl_name.Type() == TableType::RangePartition)
             {
                 continue;
             }
@@ -2971,6 +2977,12 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
 
     for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
     {
+        if (Sharder::Instance().NodeId() == nid)
+        {
+            // Send out local request at last to prevent it from
+            // modifying rec_ while the handler is still using it.
+            continue;
+        }
         handler->PostWriteAll(*post_write_all_op.table_name_,
                               *post_write_all_op.key_,
                               *post_write_all_op.rec_,
@@ -2984,6 +2996,17 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                               post_write_all_op.write_type_);
     }
 
+    handler->PostWriteAll(*post_write_all_op.table_name_,
+                          *post_write_all_op.key_,
+                          *post_write_all_op.rec_,
+                          Sharder::Instance().NodeId(),
+                          tx_number_.load(std::memory_order_relaxed),
+                          tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
+                          commit_ts_,
+                          post_write_all_op.hd_result_,
+                          post_write_all_op.op_type_,
+                          post_write_all_op.write_type_);
     StartTiming();
 }
 
@@ -3006,29 +3029,34 @@ void TransactionExecution::PostProcess(PostWriteAllOp &post_write_all_op)
     Forward();
 }
 
-void TransactionExecution::ReleaseCatalogLock(
-    CcHandlerResult<PostProcessResult> &catalog_hd_result)
+void TransactionExecution::ReleaseCatalogRangeLock(
+    CcHandlerResult<PostProcessResult> &catalog_range_hd_result)
 {
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
         &rset = rw_set_.ReadSet();
-    auto catalog_it = rset.find(catalog_ccm_name);
-    assert(catalog_it != rset.end());
-
-    size_t ref_cnt = catalog_hd_result.RefCnt();
+    size_t ref_cnt = catalog_range_hd_result.RefCnt();
     assert(ref_cnt != 0);
 
-    for (const auto &[cce_addr, read_entry] : catalog_it->second)
+    for (const auto &[tbl_name, tbl_set] : rset)
     {
-        --ref_cnt;
-        handler->PostRead(TxNumber(),
-                          TxTerm(),
-                          CommandId(),
-                          read_entry.version_ts_,
-                          0,
-                          commit_ts_,
-                          cce_addr,
-                          catalog_hd_result);
+        if (tbl_name.Type() != TableType::Catalog &&
+            tbl_name.Type() != TableType::RangePartition)
+        {
+            continue;
+        }
+        for (const auto &[cce_addr, read_entry] : tbl_set)
+        {
+            --ref_cnt;
+            handler->PostRead(TxNumber(),
+                              TxTerm(),
+                              CommandId(),
+                              read_entry.version_ts_,
+                              0,
+                              commit_ts_,
+                              cce_addr,
+                              catalog_range_hd_result);
+        }
     }
     assert(ref_cnt == 0);
 }

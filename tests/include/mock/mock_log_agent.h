@@ -98,7 +98,7 @@ public:
         return log_agent_.LogGroupReplicaNum();
     }
 
-    uint32_t GetLogGroupId(uint64_t tx_number) const override
+    uint32_t GetLogGroupId(uint64_t tx_number) override
     {
         return tx_number % log_agent_.LogGroupCount();
     }

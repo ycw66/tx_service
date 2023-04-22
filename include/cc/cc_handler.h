@@ -283,7 +283,8 @@ public:
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
         CcProtocol proto = CcProtocol::OCC,
         bool is_for_write = false,
-        bool is_ckpt_delta = false) = 0;
+        bool is_ckpt_delta = false,
+        bool is_covering_keys = false) = 0;
 
     virtual void ScanOpenLocal(
         const TableName &table_name,

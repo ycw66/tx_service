@@ -314,7 +314,7 @@ private:
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
 
-    void ReleaseCatalogLock(CcHandlerResult<PostProcessResult> &hd_result);
+    void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
 
     TxErrorCode ConvertCcError(CcErrorCode error);
 

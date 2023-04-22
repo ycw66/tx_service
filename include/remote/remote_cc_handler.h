@@ -135,7 +135,8 @@ public:
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
-                  bool is_ckpt = false);
+                  bool is_ckpt = false,
+                  bool is_covering_keys = false);
 
     void ScanNext(uint32_t src_node_id,
                   uint32_t ng_id,
@@ -148,7 +149,8 @@ public:
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
-                  bool is_ckpt = false);
+                  bool is_ckpt = false,
+                  bool is_covering_keys = false);
 
     void ScanNext(uint32_t src_node_id,
                   const TableName &tbl_name,

@@ -35,6 +35,7 @@ CcShard::CcShard(uint16_t core_id,
       next_tx_ident_(0),
       head_ccp_(nullptr),
       tail_ccp_(nullptr),
+      clean_start_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
       processor_sleep_(false),
@@ -287,8 +288,12 @@ void CcShard::DetachLru(LruPage *page)
 {
     LruPage *prev = page->lru_prev_;
     LruPage *next = page->lru_next_;
-    //    LOG(INFO) << "detach lru for page : " << page << ", prev: " << prev
-    //              << ", next: " << next;
+    // If page is the head to start looking for cc entry to kickout, move
+    // the clean head to the next page
+    if (clean_start_ccp_ == page)
+    {
+        clean_start_ccp_ = page->lru_next_;
+    }
     assert(prev != nullptr && next != nullptr);
     prev->lru_next_ = next;
     next->lru_prev_ = prev;
@@ -298,11 +303,6 @@ void CcShard::DetachLru(LruPage *page)
 
 void CcShard::UpdateLruList(LruPage *page)
 {
-    //    LOG(INFO) << "Before UpdateLruList for page: " << page
-    //              << ", lru prev: " << page->lru_prev_
-    //              << ", next: " << page->lru_next_;
-    //    assert(VerifyLruList());
-
     // page already at the tail, do nothing
     if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
     {
@@ -416,8 +416,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
             for (const auto &lru : lk_info.cce_list_)
             {
-                LOG(INFO) << "table: "
-                          << lru->parent_map_->table_name_.StringView();
+                LOG(INFO) << "table: " << lru->parent_map_->table_name_.Trace();
             }
             // no need to check and recover local txn, it must be ongoing
             return;
@@ -465,8 +464,6 @@ void CcShard::VerifyLruList()
     {
         assert(pre->lru_next_ == cur && cur->lru_prev_ == pre);
         pre = cur;
-        // LOG(INFO) << "prev: " << cur->lru_prev_ << ", cur: " << cur
-        //           << ", next: " << cur->lru_next_;
     }
     assert(pre == &tail_ccp_);
 }
@@ -478,20 +475,10 @@ void CcShard::VerifyLruList()
  */
 size_t CcShard::Clean()
 {
-    LruPage *ccp = head_ccp_.lru_next_;
+    LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
     size_t free_cnt = 0;
 
-    // previous check has notified ckpt since freeable entries cannot be found,
-    // skip iterate lru list before the ckpt is finished.
-    if (local_shards_.IsWaitingCkpt())
-    {
-        return 0;
-    }
-
-    //    LOG(INFO) << "Before CcShard::Clean, lru list: ";
-    //    assert(VerifyLruList());
-
-    while (free_cnt < CcShard::freeBatchSize && ccp != &tail_ccp_)
+    while ((Full() || free_cnt < CcShard::freeBatchSize) && ccp != &tail_ccp_)
     {
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
         // might change
@@ -499,18 +486,15 @@ size_t CcShard::Clean()
         free_cnt += freed;
         ccp = next;
     }
+    clean_start_ccp_ = ccp;
 
     // notify the checkpointer thread to do checkpoint if there is not freeable
     // entries to be kicked out from ccmap.
-    if (free_cnt == 0)
+    if (free_cnt == 0 && !local_shards_.IsWaitingCkpt())
     {
         local_shards_.SetWaitingCkpt(true);
         NotifyCkpt();
     }
-
-    //    LOG(INFO) << "After CcShard::Clean, free_cnt: " << free_cnt
-    //              << ", lru list: ";
-    //    assert(VerifyLruList());
 
     return free_cnt;
 }
@@ -708,7 +692,7 @@ const TableRangeEntry *CcShard::CreateTableRange(
     TxKey::Uptr start_key,
     const TxKey *end_key,
     uint64_t version,
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys)
+    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> *slice_keys)
 {
     return local_shards_.CreateTableRange(table_name,
                                           ng_id,
@@ -725,9 +709,9 @@ void CcShard::CleanTableRange(const TableName &table_name,
     local_shards_.CleanTableRange(table_name, ng_id);
 }
 
-const TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
-                                                   const NodeGroupId ng_id,
-                                                   const TxKey *key)
+TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
+                                             const NodeGroupId ng_id,
+                                             const TxKey *key)
 {
     return local_shards_.GetTableRangeEntry(table_name, ng_id, key);
 }
@@ -1123,7 +1107,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     const TxKey &key,
                                     bool inclusive,
                                     CcRequestBase *cc_request,
-                                    RangeSliceOpStatus &pin_status)
+                                    RangeSliceOpStatus &pin_status,
+                                    bool force_load)
 {
     return local_shards_.PinRangeSlice(table_name,
                                        ng_id,
@@ -1135,7 +1120,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        inclusive,
                                        cc_request,
                                        this,
-                                       pin_status);
+                                       pin_status,
+                                       force_load);
 }
 
 RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
@@ -1148,7 +1134,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     const TxKey &key,
                                     bool inclusive,
                                     CcRequestBase *cc_request,
-                                    RangeSliceOpStatus &pin_status)
+                                    RangeSliceOpStatus &pin_status,
+                                    bool force_load)
 {
     return local_shards_.PinRangeSlice(table_name,
                                        ng_id,
@@ -1161,7 +1148,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        inclusive,
                                        cc_request,
                                        this,
-                                       pin_status);
+                                       pin_status,
+                                       force_load);
 }
 
 void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)

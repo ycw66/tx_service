@@ -168,7 +168,8 @@ public:
                   IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
-                  bool is_ckpt_delta = false) override;
+                  bool is_ckpt_delta = false,
+                  bool is_covering_keys = false) override;
 
     void ScanOpenLocal(const TableName &table_name,
                        ScanIndexType index_type,
@@ -335,7 +336,6 @@ private:
     CcRequestPool<ScanSliceCc> scan_slice_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
-    CcRequestPool<CkptScanCc> ckpt_scan_pool;
 
     friend class remote::RemoteCcHandler;
 };

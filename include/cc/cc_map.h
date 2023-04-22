@@ -105,18 +105,9 @@ public:
     virtual void Clean(LruEntry *remove_entry) = 0;
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
-        uint64_t *ckpt_ts = nullptr,
-        bool is_single_ccmap = false,
+        KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;
-
-    /**
-     * @brief If the new cc_entry is not in the checkpoint list, enlists the new
-     * entry.
-     *
-     * @param entry
-     */
-    virtual void TryInsertCkptList(LruEntry *entry) = 0;
 
     /**
      * Used for debug to verify the map_link is complete.
@@ -194,7 +185,8 @@ protected:
         CcOperation cc_op,
         IsolationLevel iso_level,
         CcProtocol protocol,
-        uint64_t read_ts);
+        uint64_t read_ts,
+        bool is_covering_keys);
 
     /**
      * @brief do check after request is resumed from lock blocking queue.
@@ -211,7 +203,8 @@ protected:
         CcOperation cc_op,
         IsolationLevel iso_level,
         CcProtocol protocol,
-        uint64_t read_ts);
+        uint64_t read_ts,
+        bool is_covering_keys);
 
     void RecoverTxForLockConfilct(NonBlockingLock &lock,
                                   LockType lock_type,

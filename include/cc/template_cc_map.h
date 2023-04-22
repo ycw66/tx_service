@@ -70,9 +70,6 @@ public:
         pg_ps_inf_.prev_page_ = &pg_ng_inf_;
         pg_ps_inf_.next_page_ = nullptr;
 
-        pg_ng_inf_.ckpt_next_ = &pg_ps_inf_;
-        pg_ps_inf_.ckpt_prev_ = &pg_ng_inf_;
-
         if (table_name.Type() == TableType::Primary ||
             table_name.Type() == TableType::Secondary)
         {
@@ -187,7 +184,8 @@ public:
                                             CcOperation::Write,
                                             req.Isolation(),
                                             req.Protocol(),
-                                            0);
+                                            0,
+                                            false);
         }
         else
         {
@@ -246,8 +244,13 @@ public:
                 {
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity.
+#ifdef RANGE_PARTITION_ENABLED
                     req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
+#else
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+#endif
                 }
 
                 assert(cce_ptr != nullptr);
@@ -318,7 +321,8 @@ public:
                                       CcOperation::Write,
                                       req.Isolation(),
                                       req.Protocol(),
-                                      0);
+                                      0,
+                                      false);
             }
 
             if (err_code == CcErrorCode::NO_ERROR)
@@ -461,8 +465,13 @@ public:
                 if (new_cce == nullptr)
                 {
                     // The cc map has reached the maximal capacity.
+#ifdef RANGE_PARTITION_ENABLED
                     req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
+#else
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+#endif
                 }
 
                 auto ite =
@@ -501,8 +510,6 @@ public:
                 prior_cce.gap_commit_ts_ = commit_ts;
                 prior_cce.insert_intention_set_.erase(
                     --ite, prior_cce.insert_intention_set_.end());
-
-                TryInsertCkptList(new_cce);
 
                 if (maintain_statistics_)
                 {
@@ -546,11 +553,11 @@ public:
 
                 if (cce == nullptr)
                 {
-                    // The acquire request needs a new cc entry but the cc map
-                    // has reached the maximal capacity. Blocks the request by
-                    // putting it back to the cc request queue.
-                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    // postwrite must succeed since log has already been
+                    // written. Renqueue the request and wait until we have
+                    // free space in memory.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
                 }
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
@@ -560,9 +567,10 @@ public:
                 cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                     cce_addr->CcePtr());
 
-                if (cce->key_lock_ptr_ != nullptr &&
+                if (cce->key_lock_ptr_ == nullptr ||
+                    !cce->key_lock_ptr_->HasWriteLock() ||
                     cce->key_lock_ptr_->HasWriteLock() &&
-                    cce->key_lock_ptr_->WriteLockTx() != txn)
+                        cce->key_lock_ptr_->WriteLockTx() != txn)
                 {
                     req.Result()->SetFinished();
                     return true;
@@ -635,8 +643,6 @@ public:
 
                 cce->payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
-                TryInsertCkptList(cce);
-
                 DLOG_IF(INFO, TRACE_OCC_ERR)
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
@@ -723,7 +729,8 @@ public:
                                             req.CcOp(),
                                             req.Isolation(),
                                             req.Protocol(),
-                                            0);
+                                            0,
+                                            false);
         }
         else
         {
@@ -741,9 +748,11 @@ public:
                 {
                 case KeyType::NegativeInf:
                     target_key = NegativeInfinity<KeyT>::Instance();
+                    req.SetTxKey(target_key);
                     break;
                 case KeyType::PositiveInf:
                     target_key = PositiveInfinity<KeyT>::Instance();
+                    req.SetTxKey(target_key);
                     break;
                 case KeyType::Normal:
                     const std::string *key_str = req.KeyStr();
@@ -807,8 +816,13 @@ public:
                     // The acquire request needs a new cc entry but the cc map
                     // has reached the maximal capacity. Blocks the request by
                     // putting it back to the cc request queue.
+#ifdef RANGE_PARTITION_ENABLED
                     hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
                     return true;
+#else
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+#endif
                 }
 
                 req.SetCcePtr(cce_ptr);
@@ -875,7 +889,8 @@ public:
                                       cc_op,
                                       iso_lvl,
                                       cc_proto,
-                                      0);
+                                      0,
+                                      false);
             }
 
             switch (err_code)
@@ -999,9 +1014,11 @@ public:
             {
             case KeyType::NegativeInf:
                 target_key = NegativeInfinity<KeyT>::Instance();
+                req.SetTxKey(target_key);
                 break;
             case KeyType::PositiveInf:
                 target_key = PositiveInfinity<KeyT>::Instance();
+                req.SetTxKey(target_key);
                 break;
             case KeyType::Normal:
                 const std::string *key_str = req.KeyStr();
@@ -1059,8 +1076,13 @@ public:
 
         if (cce_ptr == nullptr)
         {
+#ifdef RANGE_PARTITION_ENABLED
             req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
             return true;
+#else
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+            return false;
+#endif
         }
 
         TxNumber txn = req.Txn();
@@ -1090,8 +1112,13 @@ public:
                     if (new_cce == nullptr)
                     {
                         // The cc map has reached the maximal capacity.
+#ifdef RANGE_PARTITION_ENABLED
                         req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                         return true;
+#else
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+#endif
                     }
 
                     shard_->DecrementMemory(new_cce->PayloadMemUsage());
@@ -1119,8 +1146,6 @@ public:
                     cce_ptr->gap_commit_ts_ = commit_ts;
                     cce_ptr->insert_intention_set_.erase(
                         --insert_it, cce_ptr->insert_intention_set_.end());
-
-                    TryInsertCkptList(new_cce);
                 }
             }
 
@@ -1179,8 +1204,6 @@ public:
                              req.OpType() == OperationType::DropTable)
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
-
-                        TryInsertCkptList(cce_ptr);
                     }
                 }
 
@@ -1489,7 +1512,8 @@ public:
                                                     cc_op,
                                                     iso_lvl,
                                                     cc_proto,
-                                                    req.ReadTimestamp());
+                                                    req.ReadTimestamp(),
+                                                    req.IsCoveringKeys());
                 }
             }
             else
@@ -1582,9 +1606,28 @@ public:
                                 }
                             }
                         }
-                        else if (pin_status == RangeSliceOpStatus::Blocked)
+                        else if (pin_status ==
+                                 RangeSliceOpStatus::BlockedOnLoad)
                         {
                             return false;
+                        }
+                        else if (pin_status == RangeSliceOpStatus::Retry)
+                        {
+                            shard_->Enqueue(shard_->LocalCoreId(), &req);
+                            return false;
+                        }
+                        else if (pin_status == RangeSliceOpStatus::Delay)
+                        {
+                            if (slice_id.Range()->HasLock())
+                            {
+                                hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                                return true;
+                            }
+                            else
+                            {
+                                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                                return false;
+                            }
                         }
                         else
                         {
@@ -1614,8 +1657,8 @@ public:
                 // the cc map is full and cannot allocates a new entry.
                 if (cce == nullptr)
                 {
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
                 }
 
                 // if ccm contains all the ccentries, then unknown status means
@@ -1636,6 +1679,18 @@ public:
                                 ng_term,
                                 req.NodeGroupId(),
                                 shard_->LocalCoreId());
+                CODE_FAULT_INJECTOR("remote_read_msg_missed", {
+                    LOG(INFO) << "FaultInject  remote_read_msg_missed"
+                              << "txID: " << req.Txn();
+                    if (!req.IsLocal())
+                    {
+                        remote::RemoteRead &remote_req =
+                            static_cast<remote::RemoteRead &>(req);
+                        remote_req.Acknowledge();
+                    }
+
+                    return false;
+                });
 
                 // Try to acquire lock
                 std::tie(acquired_lock, err_code) =
@@ -1648,7 +1703,8 @@ public:
                                       cc_op,
                                       iso_lvl,
                                       cc_proto,
-                                      req.ReadTimestamp());
+                                      req.ReadTimestamp(),
+                                      req.IsCoveringKeys());
             }
 
             // After acquiring lock
@@ -2109,7 +2165,8 @@ public:
                                                 cc_op,
                                                 iso_lvl,
                                                 cc_proto,
-                                                req.ReadTimestamp());
+                                                req.ReadTimestamp(),
+                                                req.IsCoveringKeys());
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
                     assert(lock_pair.second ==
@@ -2158,7 +2215,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2228,7 +2286,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2295,7 +2354,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2423,7 +2483,8 @@ public:
                                                 cc_op,
                                                 iso_lvl,
                                                 cc_proto,
-                                                req.ReadTimestamp());
+                                                req.ReadTimestamp(),
+                                                req.IsCoveringKeys());
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
                     assert(lock_pair.second ==
@@ -2484,7 +2545,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2569,7 +2631,8 @@ public:
                                                        cc_op,
                                                        iso_lvl,
                                                        cc_proto,
-                                                       req.ReadTimestamp());
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
                     switch (lock_pair.second)
                     {
                     case CcErrorCode::NO_ERROR:
@@ -2774,7 +2837,8 @@ public:
                                                 cc_op,
                                                 iso_lvl,
                                                 cc_proto,
-                                                req.ReadTimestamp());
+                                                req.ReadTimestamp(),
+                                                req.IsCoveringKeys());
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
                     assert(lock_pair.second ==
@@ -2820,7 +2884,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2902,7 +2967,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -2979,7 +3045,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -3104,7 +3171,8 @@ public:
                                                 cc_op,
                                                 iso_lvl,
                                                 cc_proto,
-                                                req.ReadTimestamp());
+                                                req.ReadTimestamp(),
+                                                req.IsCoveringKeys());
 
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
@@ -3161,7 +3229,8 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
@@ -3245,7 +3314,8 @@ public:
                                                        cc_op,
                                                        iso_lvl,
                                                        cc_proto,
-                                                       req.ReadTimestamp());
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
                     switch (lock_pair.second)
                     {
                     case CcErrorCode::NO_ERROR:
@@ -3404,11 +3474,29 @@ public:
                                              &req,
                                              pin_status);
 
-            if (pin_status == RangeSliceOpStatus::Blocked)
+            if (pin_status == RangeSliceOpStatus::Retry)
+            {
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+            }
+            else if (pin_status == RangeSliceOpStatus::Delay)
+            {
+                if (slice_id.Range()->HasLock())
+                {
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
+                }
+                else
+                {
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+            }
+            else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
             {
                 return false;
             }
-            else if (pin_status == RangeSliceOpStatus::Errored)
+            else if (pin_status == RangeSliceOpStatus::Error)
             {
                 // If the pin operation returns an error, the data store
                 // is inaccessible.
@@ -3441,9 +3529,9 @@ public:
             req.SetCceScanType(ScanType::ScanUnknow, core_id);
 
             bool is_locked = false;
-            if (req.IsWaitForPostWrite())
+            if (req.IsWaitForPostWrite(shard_->core_id_))
             {
-                req.SetIsWaitForPostWrite(false);
+                req.SetIsWaitForPostWrite(false, shard_->core_id_);
                 cce->key_lock_ptr_->ReleaseLock(
                     req.Txn(), shard_, LockType::ReadLock);
             }
@@ -3460,7 +3548,8 @@ public:
                                                 cc_op,
                                                 iso_lvl,
                                                 req.Protocol(),
-                                                req.ReadTimestamp());
+                                                req.ReadTimestamp(),
+                                                req.IsCoveringKeys());
 
                 if (lock_pair.second != CcErrorCode::NO_ERROR)
                 {
@@ -3547,14 +3636,15 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
                     // Put the request to top of key lock's blocking queue with
                     // acquring readlock. And then should release the readlock
                     // before handling this requst when PostWriteCc finished.
@@ -3711,14 +3801,15 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
                     // Put the request to top of key lock's blocking queue with
                     // acquring readlock. And then should release the readlock
                     // before handling this requst when PostWriteCc finished.
@@ -3940,14 +4031,15 @@ public:
                                                    cc_op,
                                                    iso_lvl,
                                                    cc_proto,
-                                                   req.ReadTimestamp());
+                                                   req.ReadTimestamp(),
+                                                   req.IsCoveringKeys());
                 switch (lock_pair.second)
                 {
                 case CcErrorCode::NO_ERROR:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
-                    req.SetIsWaitForPostWrite(true);
+                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
                     // Put the request to top of key lock's blocking queue with
                     // acquring readlock. And then should release the readlock
                     // before handling this requst when PostWriteCc finished.
@@ -4101,25 +4193,47 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        LruPage *lru_ccp = req.start_page_ == nullptr ? pg_ng_inf_.ckpt_next_
-                                                      : req.start_page_;
-        CcPage<KeyT, ValueT> *ccp =
-            static_cast<CcPage<KeyT, ValueT> *>(lru_ccp);
-        // a page is pinned when CkptScan stops at it, Unpin the page when
-        // CkptScan resumes
-        if (req.start_page_ != nullptr)
-        {
-            ccp->UnpinPage();
-        }
-
         const KeyT *start_key = static_cast<const KeyT *>(req.start_key_);
         const KeyT *end_key = static_cast<const KeyT *>(req.end_key_);
+        Iterator it;
+        if (req.pause_key_.at(shard_->core_id_).second)
+        {
+            // scan is already finished on this core
+            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
+            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            return false;
+        }
+        if (req.pause_key_.at(shard_->core_id_).first == nullptr)
+        {
+            // If this is a new scan cc, start from the specified start key or
+            // negative inf.
+            if (start_key == nullptr ||
+                start_key == NegativeInfinity<KeyT>::Instance())
+            {
+                it = Begin();
+                it++;
+            }
+            else
+            {
+                it = Floor(*start_key);
+                if (it->first == NegativeInfinity<KeyT>::Instance())
+                {
+                    it++;
+                }
+            }
+        }
+        else
+        {
+            const KeyT *pause_key = static_cast<const KeyT *>(
+                req.pause_key_.at(shard_->core_id_).first.get());
+            it = Floor(*pause_key);
+        }
 
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
             req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return true;
+            return false;
         }
 
         uint64_t recycle_ts = 1U;
@@ -4127,147 +4241,136 @@ public:
         {
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
-        // todo: calculate memory accumulated
-        // size_t collected_size = 0;
+
+        if (req.LoadingSlice(shard_->core_id_).Range() != nullptr)
+        {
+            // request was blocked on slice loading last time it
+            // was processed. Now the slice has already been pinned
+            // by this request when the slice is loaded into memory,
+            // so we need to unpin it here.
+            req.LoadingSlice(shard_->core_id_).Unpin();
+            req.SetLoadingSlce(RangeSliceId(nullptr, nullptr),
+                               shard_->core_id_);
+        }
 
         // CkptScanCc is running on TxProcessor thread. To avoid blocking
         // other transaction for a long time, we only process CkptScanBatch
-        // number of pages in each round. So CkptScan might stop at some page
-        // and this page must not be removed or change its position in
-        // checkpoint list because its address is taken by CkptScanCc. Also, the
-        // page might get cleaned and become empty. To avoid dealing with empty
-        // pages in ccmap, we do not clean the page ongoing CkptScan stops at.
+        // number of pages in each round.
         for (size_t scan_cnt = 0;
              scan_cnt < CkptScanCc::CkptScanBatchSize &&
-             req.accumulated_scan_cnt_ < req.scan_batch_size_ &&
-             ccp != &pg_ps_inf_;)
+             req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                 req.scan_batch_size_ &&
+             it != End() && (end_key == nullptr || *(it->first) < *end_key);
+             it++)
         {
-            // a page is detached from the checkpoint list if all entries in it
-            // have been flushed, i.e, a page is lazily detached from the
-            // checkpoint list in the next round of checkpoint scan.
-            bool detachable = true;
-            auto key_it = ccp->keys_.begin();
-            auto entry_it = ccp->entries_.begin();
-            for (; key_it != ccp->keys_.end(); key_it++, entry_it++)
+            const KeyT &key = *(it->first);
+            CcEntry<KeyT, ValueT> *cce = it->second;
+
+            if (shard_->EnableMvcc())
             {
-                const KeyT &key = *key_it;
-                CcEntry<KeyT, ValueT> *cce = entry_it->get();
+                shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
+            }
 
-                if (shard_->EnableMvcc())
-                {
-                    shard_->DecrementMemory(
-                        cce->KickOutArchiveRecords(recycle_ts));
-                }
-
-                if (cce->NeedCkpt())
-                {
-                    detachable = false;
-                    if (KeyInRange(&key, start_key, end_key))
-                    {
+            if (cce->NeedCkpt() && KeyInRange(&key, start_key, end_key))
+            {
 #ifdef RANGE_PARTITION_ENABLED
+                if (cce->data_store_size_.load(std::memory_order_acquire) ==
+                    INT32_MAX)
+                {
+                    // Load data store size by pinning the slice. Data
+                    // store size is required to decide slice & range
+                    // update plan.
+                    RangeSliceOpStatus pin_status;
+                    RangeSliceId slice_id =
+                        shard_->PinRangeSlice(table_name_,
+                                              req.NodeGroupId(),
+                                              KeySchema(),
+                                              RecordSchema(),
+                                              table_schema_->Version(),
+                                              table_schema_->GetKVCatalogInfo(),
+                                              key,
+                                              true,
+                                              &req,
+                                              pin_status,
+                                              true);
+                    if (pin_status == RangeSliceOpStatus::Successful)
+                    {
                         if (cce->data_store_size_.load(
                                 std::memory_order_acquire) == INT32_MAX)
                         {
-                            // Load data store size by pinning the slice. Data
-                            // store size is required to decide slice & range
-                            // update plan.
-                            RangeSliceOpStatus pin_status;
-                            RangeSliceId slice_id = shard_->PinRangeSlice(
-                                table_name_,
-                                req.NodeGroupId(),
-                                KeySchema(),
-                                RecordSchema(),
-                                table_schema_->Version(),
-                                table_schema_->GetKVCatalogInfo(),
-                                key,
-                                true,
-                                &req,
-                                pin_status);
-                            if (pin_status == RangeSliceOpStatus::Successful)
-                            {
-                                if (cce->data_store_size_.load(
-                                        std::memory_order_acquire) == INT32_MAX)
-                                {
-                                    // If data store size is still unavailable
-                                    // after the slice is loaded from data
-                                    // store, that means this entry does not
-                                    // exist in data store.
-                                    cce->data_store_size_.store(0);
-                                }
-                                slice_id.Unpin();
-                            }
-                            else if (pin_status == RangeSliceOpStatus::Blocked)
-                            {
-                                ccp->PinPage();
-                                req.start_page_ = ccp;
-                                return false;
-                            }
-                            else
-                            {
-                                req.SetError(
-                                    CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                                return true;
-                            }
+                            // If data store size is still unavailable
+                            // after the slice is loaded from data
+                            // store, that means this entry does not
+                            // exist in data store.
+                            cce->data_store_size_.store(0);
                         }
-#endif
-                        cce->ExportForCkpt(key,
-                                           *req.ckpt_vec_,
-                                           *req.archive_vec_,
-                                           *req.mv_base_vec_,
-                                           req.ckpt_ts_,
-                                           recycle_ts,
-                                           Type(),
-                                           shard_->EnableMvcc());
+                        slice_id.Unpin();
+                        req.SetLoadingSlce(RangeSliceId(nullptr, nullptr),
+                                           shard_->core_id_);
+                    }
+                    else if (pin_status == RangeSliceOpStatus::Retry)
+                    {
+                        req.pause_key_.at(shard_->core_id_).first = key.Clone();
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
+                    {
+                        req.SetLoadingSlce(slice_id, shard_->core_id_);
+                        req.pause_key_.at(shard_->core_id_).first = key.Clone();
+                        return false;
+                    }
+                    else
+                    {
+                        // Checkpointing needs to load a slice only if one or
+                        // more changed records are to be flushed. Range catalog
+                        // must have been loaded when initial changes were made.
+                        // So, pinning slice in checkpointing never returns
+                        // BlockedOnCatalog. Moreover, since the force_load flag
+                        // is set, pinning slice in checkpointing never returns
+                        // Delay.
+                        req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                        return true;
                     }
                 }
-                scan_cnt++;
-                req.accumulated_scan_cnt_++;
+#endif
+                cce->ExportForCkpt(key,
+                                   req.CkptVec(shard_->core_id_),
+                                   req.ArchiveVec(shard_->core_id_),
+                                   req.MoveBaseVec(shard_->core_id_),
+                                   req.ckpt_ts_,
+                                   recycle_ts,
+                                   Type(),
+                                   shard_->EnableMvcc());
+                req.accumulated_scan_cnt_.at(shard_->core_id_)++;
             }
-
-            LruPage *next = ccp->ckpt_next_;
-            if (detachable && !ccp->IsPinned())
-            {
-                // scan over for this page and this page can be detached from
-                // the checkpoint list
-                DetachFromCkptList(ccp);
-            }
-            // move to next page
-            ccp = static_cast<CcPage<KeyT, ValueT> *>(next);
+            scan_cnt++;
         }
 
-        if (ccp == &pg_ps_inf_)
+        if (it == End() || (end_key != nullptr && !(*it->first < *end_key)))
         {
-            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-            {
-                // scan data drained
-                std::tuple<uint16_t, LruPage *, bool> ckpt_scan_result{
-                    shard_->core_id_, nullptr, true};
-                req.SetFinish(std::move(ckpt_scan_result));
-                return true;
-            }
-            else
-            {
-                req.Reset(req.NodeGroupId());
-                MoveRequest(&req, shard_->core_id_ + 1);
-            }
+            // scan data drained
+            std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
+            req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            return false;
         }
         else
         {
             // set the start_page_ and put the CkptScanCc request into CcQueue
             // again.
-            ccp->PinPage();
-            if (req.accumulated_scan_cnt_ < req.scan_batch_size_)
+            if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                req.scan_batch_size_)
             {
-                req.start_page_ = ccp;
+                req.pause_key_.at(shard_->core_id_).first = it->first->Clone();
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
-                std::tuple<uint16_t, LruPage *, bool> ckpt_scan_result{
-                    shard_->core_id_, ccp, false};
-                req.SetFinish(std::move(ckpt_scan_result));
-                return true;
+                std::pair<TxKey::Uptr, bool> ckpt_scan_result{
+                    it->first->Clone(), false};
+                req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+                return false;
             }
         }
 
@@ -4347,8 +4450,13 @@ public:
 
             if (cce == nullptr)
             {
+#ifdef RANGE_PARTITION_ENABLED
                 req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
                 return true;
+#else
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
+#endif
             }
 
             if (cce->commit_ts_ >= req.CommitTs())
@@ -4402,8 +4510,6 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                 }
                 cce->commit_ts_ = req.CommitTs();
-
-                TryInsertCkptList(cce);
 
                 if (cce->key_lock_ptr_ != nullptr &&
                     cce->key_lock_ptr_->HasWriteLock())
@@ -4492,28 +4598,19 @@ public:
             const ValueT *record =
                 static_cast<const ValueT *>(data_item.record_.get());
 
-            Iterator it = FindEmplace(*key);
+            Iterator it = FindEmplace(*key, req.ForceLoad());
             const KeyT *cce_key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
             if (cce == nullptr)
             {
                 // Memory reaches capacity while bringing a range slice into
                 // memory.
-                req.SetError();
+                req.SetError(CcErrorCode::OUT_OF_MEMORY);
                 return true;
             }
 
             uint32_t rec_store_size =
                 data_item.is_deleted_ ? 0 : cce_key->Size() + record->Size();
-
-            // The ckpt_ts_ field represents the newest version stored in the
-            // data store. If ckpt_ts_ has not been set, sets the field.
-            if (cce->ckpt_ts_.load(std::memory_order_relaxed) <
-                data_item.version_ts_)
-            {
-                cce->ckpt_ts_.store(data_item.version_ts_,
-                                    std::memory_order_relaxed);
-            }
 
             if (cce->commit_ts_ > 1)
             {
@@ -4533,18 +4630,20 @@ public:
                 continue;
             }
 
+            shard_->DecrementMemory(cce->PayloadMemUsage());
             if (cce->payload_ == nullptr)
             {
                 cce->payload_ = std::make_shared<ValueT>(*record);
             }
-            shard_->DecrementMemory(cce->payload_->MemUsage());
             cce->commit_ts_ = data_item.version_ts_;
+            cce->ckpt_ts_.store(data_item.version_ts_,
+                                std::memory_order_relaxed);
             cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
                                                          : RecordStatus::Normal;
             cce->data_store_size_.store(rec_store_size,
                                         std::memory_order_relaxed);
 
-            shard_->mem_usage_ += cce->payload_->MemUsage();
+            shard_->mem_usage_ += cce->PayloadMemUsage();
         }
 
         req.SetFinish();
@@ -4570,18 +4669,22 @@ public:
                                            table_schema_->GetKVCatalogInfo(),
                                            &req,
                                            shard_,
-                                           shard_->local_shards_.store_hd_);
+                                           shard_->local_shards_.store_hd_,
+                                           true);
 
-            if (pin_status == RangeSliceOpStatus::Blocked)
+            if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
             {
+                req.SetOnLoad(true);
                 return false;
             }
-            else if (pin_status == RangeSliceOpStatus::Errored)
+            else if (pin_status == RangeSliceOpStatus::Error)
             {
                 item_vec.clear();
-                req.SetError();
+                req.SetError(CcErrorCode::DATA_STORE_ERR);
                 return false;
             }
+
+            req.SetOnLoad(false);
         }
 
         Iterator map_it, map_end_it;
@@ -4730,30 +4833,49 @@ public:
         }
 
         // Iterate the cc map using the original page list.
-        LruPage *lru_ccp = req.StartPage() == nullptr ? pg_ng_inf_.next_page_
-                                                      : req.StartPage();
-
-        CcPage<KeyT, ValueT> *ccp =
-            static_cast<CcPage<KeyT, ValueT> *>(lru_ccp);
-
-        // The page has be pinned at the end of the last round, unpin it when
-        // the request resumes.
-        if (req.StartPage() != nullptr)
+        const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
+        const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
+        LruPage *lru_page;
+        if (req.ResumeKey(shard_->core_id_) != nullptr)
         {
-            ccp->UnpinPage();
+            // resume key is the first key we need to start with, find the
+            // floor key of it in case resume key has already been kicked
+            // out.
+            const KeyT *resume_key =
+                static_cast<const KeyT *>(req.ResumeKey(shard_->core_id_));
+            Iterator it = Floor(*resume_key);
+            lru_page = it->second->parent_page_;
+        }
+        else
+        {
+            if (req.StartKey() == nullptr)
+            {
+                lru_page = pg_ng_inf_.next_page_;
+            }
+            else
+            {
+                Iterator it = Floor(*start_key);
+                if (it->first == NegativeInfinity<KeyT>::Instance())
+                {
+                    it++;
+                }
+                lru_page = it->second->parent_page_;
+            }
         }
 
-        uint64_t ckpt_ts = req.CkptTs();
+        CcPage<KeyT, ValueT> *ccp =
+            static_cast<CcPage<KeyT, ValueT> *>(lru_page);
 
         // To avoid occupy the TxProcessor thread for a long time, only process
         // KickoutPageBatchSize number of pages in each round.
         size_t scan_page_cnt = 0;
         bool is_success = true;
         while (scan_page_cnt < KickoutCcEntryCc::KickoutPageBatchSize &&
+               (end_key == nullptr || ccp->FirstKey() < *end_key) &&
                ccp != &pg_ps_inf_)
         {
             auto [freed_cnt, next_page] =
-                CleanPageAndReBalance(ccp, &ckpt_ts, true, &is_success);
+                CleanPageAndReBalance(ccp, &req, &is_success);
             ++scan_page_cnt;
             if (!is_success)
             {
@@ -4766,29 +4888,15 @@ public:
             ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
         }
 
-        if (ccp == &pg_ng_inf_)
+        if (ccp == &pg_ng_inf_ ||
+            (end_key != nullptr && *end_key < ccp->FirstKey()))
         {
-            // Reach the end.
-            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-            {
-                // Finished on all cc shards
-                req.Result()->SetFinished();
-                req.Notify();
-                return true;
-            }
-            else
-            {
-                // Move the request to next ccshard
-                req.Reset(req.NodeGroupId());
-                MoveRequest(&req, shard_->core_id_ + 1);
-            }
+            req.SetFinish(shard_->core_id_);
         }
         else
         {
-            // Set the start_page_ for next round, and should pin the cc page to
-            // avoid it be modified by other tx.
-            ccp->PinPage();
-            req.SetStartPage(ccp);
+            // Set the resume key for next round
+            req.SetResumeKey(&ccp->FirstKey(), shard_->core_id_);
             shard_->Enqueue(&req);
         }
 
@@ -4847,13 +4955,12 @@ public:
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *lru_page,
-        uint64_t *ckpt_ts = nullptr,
-        bool is_single_ccmap = false,
+        KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) override
     {
         size_t free_cnt = 0;
         LruPage *next_page = nullptr;
-        if (is_single_ccmap)
+        if (kickout_cc)
         {
             // For target ccmap, go along with CcPage::next_page_
             CcPage<KeyT, ValueT> *ccpage =
@@ -4865,16 +4972,6 @@ public:
             // go along with the lru list.
             next_page = lru_page->lru_next_;
         }
-        if (lru_page->IsPinned())
-        {
-            // pinned page cannot be removed, skip cleaning pinned page to avoid
-            // empty page
-            if (is_success != nullptr)
-            {
-                *is_success = false;
-            }
-            return {free_cnt, next_page};
-        }
         size_t mem_decreased = 0;
 
         // clean page
@@ -4882,7 +4979,7 @@ public:
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
         auto [success, last_read_ts] =
-            CleanPage(page, mem_decreased, free_cnt, ckpt_ts);
+            CleanPage(page, mem_decreased, free_cnt, kickout_cc);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -4892,8 +4989,6 @@ public:
 
         if (page->Empty())  // remove page if empty
         {
-            // only non-empty page will be pinned by ongoing CkptScanCc
-            assert(!page->IsPinned());
             mem_decreased += page->MemUsage();
             if (page->lru_next_ != nullptr)
             {
@@ -4991,7 +5086,7 @@ public:
                                        page2_last_read_ts,
                                        page,
                                        mem_decreased,
-                                       is_single_ccmap);
+                                       kickout_cc != nullptr);
             }
         }
 
@@ -5012,10 +5107,6 @@ public:
         {
             //            const CcPage<KeyT, ValueT> &page = it->second;
             CcPage<KeyT, ValueT> &page = it->second;
-            if (page.ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(&page);
-            }
             if (page.lru_next_ != nullptr)
             {
                 shard_->DetachLru(&page);
@@ -5031,13 +5122,6 @@ public:
     TableType Type() const override
     {
         return table_name_.Type();
-    }
-
-    void TryInsertCkptList(LruEntry *entry) override
-    {
-        CcEntry<KeyT, ValueT> *cce =
-            static_cast<CcEntry<KeyT, ValueT> *>(entry);
-        TryInsertCkptList(cce->parent_page_);
     }
 
     const Schema *KeySchema() const override
@@ -5103,21 +5187,6 @@ public:
         return cnt;
     }
 
-    /**
-     * Used for unit test to verify the ckpt link is complete.
-     */
-    void VerifyCkptList()
-    {
-        LruPage *pre = &pg_ng_inf_;
-        for (LruPage *cur = pg_ng_inf_.ckpt_next_; cur != nullptr;
-             cur = cur->ckpt_next_)
-        {
-            assert(pre->ckpt_next_ == cur && cur->ckpt_prev_ == pre);
-            pre = cur;
-        }
-        assert(pre == &pg_ps_inf_);
-    }
-
     bool BulkEmplaceForTest(std::vector<KeyT *> &keys)
     {
         std::random_device rd;
@@ -5126,7 +5195,7 @@ public:
         for (auto key : keys)
         {
             bool emplace = false;
-            auto it = FindEmplace(*key, emplace);
+            auto it = FindEmplace(*key, emplace, false);
             if (!emplace)
             {
                 assert(false);
@@ -5137,7 +5206,6 @@ public:
             // randomly set ckpt_ts and commit_ts
             cce->ckpt_ts_ = distribution(generator);
             cce->commit_ts_ = distribution(generator);
-            TryInsertCkptList(cce->parent_page_);
         }
         return true;
     }
@@ -5462,10 +5530,10 @@ protected:
         }
     }
 
-    Iterator FindEmplace(const KeyT &key)
+    Iterator FindEmplace(const KeyT &key, bool force_emplace = false)
     {
         bool emplace;
-        return FindEmplace(key, emplace);
+        return FindEmplace(key, emplace, force_emplace);
     }
 
     /**
@@ -5474,7 +5542,9 @@ protected:
      * @param key
      * @return The Iterator pointing to the target CcEntry
      */
-    Iterator FindEmplace(const KeyT &key, bool &emplace)
+    Iterator FindEmplace(const KeyT &key,
+                         bool &emplace,
+                         bool force_emplace = false)
     {
         emplace = false;
         if (&key == NegativeInfinity<KeyT>::Instance())
@@ -5486,16 +5556,17 @@ protected:
             return End();
         }
 
-        // catalog ccmap bypass shard memory limit. since checkpointer may
-        // emplace ccentry into ccmap.
-        if (shard_->Full() && !(table_name_.Type() == TableType::Catalog) &&
-            !(table_name_.Type() == TableType::RangePartition))
+        // catalog and range ccmap bypass shard memory limit. since checkpointer
+        // may emplace ccentry into ccmap.
+        if (shard_->Full())
         {
             // The shard has reached the maximal capacity. Tries to clean cc
             // entries that have been checkpointed but are not being
             // accessed by active tx's.
-            size_t free_cnt = shard_->Clean();
-            if (free_cnt == 0)
+            shard_->Clean();
+            if (shard_->Full() && !(table_name_.Type() == TableType::Catalog) &&
+                !(table_name_.Type() == TableType::RangePartition) &&
+                !force_emplace)
             {
                 return End();
             }
@@ -5565,16 +5636,8 @@ protected:
             CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
             mem_increased += new_page->MemUsage();
 
-            // insert new page into checkpoint list and lru list right after old
+            // insert new page into lru list right after old
             // page
-            if (target_page->ckpt_next_ != nullptr)
-            {
-                LruPage *next = target_page->ckpt_next_;
-                new_page->ckpt_next_ = next;
-                next->ckpt_prev_ = new_page;
-                target_page->ckpt_next_ = new_page;
-                new_page->ckpt_prev_ = target_page;
-            }
             if (target_page->lru_next_ != nullptr)
             {
                 LruPage *next = target_page->lru_next_;
@@ -6159,29 +6222,6 @@ protected:
         return false;
     }
 
-    void DetachFromCkptList(LruPage *page)
-    {
-        LruPage *prev = page->ckpt_prev_;
-        LruPage *next = page->ckpt_next_;
-        assert(prev != nullptr && next != nullptr);
-        prev->ckpt_next_ = next;
-        next->ckpt_prev_ = prev;
-        page->ckpt_prev_ = nullptr;
-        page->ckpt_next_ = nullptr;
-    }
-
-    void TryInsertCkptList(LruPage *page)
-    {
-        if (page->ckpt_next_ == nullptr)
-        {
-            LruPage *old_tail = pg_ps_inf_.ckpt_prev_;
-            old_tail->ckpt_next_ = page;
-            page->ckpt_prev_ = old_tail;
-            page->ckpt_next_ = &pg_ps_inf_;
-            pg_ps_inf_.ckpt_prev_ = page;
-        }
-    }
-
     void TryUpdatePageKey(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page_it)
     {
@@ -6209,16 +6249,21 @@ protected:
     std::pair<bool, uint64_t> CleanPage(CcPage<KeyT, ValueT> *page,
                                         size_t &mem_decreased,
                                         size_t &free_cnt,
-                                        uint64_t *ckpt_ts = nullptr)
+                                        KickoutCcEntryCc *kickout_cc = nullptr)
     {
         uint64_t last_read_ts = 0;
         std::vector<KeyT> &keys = page->keys_;
         std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &entries =
             page->entries_;
+        const KeyT *start_key, *end_key;
+        if (kickout_cc)
+        {
+            start_key = static_cast<const KeyT *>(kickout_cc->StartKey());
+            end_key = static_cast<const KeyT *>(kickout_cc->EndKey());
+        }
         auto key_insert_it = keys.begin();
         auto entry_insert_it = entries.begin();
 
-        bool detach_ckpt = true;
         // Whether all ccentries whose commit_ts < @ckpt_ts have been cleaned.
         bool clean_success = true;
         auto key_it = keys.begin();
@@ -6227,40 +6272,61 @@ protected:
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
             last_read_ts = std::max(last_read_ts, cce->last_read_ts_);
-            if (cce->NeedCkpt())
+            if (!kickout_cc || KeyInRange(&(*key_it), start_key, end_key))
             {
-                detach_ckpt = false;
-            }
-            if (cce->IsFree())
-            {
-                // free entries will be erased
-                mem_decreased += cce->GetCcEntryMemUsage() +
-                                 key_it->MemUsage() - sizeof(KeyT);
-                free_cnt++;
-            }
-            else
-            {
-                detach_ckpt = false;
-                // The ccentry that expect to clean cannot be kick out.
-                if (ckpt_ts != nullptr && cce->commit_ts_ < *ckpt_ts)
+                if (cce->IsFree())
                 {
-                    clean_success = false;
+#ifdef RANGE_PARTITION_ENABLED
+                    bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
+                        table_name_, cc_ng_id_, *key_it);
+                    if (!kick_ret)
+                    {
+                        // If the slice is being loaded or pinned, do not clean
+                        // it.
+                        *key_insert_it = std::move(*key_it);
+                        *entry_insert_it = std::move(*entry_it);
+                        key_insert_it++;
+                        entry_insert_it++;
+                        // The ccentry that expect to clean cannot be kick out.
+                        if (kickout_cc != nullptr &&
+                            cce->commit_ts_ < kickout_cc->CkptTs())
+                        {
+                            clean_success = false;
+                        }
+                    }
+                    else
+                    {
+                        // free entries will be erased
+                        mem_decreased += cce->GetCcEntryMemUsage() +
+                                         key_it->MemUsage() - sizeof(KeyT);
+                        free_cnt++;
+                    }
+#else
+                    // free entries will be erased
+                    mem_decreased += cce->GetCcEntryMemUsage() +
+                                     key_it->MemUsage() - sizeof(KeyT);
+                    free_cnt++;
+#endif
                 }
-                // keep the entries that are not free
-                *key_insert_it = std::move(*key_it);
-                *entry_insert_it = std::move(*entry_it);
-                key_insert_it++;
-                entry_insert_it++;
+                else
+                {
+                    // The ccentry that expect to clean cannot be kick out.
+                    if (kickout_cc != nullptr &&
+                        cce->commit_ts_ < kickout_cc->CkptTs())
+                    {
+                        clean_success = false;
+                    }
+                    // keep the entries that are not free
+                    *key_insert_it = std::move(*key_it);
+                    *entry_insert_it = std::move(*entry_it);
+                    key_insert_it++;
+                    entry_insert_it++;
+                }
             }
         }
         keys.erase(key_insert_it, keys.end());
         entries.erase(entry_insert_it, entries.end());
 
-        if (detach_ckpt && page->ckpt_next_ != nullptr && !page->IsPinned())
-        {
-            // detach page from the checkpoint list if it is not pinned
-            DetachFromCkptList(page);
-        }
         return {clean_success, last_read_ts};
     }
 
@@ -6337,52 +6403,6 @@ protected:
         TryUpdatePageKey(page1_it);
         TryUpdatePageKey(page2_it);
 
-        // update checkpoint list
-        // checkpoint scan might stop at a pinned page and page redistribution
-        // could happen while the checkpoint scan is ongoing. The requirements
-        // are as follows:
-        // 1. the pinned page and its position in checkpoint list should remain
-        // unchanged;
-        // 2. pages behind the pinned page in checkpoint list should not be
-        // skipped by the ongoing checkpoint scan after the redistribution.
-        if (page1.IsPinned() || page2.IsPinned())
-        {
-            // if either page is pinned by ongoing checkpoint scan, keep the
-            // pinned page unchanged and insert the other after the pinned page
-            CcPage<KeyT, ValueT> *pinned_page =
-                page1.IsPinned() ? &page1 : &page2;
-            CcPage<KeyT, ValueT> *other = page1.IsPinned() ? &page2 : &page1;
-            if (other->ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(other);
-            }
-            LruPage *next = pinned_page->ckpt_next_;
-            other->ckpt_next_ = next;
-            other->ckpt_prev_ = pinned_page;
-            next->ckpt_prev_ = other;
-            pinned_page->ckpt_next_ = other;
-        }
-        else if (page1.ckpt_next_ != nullptr || page2.ckpt_next_ != nullptr)
-        {
-            // if either page is in checkpoint list, reinsert the two pages at
-            // the tail
-            if (page1.ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(&page1);
-            }
-            if (page2.ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(&page2);
-            }
-            TryInsertCkptList(&page1);
-            TryInsertCkptList(&page2);
-        }
-        else
-        {
-            // neither page is in checkpoint list, no entry needs to be scanned
-            // by CkptScanCc, do nothing
-        }
-
         // update LRU list
         // after redistribution, the two pages should be seen as one in the LRU
         // list, insert the less recently used page after the more recently used
@@ -6403,7 +6423,7 @@ protected:
     }
 
     /**
-     * Merge page1 and page2. Update the map, checkpoint list and lru list after
+     * Merge page1 and page2. Update the map and lru list after the
      * merge.
      *
      * @param page
@@ -6427,9 +6447,8 @@ protected:
 
         // if either page is pinned, use the pinned page as the merged page and
         // discard the other
-        auto merged_page_it = page2_it->second.IsPinned() ? page2_it : page1_it;
-        auto discarded_page_it =
-            page2_it->second.IsPinned() ? page1_it : page2_it;
+        auto merged_page_it = page1_it;
+        auto discarded_page_it = page2_it;
         CcPage<KeyT, ValueT> *merged_page = &merged_page_it->second;
         CcPage<KeyT, ValueT> *discarded_page = &discarded_page_it->second;
 
@@ -6460,43 +6479,6 @@ protected:
         merged_page->next_page_ = map_next;
         map_prev->next_page_ = merged_page;
         map_next->prev_page_ = merged_page;
-
-        // Update the checkpoint list.
-        // There are some issues about the merged page's position in the
-        // checkpoint list, because checkpoint scan might stop at a pinned page
-        // and page merge could happen while the checkpoint scan is ongoing.
-        // The requirements are as follows:
-        // 1. the pinned page and its position in checkpoint list should remain
-        // unchanged;
-        // 2. pages behind the pinned page in checkpoint list should not be
-        // skipped by the ongoing checkpoint scan after the merge.
-        if (merged_page_it->second.IsPinned())
-        {
-            // merged_page is pinned, keep its position in checkpoint list
-            // unchanged, detach discard_page from the checkpoint list
-            DetachFromCkptList(discarded_page);
-        }
-        else if (merged_page->ckpt_next_ != nullptr ||
-                 discarded_page->ckpt_next_ != nullptr)
-        {
-            // detach both pages and insert merged_page to the end of the
-            // checkpoint list so that entries in the two pages being merged are
-            // guaranteed to be scanned at least once by the ongoing CkptScanCc
-            if (merged_page->ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(merged_page);
-            }
-            if (discarded_page->ckpt_next_ != nullptr)
-            {
-                DetachFromCkptList(discarded_page);
-            }
-            TryInsertCkptList(merged_page);
-        }
-        else
-        {
-            // neither of the two page is in checkpoint list, no entry in the
-            // merged page needs to be scanned by CkptScanCc, do nothing
-        }
 
         // Update the LRU list.
         // record page's original lru_next as it will change after the Lru list

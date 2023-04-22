@@ -42,15 +42,41 @@ enum struct SliceStatus
      * request is loading the slice's records into cc maps.
      *
      */
-    BeingLoaded,
-    Errored
+    BeingLoaded
 };
 
 enum struct RangeSliceOpStatus
 {
+    /**
+     * The slice is fully cached in memory and has been pinned.
+     */
     Successful = 0,
-    Blocked,
-    Errored,
+    /**
+     * @brief The demanding cc request either performs an async data store read
+     * or awaits for an on-the-fly data store read. The cc request will be
+     * re-enqueued for execution once the async read finishes and fills the
+     * slice into memory (though filling may fail due to out of memory).
+     *
+     */
+    BlockedOnLoad,
+    /**
+     * @brief The request is temporarily pushed back due to concurrent
+     * modifications of the slice. The request is re-enqueued and re-tries
+     * immediately.
+     *
+     */
+    Retry,
+    /**
+     * @brief The cc request demands a slice that was loaded shortly (less than
+     * 4 seconds). Given that the demanding slice becomes partially cached in
+     * such a short period, the cache is likely experiencing thrashing. To
+     * mitigate the issue, loading is not performed and the request is pushed
+     * back for retry. If the range in which the slice resides is experiencing
+     * splitting, the request is aborted on the OOM error.
+     *
+     */
+    Delay,
+    Error,
 };
 
 struct SliceChangeInfo
@@ -197,7 +223,7 @@ public:
 
     FillStoreSliceCc *FillCcRequest();
 
-    void SetLoadingError(uint64_t load_ts);
+    void SetLoadingError(StoreRange &range);
 
     bool NeedSplitOrMerge() const
     {
@@ -223,10 +249,7 @@ public:
         }
         else
         {
-            if (status_ != SliceStatus::Errored)
-            {
-                status_ = SliceStatus::PartiallyCached;
-            }
+            status_ = SliceStatus::PartiallyCached;
             return true;
         }
     }
@@ -268,7 +291,15 @@ public:
         return pins_;
     }
 
+    bool ChangeAllowed()
+    {
+        std::unique_lock<std::mutex> lk(slice_mux_);
+        return pins_ == 0 && status_ != SliceStatus::BeingLoaded;
+    }
+
 private:
+    bool IsRecentLoad() const;
+
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
 
@@ -347,7 +378,8 @@ public:
                           CcRequestBase *cc_request,
                           CcShard *cc_shard,
                           store::DataStoreHandler *store_hd,
-                          RangeSliceOpStatus &pin_status);
+                          RangeSliceOpStatus &pin_status,
+                          bool force_load = false);
 
     RangeSliceOpStatus PinSlice(const TableName &tbl_name,
                                 StoreSlice *slice,
@@ -358,7 +390,8 @@ public:
                                 const KVCatalogInfo *kv_info,
                                 CcRequestBase *cc_request,
                                 CcShard *cc_shard,
-                                store::DataStoreHandler *store_hd);
+                                store::DataStoreHandler *store_hd,
+                                bool force_load = false);
 
     void UnpinSlice(StoreSlice *slice);
 
@@ -371,20 +404,27 @@ public:
                                   bool update_slice_keys,
                                   store::DataStoreHandler *store_hd);
 
-    /**
-     * @brief Updates the range and splits the input slice into specified
-     * sub-slices. This method is called exclusively by the checkpointer, before
-     * it flushes changed data items in the slice and decides to split the slice
-     * into multiple ones.
-     *
-     * @param slice Slice to split
-     * @param split_slices Sub-slices after splitting, specified by slices'
-     * start keys and their sizes.
-     */
-    void UpdateSlice(StoreSlice *slice,
-                     std::vector<SliceChangeInfo> &sub_slices);
+    bool UpdateSliceSpec(StoreSlice *slice,
+                         const TableName &table_name,
+                         NodeGroupId ng_id,
+                         uint64_t flush_ts,
+                         const std::vector<FlushRecord> &flush_vec,
+                         size_t start_idx,
+                         size_t end_idx,
+                         bool range_locked = false);
 
-    void SetLoadError(uint64_t load_ts);
+    /**
+     * This function is NOT THREAD SAFE. Only checkpointer should be calling
+     * this function and update range specs.
+     */
+    std::vector<const TxKey *> CalculateRangeSplitKeys(
+        const TableName &,
+        NodeGroupId ng_id,
+        uint64_t flush_ts,
+        size_t post_ckpt_size,
+        std::vector<FlushRecord>::const_iterator range_start_it,
+        std::vector<FlushRecord>::const_iterator range_end_it,
+        const std::vector<FlushRecord> &flush_vec);
 
     const TxKey *RangeStartKey() const
     {
@@ -405,15 +445,23 @@ public:
 
     StoreSlice *FindSlice(const TxKey &key);
 
+    StoreSlice *FindSlice(size_t idx)
+    {
+        return slices_.at(idx).get();
+    }
+
     void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys,
                     bool fully_cached = false);
+
+    void InitSlices(std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                        &slice_keys);
 
     const std::vector<std::unique_ptr<StoreSlice>> &Slices() const
     {
         return slices_;
     }
 
-    bool NeedSplit();
+    size_t PostCkptSize();
 
     /**
      * @brief Split the range with new_end. new_end will be the new
@@ -421,41 +469,66 @@ public:
      * from this range and returned to the caller.
      *
      * @param new_end
-     * @return std::vector<std::pair<TxKey::Uptr, uint32_t>>
+     * @return std::vector<std::pair<TxKey::Uptr, uint32_t, SliceStatus>>
      */
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> SplitRange(
+    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> SplitRange(
         const TxKey *new_end)
     {
         std::unique_lock<std::shared_mutex> range_lk(mux_);
-        std::vector<std::pair<TxKey::Uptr, uint32_t>> removed_slices;
-        std::vector<TxKey::Uptr> remain_boundary;
-        std::vector<std::unique_ptr<StoreSlice>> remain_slices;
-        auto boundary = boundary_keys_.begin();
-        auto slice = slices_.begin();
-        // The first slice always belongs to the old range and
-        // is not in boundary_keys_.
-        remain_slices.push_back(std::move(*slice));
-        slice++;
+        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+            removed_slices;
+        size_t remove_offset = SearchSlice(*new_end, true);
+        auto boundary = boundary_keys_.begin() + remove_offset - 1;
+        auto slice = slices_.begin() + remove_offset;
+        while (slice != slices_.end())
+        {
+            // first check if any of the slices that will be removed is pinned
+            // or being loaded
+            std::unique_lock<std::mutex> slice_lk((*slice)->slice_mux_);
+            if ((*slice)->pins_ > 0 ||
+                (*slice)->status_ == SliceStatus::BeingLoaded)
+            {
+                if ((*slice)->pins_)
+                {
+                    LOG(INFO) << "slice pinned when trying to split range";
+                }
+                else
+                {
+                    LOG(INFO) << "slice loading when tyring to split range";
+                }
+                return removed_slices;
+            }
+            slice++;
+        }
+        slice = slices_.begin() + remove_offset;
         while (boundary != boundary_keys_.end())
         {
-            if (!(**boundary < *new_end))
-            {
-                // Remove boundary keys >= new end key
-                removed_slices.emplace_back(std::move(*boundary),
-                                            (*slice)->Size());
-            }
-            else
-            {
-                remain_boundary.push_back(std::move(*boundary));
-                remain_slices.push_back(std::move(*slice));
-            }
+            // Remove boundary keys >= new end key
+            removed_slices.emplace_back(
+                std::move(*boundary), (*slice)->Size(), (*slice)->status_);
             boundary++;
             slice++;
         }
-        boundary_keys_ = std::move(remain_boundary);
-        slices_ = std::move(remain_slices);
-        range_end_key_ = removed_slices.front().first.get();
+        slices_.erase(slices_.begin() + remove_offset, slices_.end());
+        boundary_keys_.erase(boundary_keys_.begin() + remove_offset - 1,
+                             boundary_keys_.end());
+        range_end_key_ = std::get<0>(removed_slices.front()).get();
         return removed_slices;
+    }
+
+    void Lock()
+    {
+        has_write_lock_.store(true, std::memory_order_relaxed);
+    }
+
+    bool HasLock()
+    {
+        return has_write_lock_.load(std::memory_order_relaxed);
+    }
+
+    void Unlock()
+    {
+        return has_write_lock_.store(false, std::memory_order_relaxed);
     }
 
 private:
@@ -465,16 +538,25 @@ private:
 
     size_t SearchSlice(const TxKey &search_key, bool inclusive) const;
 
-    bool LoadSlice(const TableName &tbl_name,
-                   StoreSlice &slice,
-                   const Schema *key_schema,
-                   const Schema *rec_schema,
-                   uint64_t schema_ts,
-                   uint64_t snapshot_ts,
-                   const KVCatalogInfo *kv_info,
-                   CcRequestBase *cc_request,
-                   CcShard *cc_shard,
-                   store::DataStoreHandler *store_hd);
+    enum struct LoadSliceStatus
+    {
+        Success,
+        Delay,
+        Error
+    };
+
+    LoadSliceStatus LoadSlice(const TableName &tbl_name,
+                              StoreSlice &slice,
+                              const Schema *key_schema,
+                              const Schema *rec_schema,
+                              uint64_t schema_ts,
+                              uint64_t snapshot_ts,
+                              const KVCatalogInfo *kv_info,
+                              CcRequestBase *cc_request,
+                              CcShard *cc_shard,
+                              store::DataStoreHandler *store_hd,
+                              bool force_load,
+                              std::unique_lock<std::mutex> &slice_lk);
 
     /**
      * @brief The start and end keys of the range. The two boundary keys are raw
@@ -518,6 +600,8 @@ private:
     std::condition_variable_any wait_cv_;
 
     LocalCcShards &local_cc_shards_;
+
+    std::atomic<bool> has_write_lock_{false};
 
     friend class StoreSlice;
     friend struct TableRangeEntry;

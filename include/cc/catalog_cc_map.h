@@ -853,7 +853,8 @@ public:
                                                CcOperation::Write,
                                                IsolationLevel::RepeatableRead,
                                                CcProtocol::Locking,
-                                               0);
+                                               0,
+                                               false);
 
             // When a cc node recovers, no one should be holding read locks. So,
             // the acquire operation should always succeed.

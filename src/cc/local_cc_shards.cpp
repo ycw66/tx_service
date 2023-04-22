@@ -513,8 +513,9 @@ const TableRangeEntry *LocalCcShards::UploadNewRangeInfo(
     return entry;
 }
 
-const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
-    const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
+TableRangeEntry *LocalCcShards::GetTableRangeEntry(const TableName &table_name,
+                                                   const NodeGroupId ng_id,
+                                                   const TxKey *key)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     TableName range_table_name(table_name.StringView(),
@@ -538,12 +539,10 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     TxKey::Uptr start_key,
     const TxKey *end_key,
     uint64_t version,
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys)
+    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> *slice_keys)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     std::vector<TableRangeEntry *> new_entries;
-    auto table_it = table_ranges_.find(table_name);
-    assert(table_it != table_ranges_.end());
 
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *ranges =
         GetTableRangesForATableInternal(table_name, ng_id);
@@ -577,9 +576,10 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           bool inclusive,
                                           CcRequestBase *cc_request,
                                           CcShard *cc_shard,
-                                          RangeSliceOpStatus &pin_status)
+                                          RangeSliceOpStatus &pin_status,
+                                          bool force_load)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
@@ -591,7 +591,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
             range_table_name, kv_info, cc_request, ng_id);
-        pin_status = RangeSliceOpStatus::Blocked;
+        pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
 
@@ -606,7 +606,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           cc_request,
                                           cc_shard,
                                           store_hd_,
-                                          pin_status);
+                                          pin_status,
+                                          force_load);
 }
 
 RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
@@ -620,9 +621,10 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           bool inclusive,
                                           CcRequestBase *cc_request,
                                           CcShard *cc_shard,
-                                          RangeSliceOpStatus &pin_status)
+                                          RangeSliceOpStatus &pin_status,
+                                          bool force_load)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
@@ -634,7 +636,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
             range_table_name, kv_info, cc_request, ng_id);
-        pin_status = RangeSliceOpStatus::Blocked;
+        pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
 
@@ -655,7 +657,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           cc_request,
                                           cc_shard,
                                           store_hd_,
-                                          pin_status);
+                                          pin_status,
+                                          force_load);
 }
 
 StoreRange *LocalCcShards::FindRange(const TableName &table_name,
@@ -781,7 +784,7 @@ bool LocalCcShards::KickoutRangeSlice(const TableName &tbl_name,
     TableName range_tbl_name(tbl_name.StringView(), TableType::RangePartition);
     TableRangeEntry *entry =
         GetTableRangeEntryInternal(range_tbl_name, ng_id, &key);
-    if (entry == nullptr)
+    if (entry == nullptr || entry->RangeSlices() == nullptr)
     {
         return true;
     }

@@ -486,8 +486,18 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
-        const PostCommitRequest &req = input_msg_->postcommit_req();
-        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        if (input_msg_->has_postcommit_req())
+        {
+            const PostCommitRequest &req = input_msg_->postcommit_req();
+            hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        }
+        else
+        {
+            assert(input_msg_->has_forward_post_commit_req());
+            const ForwardPostCommitRequest &req =
+                input_msg_->forward_post_commit_req();
+            hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        }
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -680,8 +690,8 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
-            LockType lock_type =
-                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
+            LockType lock_type = LockTypeUtil::DeduceLockType(
+                cc_op, Isolation(), Protocol(), IsCoveringKeys());
 
             // When there is a scan error and the scan does not put locks on the
             // scanned entries, clears the scan cache and does not return them
@@ -731,6 +741,7 @@ void txservice::remote::RemoteScanOpen::Reset(
     table_name_ = &remote_table_name_;
     tx_term_ = input_msg->tx_term();
     is_for_write_ = scan_open.is_for_write();
+    is_covering_keys_ = scan_open.is_covering_keys();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_open.protocol());
     tx_number_ = input_msg->tx_number();
@@ -836,9 +847,9 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
+            LockType lock_type = LockTypeUtil::DeduceLockType(
+                cc_op, Isolation(), Protocol(), IsCoveringKeys());
 
-            LockType lock_type =
-                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
             // When there is a scan error and the scan does not put locks on the
             // scanned entries, clears the scan cache and does not return them
             // back to the sender. If the scan puts locks on scanned entries,
@@ -887,6 +898,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                                     : ScanDirection::Backward;
     tx_term_ = input_msg->tx_term();
     is_for_write_ = scan_next.is_for_write();
+    is_covering_keys_ = scan_next.is_covering_keys();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
     tx_number_ = input_msg->tx_number();
@@ -951,8 +963,8 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
                 cc_op = CcOperation::Read;
             }
 
-            LockType lock_type =
-                LockTypeUtil::DeduceLockType(cc_op, Isolation(), Protocol());
+            LockType lock_type = LockTypeUtil::DeduceLockType(
+                cc_op, Isolation(), Protocol(), IsCoveringKeys());
 
             // When there is a scan error and the scan does not put locks on the
             // scanned entries, clears the scan cache and does not return them
@@ -987,7 +999,6 @@ void txservice::remote::RemoteScanSlice::Reset(
     assert(input_msg->has_scan_slice_req());
 
     cc_res_.Reset();
-    cc_res_.SetRefCnt(core_cnt);
 
     const ScanSliceRequest &scan_slice_req = input_msg->scan_slice_req();
     std::string_view tbl_name_view(scan_slice_req.table_name_str());
@@ -1011,7 +1022,8 @@ void txservice::remote::RemoteScanSlice::Reset(
                      cc_res_,
                      ToLocalType::ConvertIsolation(scan_slice_req.iso_level()),
                      ToLocalType::ConvertProtocol(scan_slice_req.protocol()),
-                     scan_slice_req.is_for_write());
+                     scan_slice_req.is_for_write(),
+                     scan_slice_req.is_covering_keys());
 
     output_msg_.set_tx_number(input_msg->tx_number());
     output_msg_.set_handler_addr(input_msg->handler_addr());

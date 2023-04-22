@@ -338,7 +338,8 @@ public:
         {
             cc_op = CcOperation::ReadForWrite;
         }
-        return LockTypeUtil::DeduceLockType(cc_op, iso_level_, protocol_);
+        return LockTypeUtil::DeduceLockType(
+            cc_op, iso_level_, protocol_, is_covering_keys_);
     }
 
 protected:
@@ -353,6 +354,7 @@ public:
     bool read_local_{false};
     bool is_ckpt_delta_{false};
     bool is_for_write_{false};
+    bool is_covering_keys_{false};
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
 };

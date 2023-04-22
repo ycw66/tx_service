@@ -462,12 +462,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetRemoteFinished();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -1139,6 +1139,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest:
     {
+        LOG(INFO) << "RECEIVED check block";
         RemoteBlockReqCheckCc *req = blocked_req_check_pool_.NextRequest();
         uint32_t core_id = msg->blocked_check_req().cce_addr().core_id();
         req->Reset(std::move(msg));
@@ -1148,6 +1149,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::
         CcMessage_MessageType_BlockedCcReqCheckResponse:
     {
+        LOG(INFO) << "RECEIVED check block resp";
         assert(msg->has_blocked_check_resp());
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -1183,6 +1185,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
                     msg->handler_addr());
             AckStatus status = (AckStatus) resp.req_status();
+            LOG(INFO) << "status " << (int) status;
             if (status == AckStatus::ErrorTerm)
             {
                 hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);

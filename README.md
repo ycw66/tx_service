@@ -257,12 +257,11 @@ Figure 5 TxId and TxNumber representation
 ### CcEntry
 CcEntry inherits from LruEntry, which contains:
 1. LRU linkpointer : **lru_prev_** and **lru_next_**. This link records the age of entry, when ccmap is full, kickout the entries by the order of LRU.
-2. Checkpoint link pointer: **ckpt_prev_** and **ckpt_next_**. This link is used by CkptScanCc to iterate and generate the list of payload_ckpt_. This link is appended by `Postwrite()`.
-3. **key_lock_**: entry's key lock which contains read, write and corresponding wait queue.
-4. **commit_ts_**: commit_ts_ of entry, computed in `SetTs()` operator at TxExecution.
-5. **last_vali_ts_**: updated duing `PostRead()`. This is used to advanced the commit_ts for the rule that: tx acquire write intention on entries in write set, the tx commit_ts should be greater than the last_vali_ts_ of all the above entries. 
-6. **gap_lock_**, **gap_commit_ts_** and **gap_last_vali_ts_**: not fully implemented yet. Gap in CcEntry is used to handle phantom read using range lock.
-7. **ckpt_ts_**: atomic since also update by checkpointer thread. it's the timestamp when this entry was last flushed to the data store.
+2. **key_lock_**: entry's key lock which contains read, write and corresponding wait queue.
+3. **commit_ts_**: commit_ts_ of entry, computed in `SetTs()` operator at TxExecution.
+4. **last_vali_ts_**: updated duing `PostRead()`. This is used to advanced the commit_ts for the rule that: tx acquire write intention on entries in write set, the tx commit_ts should be greater than the last_vali_ts_ of all the above entries. 
+5. **gap_lock_**, **gap_commit_ts_** and **gap_last_vali_ts_**: not fully implemented yet. Gap in CcEntry is used to handle phantom read using range lock.
+6. **ckpt_ts_**: atomic since also update by checkpointer thread. it's the timestamp when this entry was last flushed to the data store.
 
 CcEntry adds addtional fields:
 1. **key_**: entry's key.

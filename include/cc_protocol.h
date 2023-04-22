@@ -72,14 +72,17 @@ class LockTypeUtil
 public:
     static LockType DeduceLockType(CcOperation cc_op,
                                    IsolationLevel iso_level,
-                                   CcProtocol cc_protocol)
+                                   CcProtocol cc_protocol,
+                                   bool is_covering_keys)
     {
         assert(!(iso_level == IsolationLevel::Snapshot &&
                  cc_protocol == CcProtocol::Locking));
 
         if (cc_op == CcOperation::ReadSkIndex)
         {
-            if (iso_level == IsolationLevel::Snapshot)
+            if (iso_level == IsolationLevel::Snapshot ||
+                (iso_level == IsolationLevel::ReadCommitted &&
+                 is_covering_keys))
             {
                 return LockType::NoLock;
             }

@@ -342,7 +342,8 @@ public:
         TxKey::Uptr start_key,
         const TxKey *end_key,
         uint64_t version,
-        std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys = nullptr);
+        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+            *slice_keys = nullptr);
     /**
      * @brief Initialize TableRangeEntry for a table in range_maps_.
      */
@@ -380,9 +381,9 @@ public:
      * from local cc shards. This result in a binary search with key in
      * table_ranges_.
      */
-    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
-                                              const NodeGroupId ng_id,
-                                              const TxKey *key);
+    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                        const NodeGroupId ng_id,
+                                        const TxKey *key);
 
     const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
                                               const NodeGroupId ng_id,
@@ -398,7 +399,8 @@ public:
                                bool inclusive,
                                CcRequestBase *cc_request,
                                CcShard *cc_shard,
-                               RangeSliceOpStatus &pin_status);
+                               RangeSliceOpStatus &pin_status,
+                               bool force_load = false);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
@@ -411,7 +413,8 @@ public:
                                bool inclusive,
                                CcRequestBase *cc_request,
                                CcShard *cc_shard,
-                               RangeSliceOpStatus &pin_status);
+                               RangeSliceOpStatus &pin_status,
+                               bool force_load = false);
 
     StoreRange *FindRange(const TableName &table_name,
                           const NodeGroupId ng_id,

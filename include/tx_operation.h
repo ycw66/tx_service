@@ -254,11 +254,13 @@ struct UpdateTxnStatus : TransactionOperation
 struct PostProcessOp : TransactionOperation
 {
     PostProcessOp(TransactionExecution *txm);
-    void Reset(size_t write_cnt, size_t data_read_cnt, size_t catalog_read_cnt);
+    void Reset(size_t write_cnt,
+               size_t data_read_cnt,
+               size_t catalog_range_read_cnt);
     void Forward(TransactionExecution *txm) override;
 
     CcHandlerResult<PostProcessResult> hd_result_;
-    CcHandlerResult<PostProcessResult> catalog_hd_result_;
+    CcHandlerResult<PostProcessResult> catalog_range_hd_result_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -713,6 +715,9 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     const TxKey *old_end_key_;
     // vector< new start key, new partition id >
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
+    // Used during commit post write. We cannot rely on the range slice stored
+    // in TableRangeEntry since that might become invalid during retry.
+    std::vector<std::pair<TxKey::Uptr, size_t>> slice_info_;
 
     // vector buffer used during checkpoint scan
     std::vector<FlushRecord> ckpt_vec_;

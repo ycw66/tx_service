@@ -459,7 +459,8 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     IsolationLevel iso_level,
     CcProtocol proto,
     bool is_for_write,
-    bool is_ckpt)
+    bool is_ckpt,
+    bool is_covering_keys)
 {
     CcMessage send_msg;
 
@@ -498,6 +499,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_open->set_is_for_write(is_for_write);
     scan_open->set_ckpt(is_ckpt);
+    scan_open->set_is_covering_keys(is_covering_keys);
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
 }
@@ -514,7 +516,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     IsolationLevel iso_level,
     CcProtocol proto,
     bool is_for_write,
-    bool is_ckpt)
+    bool is_ckpt,
+    bool is_covering_keys)
 {
     CcMessage send_msg;
 
@@ -542,6 +545,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_next->set_is_for_write(is_for_write);
     scan_next->set_ckpt(is_ckpt);
+    scan_next->set_is_covering_keys(is_covering_keys);
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }
@@ -627,6 +631,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
     scan_slice->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_slice->set_is_for_write(scanner.is_for_write_);
+    scan_slice->set_is_covering_keys(scanner.is_covering_keys_);
 
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }

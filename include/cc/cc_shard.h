@@ -190,7 +190,7 @@ public:
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
                    std::vector<const TxKey *> *mv_vec,
-                   CcHandlerResult<Void> *hres = nullptr);
+                   CcHandlerResult<Void> *hres);
 
     /**
      * @brief Get the number of ccentries in this ccshard
@@ -238,7 +238,7 @@ public:
      * in UpdateLruList or when the cc page is to be kicked out.
      * @param page
      */
-    static void DetachLru(LruPage *page);
+    void DetachLru(LruPage *page);
 
     TxLockInfo *UpsertLockHoldingTx(TxNumber txn,
                                     int64_t tx_term,
@@ -385,7 +385,8 @@ public:
         TxKey::Uptr start_key,
         const TxKey *end_key,
         uint64_t version,
-        std::vector<std::pair<TxKey::Uptr, uint32_t>> *slice_keys = nullptr);
+        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+            *slice_keys = nullptr);
 
     const TableRangeEntry *UploadNewRangeInfo(
         const TableName &table_name,
@@ -395,9 +396,9 @@ public:
         const std::vector<int32_t> &new_partition_id,
         uint64_t commit_ts);
 
-    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
-                                              const NodeGroupId ng_id,
-                                              const TxKey *key);
+    TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                        const NodeGroupId ng_id,
+                                        const TxKey *key);
 
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
@@ -469,7 +470,8 @@ public:
                                const TxKey &key,
                                bool inclusive,
                                CcRequestBase *cc_request,
-                               RangeSliceOpStatus &pin_status);
+                               RangeSliceOpStatus &pin_status,
+                               bool force_load = false);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
@@ -481,7 +483,8 @@ public:
                                const TxKey &key,
                                bool inclusive,
                                CcRequestBase *cc_request,
-                               RangeSliceOpStatus &pin_status);
+                               RangeSliceOpStatus &pin_status,
+                               bool force_load = false);
 
     /**
      * Used for unit test to verify the lru link is complete.
@@ -519,6 +522,16 @@ public:
         &GetLockHoldingTxs()
     {
         return lock_holding_txs_;
+    }
+
+    void ResetCleanStart()
+    {
+        clean_start_ccp_ = nullptr;
+    }
+
+    bool OutOfMemory()
+    {
+        return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
     }
 
 private:
@@ -585,6 +598,9 @@ private:
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.
     LruPage head_ccp_, tail_ccp_;
+
+    // Page to start looking for cc entries to kick out on LRU chain.
+    LruPage *clean_start_ccp_;
 
     // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;

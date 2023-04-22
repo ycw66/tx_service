@@ -241,6 +241,8 @@ void txservice::LocalCcHandler::PostWrite(
     }
     else
     {
+        hres.IncrementRemoteRef();
+
         remote_hd_.PostWrite(cc_shards_.node_id_,
                              tx_number,
                              tx_term,
@@ -344,6 +346,7 @@ void txservice::LocalCcHandler::PostRead(
     }
     else
     {
+        hres.IncrementRemoteRef();
         remote_hd_.PostRead(cc_shards_.node_id_,
                             tx_number,
                             tx_term,
@@ -372,13 +375,16 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
 {
     hres.Value().rec_ = &record;
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-    CcEntryAddr &cce_addr = hres.Value().cce_addr_;
+    ReadKeyResult &read_result = hres.Value();
+    CcEntryAddr &cce_addr = read_result.cce_addr_;
     cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, -1, 0);
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
+        read_result.is_local_ = true;
+
         ReadCc *req = read_pool.NextRequest();
         req->Reset(&table_name,
                    &key,
@@ -398,6 +404,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
     }
     else
     {
+        read_result.is_local_ = false;
+
         remote_hd_.Read(cc_shards_.node_id_,
                         cc_ng_id,
                         table_name,
@@ -500,6 +508,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     read_result.rec_ = &record;
     read_result.rec_status_ = RecordStatus::Unknown;
     read_result.ts_ = 0;
+    read_result.is_local_ = true;
     CcEntryAddr &cce_addr = read_result.cce_addr_;
 
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
@@ -565,7 +574,8 @@ void txservice::LocalCcHandler::ScanOpen(
     IsolationLevel iso_level,
     CcProtocol proto,
     bool is_for_write,
-    bool is_ckpt_delta)
+    bool is_ckpt_delta,
+    bool is_covering_keys)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
 
@@ -617,6 +627,7 @@ void txservice::LocalCcHandler::ScanOpen(
     ++scan_alias_cnt_;
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
+    scanner_ptr->is_covering_keys_ = is_covering_keys;
     scanner_ptr->iso_level_ = iso_level;
     scanner_ptr->protocol_ = proto;
     scanner_ptr->read_local_ = false;
@@ -672,7 +683,8 @@ void txservice::LocalCcHandler::ScanOpen(
                            iso_level,
                            proto,
                            is_for_write,
-                           scanner_ptr->is_ckpt_delta_);
+                           is_ckpt_delta,
+                           is_covering_keys);
 
                 TX_TRACE_ACTION(this, req);
                 TX_TRACE_DUMP(req);
@@ -704,7 +716,8 @@ void txservice::LocalCcHandler::ScanOpen(
                                 iso_level,
                                 proto,
                                 is_for_write,
-                                scanner_ptr->is_ckpt_delta_);
+                                is_ckpt_delta,
+                                is_covering_keys);
         }
     }
 #endif
@@ -819,7 +832,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
                             scanner_ptr->iso_level_,
                             scanner_ptr->protocol_,
                             scanner_ptr->is_for_write_,
-                            scanner_ptr->is_ckpt_delta_);
+                            scanner_ptr->is_ckpt_delta_,
+                            scanner_ptr->is_covering_keys_);
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
@@ -856,6 +870,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     uint32_t node_id = Sharder::Instance().LeaderNodeId(node_group_id);
     if (node_id == cc_shards_.node_id_)
     {
+        hd_res.Value().is_local_ = true;
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Reset(node_group_id,
                    tx_number,
@@ -866,7 +881,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.iso_level_,
                    scanner.protocol_,
                    scanner.is_for_write_,
-                   scanner.is_ckpt_delta_);
+                   scanner.is_ckpt_delta_,
+                   scanner.is_covering_keys_);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -874,6 +890,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
     else
     {
+        hd_res.Value().is_local_ = false;
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             node_group_id,
                             tx_number,
@@ -911,6 +928,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     uint32_t node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (node_id == cc_shards_.node_id_)
     {
+        hd_res.Value().is_local_ = true;
         CcScanner &scanner = *hd_res.Value().ccm_scanner_;
         ScanSliceCc *req = scan_slice_pool.NextRequest();
         req->Set(tbl_name,
@@ -927,7 +945,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  hd_res,
                  iso_level,
                  proto,
-                 scanner.is_for_write_);
+                 scanner.is_for_write_,
+                 scanner.is_covering_keys_);
 
         uint32_t core_cnt = cc_shards_.Count();
         req->SetShardCount(core_cnt);
@@ -958,6 +977,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
     else
     {
+        hd_res.Value().is_local_ = false;
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             tbl_name,
                             range_id,
@@ -1001,7 +1021,8 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
                scanner.iso_level_,
                scanner.protocol_,
                scanner.is_for_write_,
-               scanner.is_ckpt_delta_);
+               scanner.is_ckpt_delta_,
+               scanner.is_covering_keys_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
     local_shard.Enqueue(req);

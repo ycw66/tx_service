@@ -26,7 +26,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     CcOperation cc_op,
     IsolationLevel iso_level,
     CcProtocol protocol,
-    uint64_t read_ts)
+    uint64_t read_ts,
+    bool is_covering_keys)
 {
     if (iso_level == IsolationLevel::Snapshot)
     {
@@ -66,8 +67,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     }
 
     // deduce the lock type to acquire
-    LockType lock_type =
-        LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
+    LockType lock_type = LockTypeUtil::DeduceLockType(
+        cc_op, iso_level, protocol, is_covering_keys);
 
     TxNumber tx_number = req->Txn();
     LockOpStatus lock_op_status = LockOpStatus::Successful;
@@ -199,11 +200,12 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     CcOperation cc_op,
     IsolationLevel iso_level,
     CcProtocol protocol,
-    uint64_t read_ts)
+    uint64_t read_ts,
+    bool is_covering_keys)
 {
     TxNumber tx_number = req->Txn();
-    LockType acquired_lock =
-        LockTypeUtil::DeduceLockType(cc_op, iso_level, protocol);
+    LockType acquired_lock = LockTypeUtil::DeduceLockType(
+        cc_op, iso_level, protocol, is_covering_keys);
     CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
     bool should_release_lock = (cce_payload_status == RecordStatus::Deleted &&

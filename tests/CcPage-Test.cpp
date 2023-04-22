@@ -85,7 +85,6 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     for (auto &up : ccmaps)
     {
         auto &cc_map = *up;
-        cc_map.VerifyCkptList();
         size_t size = cc_map.VerifyOrdering();
         REQUIRE(size == MAP_SIZE);
     }
@@ -111,7 +110,6 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     for (size_t i = 0; i < MAP_NUM; i++)
     {
         auto &cc_map = *ccmaps.at(i);
-        cc_map.VerifyCkptList();
         size_t remain = cc_map.VerifyOrdering();
         LOG(INFO) << "after clean, ccmap of table " << tables[i]
                   << " remain: " << remain;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -257,6 +258,7 @@ public:
                      uint64_t schema_ts,
                      StoreSlice &slice,
                      StoreRange &range,
+                     bool force_load,
                      uint64_t snapshot_ts,
                      LocalCcShards &cc_shards);
 
@@ -276,7 +278,7 @@ public:
                      bool is_deleted);
 
     void SetFinish();
-    void SetError();
+    void SetError(CcErrorCode err_code);
 
     const TableName &TblName() const
     {
@@ -299,12 +301,25 @@ public:
         return &load_slice_req_;
     }
 
+    bool ForceLoad()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        return force_load_;
+    }
+
+    void SetForceLoad(bool force_load)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        force_load_ = force_load;
+    }
+
 private:
     const TableName *table_name_;
     NodeGroupId cc_ng_id_;
+    bool force_load_;
     uint16_t finish_cnt_;
-    uint16_t error_cnt_;
     std::mutex mux_;
+    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 
     std::vector<std::vector<SliceDataItem>> partitioned_slice_data_;
     LoadRangeSliceRequest load_slice_req_;
@@ -322,10 +337,9 @@ public:
                      NodeGroupId ng_id,
                      StoreSlice *slice,
                      StoreRange *range,
-                     std::vector<FlushRecord> &ckpt_vec,
+                     const std::vector<FlushRecord> &ckpt_vec,
                      uint32_t first_slice_idx,
                      uint32_t last_slice_idx,
-                     uint64_t last_ckpt_ts,
                      uint64_t ckpt_ts);
 
     bool Execute(CcShard &ccs) override;
@@ -352,7 +366,7 @@ public:
         return slice_last_idx_;
     }
 
-    std::vector<FlushRecord> &CkptVec()
+    const std::vector<FlushRecord> &CkptVec() const
     {
         return ckpt_vec_;
     }
@@ -367,21 +381,22 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         is_finished_ = true;
-        is_errored_ = false;
+        err_code_ = CcErrorCode::NO_ERROR;
         cv_.notify_one();
     }
 
-    void SetError()
+    void SetError(CcErrorCode err_code)
     {
         std::unique_lock<std::mutex> lk(mux_);
         is_finished_ = true;
-        is_errored_ = true;
+        err_code_ = err_code;
         cv_.notify_one();
     }
 
-    bool IsError() const
+    CcErrorCode ErrorCode()
     {
-        return is_errored_;
+        std::unique_lock<std::mutex> lk(mux_);
+        return err_code_;
     }
 
     bool IsFinish()
@@ -390,15 +405,37 @@ public:
         return is_finished_;
     }
 
+    void SetOnLoad(bool on_load)
+    {
+        on_load_ = on_load;
+    }
+
+    bool OnLoad() const
+    {
+        return on_load_;
+    }
+
+    void Reset()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+
+        slice_items_.clear();
+        is_finished_ = false;
+        err_code_ = CcErrorCode::NO_ERROR;
+
+        on_load_ = false;
+    }
+
+    std::chrono::time_point<std::chrono::steady_clock> load_start_;
+
 private:
     const TableName &table_name_;
     NodeGroupId cc_ng_id_;
     StoreSlice *slice_;
     StoreRange *range_;
-    std::vector<FlushRecord> &ckpt_vec_;
+    const std::vector<FlushRecord> &ckpt_vec_;
     uint32_t slice_first_idx_;
     uint32_t slice_last_idx_;
-    uint64_t last_ckpt_ts_;
     uint64_t ckpt_ts_;
     /**
      * @brief A collection of keys and their curr and post ckpt record sizes in
@@ -408,8 +445,10 @@ private:
     std::vector<SliceChangeInfo> slice_items_;
 
     bool is_finished_{false};
-    bool is_errored_{false};
+    CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
     std::condition_variable cv_;
+
+    bool on_load_{false};
 };
 }  // namespace txservice

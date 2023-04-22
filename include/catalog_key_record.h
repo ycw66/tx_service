@@ -217,6 +217,29 @@ public:
         return 8 * 3;
     }
 
+    size_t MemUsage() const override
+    {
+        // Most C++ implementations provide SSO, Small String Optimization.
+        // Based on libstdc++, basic_string<char> has a local capacity of 15,
+        // plus one more byte to store '\0', i.e. strings shorter than 16 are
+        // stored directly in the String object, only strings longer than 16
+        // have an allocated buffer to store the contents.
+        size_t mem_usage = sizeof(CatalogRecord);
+        if (schema_image_.capacity() >= 16)
+        {
+            mem_usage += schema_image_.capacity();
+        }
+        if (dirty_schema_image_.capacity() >= 16)
+        {
+            mem_usage += dirty_schema_image_.capacity();
+        }
+        if (statistics_binary_.capacity() >= 16)
+        {
+            mem_usage += statistics_binary_.capacity();
+        }
+        return mem_usage;
+    }
+
 private:
     /**
      * @brief The CatalogRecord serves three purposes:

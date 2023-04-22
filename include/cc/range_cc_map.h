@@ -94,7 +94,7 @@ public:
                 cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = range_info;
                 cce->payload_status_ = RecordStatus::Normal;
-                shard_->mem_usage_ += cce->PayloadSize();
+                shard_->mem_usage_ += cce->PayloadMemUsage();
                 it--;
                 it->second->payload_->end_key_ = range_info->start_key_.get();
             }
@@ -191,7 +191,8 @@ public:
                                             cc_op,
                                             req.Isolation(),
                                             req.Protocol(),
-                                            req.ReadTimestamp());
+                                            req.ReadTimestamp(),
+                                            false);
         }
         else
         {
@@ -221,7 +222,8 @@ public:
                                   cc_op,
                                   iso_lvl,
                                   cc_proto,
-                                  req.ReadTimestamp());
+                                  req.ReadTimestamp(),
+                                  false);
         }
 
         // after acquiring lock
@@ -260,6 +262,22 @@ public:
         return true;
     }
 
+    bool Execute(AcquireAllCc &req) override
+    {
+        if (shard_->core_id_ == 0)
+        {
+            assert(req.Key() != nullptr);
+            const KeyT *range_key = static_cast<const KeyT *>(req.Key());
+            TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                this->table_name_, req.NodeGroupId(), range_key);
+
+            StoreRange *range = range_entry->RangeSlices();
+            range->Lock();
+        }
+
+        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+    }
+
     /**
      * @brief
      */
@@ -284,7 +302,6 @@ public:
         std::vector<std::pair<TxKey::Uptr, uint32_t>> range_slices;
         bool is_remote_req = false;
         // Place holder for decoded range info if req is remote
-        RangeInfo tmp_info(nullptr, 0, 0);
         if (req.Key() != nullptr)
         {
             upload_range_rec = static_cast<RangeRecord *>(req.Payload());
@@ -299,9 +316,11 @@ public:
             {
             case KeyType::NegativeInf:
                 target_key = NegativeInfinity<KeyT>::Instance();
+                req.SetTxKey(target_key);
                 break;
             case KeyType::PositiveInf:
                 target_key = PositiveInfinity<KeyT>::Instance();
+                req.SetTxKey(target_key);
                 break;
             case KeyType::Normal:
                 const std::string *key_str = req.KeyStr();
@@ -316,7 +335,6 @@ public:
             assert(req.PayloadStr() != nullptr);
             std::unique_ptr<RangeRecord> decoded_rec =
                 std::make_unique<RangeRecord>();
-            decoded_rec->range_info_ = &tmp_info;
             DeserializeRangeRecord(
                 *req.PayloadStr(), decoded_rec.get(), range_slices);
             upload_range_rec = decoded_rec.get();
@@ -332,24 +350,27 @@ public:
                 // point the req range rec to the local cc shard table_ranges_
                 // entry. The req range rec will be used to update ccmap on each
                 // core.
-                upload_range_rec->range_info_ =
+                upload_range_rec->SetRangeInfo(
                     shard_
                         ->UploadNewRangeInfo(
                             this->table_name_,
                             this->cc_ng_id_,
                             target_key,
-                            upload_range_rec->range_info_->new_key_,
-                            upload_range_rec->range_info_->new_partition_id_,
+                            upload_range_rec->GetRangeInfo()->new_key_,
+                            upload_range_rec->GetRangeInfo()->new_partition_id_,
                             req.CommitTs())
-                        ->GetRangeInfo();
+                        ->GetRangeInfo());
+
+                TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                    this->table_name_, req.NodeGroupId(), target_key);
+                range_entry->RangeSlices()->Unlock();
             }
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
             std::vector<const RangeInfo *> new_range_infos;
-            TableRangeEntry *old_entry =
-                const_cast<TableRangeEntry *>(shard_->GetTableRangeEntry(
-                    this->table_name_, req.NodeGroupId(), target_key));
+            TableRangeEntry *old_entry = shard_->GetTableRangeEntry(
+                this->table_name_, req.NodeGroupId(), target_key);
             RangeInfo *old_info = old_entry->range_info_.get();
 
             if (shard_->core_id_ == 0)
@@ -360,7 +381,8 @@ public:
                 // Split the StoreRange struct in old TableRangeEntry and get
                 // the removed slice keys and sizes. These keys will be reused
                 // as the slice keys in the new ranges.
-                std::vector<std::pair<TxKey::Uptr, uint32_t>> new_slice_keys;
+                std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                    new_slice_keys;
                 if (is_remote_req)
                 {
                     std::unique_ptr<StoreRange> store_range =
@@ -378,29 +400,36 @@ public:
                     new_slice_keys = old_entry->RangeSlices()->SplitRange(
                         old_info->new_key_.front().get());
                 }
-                assert(!new_slice_keys.empty());
+                if (new_slice_keys.empty())
+                {
+                    // If split fails due to slice is pinned or is loading
+                    // retry later.
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
                 auto cur_slice = new_slice_keys.begin();
 
                 // Create new range entries in local cc shard
                 for (uint idx = 0; idx < old_info->new_partition_id_.size();
                      idx++)
                 {
-                    std::vector<std::pair<TxKey::Uptr, uint32_t>>
+                    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                         cur_range_slices;
                     // First slice start key will reuse the new range start key,
                     // so we can just pass in nullptr.
-                    TxKey::Uptr range_start_key = std::move(cur_slice->first);
-                    cur_range_slices.emplace_back(nullptr, cur_slice->second);
+                    TxKey::Uptr range_start_key =
+                        std::move(std::get<0>(*cur_slice));
+                    std::get<0>(*cur_slice) = nullptr;
+                    cur_range_slices.push_back(std::move(*cur_slice));
                     cur_slice++;
 
                     // Move the range slices that falls into the new range.
-                    while (
-                        cur_slice != new_slice_keys.end() &&
-                        (idx + 1 == old_info->new_key_.size() ||
-                         *cur_slice->first < *old_info->new_key_.at(idx + 1)))
+                    while (cur_slice != new_slice_keys.end() &&
+                           (idx + 1 == old_info->new_key_.size() ||
+                            *std::get<0>(*cur_slice) <
+                                *old_info->new_key_.at(idx + 1)))
                     {
-                        cur_range_slices.emplace_back(
-                            std::move(cur_slice->first), cur_slice->second);
+                        cur_range_slices.push_back(std::move(*cur_slice));
                         cur_slice++;
                     }
                     // Check which node group the new range falls on.
@@ -416,7 +445,7 @@ public:
                         std::move(range_start_key),
                         cur_slice == new_slice_keys.end()
                             ? old_end_key
-                            : cur_slice->first.get(),
+                            : std::get<0>(*cur_slice).get(),
                         old_info->dirty_ts_,
                         cc_ng_id == this->cc_ng_id_ ? &cur_range_slices
                                                     : nullptr);
@@ -430,7 +459,9 @@ public:
                 old_info->CommitDirty();
                 upload_range_rec->end_key_ =
                     new_range_infos.front()->start_key_.get();
-                upload_range_rec->range_info_ = old_info;
+                upload_range_rec->SetRangeInfo(old_info);
+
+                old_entry->RangeSlices()->Unlock();
             }
             else
             {
@@ -488,10 +519,9 @@ public:
             // original range.
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
-                shard_
-                    ->GetTableRangeEntry(
-                        this->table_name_, this->cc_ng_id_, target_key)
-                    ->range_info_->ClearDirty();
+                TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                    this->table_name_, this->cc_ng_id_, target_key);
+                range_entry->range_info_->ClearDirty();
             }
         }
 
@@ -687,6 +717,7 @@ public:
         //    req.SetFinish();
         //}
 
+        req.SetFinish();
         return false;
     }
 
@@ -703,24 +734,27 @@ private:
     {
         const char *buf = payload.data();
         size_t offset = 0;
-        RangeInfo *range_info =
-            const_cast<RangeInfo *>(range_record->range_info_);
+        std::unique_ptr<TxKey> start_key = nullptr;
         bool is_normal;
         DesrializeFrom(buf, offset, &is_normal);
         if (is_normal)
         {
-            std::unique_ptr<TxKey> start_key = std::make_unique<KeyT>();
+            start_key = std::make_unique<KeyT>();
             start_key->Deserialize(buf, offset, nullptr);
-            range_info->start_key_ = std::move(start_key);
         }
-        else
-        {
-            range_info->start_key_ = nullptr;
-        }
-        DesrializeFrom(buf, offset, &range_info->partition_id_);
-        DesrializeFrom(buf, offset, &range_info->version_ts_);
+
+        uint64_t version_ts;
+        uint32_t partition_id;
+        DesrializeFrom(buf, offset, &partition_id);
+        DesrializeFrom(buf, offset, &version_ts);
+        std::unique_ptr<RangeInfo> range_info = std::make_unique<RangeInfo>(
+            std::move(start_key), version_ts, partition_id);
         uint16_t new_part_size;
         DesrializeFrom(buf, offset, &new_part_size);
+        if (new_part_size > 0)
+        {
+            range_info->is_dirty_ = true;
+        }
         for (size_t idx = 0; idx < new_part_size; idx++)
         {
             TxKey::Uptr new_key = std::make_unique<KeyT>();
@@ -740,14 +774,17 @@ private:
         {
             KeyT end_key;
             end_key.Deserialize(buf, offset, nullptr);
+            CcEntry<KeyT, RangeRecord> *cce = Find(end_key).second;
+            assert(cce != nullptr);
             range_record->end_key_ =
-                Find(end_key).second->payload_->range_info_->start_key_.get();
+                cce->payload_->range_info_->start_key_.get();
             assert(range_record->end_key_ != nullptr);
         }
         else
         {
             range_record->end_key_ = PositiveInfinity<KeyT>::Instance();
         }
+        range_record->SetRangeInfo(std::move(range_info));
 
         uint16_t slice_cnt;
         DesrializeFrom(buf, offset, &slice_cnt);

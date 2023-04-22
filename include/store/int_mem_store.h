@@ -177,6 +177,7 @@ public:
     bool CopyRangeData(
         const txservice::TableName &table_name,
         int32_t old_partition_id,
+        const TxKey *old_end_key,
         std::vector<std::pair<TxKey::Uptr, int32_t>> &new_partition_info,
         uint64_t tx_ts,
         const txservice::TableSchema *table_schema) override

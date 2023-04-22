@@ -215,6 +215,7 @@ int Sharder::Init(const std::string &path)
             --cc_group_id;
         }
     }
+    cc_nodes_init_.store(true, std::memory_order_release);
 
     if (ips_.size() > 1)
     {
@@ -308,6 +309,11 @@ bool Sharder::CheckLeaderTerm(uint32_t ng_id, int64_t term) const
 
 int64_t Sharder::LeaderTerm(uint32_t ng_id) const
 {
+    if (!cc_nodes_init_.load(std::memory_order_acquire))
+    {
+        return -1;
+    }
+
     auto find_it = cc_nodes_.find(ng_id);
     if (find_it == cc_nodes_.end())
     {
@@ -320,6 +326,11 @@ int64_t Sharder::LeaderTerm(uint32_t ng_id) const
 
 int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
 {
+    if (!cc_nodes_init_.load(std::memory_order_acquire))
+    {
+        return -1;
+    }
+
     auto find_it = cc_nodes_.find(ng_id);
     if (find_it == cc_nodes_.end())
     {

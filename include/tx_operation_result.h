@@ -65,6 +65,7 @@ struct ReadKeyResult
         cce_addr_.SetTerm(-1);
         rec_status_ = RecordStatus::Unknown;
         lock_type_ = LockType::NoLock;
+        is_local_ = true;
     }
 
     TxRecord *rec_;
@@ -74,6 +75,8 @@ struct ReadKeyResult
 
     // Acquired key lock type by this read operation.
     LockType lock_type_{LockType::NoLock};
+
+    bool is_local_{true};
 };
 
 struct ScanOpenResult
@@ -257,6 +260,7 @@ struct RangeScanSliceResult
 
 struct ScanNextResult
 {
+    bool is_local_;
     int64_t term_;
     uint32_t node_group_id_;
 };

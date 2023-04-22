@@ -182,12 +182,13 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                                    uint64_t schema_ts,
                                    StoreSlice &slice,
                                    StoreRange &range,
+                                   bool force_load,
                                    uint64_t snapshot_ts,
                                    LocalCcShards &cc_shards)
     : table_name_(&table_name),
       cc_ng_id_(cc_ng),
+      force_load_(force_load),
       finish_cnt_(0),
-      error_cnt_(0),
       load_slice_req_(table_name,
                       key_schema,
                       rec_schema,
@@ -210,7 +211,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
     if (cc_ng_candid_term < 0 && cc_ng_term < 0)
     {
-        SetError();
+        SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         return false;
     }
 
@@ -236,7 +237,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
                           << cc_ng_id_
                           << ". Fail to initialize the ccm, as there is a data "
                              "store error when reading the schema.";
-                SetError();
+                SetError(CcErrorCode::DATA_STORE_ERR);
                 return false;
             }
             else
@@ -281,30 +282,49 @@ void FillStoreSliceCc::AddDataItem(txservice::TxKey::Uptr key,
 
 void FillStoreSliceCc::SetFinish()
 {
-    std::lock_guard<std::mutex> lk(mux_);
-
-    ++finish_cnt_;
-    if (finish_cnt_ + error_cnt_ == local_cc_shards_.Count())
+    bool finish_all = false;
+    CcErrorCode err_code;
     {
-        if (error_cnt_ == 0)
+        std::lock_guard<std::mutex> lk(mux_);
+        ++finish_cnt_;
+
+        if (finish_cnt_ == local_cc_shards_.Count())
+        {
+            finish_all = true;
+            err_code = err_code_;
+        }
+    }
+
+    if (finish_all)
+    {
+        if (err_code == CcErrorCode::NO_ERROR)
         {
             range_slice_.CommitLoading(load_slice_req_.SliceSize());
         }
         else
         {
-            range_slice_.SetLoadingError(local_cc_shards_.ClockTs());
+            range_slice_.SetLoadingError(range_);
         }
     }
 }
 
-void FillStoreSliceCc::SetError()
+void FillStoreSliceCc::SetError(CcErrorCode err_code)
 {
-    std::lock_guard<std::mutex> lk(mux_);
-
-    ++error_cnt_;
-    if (finish_cnt_ + error_cnt_ == local_cc_shards_.Count())
+    bool finish_all = false;
     {
-        range_slice_.SetLoadingError(local_cc_shards_.ClockTs());
+        std::lock_guard<std::mutex> lk(mux_);
+        ++finish_cnt_;
+        err_code_ = err_code;
+
+        if (finish_cnt_ == local_cc_shards_.Count())
+        {
+            finish_all = true;
+        }
+    }
+
+    if (finish_all)
+    {
+        range_slice_.SetLoadingError(range_);
     }
 }
 
@@ -315,7 +335,10 @@ void FillStoreSliceCc::StartFilling()
 
 void FillStoreSliceCc::TerminateFilling()
 {
-    range_slice_.SetLoadingError(local_cc_shards_.ClockTs());
+    // The method is called when there is an error of reading the data store.
+    // The slice has not been filled into memory. So, the out-of-memory flag is
+    // false.
+    range_slice_.SetLoadingError(range_);
 }
 
 const TxKey *FillStoreSliceCc::SliceStart() const
@@ -332,10 +355,9 @@ GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
                                    NodeGroupId ng_id,
                                    StoreSlice *slice,
                                    StoreRange *range,
-                                   std::vector<FlushRecord> &ckpt_vec,
+                                   const std::vector<FlushRecord> &ckpt_vec,
                                    uint32_t slice_first_idx,
                                    uint32_t slice_last_idx,
-                                   uint64_t last_ckpt_ts,
                                    uint64_t ckpt_ts)
     : table_name_(table_name),
       cc_ng_id_(ng_id),
@@ -344,7 +366,6 @@ GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
       ckpt_vec_(ckpt_vec),
       slice_first_idx_(slice_first_idx),
       slice_last_idx_(slice_last_idx),
-      last_ckpt_ts_(last_ckpt_ts),
       ckpt_ts_(ckpt_ts)
 {
 }

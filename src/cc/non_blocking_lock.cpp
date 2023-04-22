@@ -19,11 +19,6 @@ namespace txservice
  */
 void NonBlockingLock::UpgradeLock(TxNumber tx_number, LockType lock_type)
 {
-    CODE_FAULT_INJECTOR("remote_read_msg_missed", {
-        LOG(INFO) << "FaultInject  remote_read_msg_missed";
-        return;
-    });
-
     // write lock needs to upgrade write intent as well.
     if (lock_type == LockType::WriteLock)
     {
@@ -419,6 +414,7 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
         if (protocol != CcProtocol::OCC)
         {
             // block the request by putting it into the blocking queue.
+            LOG(INFO) << "write intent enqueue block queue " << cc_req->Txn();
             blocking_queue_.Enqueue(
                 LockQueueEntry(cc_req, LockType::WriteIntent));
         }

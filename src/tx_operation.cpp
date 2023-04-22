@@ -206,6 +206,10 @@ void ReadOperation::Forward(TransactionExecution *txm)
         {
             txm->PostProcess(*this);
         }
+    }
+    // If lock range is not finished yet, just wait since lock range is
+    // always a local read.
+    else if (lock_range_result_.IsFinished())
 #else
         if (hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
         {
@@ -218,9 +222,9 @@ void ReadOperation::Forward(TransactionExecution *txm)
             return;
         }
         txm->PostProcess(*this);
-#endif
     }
     else
+#endif
     {
         bool timeout = txm->IsTimeOut();
         CODE_FAULT_INJECTOR("read_operation_timeout", {
@@ -230,8 +234,9 @@ void ReadOperation::Forward(TransactionExecution *txm)
                                                 "remove");
         });
 
-        if (cce_addr.Term() < 0 && timeout)
+        if (!hd_result_.Value().is_local_ && cce_addr.Term() < 0 && timeout)
         {
+            LOG(INFO) << "read op timed out";
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
                 "Forward.Term<0,IsTimeout || TxNodeFail",
@@ -244,13 +249,14 @@ void ReadOperation::Forward(TransactionExecution *txm)
                             .append(",\"term\":")
                             .append(std::to_string(txm->TxTerm()));
                     }));
-            // For non-blocking concurrency control protocols, the read request
-            // is expected to return instantly. For lock-based protocols, if the
-            // read request is blocked, the cc node will send an acknowledgement
-            // to update the key's term. In either case, if the read key's term
-            // is not set, the tx has not received any response or
-            // acknowledgement from the key's cc node group. The read request is
-            // forced to be errored upon timeout.
+            // For non-blocking concurrency control protocols, the read
+            // request is expected to return instantly. For lock-based
+            // protocols, if the read request is blocked, the cc node will
+            // send an acknowledgement to update the key's term. In either
+            // case, if the read key's term is not set, the tx has not
+            // received any response or acknowledgement from the key's cc
+            // node group. The read request is forced to be errored upon
+            // timeout.
             // FIXME(lzx): Is it more appropriate to retry?
             // If the tx node fails, also force the tx to abort instantly.
             bool force_success = hd_result_.ForceError();
@@ -258,14 +264,15 @@ void ReadOperation::Forward(TransactionExecution *txm)
             {
                 txm->PostProcess(*this);
             }
-            // If forcing error fails, it means that the remote response returns
-            // normally and the tx has been moved from the waiting queue to the
-            // execution queue. Does not continue execution. The tx will be
-            // re-executed when the tx processor visits it in the execution
-            // queue.
+            // If forcing error fails, it means that the remote response
+            // returns normally and the tx has been moved from the waiting
+            // queue to the execution queue. Does not continue execution.
+            // The tx will be re-executed when the tx processor visits it in
+            // the execution queue.
         }
         else if (cce_addr.Term() > 0 && timeout)
         {
+            LOG(INFO) << "read op check block";
             txm->handler->BlockCcReqCheck(txm->TxNumber(),
                                           txm->TxTerm(),
                                           txm->CommandId(),
@@ -416,10 +423,11 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
         if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
         {
-            // FIXME(lzx): Is it more appropriate to retry if remote_ack_cnt_>0
-            // ? If the tx node fails, force the tx to abort instantly.
-            // TODO: for 2PL, the tx may be blocked arbitrarily long, even after
-            // all acquire requests are acknowledged. We still need to
+            // FIXME(lzx): Is it more appropriate to retry if
+            // remote_ack_cnt_>0 ? If the tx node fails, force the tx to
+            // abort instantly.
+            // TODO: for 2PL, the tx may be blocked arbitrarily long, even
+            // after all acquire requests are acknowledged. We still need to
             // periodically check liveness of the remote node.
             bool success = hd_result_.ForceError();
             if (success)
@@ -428,9 +436,9 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
                 txm->PostProcess(*this);
             }
             // Else, all acquire-write requests finish normally. The tx must
-            // have been moved from the waiting queue to the execution queue.
-            // Does not forword the tx now, as it will be re-executed when the
-            // tx processor visits the execution queue.
+            // have been moved from the waiting queue to the execution
+            // queue. Does not forword the tx now, as it will be re-executed
+            // when the tx processor visits the execution queue.
         }
         else if (timeout)
         {
@@ -483,7 +491,7 @@ void LockWriteRangesOp::Advance()
         next_range_start = table_write_set.lower_bound(range_end_key);
     }
 
-    uint32_t range_id = range_rec_.GetRangeInfo()->partition_id_;
+    uint32_t range_id = range_rec_.GetRangeInfo()->PartitionId();
     // Updates the sharding codes of the write-set keys belonging to this
     // range. The higher 22 bits represent the range ID.
     int32_t new_range_id = -1;
@@ -496,12 +504,13 @@ void LockWriteRangesOp::Advance()
         write_entry.key_shard_code_ = (range_id << 10) | (hash & 0x3FF);
 
         // If range is splitting and the key will fall on a new range after
-        // split is finished, register forward_key_shard_code_ to indicate entry
-        // needs to be double written.
-        while (new_range_idx < range_info->new_key_.size() &&
-               !(*write_entry.key_ < *range_info->new_key_.at(new_range_idx)))
+        // split is finished, register forward_key_shard_code_ to indicate
+        // entry needs to be double written.
+        while (range_info->IsDirty() &&
+               new_range_idx < range_info->NewKey()->size() &&
+               !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
         {
-            new_range_id = range_info->new_partition_id_.at(new_range_idx);
+            new_range_id = range_info->NewPartitionId()->at(new_range_idx);
             new_range_idx++;
         }
         if (new_range_id > 0)
@@ -638,15 +647,15 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        // For DML transactions, the coordinator must keep retrying the WriteLog
-        // request until getting a clear response, either success or failure, or
-        // the coordinator itself is no longer leader. In the last case, the
-        // committing process interrupts with an unknown result, and an error
-        // message "Log service is unreachable, transaction status is unknown"
-        // is returned. For these result unknown txns, The coordinator must skip
-        // the PostProcess and the locks on participants remain. The
-        // participants ccnodes will do the PostProcess individually via orphan
-        // lock recovery mechanism.
+        // For DML transactions, the coordinator must keep retrying the
+        // WriteLog request until getting a clear response, either success
+        // or failure, or the coordinator itself is no longer leader. In the
+        // last case, the committing process interrupts with an unknown
+        // result, and an error message "Log service is unreachable,
+        // transaction status is unknown" is returned. For these result
+        // unknown txns, The coordinator must skip the PostProcess and the
+        // locks on participants remain. The participants ccnodes will do
+        // the PostProcess individually via orphan lock recovery mechanism.
         if (hd_result_.ErrorCode() ==
                 CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR &&
             log_type_ == TxLogType::DATA &&
@@ -661,8 +670,8 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             LOG(WARNING)
                 << "Write Log Request result unknown, retrying, tx_number: "
                 << txm->TxNumber();
-            // log request return unknown status, we need to set retry flag to
-            // inform log service that this is a retried request
+            // log request return unknown status, we need to set retry flag
+            // to inform log service that this is a retried request
             ::txlog::LogRequest &log_req = log_closure_.LogRequest();
             ::txlog::WriteLogRequest *log_rec =
                 log_req.mutable_write_log_request();
@@ -748,13 +757,13 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
 }
 
 PostProcessOp::PostProcessOp(TransactionExecution *txm)
-    : hd_result_(txm), catalog_hd_result_(txm)
+    : hd_result_(txm), catalog_range_hd_result_(txm)
 {
 }
 
 void PostProcessOp::Reset(size_t write_cnt,
                           size_t data_read_cnt,
-                          size_t catalog_read_cnt)
+                          size_t catalog_range_read_cnt)
 {
     hd_result_.Reset();
     hd_result_.Value().Clear();
@@ -767,16 +776,16 @@ void PostProcessOp::Reset(size_t write_cnt,
         hd_result_.SetRefCnt(write_cnt + data_read_cnt);
     }
 
-    catalog_hd_result_.Reset();
-    catalog_hd_result_.Value().Clear();
+    catalog_range_hd_result_.Reset();
+    catalog_range_hd_result_.Value().Clear();
 
-    if (catalog_read_cnt == 0)
+    if (catalog_range_read_cnt == 0)
     {
-        catalog_hd_result_.SetFinished();
+        catalog_range_hd_result_.SetFinished();
     }
     else
     {
-        catalog_hd_result_.SetRefCnt(catalog_read_cnt);
+        catalog_range_hd_result_.SetRefCnt(catalog_range_read_cnt);
     }
 }
 
@@ -784,7 +793,7 @@ void PostProcessOp::Forward(TransactionExecution *txm)
 {
     if (hd_result_.IsFinished())
     {
-        if (catalog_hd_result_.IsFinished())
+        if (catalog_range_hd_result_.IsFinished())
         {
             txm->PostProcess(*this);
         }
@@ -792,10 +801,10 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         {
             txm->StartTiming();
             is_running_ = true;
-            txm->ReleaseCatalogLock(catalog_hd_result_);
+            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
         }
     }
-    else if (txm->IsTimeOut())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -814,7 +823,7 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         {
             txm->StartTiming();
             is_running_ = true;
-            txm->ReleaseCatalogLock(catalog_hd_result_);
+            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
         }
     }
 }
@@ -971,8 +980,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
 
             if (lock_range_result_.IsError())
             {
-                // There is an error when getting the next range's lock and ID.
-                // The scan next operation is set to be errored.
+                // There is an error when getting the next range's lock and
+                // ID. The scan next operation is set to be errored.
                 hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
                 unlock_range_result_.SetFinished();
             }
@@ -982,18 +991,18 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
 
                 if (txm->iso_level_ >= IsolationLevel::RepeatableRead)
                 {
-                    // For isolation levels greater than or equal to Repeatable
-                    // Read, keeps the read lock on the range because there will
-                    // be a post read on the key in this range. The range cannot
-                    // be split or merged before the tx finishes
-                    // post-processing.
+                    // For isolation levels greater than or equal to
+                    // Repeatable Read, keeps the read lock on the range
+                    // because there will be a post read on the key in this
+                    // range. The range cannot be split or merged before the
+                    // tx finishes post-processing.
                     txm->rw_set_.AddRead(
                         read_res.cce_addr_, read_res.ts_, &range_table_name_);
                 }
 
                 scan_state_->range_cce_addr_ = read_res.cce_addr_;
                 scan_state_->range_id_ =
-                    range_rec_.GetRangeInfo()->partition_id_;
+                    range_rec_.GetRangeInfo()->PartitionId();
                 txm->Process(*this);
                 return;
             }
@@ -1070,9 +1079,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
 
                     // After the unlock range request is sent,
                     // lock_range_result_ is reset. When the tx machine is
-                    // re-executed, its status is unfinished, indicating that
-                    // the scan next operation is waiting for the response of
-                    // unlocking the current range.
+                    // re-executed, its status is unfinished, indicating
+                    // that the scan next operation is waiting for the
+                    // response of unlocking the current range.
                     lock_range_result_.Reset();
                     return;
                 }
@@ -1092,8 +1101,10 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
 
         txm->PostProcess(*this);
     }
+    else if (txm->IsTimeOut() && !slice_hd_result_.Value().is_local_)
+#else
+    else if (txm->IsTimeOut() && !hd_result_.Value().is_local_)
 #endif
-    else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1613,8 +1624,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
             {
                 // prepare log result unknown, keep retrying until getting a
-                // clear response, either success or failure, or the coordinator
-                // itself is no longer leader
+                // clear response, either success or failure, or the
+                // coordinator itself is no longer leader
                 int64_t tx_node_term =
                     Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
                 if (tx_node_term > 0)
@@ -1638,10 +1649,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                                 << txm->TxNumber()
                                 << ", not leader any more, stop retrying";
                     // Not leader anymore, just quit. New leader will know
-                    // whether prepare log succeeds and continue the rest if it
-                    // does. Should not release the write intents. If prepare
-                    // log is not written, the write intents will be released
-                    // individually via orphan lock recovery mechanism.
+                    // whether prepare log succeeds and continue the rest if
+                    // it does. Should not release the write intents. If
+                    // prepare log is not written, the write intents will be
+                    // released individually via orphan lock recovery
+                    // mechanism.
                     txm->bool_resp_->SetErrorCode(
                         TxErrorCode::LOG_SERVICE_UNREACHABLE);
 
@@ -1659,8 +1671,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     << txm->TxNumber();
                 // Fails to flush the prepare log. The schema operation is
                 // considered failed if the prepare log is not flushed. The
-                // commit ts is set to 0 to signal that the following post write
-                // operation releases all write intents.
+                // commit ts is set to 0 to signal that the following post
+                // write operation releases all write intents.
                 txm->commit_ts_ = tx_op_failed_ts_;
                 // Moves to the last operation that removes all write
                 // intents/locks.
@@ -1891,9 +1903,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             {
                 op_ = &upsert_kv_table_op_;
                 // Read table schema from local cc shard. This is because we
-                // could be recovering from commit stage, in which case we have
-                // skipped post_all_intent_op_ and the schema in catalog_rec_
-                // would be empty.
+                // could be recovering from commit stage, in which case we
+                // have skipped post_all_intent_op_ and the schema in
+                // catalog_rec_ would be empty.
                 LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
                 auto catalog_entry =
                     shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
@@ -1944,12 +1956,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             // After the prepare log is flushed, if flush kv succeeds, the
             // schema op is guaranteed to succeed and can only roll forward.
-            // Retry this step to install the committed schema and remove write
-            // locks, if the tx node is still the leader or the tx is in the
-            // recovery mode and the cc node is a leader candidate. However, if
-            // flush kv fails, this schema op has already been rolled back while
-            // processing this post_all_lock_op_, so here we only need to
-            // ForceToFinish.
+            // Retry this step to install the committed schema and remove
+            // write locks, if the tx node is still the leader or the tx is
+            // in the recovery mode and the cc node is a leader candidate.
+            // However, if flush kv fails, this schema op has already been
+            // rolled back while processing this post_all_lock_op_, so here
+            // we only need to ForceToFinish.
             if ((tx_node_term >= 0 ||
                  (txm->tx_status_ == TxnStatus::Recovering &&
                   tx_node_candid_term >= 0)) &&
@@ -2342,8 +2354,9 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
                     .append(",\"term\":")
                     .append(std::to_string(txm->TxTerm()));
             });
-        // Not necessary to have timeout for ds operation, you don't estimate
-        // the proper op time out secs, and the dsop will finished anyway
+        // Not necessary to have timeout for ds operation, you don't
+        // estimate the proper op time out secs, and the dsop will finished
+        // anyway
 
         // bool succ = hd_result_.ForceError();
         // if (succ)
@@ -2410,9 +2423,6 @@ void FlushDataOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    // TODO{liunyl} : figure out how to handle timeout. Flush data
-    // can take a long time to finish.
-    // potential solution: check flush data worker heartbeat
 }
 
 void FlushDataOp::Reset()
@@ -2455,9 +2465,8 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       clean_log_op_(txm)
 
 {
-    old_start_key_ = range_info_.start_key_ != nullptr
-                         ? range_info_.start_key_.get()
-                         : old_start_key;
+    old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
+                                                       : old_start_key;
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
@@ -2527,8 +2536,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        // Acquire Write lock on range entry on all node groups and calculate
-        // commit ts for tx.
+        // Acquire Write lock on range entry on all node groups and
+        // calculate commit ts for tx.
         ForwardToSubOperation(txm, &prepare_acquire_all_write_op_);
     }
     else if (op_ == &prepare_acquire_all_write_op_)
@@ -2556,9 +2565,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Update the commit ts. The commit ts is the max value between
         // 1) max commit ts of last tx that updated records in this range
         // partition on all node groups, 2) local timestamp when tx started.
-        // The commit ts is used to decide whether a record needs to be flushed
-        // during the next phase. We want to make sure every records modified
-        // before commit ts is flushed to new partition in KV store.
+        // The commit ts is used to decide whether a record needs to be
+        // flushed during the next phase. We want to make sure every records
+        // modified before commit ts is flushed to new partition in KV
+        // store.
         for (size_t idx = 0; idx < prepare_acquire_all_write_op_.upload_cnt_;
              ++idx)
         {
@@ -2601,9 +2611,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             range_info_.new_key_.push_back(range_info.first->Clone());
         }
 
-        // Install dirty range info on all node groups and downgrade to write
-        // intent lock in next subop.
+        // Install dirty range info on all node groups and downgrade to
+        // write intent lock in next subop.
         install_new_range_op_.rec_ = &range_record_;
+        range_record_.SetRangeInfo(range_info_.Clone());
         ForwardToSubOperation(txm, &install_new_range_op_);
     }
     else if (op_ == &install_new_range_op_)
@@ -2619,10 +2630,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Split Flush transaction failed to install new range "
                           "info, tx number "
                        << txm->TxNumber();
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            install_new_range_op_.rec_ = &range_record_;
+            range_record_.SetRangeInfo(range_info_.Clone());
+            RetrySubOperation(txm, &install_new_range_op_);
             return;
         }
 
@@ -2630,6 +2640,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ds_migrate_old_partition_op_.op_func_ =
             [&table_name = table_name_,
              old_partition_id = range_info_.partition_id_,
+             old_end_key = old_end_key_,
              &new_partition_info = new_range_info_,
              tx_ts = txm->commit_ts_,
              table_schema = table_schema_,
@@ -2642,6 +2653,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             tx_worker_pool->SubmitWork(
                 [table_name,
                  old_partition_id,
+                 old_end_key,
                  &new_partition_info,
                  tx_ts,
                  table_schema,
@@ -2650,6 +2662,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 {
                     bool succ = store_hd->CopyRangeData(table_name,
                                                         old_partition_id,
+                                                        old_end_key,
                                                         new_partition_info,
                                                         tx_ts,
                                                         table_schema);
@@ -2659,6 +2672,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     }
                     else
                     {
+                        LOG(INFO) << "Copying data fails for split range "
+                                  << old_partition_id;
                         hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                     }
                 });
@@ -2681,10 +2696,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                        << txm->TxNumber();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            RetrySubOperation(txm, &ds_migrate_old_partition_op_);
             return;
         }
+
         ckpt_scan_op_.op_func_ =
             [&table_name = table_name_,
              start_key = old_start_key_,
@@ -2711,89 +2726,139 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                  &local_cc_shards,
                  &hd_res]
                 {
-                    std::unique_ptr<std::vector<FlushRecord>> ckpt_vec_bucket =
-                        std::make_unique<std::vector<FlushRecord>>();
-                    ckpt_vec_bucket->reserve(
-                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+                    std::vector<std::vector<FlushRecord>> ckpt_vecs;
+                    std::vector<std::vector<FlushRecord>> archive_vecs;
 
-                    std::unique_ptr<std::vector<FlushRecord>>
-                        archive_vec_bucket =
-                            std::make_unique<std::vector<FlushRecord>>();
-                    archive_vec_bucket->reserve(
-                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+                    std::vector<std::pair<TxKey::Uptr, bool>> resume_pos;
 
-                    std::unique_ptr<std::vector<const TxKey *>>
-                        mv_base_vec_bucket =
-                            std::make_unique<std::vector<const TxKey *>>();
-                    mv_base_vec_bucket->reserve(
-                        Checkpointer::CKPT_SCAN_BATCH_SIZE);
+                    for (size_t i = 0;
+                         i < Sharder::Instance().GetLocalCcShardsCount();
+                         i++)
+                    {
+                        ckpt_vecs.emplace_back();
+                        archive_vecs.emplace_back();
+                        resume_pos.emplace_back(nullptr, false);
+                    }
 
-                    uint16_t scan_start_core_id = 0;
-                    LruPage *scan_start_page = nullptr;
                     bool scan_data_drained = false;
-
+                    CkptScanCc scan_cc(
+                        table_name,
+                        ckpt_ts,
+                        node_group,
+                        Sharder::Instance().GetLocalCcShardsCount(),
+                        std::move(resume_pos),
+                        Checkpointer::CKPT_SCAN_BATCH_SIZE,
+                        start_key,
+                        end_key);
                     while (!scan_data_drained)
                     {
-                        CkptScanCc scan_cc(table_name,
-                                           ckpt_ts,
-                                           node_group,
-                                           *ckpt_vec_bucket,
-                                           *archive_vec_bucket,
-                                           *mv_base_vec_bucket,
-                                           scan_start_core_id,
-                                           scan_start_page,
-                                           Checkpointer::CKPT_SCAN_BATCH_SIZE,
-                                           start_key,
-                                           end_key);
-                        local_cc_shards.EnqueueToCcShard(scan_start_core_id,
-                                                         &scan_cc);
+                        for (size_t i = 0;
+                             i < Sharder::Instance().GetLocalCcShardsCount();
+                             i++)
+                        {
+                            local_cc_shards.EnqueueToCcShard(i, &scan_cc);
+                        }
                         scan_cc.Wait();
 
                         if (scan_cc.IsError())
                         {
-                            LOG(INFO) << "ckpt scan failed on table "
-                                      << table_name.StringView();
                             hd_res.SetError(scan_cc.ErrorCode());
+                            return;
                         }
                         else
                         {
-                            auto res = scan_cc.Result();
-                            // make the current scan core as start core for the
-                            // next scan
-                            scan_start_core_id = std::get<0>(res);
-                            // make the current scan page as start page for the
-                            // next scan
-                            scan_start_page = std::get<1>(res);
-                            // if the data is drained
-                            scan_data_drained = std::get<2>(res);
+                            auto &res = scan_cc.Result();
+                            scan_data_drained = true;
 
-                            // move the bucket into the tank
-                            std::move(ckpt_vec_bucket->begin(),
-                                      ckpt_vec_bucket->end(),
-                                      std::back_inserter(*ckpt_vec));
-                            ckpt_vec_bucket->clear();
+                            for (size_t i = 0;
+                                 i <
+                                 Sharder::Instance().GetLocalCcShardsCount();
+                                 i++)
+                            {
+                                // if the data is drained
+                                scan_data_drained =
+                                    res.at(i).second && scan_data_drained;
+                                // move the bucket into the tank
+                                std::move(scan_cc.CkptVec(i).begin(),
+                                          scan_cc.CkptVec(i).end(),
+                                          std::back_inserter(ckpt_vecs.at(i)));
 
-                            std::move(archive_vec_bucket->begin(),
-                                      archive_vec_bucket->end(),
-                                      std::back_inserter(*archive_vec));
-                            archive_vec_bucket->clear();
+                                std::move(
+                                    scan_cc.ArchiveVec(i).begin(),
+                                    scan_cc.ArchiveVec(i).end(),
+                                    std::back_inserter(archive_vecs.at(i)));
 
-                            std::move(mv_base_vec_bucket->begin(),
-                                      mv_base_vec_bucket->end(),
-                                      std::back_inserter(*mv_base_vec));
-                            mv_base_vec_bucket->clear();
+                                std::move(scan_cc.MoveBaseVec(i).begin(),
+                                          scan_cc.MoveBaseVec(i).end(),
+                                          std::back_inserter(*mv_base_vec));
+                            }
+                            scan_cc.Reset(std::move(res));
                         }
                     }
 
                     // Sort output vectors in key sorting order.
-                    std::sort(ckpt_vec->begin(),
-                              ckpt_vec->end(),
-                              [](const FlushRecord &lhs, const FlushRecord &rhs)
-                              { return *lhs.Key() < *rhs.Key(); });
-                    std::sort(archive_vec->begin(),
-                              archive_vec->end(),
-                              [](const FlushRecord &lhs, const FlushRecord &rhs)
-                              { return *lhs.Key() < *rhs.Key(); });
+                    auto greater = [](const FlushRecord &r1,
+                                      const FlushRecord &r2) -> bool
+                    { return *r2.Key() < *r1.Key(); };
+                    MergeSortedVectors(
+                        std::move(ckpt_vecs), *ckpt_vec, greater, true);
+                    MergeSortedVectors(
+                        std::move(archive_vecs), *archive_vec, greater, true);
+
+                    auto lower_bound_cmp =
+                        [](const FlushRecord &rec, const TxKey &key)
+                    { return *rec.Key() < key; };
+                    auto batch_it = ckpt_vec->begin();
+                    size_t slice_start_idx = 0;
+                    size_t slice_end_idx = 0;
+                    StoreRange *range = local_cc_shards.FindRange(
+                        table_name, node_group, *start_key);
+
+                    while (batch_it != ckpt_vec->end())
+                    {
+                        const TxKey &slice_start_key = *batch_it->Key();
+                        StoreSlice *curr_slice =
+                            range->FindSlice(slice_start_key);
+
+                        auto slice_end_it =
+                            curr_slice->EndKey() == range->RangeEndKey()
+                                ? ckpt_vec->end()
+                                : std::lower_bound(batch_it,
+                                                   ckpt_vec->end(),
+                                                   *curr_slice->EndKey(),
+                                                   lower_bound_cmp);
+
+                        slice_end_idx =
+                            std::distance(ckpt_vec->begin(), slice_end_it);
+                        int32_t slice_delta_size = 0;
+                        uint32_t slice_size = 0;
+
+                        for (; batch_it != slice_end_it; ++batch_it)
+                        {
+                            slice_delta_size += batch_it->delta_size_;
+                        }
+
+                        int32_t sum = curr_slice->Size() + slice_delta_size;
+                        slice_size = sum >= 0 ? sum : 0;
+                        curr_slice->SetPostCkptSize(slice_size);
+                        if (slice_size > StoreSlice::slice_upper_bound &&
+                            !range->UpdateSliceSpec(curr_slice,
+                                                    table_name,
+                                                    node_group,
+                                                    ckpt_ts,
+                                                    *ckpt_vec,
+                                                    slice_start_idx,
+                                                    slice_end_idx))
+                        {
+                            LOG(INFO) << "update slice spec failed";
+                            hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
+                            return;
+                        }
+
+                        batch_it = slice_end_it;
+                        slice_start_idx = slice_end_idx;
+                    }
+
                     hd_res.SetFinished();
                 });
         };
@@ -2816,8 +2881,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ClearCkptVec();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            RetrySubOperation(txm, &ckpt_scan_op_);
             return;
         }
         flush_op_.ckpt_ts_ = txm->commit_ts_;
@@ -2835,23 +2899,40 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
         if (flush_op_.hd_result_.IsError())
         {
-            LOG(ERROR)
-                << "Split Flush transaction failed to flush data, tx number "
-                << txm->TxNumber();
+            LOG(ERROR) << "Split Flush transaction failed to flush data, "
+                          "tx number "
+                       << txm->TxNumber();
 
-            ClearCkptVec();
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            RetrySubOperation(txm, &flush_op_);
             return;
         }
+
         CODE_FAULT_INJECTOR("term_SplitFlushOp_FlushOp_Continue", {
             LOG(INFO) << "FaultInject  term_SplitFlushOp_FlushOp_Continue";
             return;
         });
         // clear and release ckpt vecs
         ClearCkptVec();
+        // Now we can copy out the slice info since it's finalized after
+        // flush data
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        const StoreRange *range =
+            shards->FindRange(table_name_, node_group_, *old_start_key_);
+        const auto &slices = range->Slices();
+        for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
+             ++slice_it)
+        {
+            if (slice_it == slices.cbegin())
+            {
+                slice_info_.emplace_back(nullptr, (*slice_it)->Size());
+            }
+            else
+            {
+                slice_info_.emplace_back((*slice_it)->StartKey()->Clone(),
+                                         (*slice_it)->Size());
+            }
+        }
+
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
     }
@@ -2870,10 +2951,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                           "lock, tx_number:"
                        << txm->TxNumber();
 
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            RetrySubOperation(txm, &commit_acquire_all_write_op_);
             return;
         }
 
@@ -2904,8 +2982,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         const TxKey *start_key = old_range->RangeStartKey();
         int32_t range_id = old_range->PartitionId();
         std::vector<StoreSlice *> subrange_slices;
-        // First slice is always left in the old range. Put it into vector first
-        // to avoid dealing with null start key.
+        // First slice is always left in the old range. Put it into vector
+        // first to avoid dealing with null start key.
         subrange_slices.push_back(slice_it->get());
         slice_it++;
         for (auto &info : new_range_info_)
@@ -2976,10 +3054,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Now broadcast slice info to all nodes through PostWriteAll. New
         // ranges might land on other nodes.
         post_all_lock_op_.rec_ = &range_record_;
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        range_record_.range_slices_ =
-            shards->FindRange(table_name_, node_group_, *old_start_key_);
-        range_record_.end_key_ = range_record_.range_slices_->RangeEndKey();
+        range_record_.range_slices_ = &slice_info_;
+        range_record_.end_key_ = old_end_key_;
+        range_record_.SetRangeInfo(range_info_.Clone());
         ForwardToSubOperation(txm, &post_all_lock_op_);
     }
     else if (op_ == &post_all_lock_op_)
@@ -2987,12 +3064,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (post_all_lock_op_.hd_result_.IsError())
         {
             // error & retry
-            LOG(ERROR)
-                << "Split Flush transaction failed at post all lock, tx_number:"
-                << txm->TxNumber();
+            LOG(ERROR) << "Split Flush transaction failed at post all "
+                          "lock, tx_number:"
+                       << txm->TxNumber();
+            post_all_lock_op_.rec_ = &range_record_;
+            range_record_.range_slices_ = &slice_info_;
+            range_record_.end_key_ = old_end_key_;
+            range_record_.SetRangeInfo(range_info_.Clone());
             RetrySubOperation(txm, &post_all_lock_op_);
             return;
         }
+
         // Delete stale data from old partition
         ds_clean_old_range_op_.op_func_ =
             [partition_id = range_info_.partition_id_,
@@ -3032,13 +3114,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (ds_clean_old_range_op_.hd_result_.IsError())
         {
             // error & retry
-            LOG(ERROR)
-                << "Split Flush transaction failed to delete data in old range "
-                   "in data store, tx_number:"
-                << txm->TxNumber();
+            LOG(ERROR) << "Split Flush transaction failed to delete data "
+                          "in old range "
+                          "in data store, tx_number:"
+                       << txm->TxNumber();
             RetrySubOperation(txm, &ds_clean_old_range_op_);
             return;
         }
+
         FillCleanLogRequest(txm);
         ForwardToSubOperation(txm, &clean_log_op_);
     }
@@ -3095,9 +3178,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 }
 
 /**
- * @brief Fill prepare log for Split-Flush Tx. We need to have old range info
- * and new range info, commit ts (for deciding the records that needs to be
- * flushed) in the log record.
+ * @brief Fill prepare log for Split-Flush Tx. We need to have old range
+ * info and new range info, commit ts (for deciding the records that needs
+ * to be flushed) in the log record.
  *
  * @param txm
  */

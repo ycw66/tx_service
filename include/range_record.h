@@ -24,6 +24,7 @@ struct InitRangeEntry
     }
 
     InitRangeEntry(const InitRangeEntry &rhs) = delete;
+    InitRangeEntry &operator=(const InitRangeEntry &rhs) = delete;
 
     InitRangeEntry(std::unique_ptr<TxKey> start_key,
                    int32_t partition_id,
@@ -52,21 +53,6 @@ struct InitRangeEntry
           version_ts_(rhs.version_ts_),
           slice_keys_(std::move(rhs.slice_keys_))
     {
-    }
-
-    InitRangeEntry &operator=(const InitRangeEntry &rhs)
-    {
-        if (this == &rhs)
-        {
-            return *this;
-        }
-        std::unique_ptr<TxKey> key =
-            rhs.key_ == nullptr ? nullptr : rhs.key_->Clone();
-        key_ = std::move(key);
-        partition_id_ = rhs.partition_id_;
-        version_ts_ = rhs.version_ts_;
-
-        return *this;
     }
 
     std::unique_ptr<TxKey> key_{nullptr};
@@ -200,6 +186,51 @@ struct RangeInfo
         return new_partition_id_.at(idx - 1);
     }
 
+    const TxKey *StartKey() const
+    {
+        return start_key_.get();
+    }
+
+    int32_t PartitionId() const
+    {
+        return partition_id_;
+    }
+
+    uint64_t VersionTs() const
+    {
+        return version_ts_;
+    }
+
+    const std::vector<std::unique_ptr<TxKey>> *NewKey() const
+    {
+        return is_dirty_ ? &new_key_ : nullptr;
+    }
+
+    const std::vector<int32_t> *NewPartitionId() const
+    {
+        return is_dirty_ ? &new_partition_id_ : nullptr;
+    }
+
+    uint64_t DirtyTs() const
+    {
+        return is_dirty_ ? dirty_ts_ : 0;
+    }
+
+    size_t MemUsage() const
+    {
+        size_t mem_usage = sizeof(RangeInfo);
+        if (start_key_)
+        {
+            mem_usage += start_key_->MemUsage();
+        }
+        for (auto &key : new_key_)
+        {
+            mem_usage += key->MemUsage();
+        }
+        return mem_usage;
+    }
+
+private:
     std::unique_ptr<TxKey> start_key_;
     int32_t partition_id_{0};
     uint64_t version_ts_{1};
@@ -212,6 +243,10 @@ struct RangeInfo
     // where we need to keep the new partition info but make them invisible to
     // regular range read request.
     bool is_dirty_{false};
+    template <typename KeyT>
+    friend class RangeCcMap;
+    friend struct RangeRecord;
+    friend struct SplitFlushRangeOp;
 };
 
 struct TableRangeEntry
@@ -236,7 +271,7 @@ public:
                             const std::vector<int32_t> &new_partition_id,
                             uint64_t commit_ts)
     {
-        assert(commit_ts >= range_info_->dirty_ts_);
+        assert(commit_ts >= range_info_->DirtyTs());
 
         range_info_->SetDirty(new_key, new_partition_id, commit_ts);
     }
@@ -248,12 +283,12 @@ public:
 
     uint64_t Version() const
     {
-        return range_info_->version_ts_;
+        return range_info_->VersionTs();
     }
 
     uint64_t DirtyVersion() const
     {
-        return range_info_->dirty_ts_;
+        return range_info_->DirtyTs();
     }
 
     StoreRange *RangeSlices()
@@ -271,21 +306,48 @@ private:
 struct RangeRecord : public TxRecord
 {
 public:
-    RangeRecord() = default;
+    RangeRecord()
+        : range_info_{nullptr},
+          is_info_owner_(false),
+          range_slices_(nullptr),
+          end_key_(nullptr)
+    {
+    }
     RangeRecord(const RangeRecord &rhs)
-        : range_info_(rhs.range_info_),
+        : range_info_(rhs.GetRangeInfo()),
+          is_info_owner_(false),
           range_slices_(rhs.range_slices_),
           end_key_(rhs.end_key_)
     {
     }
+
     RangeRecord(const RangeInfo *info,
-                const StoreRange *slices,
+                const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
                 const TxKey *end_key)
-        : range_info_(info), range_slices_(slices), end_key_(end_key)
+        : range_info_(info),
+          is_info_owner_(false),
+          range_slices_(slices),
+          end_key_(end_key)
     {
     }
 
-    ~RangeRecord() = default;
+    RangeRecord(std::unique_ptr<RangeInfo> info,
+                const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
+                const TxKey *end_key)
+        : range_info_uptr_(std::move(info)),
+          is_info_owner_(true),
+          range_slices_(slices),
+          end_key_(end_key)
+    {
+    }
+
+    ~RangeRecord()
+    {
+        if (is_info_owner_)
+        {
+            range_info_uptr_.reset();
+        }
+    }
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override
     {
@@ -332,20 +394,21 @@ public:
         }
         else
         {
-            const auto &slices = range_slices_->Slices();
-            slice_cnt = slices.size();
+            slice_cnt = range_slices_->size();
             SerializeToStr(&slice_cnt, str);
-            for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
+            for (auto slice_it = range_slices_->cbegin();
+                 slice_it != range_slices_->cend();
                  slice_it++)
             {
-                uint32_t slice_size = (*slice_it)->Size();
+                uint32_t slice_size = slice_it->second;
                 SerializeToStr(&slice_size, str);
             }
             // skip first slice key since it will reuse range start key
-            for (auto slice_it = slices.cbegin() + 1; slice_it != slices.cend();
+            for (auto slice_it = range_slices_->cbegin() + 1;
+                 slice_it != range_slices_->cend();
                  slice_it++)
             {
-                (*slice_it)->StartKey()->Serialize(str);
+                slice_it->first->Serialize(str);
             }
         }
     }
@@ -376,12 +439,12 @@ public:
         size += (sizeof(int32_t) * range_info_->new_partition_id_.size());
         if (range_slices_)
         {
-            const auto &slices = range_slices_->Slices();
-            size += (sizeof(uint32_t) * slices.size());
-            for (auto slice_it = slices.cbegin() + 1; slice_it != slices.cend();
+            size += (sizeof(uint32_t) * range_slices_->size());
+            for (auto slice_it = range_slices_->cbegin() + 1;
+                 slice_it != range_slices_->cend();
                  slice_it++)
             {
-                size += (*slice_it)->StartKey()->SerializedLength();
+                size += slice_it->first->SerializedLength();
             }
         }
         return size;
@@ -395,7 +458,8 @@ public:
     void Copy(const TxRecord &rhs) override
     {
         const RangeRecord &that = static_cast<const RangeRecord &>(rhs);
-        range_info_ = that.range_info_;
+        is_info_owner_ = false;
+        range_info_ = that.GetRangeInfo();
         range_slices_ = that.range_slices_;
         end_key_ = that.end_key_;
     }
@@ -419,18 +483,57 @@ public:
 
     const RangeInfo *GetRangeInfo() const
     {
-        return range_info_;
+        return is_info_owner_ ? range_info_uptr_.get() : range_info_;
+    }
+
+    void SetRangeInfo(std::unique_ptr<RangeInfo> &&range_info)
+    {
+        if (!is_info_owner_)
+        {
+            range_info_ = nullptr;
+            is_info_owner_ = true;
+        }
+        range_info_uptr_ = std::move(range_info);
+    }
+
+    void SetRangeInfo(const RangeInfo *range_info)
+    {
+        if (is_info_owner_)
+        {
+            range_info_uptr_.reset();
+            is_info_owner_ = false;
+        }
+        range_info_ = range_info;
     }
 
     size_t Size() const override
     {
-        return 8 + 8 + 8;
+        return 8 + 8 + 8 + 1;
     }
 
-    const RangeInfo *range_info_{nullptr};
+    size_t MemUsage() const override
+    {
+        size_t mem_usage = sizeof(RangeRecord);
+        if (is_info_owner_)
+        {
+            mem_usage += range_info_uptr_->MemUsage();
+        }
+        return mem_usage;
+    }
+
+    // Usually range_info_ is a raw pointer that points to range info in
+    // TableRangeEntry stored in local cc shards. But when it is used in
+    // post write all to pass the value to cc request, it will be the owner
+    // of a temp range info object.
+    union
+    {
+        const RangeInfo *range_info_;
+        std::unique_ptr<RangeInfo> range_info_uptr_;
+    };
+    bool is_info_owner_{false};
     // Only used in range split tx to broadcast slice
     // info to all nodes.
-    const StoreRange *range_slices_{nullptr};
+    const std::vector<std::pair<TxKey::Uptr, size_t>> *range_slices_{nullptr};
     /**
      * @brief The exclusive end of the range, which is also the start of the
      * next range. Null, if this is the last range and end key points to
