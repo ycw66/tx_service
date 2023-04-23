@@ -988,17 +988,14 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             else
             {
                 const ReadKeyResult &read_res = lock_range_result_.Value();
-
-                if (txm->iso_level_ >= IsolationLevel::RepeatableRead)
-                {
-                    // For isolation levels greater than or equal to
-                    // Repeatable Read, keeps the read lock on the range
-                    // because there will be a post read on the key in this
-                    // range. The range cannot be split or merged before the
-                    // tx finishes post-processing.
-                    txm->rw_set_.AddRead(
-                        read_res.cce_addr_, read_res.ts_, &range_table_name_);
-                }
+                // For scans, range locks are released when the last/first slice
+                // of the range is scanned. Hence, the range lock is always put
+                // into the read set. If the tx terminates the scan early before
+                // the last/first slice is encountered, the range lock is
+                // released in post-processing.
+                // TODO: release the range lock in the scan close phase.
+                txm->rw_set_.AddRead(
+                    read_res.cce_addr_, read_res.ts_, &range_table_name_);
 
                 scan_state_->range_cce_addr_ = read_res.cce_addr_;
                 scan_state_->range_id_ =
@@ -1068,6 +1065,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             {
                 if (lock_range_result_.IsFinished())
                 {
+                    txm->rw_set_.DedupRead(range_table_name_,
+                                           scan_state_->range_cce_addr_);
+
                     txm->handler->PostRead(txm->TxNumber(),
                                            txm->TxTerm(),
                                            txm->CommandId(),

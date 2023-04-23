@@ -207,6 +207,36 @@ public:
         return read_ts;
     }
 
+    uint64_t DedupRead(const TableName &tbl_name, const CcEntryAddr &cce_addr)
+    {
+        auto tbl_it = rset_.find(tbl_name);
+        if (tbl_it == rset_.end())
+        {
+            return 0;
+        }
+
+        std::unordered_map<CcEntryAddr, ReadSetEntry> &tbl_read_set =
+            tbl_it->second;
+        auto cce_it = tbl_read_set.find(cce_addr);
+        if (cce_it != tbl_read_set.end())
+        {
+            if (!(tbl_name == catalog_ccm_name) &&
+                (tbl_name.Type() != TableType::RangePartition))
+            {
+                --data_rset_cnt_;
+            }
+
+            uint64_t read_ts = cce_it->second.version_ts_;
+            tbl_read_set.erase(cce_it);
+
+            return read_ts;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
     bool AddWrite(const TableName &table_name,
                   TxKey::Uptr key,
                   TxRecord::Uptr rec,
