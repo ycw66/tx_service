@@ -794,6 +794,7 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
+        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
@@ -821,6 +822,7 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
+        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
@@ -849,6 +851,7 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
+        is_local_ = false;
     }
 
     uint64_t CommitTs() const
@@ -923,6 +926,11 @@ public:
         ccm_ = nullptr;
     }
 
+    bool IsLocal() const
+    {
+        return is_local_;
+    }
+
     // int64_t TxTerm()
     // {
     //     return tx_term_;
@@ -950,6 +958,7 @@ private:
     OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
     int64_t tx_term_{0};
+    bool is_local_{false};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>

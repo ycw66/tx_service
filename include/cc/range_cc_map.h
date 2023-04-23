@@ -264,9 +264,10 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
-        if (shard_->core_id_ == 0)
+        if (shard_->core_id_ == 0 && req.IsLocal())
         {
-            assert(req.Key() != nullptr);
+            // If this is a local range split tx, mark the StoreRange as
+            // locked since we are the owner of this range.
             const KeyT *range_key = static_cast<const KeyT *>(req.Key());
             TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
                 this->table_name_, req.NodeGroupId(), range_key);
@@ -300,7 +301,6 @@ public:
         RangeRecord *upload_range_rec = nullptr;
         const TxKey *target_key = nullptr;
         std::vector<std::pair<TxKey::Uptr, uint32_t>> range_slices;
-        bool is_remote_req = false;
         // Place holder for decoded range info if req is remote
         if (req.Key() != nullptr)
         {
@@ -311,7 +311,6 @@ public:
         {
             // Request comes from a remote node and is processed for the first
             // time. Deserialize the keys and payloads.
-            is_remote_req = true;
             switch (*req.KeyStrType())
             {
             case KeyType::NegativeInf:
@@ -361,9 +360,12 @@ public:
                             req.CommitTs())
                         ->GetRangeInfo());
 
-                TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
-                    this->table_name_, req.NodeGroupId(), target_key);
-                range_entry->RangeSlices()->Unlock();
+                if (req.IsLocal())
+                {
+                    TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                        this->table_name_, req.NodeGroupId(), target_key);
+                    range_entry->RangeSlices()->Unlock();
+                }
             }
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
@@ -383,7 +385,7 @@ public:
                 // as the slice keys in the new ranges.
                 std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                     new_slice_keys;
-                if (is_remote_req)
+                if (!req.IsLocal())
                 {
                     std::unique_ptr<StoreRange> store_range =
                         std::make_unique<StoreRange>(
@@ -461,7 +463,10 @@ public:
                     new_range_infos.front()->start_key_.get();
                 upload_range_rec->SetRangeInfo(old_info);
 
-                old_entry->RangeSlices()->Unlock();
+                if (req.IsLocal())
+                {
+                    old_entry->RangeSlices()->Unlock();
+                }
             }
             else
             {
