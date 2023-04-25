@@ -10,6 +10,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -19,8 +20,8 @@
 #include "dead_lock_check.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
-#include "metrics/metrics.h"
-#include "metrics/tx_meter.h"
+#include "meter.h"
+#include "metrics.h"
 #include "moodycamelqueue.h"
 #include "tx_execution.h"
 #include "tx_request.h"
@@ -65,15 +66,23 @@ public:
           free_tx_list_(),
           waiting_mux_(shards.ShardMutex(thd_id)),
           waiting_cv_(shards.ShardCv(thd_id)),
-          txlog_hd_(txlog_hd)
-#ifdef METRICS_COLLECTOR_ENABLE
-          ,
-          tx_meter_ptr_(metrics_registry == nullptr
-                            ? nullptr
-                            : std::make_unique<metrics::TxMeter>(
-                                  metrics_registry, thd_id, shards.NodeId()))
-#endif
+          txlog_hd_(txlog_hd),
+          meter_(std::make_unique<metrics::Meter>(
+              metrics_registry,
+              metrics::Labels{{"node_id", std::to_string(shards.NodeId())},
+                              {"core_id", std::to_string(thd_id)}}))
     {
+        if (metrics::enable_busy_loop_metrics)
+        {
+            meter_->Register("run_one_round_duration",
+                             metrics::Type::Histogram);
+        }
+
+        if (metrics::enable_transactions)
+        {
+            meter_->Register("tx_duration", metrics::Type::Histogram);
+            meter_->Register("tx_processed_total", metrics::Type::Counter);
+        }
     }
 
     TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
@@ -116,6 +125,12 @@ public:
 
     void RunOneRound(size_t &active_cnt, size_t &req_cnt)
     {
+        if (metrics::enable_busy_loop_metrics &&
+            busy_loop_round_ == metrics::busy_loop_sample_round)
+        {
+            run_one_round_start_ = metrics::Clock::now();
+        }
+
         active_cnt = 0;
         req_cnt = 0;
         size_t sweep_batch = 20;
@@ -182,6 +197,21 @@ public:
 
         // Process CcRequests.
         req_cnt = local_cc_shards_.ProcessRequests(thd_id_);
+
+        // collect metrics: run one round duration
+        if (metrics::enable_busy_loop_metrics)
+        {
+            if (busy_loop_round_ == metrics::busy_loop_sample_round)
+            {
+                meter_->CollectDuration("run_one_round_duration",
+                                        run_one_round_start_);
+                busy_loop_round_ = 1;
+            }
+            else
+            {
+                ++busy_loop_round_;
+            }
+        }
     }
 
     void Run()
@@ -261,20 +291,6 @@ public:
         }
     }
 
-#ifdef METRICS_COLLECTOR_ENABLE
-    void MetricCollect(const metrics::Value metric_value,
-                       metrics::MetricsNaming &naming_,
-                       std::optional<metrics::MetricsLabels> label_)
-    {
-        if (!tx_meter_ptr_)
-        {
-            return;
-        }
-        auto meter =
-            tx_meter_ptr_->GetMeter(std::move(naming_), std::move(label_));
-        (*meter)(metric_value);
-    }
-#endif
     size_t thd_id_;
     std::atomic<bool> terminated_;
     std::atomic<bool> in_sleep_;
@@ -299,10 +315,11 @@ public:
     friend class TxService;
     friend struct txservice::SplitFlushRangeOp;
 
+    std::unique_ptr<metrics::Meter> meter_;
+
 private:
-#ifdef METRICS_COLLECTOR_ENABLE
-    std::unique_ptr<metrics::TxMeter> tx_meter_ptr_;
-#endif
+    size_t busy_loop_round_ = 1;
+    metrics::TimePoint run_one_round_start_;
 };
 
 class TxService
@@ -348,16 +365,21 @@ public:
                           std::move(log_hd));
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
-#if defined(METRICS_COLLECTOR_ENABLE)
-            pool_.emplace_back(std::make_unique<TxProcessor>(
-                metrics_registry,
-                thd_idx,
-                local_cc_shards_,
-                Sharder::Instance().GetLogAgent()));
-#else
-            pool_.emplace_back(std::make_unique<TxProcessor>(
-                thd_idx, local_cc_shards_, Sharder::Instance().GetLogAgent()));
-#endif
+            if (metrics::enable_collect_metrics)
+            {
+                pool_.emplace_back(std::make_unique<TxProcessor>(
+                    metrics_registry,
+                    thd_idx,
+                    local_cc_shards_,
+                    Sharder::Instance().GetLogAgent()));
+            }
+            else
+            {
+                pool_.emplace_back(std::make_unique<TxProcessor>(
+                    thd_idx,
+                    local_cc_shards_,
+                    Sharder::Instance().GetLogAgent()));
+            }
         }
 
         Sharder::Instance().Init(local_path);
@@ -484,7 +506,6 @@ public:
     // tx runs shared by all the clients of tx_service. It is used to balance
     // workloads between TxProcessors.
     std::atomic<uint32_t> tx_runs_{0};
-
     friend class txservice::fault::ReplayService;
 };
 

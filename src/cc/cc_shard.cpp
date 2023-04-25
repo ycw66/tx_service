@@ -40,7 +40,11 @@ CcShard::CcShard(uint16_t core_id,
       ckpter_(nullptr),
       processor_sleep_(false),
       catalog_factory_(catalog_factory),
-      active_si_txs_()
+      active_si_txs_(),
+      meter_(std::make_unique<metrics::Meter>(
+          local_shards.metrics_registry_,
+          metrics::Labels{{"node_id", std::to_string(node_id)},
+                          {"core_id", std::to_string(core_id)}}))
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
@@ -74,6 +78,33 @@ CcShard::CcShard(uint16_t core_id,
     native_ccms_.try_emplace(
         catalog_ccm_name,
         std::make_unique<CatalogCcMap>(this, node_id_, catalog_ccm_name));
+
+    if (metrics::enable_collect_metrics)
+    {
+        meter_->Register("memory_limit", metrics::Type::Gauge);
+    }
+
+    if (metrics::enable_cache_hit_rate)
+    {
+        meter_->Register("cache_hits", metrics::Type::Counter);
+        meter_->Register("cache_miss", metrics::Type::Counter);
+    }
+
+    if (metrics::enable_busy_loop_metrics)
+    {
+        meter_->Register("cc_queue_length", metrics::Type::Gauge);
+    }
+
+    if (metrics::enable_memory_usage)
+    {
+        meter_->Register("memory_usage", metrics::Type::Gauge);
+    }
+
+    // collect metrics: memory limit
+    if (metrics::enable_collect_metrics)
+    {
+        meter_->Collect("memory_limit", memory_limit_);
+    }
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)

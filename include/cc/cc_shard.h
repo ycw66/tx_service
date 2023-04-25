@@ -21,7 +21,8 @@
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
-#include "metrics/metrics.h"
+#include "meter.h"
+#include "metrics.h"
 #include "moodycamelqueue.h"
 #include "range_record.h"
 #include "range_slice.h"
@@ -32,6 +33,8 @@ namespace txservice
 {
 class SingleShardScanner;
 class CcMapScanner;
+class TxProcessor;
+class TxService;
 class Checkpointer;
 class LocalCcShards;
 struct CheckDeadLockResult;
@@ -90,7 +93,6 @@ public:
             uint32_t node_id,
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory);
-
     /**
      * @brief Returns the cc map at this shard given the table name and the cc
      * node group.
@@ -134,6 +136,35 @@ public:
     size_t ProcessRequests()
     {
         size_t req_cnt = cc_queue_.try_dequeue_bulk(req_buf_, 100);
+
+        // collect metric: cc queue length
+        if (metrics::enable_busy_loop_metrics)
+        {
+            if (busy_loop_round_ == metrics::busy_loop_sample_round)
+            {
+                auto len = req_cnt < 100 ? req_cnt : cc_queue_.size_approx();
+                meter_->Collect("cc_queue_length", len);
+                busy_loop_round_ = 1;
+            }
+            else
+            {
+                ++busy_loop_round_;
+            }
+        }
+
+        // collect metrics: memory usage
+        if (metrics::enable_memory_usage)
+        {
+            if (memory_usage_round_ == metrics::memory_usage_sample_round)
+            {
+                meter_->Collect("memory_usage", mem_usage_);
+                memory_usage_round_ = 1;
+            }
+            else
+            {
+                ++memory_usage_round_;
+            }
+        }
         for (size_t i = 0; i < req_cnt; ++i)
         {
             bool finish = req_buf_[i]->Execute(*this);
@@ -142,10 +173,8 @@ public:
                 req_buf_[i]->Free();
             }
         }
-
         return req_cnt;
-    }
-
+    };
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
@@ -524,6 +553,8 @@ public:
         return lock_holding_txs_;
     }
 
+    std::unique_ptr<metrics::Meter> meter_;
+
     void ResetCleanStart()
     {
         clean_start_ccp_ = nullptr;
@@ -554,6 +585,9 @@ private:
     {
         processor_sleep_.store(false, std::memory_order_release);
     }
+
+    size_t busy_loop_round_ = 1;
+    size_t memory_usage_round_ = 1;
 
     /**
      * @brief A collection of active tx's that have acquired locks/intentions in

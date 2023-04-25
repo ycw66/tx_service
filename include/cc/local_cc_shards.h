@@ -18,7 +18,7 @@
 #include "catalog_key_record.h"
 #include "cc_shard.h"
 #include "local_cc_handler.h"
-#include "metrics/metrics.h"
+#include "metrics.h"
 #include "raft_log.pb.h"
 #include "range_slice.h"
 #include "store/data_store_handler.h"
@@ -546,5 +546,6 @@ private:
     friend class remote::RemoteCcHandler;
     friend class Checkpointer;
     friend class txservice::fault::ReplayService;
+    friend class CcShard;
 };
 }  // namespace txservice

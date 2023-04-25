@@ -89,7 +89,6 @@ set(INCLUDE_DIR
    ${TX_SERVICE_SOURCE_DIR}/include/cc
    ${TX_SERVICE_SOURCE_DIR}/include/remote
    ${TX_SERVICE_SOURCE_DIR}/include/fault
-   ${TX_SERVICE_SOURCE_DIR}/include/metrics
    ${TX_SERVICE_SOURCE_DIR}/include/store
    ${TX_SERVICE_SOURCE_DIR}/log_service/proto
    ${TX_SERVICE_SOURCE_DIR}/log_service/include
@@ -147,7 +146,6 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/cc_node.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/metrics/tx_meter.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
     )
 

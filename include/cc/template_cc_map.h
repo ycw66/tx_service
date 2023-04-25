@@ -18,6 +18,8 @@
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
+#include "meter.h"
+#include "metrics.h"
 #include "proto/cc_request.pb.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
@@ -1536,6 +1538,21 @@ public:
 
 #ifdef RANGE_PARTITION_ENABLED
                 cce = Find(*look_key).second;
+
+                // collect metrics: cache hits and miss
+                if (metrics::enable_cache_hit_rate)
+                {
+                    auto meter = shard_->meter_.get();
+                    if (cce != nullptr)
+                    {
+                        meter->Collect("cache_hits", 1);
+                    }
+                    else
+                    {
+                        meter->Collect("cache_miss", 1);
+                    }
+                }
+
                 if (cce == nullptr)
                 {
                     if (Type() == TableType::Primary)

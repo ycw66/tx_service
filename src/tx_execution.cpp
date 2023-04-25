@@ -738,6 +738,11 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
     commit_ts_ = 0;
     commit_ts_bound_ = 0;
 
+    if (metrics::enable_transactions)
+    {
+        tx_duration_start_ = metrics::Clock::now();
+    }
+
     init_txn.Reset();
 
     handler->NewTxn(init_txn.hd_result_, iso_level_);
@@ -2903,10 +2908,13 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
-#ifdef METRICS_COLLECTOR_ENABLE
-    tx_processor_->MetricCollect(
-        metrics::Value(1), post_process_total, std::nullopt);
-#endif
+    // collect metrics: tx duration and tx processed total
+    if (metrics::enable_transactions)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("tx_duration", tx_duration_start_);
+        meter->Collect("tx_processed_total", 1);
+    }
     Reset();
 }
 
@@ -2942,7 +2950,6 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
                                  acq_all_op.protocol_,
                                  acq_all_op.cc_op_);
     }
-
     StartTiming();
 }
 

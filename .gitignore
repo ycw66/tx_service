@@ -347,6 +347,7 @@ include/proto/*.pb.h
 
 # log_service dir
 log_service
+mono_metrics
 
 # pre-commit
 .pre-commit-config.yaml
@@ -354,3 +355,5 @@ log_service
 # macOS garbage
 .DS_Store
 
+# cc compilation database for Emacs
+compile_commands.json
