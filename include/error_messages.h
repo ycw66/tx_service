@@ -46,6 +46,9 @@ enum struct TxErrorCode
     NG_TERM_CHANGED,
     REQUEST_LOST,
 
+    // Out of Memory
+    OUT_OF_MEMORY,
+
     // Ckpt
     CKPT_PIN_RANGE_SLICE_FAIL,
 };
@@ -83,6 +86,7 @@ static const std::map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::NG_TERM_CHANGED,
      "The node group term changed and the related ccrequest was discarded."},
     {TxErrorCode::REQUEST_LOST, "The returned message of ccrequest missed."},
+    {TxErrorCode::OUT_OF_MEMORY, "Transaction failed due to out of memory."},
     {TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL,
      "The checkpoint error due to pin range slice failed."}};
 
@@ -187,6 +191,8 @@ static const std::map<CcErrorCode, std::string> cc_error_messages{
      "VALIDATION_FAILED_FOR_CONFILICTED_TXS"},
     {CcErrorCode::MVCC_READ_MUST_WAIT_WRITE, "MVCC_READ_MUST_WAIT_WRITE"},
     {CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT, "MVCC_READ_FOR_WRITE_CONFLICT"},
+
+    {CcErrorCode::OUT_OF_MEMORY, "OUT_OF_MEMORY"},
 
     // range
     {CcErrorCode::GET_RANGE_ID_ERR, "GET_RANGE_ID_ERR"},

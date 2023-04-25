@@ -179,6 +179,9 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::PIN_RANGE_SLICE_FAILED:
         return TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL;
 
+    case CcErrorCode::OUT_OF_MEMORY:
+        return TxErrorCode::OUT_OF_MEMORY;
+
     case CcErrorCode::UNDEFINED_ERR:
     default:
         return TxErrorCode::UNDEFINED_ERR;
