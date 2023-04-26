@@ -525,6 +525,8 @@ struct AlterTableInfo
         offset += sizeof(add_index_names_len);
         if (index_add_count_ > 0)
         {
+            // Clear this buff.
+            index_add_names_.clear();
             std::string add_index_names(buf + offset, add_index_names_len);
 
             std::stringstream add_ss(add_index_names);
@@ -552,6 +554,8 @@ struct AlterTableInfo
         offset += sizeof(drop_index_names_len);
         if (index_drop_count_ > 0)
         {
+            // Clear this buff.
+            index_drop_names_.clear();
             std::string drop_index_names(buf + offset, drop_index_names_len);
 
             std::stringstream drop_ss(drop_index_names);
