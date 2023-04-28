@@ -10,6 +10,7 @@
 #include "cc_request.h"
 #include "error_messages.h"  //CcErrorCode
 #include "range_record.h"
+#include "statistics.h"
 #include "template_cc_map.h"
 #include "tx_operation.h"
 #include "tx_serialize.h"
@@ -519,6 +520,16 @@ public:
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
+
+            if (shard_->realtime_sampling_)
+            {
+                if (shard_->core_id_ ==
+                    Statistics::CoreDoSample(this->table_name_))
+                {
+                    SplitSamplePool(old_info);
+                }
+            }
+
             // Now that every core has inserted new range entries into ccmap, we
             // don't need the new keys anymore. Remove new keys from the
             // original range.
@@ -810,6 +821,20 @@ private:
                 range_slices.at(idx).first = std::move(slice_key);
             }
         }
+    }
+
+    void SplitSamplePool(const RangeInfo *old_info)
+    {
+        TableName table_or_index_name(this->table_name_.StringView(),
+                                      this->table_name_.IsBase()
+                                          ? TableType::Primary
+                                          : TableType::Secondary);
+        TableStatistics<KeyT> *statistics =
+            static_cast<TableStatistics<KeyT> *>(
+                table_schema_->StatisticsObject());
+
+        statistics->OnSplitSamplePool(
+            shard_, this->cc_ng_id_, table_or_index_name, old_info);
     }
 };
 }  // namespace txservice

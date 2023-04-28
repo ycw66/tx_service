@@ -5,6 +5,7 @@
 #include "cc/local_cc_shards.h"
 #include "range_record.h"
 #include "range_slice.h"
+#include "statistics.h"
 
 namespace txservice
 {
@@ -44,11 +45,8 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
         if (status_ == RecordStatus::Normal)
         {
             assert(commit_ts_ > 0);
-            ccs.CreateCatalog(table_name_,
-                              cc_ng_id_,
-                              catalog_image_,
-                              statistics_binary_,
-                              commit_ts_);
+            ccs.CreateCatalog(
+                table_name_, cc_ng_id_, catalog_image_, commit_ts_);
         }
         else if (status_ == RecordStatus::Deleted)
         {
@@ -56,15 +54,13 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
             // The catalog of the specified table does not exists. The version
             // of the non-existent catalog starts from the beginning of history,
             // i.e., ts=1.
-            ccs.CreateCatalog(
-                table_name_, cc_ng_id_, catalog_image_, statistics_binary_, 1);
+            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
         }
         else
         {
             // Timestamp being 0 means that there is an error when fetching from
             // the data store and the catalog status is unknown.
-            ccs.CreateCatalog(
-                table_name_, cc_ng_id_, catalog_image_, statistics_binary_, 0);
+            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 0);
         }
     }
 
@@ -80,6 +76,77 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
 void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 {
     status_ = status;
+    error_code_ = err;
+    ccs_.Enqueue(this);
+}
+
+FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
+                                               CcShard &ccs,
+                                               uint32_t cc_ng_id)
+    : FetchCc(ccs, cc_ng_id),
+      table_name_(table_name.StringView().data(),
+                  table_name.StringView().size(),
+                  table_name.Type())
+{
+}
+
+bool FetchTableStatisticsCc::Execute(CcShard &ccs)
+{
+    int64_t cc_ng_candid_term =
+        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+    if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+    {
+        CatalogEntry *catalog_entry = ccs.GetCatalog(table_name_, cc_ng_id_);
+        TableSchema *table_schema = catalog_entry->schema_.get();
+
+        std::unordered_map<TableName, std::vector<uint64_t>> ng_weights_map;
+
+#ifdef RANGE_PARTITION_ENABLED
+        ng_weights_map.try_emplace(
+            table_name_,
+            ccs.AllNodeGroupBytesAtFetchRange(table_name_, cc_ng_id_));
+        for (const TableName &index_name : table_schema->IndexNames())
+        {
+            ng_weights_map.try_emplace(
+                index_name,
+                ccs.AllNodeGroupBytesAtFetchRange(index_name, cc_ng_id_));
+        }
+
+#else
+        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+        ng_weights_map.try_emplace(table_name_,
+                                   std::vector<uint64_t>(ng_cnt, 1UL));
+        for (const TableName &index_name : table_schema->IndexNames())
+        {
+            ng_weights_map.try_emplace(index_name, std::vector(ng_cnt, 1UL));
+        }
+#endif
+
+        auto [statistics, inserted] =
+            ccs.InitTableStatistics(table_name_,
+                                    cc_ng_id_,
+                                    table_schema,
+                                    std::move(sample_pool_map_),
+                                    ng_weights_map);
+        if (inserted)
+        {
+            table_schema->BindStatistics(statistics);
+        }
+    }
+
+    for (CcRequestBase *&req : requesters_)
+    {
+        ccs.Enqueue(ccs.core_id_, req);
+    }
+
+    ccs.RemoveFetchRequest(table_name_);
+    return false;
+}
+
+void FetchTableStatisticsCc::SetFinish(int err)
+{
     error_code_ = err;
     ccs_.Enqueue(this);
 }
@@ -140,6 +207,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     ++finish_cnt_;
     if (finish_cnt_ == core_cnt_)
     {
+        ccs.local_shards_.DropTableStatistics(cc_ng_id_);
         ccs.local_shards_.DropCatalogs(cc_ng_id_);
         LOG(INFO) << "ccshard: " << ccs.core_id_
                   << "; clear ccmaps and catalogs of node group: " << cc_ng_id_;

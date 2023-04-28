@@ -341,6 +341,7 @@ public:
                            conf.find("core_num")->second,
                            conf.find("node_memory_limit_mb")->second,
                            conf.find("node_log_limit_mb")->second,
+                           conf.find("realtime_sampling")->second,
                            catalog_factory,
                            store_hd,
                            metrics_registry,

@@ -7,7 +7,6 @@
 
 #include "cc/cc_map.h"
 #include "schema.h"
-#include "statistics.h"
 
 namespace txservice
 {
@@ -25,6 +24,7 @@ struct KVCatalogInfo
     std::unordered_map<txservice::TableName, std::string> kv_index_names_;
 };
 
+class Statistics;
 struct TableSchema
 {
     using uptr = std::unique_ptr<TableSchema>;
@@ -36,14 +36,14 @@ struct TableSchema
     virtual const std::string &SchemaImage() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
     virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
-    virtual Statistics *StatisticsObject() const = 0;
-    virtual const std::string &StatisticsBinary() const = 0;
     virtual uint64_t Version() const = 0;
     virtual std::string_view VersionStringView() const = 0;
     virtual std::vector<TableName> IndexNames() const = 0;
     virtual size_t IndexesSize() const = 0;
     virtual const SecondaryKeySchema *IndexKeySchema(
         const TableName &index_name) const = 0;
+    virtual void BindStatistics(Statistics *statistics) = 0;
+    virtual Statistics *StatisticsObject() const = 0;
 };
 
 class CatalogFactory
@@ -55,7 +55,6 @@ public:
     virtual TableSchema::uptr CreateTableSchema(
         const TableName &table_name,
         const std::string &catalog_image,
-        const std::string &statistics_binary,
         uint64_t version,
         NodeGroupId cc_ng_id) = 0;
 
@@ -88,6 +87,19 @@ public:
         ScanDirection direction,
         const Schema *key_schema,
         const TableName &range_table_name) = 0;
+
+    virtual std::unique_ptr<Statistics> CreateTableStatistics(
+        const TableSchema *table_schema) = 0;
+
+    virtual std::unique_ptr<Statistics> CreateTableStatistics(
+        const TableSchema *table_schema,
+        std::unordered_map<TableName,
+                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+            &&sample_pool_map,
+        const std::unordered_map<TableName, std::vector<uint64_t>>
+            &ng_weights_map,
+        CcShard *ccs,
+        NodeGroupId cc_ng_id) = 0;
 
     virtual const TxKey *NegativeInfKey() = 0;
     virtual const TxKey *PositiveInfKey() = 0;

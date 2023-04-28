@@ -37,6 +37,7 @@ struct NegotiateCc;
 struct CkptScanCc;
 struct CkptUpdateCc;
 struct CkptTs;
+struct AnalyzeTableAllCc;
 struct ReplayLogCc;
 struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
@@ -93,6 +94,7 @@ public:
     virtual bool Execute(ScanSliceCc &req) = 0;
     virtual bool Execute(CkptScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
+    virtual bool Execute(AnalyzeTableAllCc &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
     virtual bool Execute(CleanCcEntryForTestCc &req) = 0;

@@ -1,10 +1,10 @@
 #include "checkpointer.h"
 
 #include "proto/cc_request.pb.h"
-#include "proto/statistics.pb.h"
 #include "range_slice.h"
 #include "remote/cc_stream_sender.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -435,6 +435,16 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             }
             else
             {
+                bool ok =
+                    catalog_rec.Schema()->StatisticsObject()->PostCheckpoint(
+                        store_hd_, table_name, node_group, ckpt_ts, true);
+                if (!ok)
+                {
+                    AbortTxRequest abort_req;
+                    ckpt_txm->Execute(&abort_req);
+                    abort_req.Wait();
+                }
+
                 CommitTxRequest commit_req;
 
                 commit_req.Reset();
@@ -612,23 +622,6 @@ void Checkpointer::FlushDataWorker()
                                      ckpt_ts,
                                      true);
                 }
-#ifdef STATISTICS_ENABLED
-                // Flush statistics based on primary table.
-                if (table_name.Type() == TableType::Primary)
-                {
-                    uint32_t shard_code = Sharder::Instance().ShardCode(
-                        std::hash<TableName>{}(table_name));
-                    uint32_t shard_id = shard_code >> 10;
-                    if (shard_id == node_group)
-                    {
-                        SyncStatistics(this,
-                                       table_name,
-                                       shard_code,
-                                       schema,
-                                       schema->Version());
-                    }
-                }
-#endif
 #endif
             }
             else
@@ -645,7 +638,14 @@ void Checkpointer::FlushDataWorker()
 #endif
                 succ = false;
             }
+
+            if (succ)
+            {
+                succ = schema->StatisticsObject()->PostCheckpoint(
+                    store_hd_, table_name, node_group, ckpt_ts, false);
+            }
         }
+
         if (txm != nullptr)
         {
             CommitTxRequest commit_req;
@@ -820,6 +820,9 @@ void Checkpointer::SplitFlushRange(
         flush_worker_failed_.compare_exchange_strong(fail, true);
         return;
     }
+
+    catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(table_name,
+                                                              node_group);
 
     // Start the SplitFlush tx. This would split the range, flush the data and
     // update slice metadata.
@@ -1369,52 +1372,6 @@ void Checkpointer::MoveNonSplittingRecords(
     size_t copy_size = std::distance(flush_vec_it, flush_vec.end());
     non_split_vec.reserve(non_split_vec.size() + copy_size);
     std::move(flush_vec_it, flush_vec.end(), std::back_inserter(non_split_vec));
-}
-
-void Checkpointer::SyncStatistics(Checkpointer *ckptr,
-                                  const TableName &table_name,
-                                  uint32_t table_shard_code,
-                                  const TableSchema *table_schema,
-                                  uint64_t table_schema_ts)
-{
-    store::Statistics store_statistics;
-
-    const Statistics *statistics = table_schema->StatisticsObject();
-
-    CkptStatisticsCc ckpt_stat_cc(statistics, &store_statistics);
-    ckptr->local_shards_.EnqueueCcRequest(table_shard_code, &ckpt_stat_cc);
-    ckpt_stat_cc.Wait();
-
-    std::string statistics_binary = store_statistics.SerializeAsString();
-    bool ok = ckptr->store_hd_->UpsertTableStatistics(
-        table_name, statistics_binary, table_schema_ts);
-    if (ok)
-    {
-        remote::CcStreamSender *stream_sender =
-            Sharder::Instance().GetCcStreamSender();
-
-        uint32_t src_node_id = Sharder::Instance().NodeId();
-        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        for (uint32_t ng_id = 0; ng_id < ng_cnt; ng_id++)
-        {
-            if (ng_id != src_node_id)
-            {
-                remote::CcMessage send_msg;
-                send_msg.set_type(
-                    remote::CcMessage::MessageType::
-                        CcMessage_MessageType_BroadcastStatisticsRequest);
-
-                remote::BroadcastStatisticsRequest *broadcast_stat_req =
-                    send_msg.mutable_broadcast_statistics_req();
-                broadcast_stat_req->set_src_node_id(src_node_id);
-                broadcast_stat_req->set_node_group_id(ng_id);
-                broadcast_stat_req->set_table_name_str(table_name.String());
-                broadcast_stat_req->set_statistics_binary(statistics_binary);
-
-                stream_sender->SendMessageToNg(ng_id, send_msg);
-            }
-        }
-    }
 }
 
 void Checkpointer::FlushData(const TableName &table_name,

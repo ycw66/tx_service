@@ -27,9 +27,11 @@
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "proto/cc_request.pb.h"
+#include "random_pairing.h"
 #include "read_write_set.h"
 #include "scan.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "tx_operation_result.h"
 #include "type.h"
 #include "util.h"
@@ -45,6 +47,8 @@ class SkCcMap;
 class CcMap;
 
 struct LruPage;
+
+class SamplePool;
 
 template <typename RequestT, typename ResultType>
 struct TemplatedCcRequest : public CcRequestBase
@@ -108,6 +112,57 @@ public:
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
+                    {
+                        // Initialize table statistics
+#ifdef RANGE_PARTITION_ENABLED
+                        // Initialize table ranges before create table
+                        // statistics.
+                        TableName base_range_table_name{
+                            table_name_->GetBaseTableNameSV(),
+                            TableType::RangePartition};
+                        auto ranges = ccs.GetTableRangesForATable(
+                            base_range_table_name, node_group_id_);
+                        if (ranges == nullptr)
+                        {
+                            ccs.FetchTableRanges(
+                                base_range_table_name,
+                                table_schema->GetKVCatalogInfo(),
+                                this,
+                                node_group_id_);
+                            return false;
+                        }
+                        for (const TableName &index_name :
+                             table_schema->IndexNames())
+                        {
+                            TableName index_range_table_name{
+                                index_name.StringView(),
+                                TableType::RangePartition};
+                            auto ranges = ccs.GetTableRangesForATable(
+                                index_range_table_name, node_group_id_);
+                            if (ranges == nullptr)
+                            {
+                                ccs.FetchTableRanges(
+                                    index_range_table_name,
+                                    table_schema->GetKVCatalogInfo(),
+                                    this,
+                                    node_group_id_);
+                                return false;
+                            }
+                        }
+#endif
+                        // Initialize table statistics before create ccmap.
+                        const StatisticsEntry *statistics_entry =
+                            ccs.GetTableStatistics(base_table_name,
+                                                   node_group_id_);
+                        if (statistics_entry == nullptr ||
+                            statistics_entry->statistics_ == nullptr)
+                        {
+                            ccs.FetchTableStatistics(
+                                base_table_name, node_group_id_, this);
+                            return false;
+                        }
+                    }
+
                     // The request is toward a special cc map that contains a
                     // table's range meta data.
                     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
@@ -155,6 +210,58 @@ public:
                             catalog_entry->schema_.get();
                         if (curr_schema != nullptr)
                         {
+                            {
+                                // Initialize table statistics
+#ifdef RANGE_PARTITION_ENABLED
+                                // Initialize table ranges before create table
+                                // statistics.
+                                TableName base_range_table_name{
+                                    table_name_->GetBaseTableNameSV(),
+                                    TableType::RangePartition};
+                                auto ranges = ccs.GetTableRangesForATable(
+                                    base_range_table_name, node_group_id_);
+                                if (ranges == nullptr)
+                                {
+                                    ccs.FetchTableRanges(
+                                        base_range_table_name,
+                                        curr_schema->GetKVCatalogInfo(),
+                                        this,
+                                        node_group_id_);
+                                    return false;
+                                }
+                                for (const TableName &index_name :
+                                     curr_schema->IndexNames())
+                                {
+                                    TableName index_range_table_name{
+                                        index_name.StringView(),
+                                        TableType::RangePartition};
+                                    auto ranges = ccs.GetTableRangesForATable(
+                                        index_range_table_name, node_group_id_);
+                                    if (ranges == nullptr)
+                                    {
+                                        ccs.FetchTableRanges(
+                                            index_range_table_name,
+                                            curr_schema->GetKVCatalogInfo(),
+                                            this,
+                                            node_group_id_);
+                                        return false;
+                                    }
+                                }
+#endif
+                                // Initialize table statistics before create
+                                // ccmap.
+                                const StatisticsEntry *statistics_entry =
+                                    ccs.GetTableStatistics(base_table_name,
+                                                           node_group_id_);
+                                if (statistics_entry == nullptr ||
+                                    statistics_entry->statistics_ == nullptr)
+                                {
+                                    ccs.FetchTableStatistics(
+                                        base_table_name, node_group_id_, this);
+                                    return false;
+                                }
+                            }
+
                             ccs.CreateOrUpdatePkCcMap(base_table_name,
                                                       curr_schema,
                                                       node_group_id_,
@@ -2307,16 +2414,13 @@ private:
                                     txservice::CkptScanCc *r);
 };
 
-struct CkptStatisticsCc : public CcRequestBase
+// This cc request is used to convert parallel access on ccmap/samplepool into
+// serial access.
+struct RunOnTxProcessorCc : public CcRequestBase
 {
 public:
-    CkptStatisticsCc(const Statistics *statistics,
-                     store::Statistics *store_statistics)
-        : statistics_(statistics),
-          store_statistics_(store_statistics),
-          done_(false),
-          mux_(),
-          cv_()
+    explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task)
+        : task_(task), done_(false), mux_(), cv_()
     {
     }
 
@@ -2324,10 +2428,11 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
 
-        statistics_->ToSerializableObj(store_statistics_);
+        task_(ccs);
 
         done_ = true;
         cv_.notify_one();
+
         return false;
     }
 
@@ -2338,8 +2443,7 @@ public:
     }
 
 private:
-    const Statistics *statistics_{nullptr};
-    store::Statistics *store_statistics_{nullptr};
+    std::function<void(CcShard &ccs)> task_;
 
     bool done_{false};
     std::mutex mux_;
@@ -2768,6 +2872,70 @@ private:
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
+};
+
+struct AnalyzeTableAllCc : public TemplatedCcRequest<AnalyzeTableAllCc, Void>
+{
+public:
+    struct SamplePoolBase
+    {
+        virtual ~SamplePoolBase() = default;
+    };
+
+    template <uint32_t CapacityN, typename KeyT, typename CopyKey>
+    struct SamplePool : public SamplePoolBase
+    {
+    public:
+        void Insert(const KeyT &key)
+        {
+            random_pairing_.Insert(key, ++counter_);
+        }
+
+        const std::vector<KeyT> &SampleKeys() const
+        {
+            return random_pairing_.SampleKeys();
+        }
+
+        uint32_t Size() const
+        {
+            return random_pairing_.Size();
+        }
+
+    public:
+        RandomPairing<CapacityN, KeyT, CopyKey> random_pairing_;
+        size_t counter_{0};
+    };
+
+public:
+    AnalyzeTableAllCc() = default;
+    void Reset(const TableName *table_name,
+               uint32_t node_group_id,
+               TxNumber tx_number,
+               CcHandlerResult<Void> *res)
+    {
+        TemplatedCcRequest<AnalyzeTableAllCc, Void>::Reset(
+            table_name, res, node_group_id, tx_number);
+
+        Clear();
+    }
+
+private:
+    void Clear()
+    {
+        key_sample_pool_.reset(nullptr);
+        slice_sample_pool_.reset(nullptr);
+        next_pin_slice_idx_ = 0;
+        visit_keys_ = 0;
+    }
+
+public:
+    constexpr static uint32_t sample_pool_capacity_{1024};
+    std::unique_ptr<SamplePoolBase> key_sample_pool_{nullptr};
+    std::unique_ptr<SamplePoolBase> slice_sample_pool_{nullptr};
+
+    size_t next_pin_slice_idx_{0};
+
+    uint32_t visit_keys_{0};
 };
 
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>

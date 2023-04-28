@@ -75,54 +75,39 @@ static inline TransactionExecution *NewTxInit(
 }
 
 static inline bool TxReadCatalog(TransactionExecution *txm,
-                                 const store::DataStoreHandler *storage_hd,
                                  ReadTxRequest &read_tx_req,
                                  bool &exists)
 {
-    assert(storage_hd != nullptr);
     assert(txm != nullptr);
-
-    bool ok = true;
-
-    const CatalogKey *catalog_key =
-        static_cast<const CatalogKey *>(read_tx_req.key_);
-    CatalogRecord *catalog_rec = static_cast<CatalogRecord *>(read_tx_req.rec_);
 
     txm->Execute(&read_tx_req);
     read_tx_req.Wait();
-    if (read_tx_req.IsError())
-    {
-        return false;
-    }
 
-    const RecordStatus &rec_status = read_tx_req.Result();
-    if (rec_status == RecordStatus::Deleted)
+    bool ok = !read_tx_req.IsError();
+    if (ok)
     {
-        exists = false;
-    }
-    else if (rec_status == RecordStatus::Unknown)
-    {
-        std::string schema_image;
-        uint64_t schema_ts = 0;
-        ok = storage_hd->FetchTable(
-            catalog_key->Name(), schema_image, exists, schema_ts);
-        if (ok)
+        const RecordStatus &rec_status = read_tx_req.Result();
+        if (rec_status == RecordStatus::Deleted)
         {
-            catalog_rec->SetSchemaImage(std::move(schema_image));
-            ReadOutsideTxRequest read_outside(*catalog_rec, !exists, schema_ts);
-            txm->Execute(&read_outside);
-            read_outside.Wait();
+            exists = false;
         }
-    }
-    else
-    {
-        assert(rec_status == RecordStatus::Normal);
-        exists = true;
-        if (catalog_rec->Schema() == nullptr)
+        else
         {
-            return false;
+            assert(rec_status == RecordStatus::Normal);
+
+            CatalogRecord *catalog_rec =
+                static_cast<CatalogRecord *>(read_tx_req.rec_);
+            if (catalog_rec->Schema())
+            {
+                exists = true;
+            }
+            else
+            {
+                ok = false;
+            }
+
+            catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
         }
-        catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
     }
 
     return ok;

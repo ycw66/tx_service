@@ -49,17 +49,13 @@ struct MockTableSchema : public TableSchema
 public:
     MockTableSchema(const TableName &table_name,
                     const std::string &catalog_image,
-                    const std::string &statistics_binary,
                     uint64_t version)
         : table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
                       table_name.Type()),
           schema_image_(catalog_image),
-          version_(version),
-          statistics_binary_(statistics_binary)
+          version_(version)
     {
-        statistics_ = std::make_unique<TypedStatistics<CompositeKey<int>>>(
-            this, statistics_binary);
     }
     ~MockTableSchema()
     {
@@ -82,14 +78,16 @@ public:
     {
         return schema_image_;
     }
+
+    void BindStatistics(txservice::Statistics *statistics) override
+    {
+    }
+
     Statistics *StatisticsObject() const override
     {
-        return statistics_.get();
+        return nullptr;
     }
-    const std::string &StatisticsBinary() const override
-    {
-        return statistics_binary_;
-    }
+
     uint64_t Version() const override
     {
         return version_;
@@ -141,8 +139,6 @@ private:
     std::unique_ptr<MockKeySchema> key_schema_;
     MockRecordSchema record_schema_;
     KVCatalogInfo::uptr kv_info_;
-    std::unique_ptr<TypedStatistics<CompositeKey<int>>> statistics_;
-    std::string statistics_binary_;
 };
 
 class MockCatalogFactory : public CatalogFactory
@@ -155,12 +151,11 @@ public:
 
     TableSchema::uptr CreateTableSchema(const TableName &table_name,
                                         const std::string &catalog_image,
-                                        const std::string &statistics_binary,
                                         uint64_t version,
                                         NodeGroupId cc_ng_id) override
     {
         return std::make_unique<MockTableSchema>(
-            table_name, catalog_image, statistics_binary, version);
+            table_name, catalog_image, version);
     }
 
     CcMap::uptr CreatePkCcMap(const TableName &table_name,
@@ -222,6 +217,28 @@ public:
         assert(false);
         return nullptr;
     }
+
+    std::unique_ptr<Statistics> CreateTableStatistics(
+        const TableSchema *table_schema) override
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    std::unique_ptr<Statistics> CreateTableStatistics(
+        const TableSchema *table_schema,
+        std::unordered_map<TableName,
+                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+            &&sample_pool_map,
+        const std::unordered_map<TableName, std::vector<uint64_t>>
+            &ng_weights_map,
+        CcShard *ccs,
+        NodeGroupId cc_ng_id) override
+    {
+        assert(false);
+        return nullptr;
+    }
+
     const TxKey *NegativeInfKey() override
     {
         assert(false);

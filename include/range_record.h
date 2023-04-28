@@ -3,11 +3,11 @@
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "butil/logging.h"
 #include "range_slice.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -53,6 +53,16 @@ struct InitRangeEntry
           version_ts_(rhs.version_ts_),
           slice_keys_(std::move(rhs.slice_keys_))
     {
+    }
+
+    uint64_t Bytes() const
+    {
+        return std::accumulate(
+            slice_keys_.begin(),
+            slice_keys_.end(),
+            0UL,
+            [](uint64_t a, const std::pair<std::unique_ptr<TxKey>, uint32_t> &b)
+            { return a + b.second; });
     }
 
     std::unique_ptr<TxKey> key_{nullptr};
@@ -211,6 +221,11 @@ struct RangeInfo
         return is_dirty_ ? &new_partition_id_ : nullptr;
     }
 
+    const std::vector<int32_t> &NewPartitionIdUncheckDirty() const
+    {
+        return new_partition_id_;
+    }
+
     uint64_t DirtyTs() const
     {
         return is_dirty_ ? dirty_ts_ : 0;
@@ -257,10 +272,12 @@ public:
     TableRangeEntry(std::unique_ptr<TxKey> start_key,
                     uint64_t version_ts,
                     int64_t partition_id,
+                    uint64_t range_bytes = 0,
                     std::unique_ptr<StoreRange> slices = nullptr)
         : range_info_(std::make_unique<RangeInfo>(
               std::move(start_key), version_ts, partition_id)),
-          range_slices_(std::move(slices))
+          range_slices_(std::move(slices)),
+          range_bytes_at_fetch_(range_bytes)
     {
     }
 
@@ -296,9 +313,23 @@ public:
         return range_slices_.get();
     }
 
+    const StoreRange *RangeSlices() const
+    {
+        return range_slices_.get();
+    }
+
+    uint64_t RangeBytesAtFetch() const
+    {
+        return range_bytes_at_fetch_;
+    }
+
 private:
     std::unique_ptr<RangeInfo> range_info_{nullptr};
     std::unique_ptr<StoreRange> range_slices_;
+
+    // This is used to rebuild statistics from storage.
+    const uint64_t range_bytes_at_fetch_{0};
+
     template <typename KeyT>
     friend class RangeCcMap;
 };

@@ -201,6 +201,14 @@ public:
                      int node_id,
                      CcHandlerResult<bool> &hres);
 
+    void AnalyzeTableAll(uint32_t src_node_id,
+                         const TableName &table_name,
+                         NodeGroupId ng_id,
+                         TxNumber tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         CcHandlerResult<Void> &hres);
+
     void CleanCcEntryForTest(uint32_t src_node_id,
                              const TableName &table_name,
                              const TxKey &key,

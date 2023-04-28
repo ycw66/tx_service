@@ -40,6 +40,7 @@ struct CleanArchivesTxRequest;
 struct ScanBatchTuple;
 struct SplitFlushTxRequest;
 struct CkptScanTxRequest;
+struct AnalyzeTableTxRequest;
 
 class TxProcessor;
 
@@ -114,6 +115,7 @@ public:
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
     void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
     void ProcessTxRequest(CkptScanTxRequest &ckpt_scan_req);
+    void ProcessTxRequest(AnalyzeTableTxRequest &analyze_req);
 
     /**
      * Interface for storage engine runtime.
@@ -142,6 +144,11 @@ public:
                          uint64_t txn,
                          int64_t tx_term,
                          uint64_t commit_ts);
+
+    void RemoteStatisticsTx(
+        const TableName &table_or_index_name,
+        uint64_t schema_version,
+        const remote::NodeGroupSamplePool &remote_sample_pool);
 
     void RecoverSplitRangeTx(
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
@@ -256,6 +263,8 @@ private:
     void PostProcess(FaultInjectOp &fault_inject_op);
     void Process(CleanCcEntryForTestOp &clean_entry_op);
     void PostProcess(CleanCcEntryForTestOp &clean_entry_op);
+    void Process(AnalyzeTableAllOp &analyze_table_op);
+    void PostProcess(AnalyzeTableAllOp &analyze_table_op);
 
     void Process(AcquireAllOp &acq_all_op);
     void PostProcess(AcquireAllOp &acq_all_op);
@@ -437,6 +446,9 @@ private:
     WriteToLogOp write_log_;
     SleepOperation sleep_op_;
 
+    // analyze table
+    AnalyzeTableAllOp analyze_table_all_op_;
+
     // fault inject
     FaultInjectOp fault_inject_op_;
 
@@ -473,6 +485,7 @@ private:
     friend struct SplitFlushRangeOp;
     friend struct FlushDataOp;
     friend struct DsSplitOp;
+    friend struct AnalyzeTableAllOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct AsyncOp;

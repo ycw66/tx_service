@@ -37,6 +37,7 @@ class TxProcessor;
 class TxService;
 class Checkpointer;
 class LocalCcShards;
+class StatisticsEntry;
 struct CheckDeadLockResult;
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
@@ -90,6 +91,7 @@ public:
             uint32_t core_cnt,
             uint32_t node_memory_limit_mb,
             uint32_t node_log_limit_mb,
+            bool realtime_sampling,
             uint32_t node_id,
             LocalCcShards &local_shards,
             CatalogFactory *catalog_factory);
@@ -364,13 +366,11 @@ public:
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &catalog_image,
-        const std::string &statistics_binary,
         uint64_t commit_ts);
 
     CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                      NodeGroupId cc_ng_id,
                                      const std::string &catalog_image,
-                                     const std::string &statistics_binary,
                                      uint64_t commit_ts);
 
     std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
@@ -429,7 +429,45 @@ public:
                                         const NodeGroupId ng_id,
                                         const TxKey *key);
 
+    const TableRangeEntry *GetTableRangeEntry(const TableName &table_name,
+                                              const NodeGroupId ng_id,
+                                              int32_t range_id);
+
+    const TableRangeEntry *GetTableRangeEntryNonLocking(
+        const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
+
+    uint64_t CountRanges(const TableName &table_name,
+                         const NodeGroupId ng_id,
+                         const NodeGroupId key_ng_id);
+
+    uint64_t CountSlices(const TableName &table_name,
+                         const NodeGroupId ng_id,
+                         const NodeGroupId local_ng_id) const;
+
+    std::vector<uint64_t> AllNodeGroupBytesAtFetchRange(
+        const TableName &table_name, const NodeGroupId ng_id) const;
+
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
+
+    std::pair<Statistics *, bool> InitTableStatistics(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        const TableSchema *table_schema);
+
+    std::pair<Statistics *, bool> InitTableStatistics(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        const TableSchema *table_schema,
+        std::unordered_map<TableName,
+                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+            &&sample_pool_map,
+        const std::unordered_map<TableName, std::vector<uint64_t>>
+            &ng_weights_map);
+
+    StatisticsEntry *GetTableStatistics(const TableName &table_name,
+                                        NodeGroupId ng_id);
+
+    void CleanTableStatistics(const TableName &table_name);
 
     /**
      * @brief Fetches the table's catalog from the data store and
@@ -445,6 +483,10 @@ public:
     void FetchCatalog(const TableName &table_name,
                       NodeGroupId cc_ng_id,
                       CcRequestBase *requester);
+
+    void FetchTableStatistics(const TableName &table_name,
+                              NodeGroupId cc_ng_id,
+                              CcRequestBase *requester);
 
     void FetchTableRanges(const TableName &range_table_name,
                           const KVCatalogInfo *kv_info,
@@ -543,6 +585,8 @@ public:
     // supports persist log state machine to disk. Hence log_limit is a soft
     // limit.
     uint64_t log_limit_{0};
+
+    const bool realtime_sampling_{true};
 
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.

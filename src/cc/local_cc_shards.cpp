@@ -3,6 +3,7 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_service.h"
+#include "tx_util.h"
 
 namespace txservice
 {
@@ -12,6 +13,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
                              uint32_t memory_limit_mb,
                              uint32_t log_limit_mb,
+                             bool realtime_sampling,
                              CatalogFactory *catalog_factory,
                              store::DataStoreHandler *store_hd,
                              metrics::MetricsRegistry *metrics_registry,
@@ -40,6 +42,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                                                           core_cnt,
                                                           memory_limit_mb,
                                                           log_limit_mb,
+                                                          realtime_sampling,
                                                           node_id,
                                                           *this,
                                                           catalog_factory_));
@@ -50,6 +53,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                              uint16_t core_cnt,
                              uint32_t memory_limit_mb,
                              uint32_t log_limit_mb,
+                             bool realtime_sampling,
                              CatalogFactory *catalog_factory,
                              store::DataStoreHandler *store_hd,
                              TxService *tx_service,
@@ -58,6 +62,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
                     core_cnt,
                     memory_limit_mb,
                     log_limit_mb,
+                    realtime_sampling,
                     catalog_factory,
                     store_hd,
                     nullptr,
@@ -120,7 +125,6 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
-    const std::string &statistics_binary,
     uint64_t commit_ts)
 {
     assert(table_name.Type() == TableType::Primary);
@@ -136,11 +140,8 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
         catalog_entry.InitSchema(
             catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(table_name,
-                                                      catalog_image,
-                                                      statistics_binary,
-                                                      commit_ts,
-                                                      cc_ng_id),
+                : catalog_factory_->CreateTableSchema(
+                      table_name, catalog_image, commit_ts, cc_ng_id),
             commit_ts);
     }
     else
@@ -152,11 +153,8 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
             catalog_entry.InitSchema(
                 catalog_image.empty()
                     ? nullptr
-                    : catalog_factory_->CreateTableSchema(table_name,
-                                                          catalog_image,
-                                                          statistics_binary,
-                                                          commit_ts,
-                                                          cc_ng_id),
+                    : catalog_factory_->CreateTableSchema(
+                          table_name, catalog_image, commit_ts, cc_ng_id),
                 commit_ts);
         }
         else
@@ -186,15 +184,12 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     {
         // If catalog entry is not initialized yet, use the old schema image
         // stored in prepare log to restore old schema.
-        catalog_entry.InitSchema(old_catalog_image.empty()
-                                     ? nullptr
-                                     : catalog_factory_->CreateTableSchema(
-                                           table_name,
-                                           old_catalog_image,
-                                           Statistics::EMPTY_STATISTICS_BINARY,
-                                           old_schema_ts,
-                                           cc_ng_id),
-                                 old_schema_ts);
+        catalog_entry.InitSchema(
+            old_catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, old_catalog_image, old_schema_ts, cc_ng_id),
+            old_schema_ts);
     }
     if (catalog_entry.Version() < dirty_schema_ts &&
         catalog_entry.DirtyVersion() < dirty_schema_ts)
@@ -202,13 +197,10 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
-            new_catalog_image.empty() ? nullptr
-                                      : catalog_factory_->CreateTableSchema(
-                                            table_name,
-                                            new_catalog_image,
-                                            Statistics::EMPTY_STATISTICS_BINARY,
-                                            dirty_schema_ts,
-                                            cc_ng_id),
+            new_catalog_image.empty()
+                ? nullptr
+                : catalog_factory_->CreateTableSchema(
+                      table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
@@ -222,7 +214,6 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
-    const std::string &statistics_binary,
     uint64_t commit_ts)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -239,11 +230,8 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
         catalog_entry.SetDirtySchema(
             catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(table_name,
-                                                      catalog_image,
-                                                      statistics_binary,
-                                                      commit_ts,
-                                                      cc_ng_id),
+                : catalog_factory_->CreateTableSchema(
+                      table_name, catalog_image, commit_ts, cc_ng_id),
             commit_ts);
     }
 
@@ -305,7 +293,7 @@ std::vector<TableName> LocalCcShards::GetCatalogTableNamesForCkpt(
                 tables.emplace_back(base_table_name.StringView().data(),
                                     base_table_name.StringView().size(),
                                     base_table_name.Type());
-                for (txservice::TableName &index_table_name :
+                for (const txservice::TableName &index_table_name :
                      catalog_entry.schema_->IndexNames())
                 {
                     tables.emplace_back(index_table_name.StringView().data(),
@@ -326,6 +314,26 @@ void LocalCcShards::CreateSchemaRecoveryTx(
 {
     TransactionExecution *txm = tx_service_->NewTx();
     txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
+}
+
+void LocalCcShards::CreateRemoteStatisticsTx(
+    TableName &&table_or_index_name,
+    uint64_t schema_version,
+    remote::NodeGroupSamplePool &&remote_sample_pool)
+{
+    TransactionExecution *txm = NewTxInit(
+        tx_service_, IsolationLevel::Serializable, CcProtocol::Locking);
+    if (txm)
+    {
+        txm->RemoteStatisticsTx(
+            table_or_index_name, schema_version, remote_sample_pool);
+
+        CommitTxRequest commit_req;
+        commit_req.Reset();
+        txm->Execute(&commit_req);
+        commit_req.Wait();
+        assert(commit_req.Result() == true);
+    }
 }
 
 void LocalCcShards::CreateSplitRangeRecoveryTx(
@@ -355,6 +363,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                              commit_ts,
                              std::move(catalog_cc_entry));
 }
+
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                     std::vector<InitRangeEntry> &init_ranges,
                                     NodeGroupId ng_id,
@@ -412,6 +421,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                       std::move(range_entry.key_),
                                       range_entry.version_ts_,
                                       range_entry.partition_id_,
+                                      range_entry.Bytes(),
                                       std::move(range_slices));
         ids.try_emplace(range_entry.partition_id_, &res.first->second);
     }
@@ -439,6 +449,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                   std::move(last_range_entry.key_),
                                   last_range_entry.version_ts_,
                                   last_range_entry.partition_id_,
+                                  last_range_entry.Bytes(),
                                   std::move(range_slices));
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
@@ -532,6 +543,14 @@ const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
     return GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 }
 
+const TableRangeEntry *LocalCcShards::GetTableRangeEntryNonLocking(
+    const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
+{
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    return GetTableRangeEntryInternal(range_table_name, ng_id, key);
+}
+
 const TableRangeEntry *LocalCcShards::CreateTableRange(
     const TableName &table_name,
     const NodeGroupId ng_id,
@@ -555,10 +574,22 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
             start_key.get(), end_key, partition_id, *this);
         range_slices->InitSlices(*slice_keys);
     }
+
+    uint64_t range_bytes =
+        slice_keys == nullptr
+            ? 0
+            : std::accumulate(
+                  slice_keys->begin(),
+                  slice_keys->end(),
+                  0UL,
+                  [](uint64_t a,
+                     const std::tuple<TxKey::Uptr, uint32_t, SliceStatus> &b)
+                  { return a + std::get<1>(b); });
     auto new_range_entry_pair = ranges->try_emplace(start_key.get(),
                                                     std::move(start_key),
                                                     version,
                                                     partition_id,
+                                                    range_bytes,
                                                     std::move(range_slices));
 
     assert(new_range_entry_pair.second);
@@ -679,6 +710,87 @@ StoreRange *LocalCcShards::FindRange(const TableName &table_name,
     }
 
     return entry->RangeSlices();
+}
+
+uint64_t LocalCcShards::CountRanges(const TableName &table_name,
+                                    const NodeGroupId ng_id,
+                                    const NodeGroupId key_ng_id) const
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
+        table_ranges_.at(range_table_name).at(ng_id);
+    uint64_t counts = std::accumulate(
+        ranges.begin(),
+        ranges.end(),
+        0UL,
+        [key_ng_id](uint64_t a,
+                    const std::pair<const TxKey *const, TableRangeEntry> &b)
+        {
+            int32_t partition_id = b.second.GetRangeInfo()->PartitionId();
+            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+            if (partition_id % ng_cnt == key_ng_id)
+            {
+                return a + 1;
+            }
+            else
+            {
+                return a;
+            }
+        });
+    return counts;
+}
+
+uint64_t LocalCcShards::CountSlices(const TableName &table_name,
+                                    const NodeGroupId ng_id,
+                                    const NodeGroupId local_ng_id) const
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    assert(Sharder::Instance().LeaderTerm(local_ng_id) >= 0 ||
+           Sharder::Instance().CandidateLeaderTerm(local_ng_id) >= 0);
+
+    uint64_t slices = 0;
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
+        table_ranges_.at(range_table_name).at(ng_id);
+
+    for (auto &[range_start_key, range_entry] : ranges)
+    {
+        if (range_entry.GetRangeInfo()->PartitionId() % ng_cnt == local_ng_id)
+        {
+            const StoreRange *store_range = range_entry.RangeSlices();
+            assert(store_range != nullptr);
+            slices += store_range->Slices().size();
+        }
+    }
+
+    return slices;
+}
+
+std::vector<uint64_t> LocalCcShards::AllNodeGroupBytesAtFetchRange(
+    const TableName &table_name, const NodeGroupId ng_id) const
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    std::vector<uint64_t> ng_bytes_vec(ng_cnt, 0);
+
+    const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
+        table_ranges_.at(range_table_name).at(ng_id);
+
+    for (auto &[range_start_key, range_entry] : ranges)
+    {
+        NodeGroupId ng_id = range_entry.GetRangeInfo()->PartitionId() % ng_cnt;
+        ng_bytes_vec.at(ng_id) += range_entry.RangeBytesAtFetch();
+    }
+
+    return ng_bytes_vec;
 }
 
 void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
@@ -847,6 +959,95 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(
 
     auto range_it = ng_it->second.find(range_id);
     return range_it == ng_it->second.end() ? nullptr : range_it->second;
+}
+
+std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    const TableSchema *table_schema)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+
+    auto ng_statistics_it = table_statistics_map_.try_emplace(table_name);
+    auto statistics_it = ng_statistics_it.first->second.try_emplace(ng_id);
+    if (statistics_it.second)
+    {
+        StatisticsEntry &statistics_entry = statistics_it.first->second;
+
+        statistics_entry.statistics_ =
+            catalog_factory_->CreateTableStatistics(table_schema);
+    }
+
+    return {statistics_it.first->second.statistics_.get(),
+            statistics_it.second};
+}
+
+std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    const TableSchema *table_schema,
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        &&sample_pool_map,
+    const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map,
+    CcShard *ccs)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+
+    auto ng_statistics_it = table_statistics_map_.try_emplace(table_name);
+    auto statistics_it = ng_statistics_it.first->second.try_emplace(ng_id);
+    if (statistics_it.second)
+    {
+        StatisticsEntry &statistics_entry = statistics_it.first->second;
+
+        statistics_entry.statistics_ =
+            catalog_factory_->CreateTableStatistics(table_schema,
+                                                    std::move(sample_pool_map),
+                                                    ng_weights_map,
+                                                    ccs,
+                                                    ng_id);
+    }
+
+    return {statistics_it.first->second.statistics_.get(),
+            statistics_it.second};
+}
+
+StatisticsEntry *LocalCcShards::GetTableStatistics(const TableName &table_name,
+                                                   NodeGroupId ng_id)
+{
+    std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
+
+    auto ng_statistics_it = table_statistics_map_.find(table_name);
+    if (ng_statistics_it == table_statistics_map_.end())
+    {
+        return nullptr;
+    }
+
+    auto statistics_it = ng_statistics_it->second.find(ng_id);
+    return statistics_it == ng_statistics_it->second.end()
+               ? nullptr
+               : &statistics_it->second;
+}
+
+void LocalCcShards::CleanTableStatistics(const TableName &table_name)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+
+    auto ng_statistics_it = table_statistics_map_.find(table_name);
+    if (ng_statistics_it != table_statistics_map_.end())
+    {
+        table_statistics_map_.erase(ng_statistics_it);
+    }
+}
+
+void LocalCcShards::DropTableStatistics(NodeGroupId ng_id)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    for (auto ng_statistics_it = table_statistics_map_.begin();
+         ng_statistics_it != table_statistics_map_.end();
+         ++ng_statistics_it)
+    {
+        ng_statistics_it->second.erase(ng_id);
+    }
 }
 
 }  // namespace txservice

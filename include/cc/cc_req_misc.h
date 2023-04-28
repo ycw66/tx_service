@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 
 #include "cc_req_base.h"
 #include "range_record.h"
@@ -49,11 +51,6 @@ public:
         return catalog_image_;
     }
 
-    std::string &StatisticsBinary()
-    {
-        return statistics_binary_;
-    }
-
     uint64_t &CommitTs()
     {
         return commit_ts_;
@@ -69,9 +66,70 @@ public:
 private:
     const TableName table_name_;
     std::string catalog_image_;
-    std::string statistics_binary_;
     uint64_t commit_ts_;
     RecordStatus status_;
+    int error_code_{0};
+};
+
+struct FetchTableStatisticsCc : public FetchCc
+{
+public:
+    FetchTableStatisticsCc() = delete;
+    FetchTableStatisticsCc(const TableName &table_name,
+                           CcShard &ccs,
+                           NodeGroupId cc_ng_id);
+    ~FetchTableStatisticsCc() = default;
+
+    bool Execute(CcShard &ccs) override;
+
+    const TableName &CatalogName() const
+    {
+        return table_name_;
+    }
+
+    void SetCurrentVersion(uint64_t current_version)
+    {
+        current_version_ = current_version;
+    }
+
+    uint64_t CurrentVersion() const
+    {
+        return current_version_;
+    }
+
+    void SamplePoolMergeFrom(const TableName &table_or_index_name,
+                             std::vector<TxKey::Uptr> &&samplekeys)
+    {
+        for (TxKey::Uptr &samplekey : samplekeys)
+        {
+            sample_pool_map_[table_or_index_name].second.emplace_back(
+                std::move(samplekey));
+        }
+    }
+
+    void SetRecords(const TableName &table_or_index_name, uint64_t records)
+    {
+        sample_pool_map_[table_or_index_name].first = records;
+    }
+
+    void SetStoreHandler(store::DataStoreHandler *store_hd)
+    {
+        store_hd_ = store_hd;
+    }
+
+    store::DataStoreHandler *StoreHandler()
+    {
+        return store_hd_;
+    }
+
+    void SetFinish(int err);
+
+private:
+    const TableName table_name_;
+    store::DataStoreHandler *store_hd_{nullptr};
+    uint64_t current_version_{0};
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        sample_pool_map_;
     int error_code_{0};
 };
 

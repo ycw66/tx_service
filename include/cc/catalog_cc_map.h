@@ -188,12 +188,20 @@ public:
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                req.NodeGroupId(),
                                                schema_rec->DirtySchemaImage(),
-                                               schema_rec->StatisticsBinary(),
                                                req.CommitTs());
 
                 schema_rec->Set(catalog_entry->schema_,
                                 catalog_entry->dirty_schema_.get(),
                                 catalog_entry->Version());
+
+                if (req.OpType() == OperationType::AddIndex)
+                {
+                    Statistics *statistics =
+                        catalog_entry->schema_->StatisticsObject();
+                    catalog_entry->dirty_schema_->BindStatistics(statistics);
+                    statistics->ResetTableSchema(
+                        catalog_entry->dirty_schema_.get());
+                }
             }
             else
             {
@@ -281,6 +289,28 @@ public:
                 schema_rec->Set(catalog_entry->dirty_schema_,
                                 nullptr,
                                 catalog_entry->DirtyVersion());
+
+                if (req.OpType() == OperationType::CreateTable)
+                {
+                    auto [statistics, inserted] = shard_->InitTableStatistics(
+                        table_key->Name(),
+                        req.NodeGroupId(),
+                        catalog_entry->dirty_schema_.get());
+                    catalog_entry->dirty_schema_->BindStatistics(statistics);
+                }
+                else if (req.OpType() == OperationType::AddIndex)
+                {
+                    // Already rebind statistics and table schema at
+                    // PrepareCommit stage
+                }
+                else if (req.OpType() == OperationType::DropIndex)
+                {
+                    Statistics *statistics =
+                        catalog_entry->schema_->StatisticsObject();
+                    statistics->ResetTableSchema(
+                        catalog_entry->dirty_schema_.get());
+                    catalog_entry->dirty_schema_->BindStatistics(statistics);
+                }
             }
             else
             {
@@ -562,11 +592,39 @@ public:
                                 TableType::RangePartition};
                             shard_->CleanTableRange(old_index_range_table_name,
                                                     req.NodeGroupId());
+                            // Rebind table statistics and table schema
+                            Statistics *statistics =
+                                old_schema->StatisticsObject();
+                            statistics->DropIndex(old_index_name);
                         }
                     }
                 }
             }
 #endif
+
+            if (req.OpType() == OperationType::DropTable)
+            {
+                shard_->CleanTableStatistics(table_key->Name());
+            }
+            else if (req.OpType() == OperationType::DropIndex)
+            {
+                std::vector<TableName> new_index_names =
+                    new_schema->IndexNames();
+                std::vector<TableName> old_index_names =
+                    old_schema->IndexNames();
+                for (const TableName &old_index_name : old_index_names)
+                {
+                    // Drop old index range table if not exist any more
+                    if (std::find(new_index_names.begin(),
+                                  new_index_names.end(),
+                                  old_index_name) == new_index_names.end())
+                    {
+                        // Rebind table statistics and table schema
+                        Statistics *statistics = old_schema->StatisticsObject();
+                        statistics->DropIndex(old_index_name);
+                    }
+                }
+            }
             shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
         }
 
@@ -630,6 +688,57 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
+                    {
+                        // Initialize table statistics
+#ifdef RANGE_PARTITION_ENABLED
+                        // Initialize table ranges before create table
+                        // statistics.
+                        TableName base_range_table_name{
+                            table_key->Name().StringView(),
+                            TableType::RangePartition};
+                        auto ranges = shard_->GetTableRangesForATable(
+                            base_range_table_name, req.NodeGroupId());
+                        if (ranges == nullptr)
+                        {
+                            shard_->FetchTableRanges(
+                                base_range_table_name,
+                                catalog_entry->schema_->GetKVCatalogInfo(),
+                                &req,
+                                req.NodeGroupId());
+                            return false;
+                        }
+                        for (const TableName &index_name :
+                             catalog_entry->schema_->IndexNames())
+                        {
+                            TableName index_range_table_name{
+                                index_name.StringView(),
+                                TableType::RangePartition};
+                            auto ranges = shard_->GetTableRangesForATable(
+                                index_range_table_name, req.NodeGroupId());
+                            if (ranges == nullptr)
+                            {
+                                shard_->FetchTableRanges(
+                                    index_range_table_name,
+                                    catalog_entry->schema_->GetKVCatalogInfo(),
+                                    &req,
+                                    req.NodeGroupId());
+                                return false;
+                            }
+                        }
+#endif
+                        // Initialize table statistics before create ccmap.
+                        const StatisticsEntry *statistics_entry =
+                            shard_->GetTableStatistics(table_key->Name(),
+                                                       req.NodeGroupId());
+                        if (statistics_entry == nullptr ||
+                            statistics_entry->statistics_ == nullptr)
+                        {
+                            shard_->FetchTableStatistics(
+                                table_key->Name(), req.NodeGroupId(), &req);
+                            return false;
+                        }
+                    }
+
                     shard_->CreateOrUpdatePkCcMap(table_key->Name(),
                                                   catalog_entry->schema_.get(),
                                                   req.NodeGroupId(),
@@ -767,7 +876,6 @@ public:
                     req.NodeGroupId(),
                     commit_ts > 0 ? schema_op_msg.new_catalog_blob()
                                   : schema_op_msg.old_catalog_blob(),
-                    Statistics::EMPTY_STATISTICS_BINARY,
                     commit_ts > 0 ? commit_ts : schema_op_msg.catalog_ts());
 
                 assert(new_catalog_entry != nullptr);

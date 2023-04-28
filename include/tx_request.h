@@ -386,6 +386,22 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_id_;
 };
 
+struct AnalyzeTableTxRequest
+    : public TemplateTxRequest<AnalyzeTableTxRequest, Void>
+{
+    AnalyzeTableTxRequest(const TableName *table_name = nullptr)
+        : table_name_(table_name)
+    {
+    }
+
+    void Set(const TableName *table_name)
+    {
+        table_name_ = table_name;
+    }
+
+    const TableName *table_name_{nullptr};
+};
+
 struct FaultInjectTxRequest
     : public TemplateTxRequest<FaultInjectTxRequest, bool>
 {

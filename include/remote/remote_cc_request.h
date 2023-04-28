@@ -528,6 +528,37 @@ private:
     friend class RemoteCcHandler;
 };
 
+struct RemoteAnalyzeTableAllCc : public AnalyzeTableAllCc
+{
+public:
+    RemoteAnalyzeTableAllCc();
+    RemoteAnalyzeTableAllCc(const RemoteAnalyzeTableAllCc &rhs) = delete;
+    RemoteAnalyzeTableAllCc(RemoteAnalyzeTableAllCc &&rhs) = delete;
+
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
+    CcHandlerResult<Void> cc_res_{nullptr};
+
+    friend class RemoteCcHandler;
+};
+
 struct RemoteCleanCcEntryForTestCc : public CleanCcEntryForTestCc
 {
 public:

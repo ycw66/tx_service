@@ -263,7 +263,6 @@ TxRecord::Uptr CatalogRecord::Clone() const
     rec->schema_ts_ = schema_ts_;
     rec->schema_image_ = schema_image_;
     rec->dirty_schema_image_ = dirty_schema_image_;
-    rec->statistics_binary_ = statistics_binary_;
 
     return rec;
 }
@@ -331,21 +330,6 @@ std::shared_ptr<const TableSchema> CatalogRecord::CopySchema()
 const TableSchema *CatalogRecord::DirtySchema() const
 {
     return dirty_schema_;
-}
-
-const std::string &CatalogRecord::StatisticsBinary() const
-{
-    return statistics_binary_;
-}
-
-void CatalogRecord::SetStatisticsBinary(const std::string &statistics_binary)
-{
-    statistics_binary_ = statistics_binary;
-}
-
-void CatalogRecord::SetStatisticsBinary(std::string &&statistics_binary)
-{
-    statistics_binary_ = std::move(statistics_binary);
 }
 
 void CatalogRecord::ClearDirtySchema()

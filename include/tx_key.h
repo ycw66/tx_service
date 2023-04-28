@@ -1,5 +1,7 @@
 #pragma once
 
+#include <assert.h>
+
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -79,7 +81,7 @@ public:
                                  const TxKey &min_key,
                                  const TxKey &max_key) const
     {
-        assert(min_key < max_key);
+        assert(min_key <= max_key);
 
         if (*this <= min_key)
         {
@@ -506,41 +508,6 @@ struct VoidKey : public TxKey
     {
         return 0;
     }
-};
-
-// PositiveInfinity<KeyT> and NegativeInfinity<KeyT> are both singleton
-// instance. But KeyT can be copyable/movable. When put them together, a wrapper
-// is required.
-template <typename KeyT>
-class MaybeInfinityKey
-{
-public:
-    void Set(const PositiveInfinity<KeyT> *key)
-    {
-        key_ = key;
-        ukey_.reset(nullptr);
-    }
-
-    void Set(const NegativeInfinity<KeyT> *key)
-    {
-        key_ = key;
-        ukey_.reset(nullptr);
-    }
-
-    void Set(std::unique_ptr<KeyT> &&ukey)
-    {
-        ukey_ = std::move(ukey);
-        key_ = ukey_.get();
-    }
-
-    const KeyT *Key() const
-    {
-        return key_;
-    }
-
-private:
-    const KeyT *key_{nullptr};
-    std::unique_ptr<KeyT> ukey_{nullptr};
 };
 
 }  // namespace txservice

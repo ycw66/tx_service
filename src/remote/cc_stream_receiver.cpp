@@ -6,6 +6,7 @@
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "tx_execution.h"
 #include "tx_trace.h"
 
@@ -26,6 +27,7 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanSlice> scan_slice_pool;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
+thread_local CcRequestPool<RemoteAnalyzeTableAllCc> analyze_table_all_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
 thread_local CcRequestPool<RemoteAbortTransactionCc> abort_tran_pool_;
@@ -1000,6 +1002,46 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         msg_pool_.enqueue(std::move(msg));
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllRequest:
+    {
+        RemoteAnalyzeTableAllCc *analyze_req =
+            analyze_table_all_pool_.NextRequest();
+        analyze_req->Reset(std::move(msg));
+        TX_TRACE_ASSOCIATE(msg.get(), clean_req);
+        uint32_t shard_code = txservice::Statistics::ShardCode(
+            analyze_req->GetTableName()->GetBaseTableNameSV());
+        local_shards_.EnqueueCcRequest(shard_code, analyze_req);
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllResponse:
+    {
+        assert(msg->has_analyze_table_all_resp());
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        CcHandlerResult<Void> *hd_res =
+            reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+
+        const AnalyzeTableAllResponse &analyze_resp =
+            msg->analyze_table_all_resp();
+        if (analyze_resp.error_code() != 0)
+        {
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(analyze_resp.error_code()));
+        }
+        else
+        {
+            hd_res->SetRemoteFinished();
+        }
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
     case CcMessage::MessageType::
         CcMessage_MessageType_CleanCcEntryForTestRequest:
     {
@@ -1109,18 +1151,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::
         CcMessage_MessageType_BroadcastStatisticsRequest:
     {
-        const BroadcastStatisticsRequest &req = msg->broadcast_statistics_req();
-        TableName table_name(req.table_name_str(), TableType::Primary);
-        NodeGroupId node_group_id = req.node_group_id();
-        const std::string &statistics_binary = req.statistics_binary();
+        // Here we can't verify whether the msg was sent from a valid leader.
+        // And if it was sent from a invalid leader, the valid leader will
+        // overwrite it with correct sample pool later.
 
-        const CatalogEntry *catalog_entry =
-            local_shards_.GetCatalog(table_name, node_group_id);
-        if (catalog_entry)
-        {
-            catalog_entry->schema_->StatisticsObject()->Reset(statistics_binary,
-                                                              true);
-        }
+        TableType table_type = ToLocalType::ConvertCcTableType(
+            msg->broadcast_statistics_req().table_type());
+        std::string table_name_str =
+            msg->broadcast_statistics_req().table_name_str();
+
+        TableName table_name(std::move(table_name_str), table_type);
+        uint64_t schema_version =
+            msg->broadcast_statistics_req().schema_version();
+
+        remote::NodeGroupSamplePool remote_sample_pool =
+            msg->broadcast_statistics_req().node_group_sample_pool();
+
+        Sharder::Instance().GetTxWorkerPool()->SubmitWork(
+            [this,
+             table_name = std::move(table_name),
+             schema_version,
+             remote_sample_pool = std::move(remote_sample_pool)]() mutable
+            {
+                local_shards_.CreateRemoteStatisticsTx(
+                    std::move(table_name),
+                    schema_version,
+                    std::move(remote_sample_pool));
+            });
+
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionRequest:

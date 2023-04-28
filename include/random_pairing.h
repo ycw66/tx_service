@@ -7,84 +7,67 @@
 #include <assert.h>
 
 #include <algorithm>
-#include <functional>
 #include <random>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "tx_key.h"
+#include "type.h"
 
 namespace txservice
 {
-template <typename KeyT>
+template <uint32_t CapacityN, typename KeyT, typename CopyKey>
 class RandomPairing
 {
 public:
-    struct Hash
+    RandomPairing() = default;
+
+    template <template <typename K> class Collection>
+    explicit RandomPairing(const Collection<KeyT> &keys)
     {
-        std::size_t operator()(const KeyT &key) const
+        assert(keys.size() <= CapacityN);
+        sample_pool_.reserve(CapacityN);
+
+        for (const KeyT &key : keys)
         {
-            return key.Hash();
-        }
-    };
-
-public:
-    explicit RandomPairing(int32_t capacity) : capacity_(capacity)
-    {
-        assert(capacity > 0);
-        sample_pool_map_.reserve(capacity + 1);
-    }
-
-    template <typename Iterator>
-    RandomPairing(
-        int32_t capacity, int32_t c1, int32_t c2, Iterator begin, Iterator end)
-        : capacity_(capacity), c1_(c1), c2_(c2)
-    {
-        assert(capacity > 0);
-        sample_pool_map_.reserve(capacity + 1);
-
-        for (Iterator iter = begin; iter != end; ++iter)
-        {
-            Insert(*iter);
+            Insert(key);
         }
     }
 
-    void Insert(const KeyT &key, int64_t dataset)
+    void Insert(const KeyT &key, uint64_t dataset)
     {
         if (c1_ + c2_ <= 0)
         {
-            if (static_cast<int32_t>(sample_pool_vec_.size()) < capacity_)
+            if (static_cast<uint32_t>(sample_pool_.size()) < CapacityN)
             {
                 Insert(key);
+                std::is_sorted(sample_pool_.begin(), sample_pool_.end());
             }
             else
             {
-                std::uniform_int_distribution<int64_t> random_dis(0,
-                                                                  dataset - 1);
-                int64_t random = random_dis(random_dev_);
-                if (random < capacity_)
+                std::uniform_int_distribution<uint64_t> random_dis(0,
+                                                                   dataset - 1);
+                uint64_t random = random_dis(random_dev_);
+                if (random < CapacityN)
                 {
-                    auto [iter, insert] = sample_pool_map_.emplace(key, random);
-                    if (insert)
-                    {
-                        sample_pool_map_.erase(sample_pool_vec_[random]);
-                        sample_pool_vec_[random] = iter;
-                    }
+                    Replace(random, key);
+                    std::is_sorted(sample_pool_.begin(), sample_pool_.end());
                 }
             }
         }
         else
         {
-            std::uniform_int_distribution<int64_t> random_dis(0, c1_ + c2_ - 1);
-            int64_t random = random_dis(random_dev_);
+            std::uniform_int_distribution<uint64_t> random_dis(0,
+                                                               c1_ + c2_ - 1);
+            uint64_t random = random_dis(random_dev_);
 
             if (random < c1_)
             {
+                assert(sample_pool_.size() < CapacityN);
                 assert(c1_ > 0);
                 c1_ -= 1;
 
                 Insert(key);
+                std::is_sorted(sample_pool_.begin(), sample_pool_.end());
             }
             else
             {
@@ -96,19 +79,24 @@ public:
 
     void Delete(const KeyT &key)
     {
-        auto iter = sample_pool_map_.find(key);
-        if (iter != sample_pool_map_.end())
+        auto iter =
+            std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
+        if (iter != sample_pool_.end() && *iter == key)
         {
             c1_ += 1;
 
-            size_t index = iter->second;
+            while (iter != sample_pool_.end() - 1)
+            {
+                CopyKey()(*iter, *(iter + 1));
+                // iter->Copy(*(iter + 1));
+                iter++;
+            }
 
-            std::swap(sample_pool_vec_[index], sample_pool_vec_.back());
+            sample_pool_.resize(sample_pool_.size() - 1);
 
-            sample_pool_vec_[index]->second = index;
-            sample_pool_vec_.resize(sample_pool_vec_.size() - 1);
+            std::is_sorted(sample_pool_.begin(), sample_pool_.end());
 
-            sample_pool_map_.erase(iter);
+            assert(sample_pool_.size() < CapacityN);
         }
         else
         {
@@ -116,84 +104,101 @@ public:
         }
     }
 
-    std::vector<const KeyT *> SamplePool() const
+    const std::vector<KeyT> &SampleKeys() const
     {
-        std::vector<const KeyT *> vec;
-        for (const auto &[key, index] : sample_pool_map_)
-        {
-            vec.push_back(&key);
-        }
-        std::sort(vec.begin(), vec.end(), PtrLessThan<KeyT>());
-        return vec;
+        return sample_pool_;
     }
 
-    size_t Size() const
+    uint64_t Size() const
     {
-        return sample_pool_vec_.size();
+        return sample_pool_.size();
+    }
+
+    static uint32_t Capacity()
+    {
+        return CapacityN;
     }
 
     void Clear()
     {
+        ClearCounter();
+        sample_pool_.clear();
+    }
+
+    void ClearCounter()
+    {
         c1_ = 0;
         c2_ = 0;
-
-        sample_pool_vec_.clear();
-        sample_pool_vec_.reserve(0);
-        sample_pool_map_.clear();
-        sample_pool_map_.reserve(capacity_ + 1);
-    }
-
-    int32_t Capacity() const
-    {
-        return capacity_;
-    }
-
-    int32_t C1() const
-    {
-        return c1_;
-    }
-
-    int32_t C2() const
-    {
-        return c2_;
     }
 
 private:
     void Insert(const KeyT &key)
     {
-        auto [iter, insert] =
-            sample_pool_map_.emplace(key, sample_pool_vec_.size());
+        assert(sample_pool_.size() < CapacityN);
 
-        // Here should have a assert.
-        //
-        // assert(insert);
-        //
-        // But system table in Mariadb store in Aria engine in past. Aria don't
-        // distinguish between insert and update. So for system table, key may
-        // be inserted multiple times.
+        auto iter =
+            std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
 
-        if (insert)
+        if (iter != sample_pool_.end())
         {
-            sample_pool_vec_.push_back(iter);
+            if (key < *iter)
+            {
+                uint64_t i = std::distance(sample_pool_.begin(), iter);
+                sample_pool_.resize(sample_pool_.size() + 1);
+
+                for (uint64_t j = sample_pool_.size() - 1; j > i; --j)
+                {
+                    // sample_pool_[j].Copy(sample_pool_[j - 1]);
+                    CopyKey()(sample_pool_[j], sample_pool_[j - 1]);
+                }
+
+                // sample_pool_[i].Copy(key);
+                CopyKey()(sample_pool_[i], key);
+            }
+        }
+        else
+        {
+            sample_pool_.push_back(key);
+        }
+
+        assert(sample_pool_.size() <= CapacityN);
+    }
+
+    void Replace(uint64_t random, const KeyT &key)
+    {
+        auto iter =
+            std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
+        if (iter != sample_pool_.end() && *iter == key)
+        {
+            return;
+        }
+
+        CopyKey()(sample_pool_[random], key);
+
+        for (uint64_t i = random; i < sample_pool_.size() - 1 &&
+                                  sample_pool_[i + 1] < sample_pool_[i];
+             ++i)
+        {
+            std::swap(sample_pool_[i], sample_pool_[i + 1]);
+        }
+
+        for (uint64_t i = random;
+             i > 0 && sample_pool_[i] < sample_pool_[i - 1];
+             --i)
+        {
+            std::swap(sample_pool_[i], sample_pool_[i - 1]);
         }
     }
 
 private:
-    // upper bound on sample size
-    int32_t capacity_{0};
-
     // no. of deletions which have been in the sample
-    int32_t c1_{0};
+    uint32_t c1_{0};
 
     // no. of deletions which have not been in the sample
-    int32_t c2_{0};
+    uint32_t c2_{0};
 
-    // for erase a given key
-    std::unordered_map<KeyT, size_t, Hash> sample_pool_map_;
-
-    // for random discard one key
-    std::vector<typename std::unordered_map<KeyT, size_t, Hash>::iterator>
-        sample_pool_vec_;
+    // order array
+    std::vector<KeyT> sample_pool_;
 
     std::mt19937_64 random_dev_;
 };

@@ -12,10 +12,12 @@
 #include "local_cc_shards.h"
 #include "scan.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_trace.h"
+#include "tx_util.h"
 #include "type.h"
 #include "util.h"
 
@@ -60,6 +62,7 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       post_process_(this),
       write_log_(this),
       sleep_op_(this),
+      analyze_table_all_op_(this),
       fault_inject_op_(this),
       clean_entry_op_(this),
       abundant_lock_op_(this)
@@ -253,6 +256,36 @@ void TransactionExecution::RecoverSchemaTx(
     default:
         tx_status_.store(TxnStatus::Finished);
         break;
+    }
+}
+
+void TransactionExecution::RemoteStatisticsTx(
+    const TableName &table_or_index_name,
+    uint64_t schema_version,
+    const remote::NodeGroupSamplePool &remote_sample_pool)
+{
+    TableName base_table_name(table_or_index_name.GetBaseTableNameSV(),
+                              TableType::Primary);
+    CatalogKey catalog_key(base_table_name);
+    CatalogRecord catalog_rec;
+    ReadTxRequest read_req(&txservice::catalog_ccm_name,
+                           &catalog_key,
+                           &catalog_rec,
+                           false,
+                           false,
+                           true);
+
+    bool exists = false;
+    bool ok = TxReadCatalog(this, read_req, exists);
+    if (ok && exists)
+    {
+        const TableSchema *table_schema = catalog_rec.Schema();
+        if (table_schema->Version() == schema_version)
+        {
+            Statistics *statistics = table_schema->StatisticsObject();
+            statistics->OnRemoteStatisticsMessage(table_or_index_name,
+                                                  remote_sample_pool);
+        }
     }
 }
 
@@ -720,6 +753,33 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
 
     PushOperation(split_flush_op_.get());
     Forward();
+}
+
+void TransactionExecution::ProcessTxRequest(AnalyzeTableTxRequest &analyze_req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &analyze_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_))
+                .append("\"table_name\":")
+                .append(analyze_req.table_name_->String());
+        });
+
+    void_resp_ = &analyze_req.tx_result_;
+    void_resp_->Reset();
+
+    analyze_table_all_op_.analyze_tx_req_ = &analyze_req;
+
+    uint32_t hres_ref_cnt = Sharder::Instance().NodeGroupCount();
+    analyze_table_all_op_.Reset(hres_ref_cnt);
+
+    PushOperation(&analyze_table_all_op_);
+    Process(analyze_table_all_op_);
 }
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
@@ -1928,7 +1988,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 
 #ifdef RANGE_PARTITION_ENABLED
-    if (scan_batch.empty())
+    if (scanner.Type() == CcmScannerType::RangePartition && scan_batch.empty())
     {
         ScanDirection dir = scan_next.Direction();
         SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
@@ -3219,6 +3279,65 @@ void TransactionExecution::PostProcess(CleanCcEntryForTestOp &clean_entry_op)
 
     bool_resp_->Finish(clean_entry_op.succeed_);
     Forward();
+}
+
+void TransactionExecution::Process(AnalyzeTableAllOp &analyze_table_all_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &analyze_table_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    analyze_table_all_op.is_running_ = true;
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        handler->AnalyzeTableAll(
+            *analyze_table_all_op.analyze_tx_req_->table_name_,
+            ng_id,
+            TxNumber(),
+            TxTerm(),
+            CommandId(),
+            analyze_table_all_op.hd_result_);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &analyze_table_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (analyze_table_all_op.hd_result_.IsError())
+    {
+        DLOG(INFO) << "AnalyzeTableAllOp FinishError for cc error: "
+                   << analyze_table_all_op.hd_result_.ErrorMsg();
+        void_resp_->FinishError(
+            ConvertCcError(analyze_table_all_op.hd_result_.ErrorCode()));
+    }
+    else
+    {
+        void_resp_->Finish(void_);
+    }
 }
 
 template <typename ResultType>

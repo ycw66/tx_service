@@ -357,8 +357,8 @@ message ScanNextResponse {
 message ScanSliceRequest {
 	uint32 src_node_id = 1;
 	uint32 node_group_id = 2;
-	// The term of the node group the scan targets. 
-	// -1, if the to-scan slice is the first in the remote node 
+	// The term of the node group the scan targets.
+	// -1, if the to-scan slice is the first in the remote node
 	// (and therefore its term is unknown).
 	int64 cc_ng_term = 3;
 	string table_name_str = 4;
@@ -394,6 +394,18 @@ message FaultInjectResponse {
   int32 error_code = 1;
 }
 
+message AnalyzeTableAllRequest {
+  uint32 src_node_id = 1;
+  uint32 node_group_id = 2;
+  string table_name_str = 3;
+  CcTableType table_type = 4;
+  repeated uint32 sample_range_ids = 5;
+}
+
+message AnalyzeTableAllResponse {
+  int32 error_code = 1;
+}
+
 message CleanCcEntryForTestRequest {
   uint32 src_node_id = 1;
   string table_name_str = 2;
@@ -418,11 +430,31 @@ message RecoverStateCheckResponse {
   uint32 node_group_id = 2;
 }
 
+message NodeGroupSamplePool
+{
+  uint32 ng_id = 1;
+  uint64 records = 2;
+  repeated bytes samples = 3;
+}
+
+message IndexStatistics {
+  CcTableType table_type = 1;
+  string table_name = 2;
+  uint64 total_keys = 3;
+  repeated bytes samples = 4;
+}
+
+message Statistics {
+  repeated IndexStatistics index_statistics_list = 1;
+}
+
 message BroadcastStatisticsRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	string table_name_str = 3;
-	bytes statistics_binary = 4;
+  uint32 src_node_id = 1;
+  uint32 node_group_id = 2;
+  CcTableType table_type = 3;
+  string table_name_str = 4;
+  uint64 schema_version = 5;
+  NodeGroupSamplePool node_group_sample_pool = 6;
 }
 
 message BlockEntry {
@@ -442,11 +474,11 @@ message TxEntrys {
   //The total number of entry locked by this transaction in this node
   uint32 ety_count = 2;
 }
-	
+
 message DeadLockRequest {
   uint32 src_node_id = 1;
 }
-	
+
 message DeadLockResponse {
   // The source node id
   uint32 node_id = 1;
@@ -473,7 +505,7 @@ message BlockedCcReqCheckRequest {
 	uint32 src_node_id = 1;
 	uint32 node_group_id = 2;
 	CceAddr_msg cce_addr = 3;
-	// CcHandlerResult template type 
+	// CcHandlerResult template type
 	uint32 result_temp_type = 4;
 }
 
@@ -481,7 +513,7 @@ message BlockedCcReqCheckResponse {
 	// To return the status of cc_request varified.
     // Value from AckStatus
 	int32 req_status = 1;
-	// CcHandlerResult template type 
+	// CcHandlerResult template type
 	uint32 result_temp_type = 2;
 }
 
@@ -520,6 +552,8 @@ message CcMessage {
 		BlockedCcReqCheckRequest = 41;
     	BlockedCcReqCheckResponse = 42;
 		ForwardPostCommitRequest = 43;
+        AnalyzeTableAllRequest = 44;
+        AnalyzeTableAllResponse = 45;
 	}
 
 	MessageType type = 1;
@@ -561,5 +595,7 @@ message CcMessage {
 		BlockedCcReqCheckRequest blocked_check_req = 49;
 		BlockedCcReqCheckResponse blocked_check_resp = 50;
 		ForwardPostCommitRequest forward_post_commit_req = 51;
+        AnalyzeTableAllRequest analyze_table_all_req = 52;
+        AnalyzeTableAllResponse analyze_table_all_resp = 53;
 	}
 }

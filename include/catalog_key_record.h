@@ -206,10 +206,6 @@ public:
     void ClearDirtySchema();
     uint64_t SchemaTs() const;
 
-    const std::string &StatisticsBinary() const;
-    void SetStatisticsBinary(const std::string &statistics_binary);
-    void SetStatisticsBinary(std::string &&statistics_binary);
-
     CatalogRecord &operator=(const CatalogRecord &rhs);
 
     size_t Size() const override
@@ -232,10 +228,6 @@ public:
         if (dirty_schema_image_.capacity() >= 16)
         {
             mem_usage += dirty_schema_image_.capacity();
-        }
-        if (statistics_binary_.capacity() >= 16)
-        {
-            mem_usage += statistics_binary_.capacity();
         }
         return mem_usage;
     }
@@ -260,6 +252,5 @@ private:
     uint64_t schema_ts_{0};
     std::string schema_image_{""};
     std::string dirty_schema_image_{""};
-    std::string statistics_binary_{""};
 };
 }  // namespace txservice

@@ -134,7 +134,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
             // put the failed message into the resend_message_list.
             auto resend_message_list = resend_message_list_.try_emplace(
                 dest_node_id,
-                std::move(moodycamel::ConcurrentQueue<ResendMessage::Uptr>()));
+                moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
             resend_message_list.first->second.enqueue(
                 std::make_unique<ResendMessage>(msg, res));
 

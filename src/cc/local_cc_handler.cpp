@@ -7,6 +7,7 @@
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
+#include "statistics.h"
 #include "tx_record.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
@@ -1178,6 +1179,35 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 {
     cc_shards_.store_hd_->UpsertTable(
         schema, op_type, commit_ts, &hres, alter_table_info);
+}
+
+void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
+                                                NodeGroupId ng_id,
+                                                TxNumber tx_number,
+                                                int64_t tx_term,
+                                                uint16_t command_id,
+                                                CcHandlerResult<Void> &hres)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.NodeId())
+    {
+        uint32_t shard_code =
+            Statistics::ShardCode(table_name.GetBaseTableNameSV());
+        AnalyzeTableAllCc *req = analyze_table_all_pool.NextRequest();
+        req->Reset(&table_name, ng_id, tx_number, &hres);
+        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+    }
+    else
+    {
+        hres.IncrementRemoteRef();
+        remote_hd_.AnalyzeTableAll(cc_shards_.node_id_,
+                                   table_name,
+                                   ng_id,
+                                   tx_number,
+                                   tx_term,
+                                   command_id,
+                                   hres);
+    }
 }
 
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,

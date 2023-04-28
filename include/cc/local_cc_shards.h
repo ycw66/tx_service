@@ -40,6 +40,7 @@ public:
                   uint16_t core_cnt = 1,
                   uint32_t memory_limit_mb = 1000,
                   uint32_t log_limit_mb = 1000,
+                  bool realtime_sampling = false,
                   CatalogFactory *catalog_factory = nullptr,
                   store::DataStoreHandler *store_hd = nullptr,
                   metrics::MetricsRegistry *metrics_registry = nullptr,
@@ -50,6 +51,7 @@ public:
                   uint16_t core_cnt = 1,
                   uint32_t memory_limit_mb = 1000,
                   uint32_t log_limit_mb = 1000,
+                  bool realtime_sampling = false,
                   CatalogFactory *catalog_factory = nullptr,
                   store::DataStoreHandler *store_hd = nullptr,
                   TxService *tx_service = nullptr,
@@ -263,13 +265,11 @@ public:
         const TableName &table_name,
         NodeGroupId cc_ng_id,
         const std::string &catalog_image,
-        const std::string &statistics_binary,
         uint64_t commit_ts);
 
     CatalogEntry *CreateDirtyCatalog(const TableName &table_name,
                                      NodeGroupId cc_ng_id,
                                      const std::string &catalog_image,
-                                     const std::string &statistics_binary,
                                      uint64_t commit_ts);
 
     /**
@@ -309,6 +309,11 @@ public:
                                 uint64_t txn,
                                 int64_t tx_term,
                                 uint64_t commit_ts);
+
+    void CreateRemoteStatisticsTx(
+        TableName &&table_or_index_name,
+        uint64_t schema_version,
+        remote::NodeGroupSamplePool &&remote_sample_pool);
 
     /**
      * ---------------------------------
@@ -389,6 +394,9 @@ public:
                                               const NodeGroupId ng_id,
                                               int32_t range_id);
 
+    const TableRangeEntry *GetTableRangeEntryNonLocking(
+        const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
+
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
                                const Schema *key_schema,
@@ -419,6 +427,17 @@ public:
     StoreRange *FindRange(const TableName &table_name,
                           const NodeGroupId ng_id,
                           const TxKey &key);
+
+    uint64_t CountRanges(const TableName &table_name,
+                         const NodeGroupId ng_id,
+                         const NodeGroupId key_ng_id) const;
+
+    uint64_t CountSlices(const TableName &table_name,
+                         const NodeGroupId ng_id,
+                         const NodeGroupId local_ng_id) const;
+
+    std::vector<uint64_t> AllNodeGroupBytesAtFetchRange(
+        const TableName &table_name, const NodeGroupId ng_id) const;
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
@@ -463,6 +482,29 @@ public:
     bool KickoutRangeSlice(const TableName &tbl_name,
                            const NodeGroupId ng_id,
                            const TxKey &key);
+
+    std::pair<Statistics *, bool> InitTableStatistics(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        const TableSchema *table_schema);
+
+    std::pair<Statistics *, bool> InitTableStatistics(
+        const TableName &table_name,
+        NodeGroupId ng_id,
+        const TableSchema *table_schema,
+        std::unordered_map<TableName,
+                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+            &&sample_pool_map,
+        const std::unordered_map<TableName, std::vector<uint64_t>>
+            &ng_weights_map,
+        CcShard *ccs);
+
+    StatisticsEntry *GetTableStatistics(const TableName &table_name,
+                                        NodeGroupId ng_id);
+
+    void CleanTableStatistics(const TableName &table_name);
+
+    void DropTableStatistics(NodeGroupId ng_id);
 
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
@@ -535,8 +577,12 @@ private:
                            std::unordered_map<uint32_t, TableRangeEntry *>>>
         table_range_ids_;
 
+    std::unordered_map<TableName,
+                       std::unordered_map<NodeGroupId, StatisticsEntry>>
+        table_statistics_map_;
+
     // Protects meta data (table_ranges_ and table_catalogs_)
-    std::shared_mutex meta_data_mux_;
+    mutable std::shared_mutex meta_data_mux_;
 
     TxService *tx_service_;
 

@@ -663,6 +663,35 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     stream_sender_.SendMessageToNg(node_id, send_msg, &hres);
 }
 
+void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
+    uint32_t src_node_id,
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<Void> &hres)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_tx_number(tx_number);
+
+    AnalyzeTableAllRequest *analyze_req =
+        send_msg.mutable_analyze_table_all_req();
+    analyze_req->set_src_node_id(src_node_id);
+    analyze_req->set_node_group_id(ng_id);
+    analyze_req->set_table_name_str(table_name.String());
+    analyze_req->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
+
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
+}
+
 void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     uint32_t src_node_id,
     const TableName &table_name,

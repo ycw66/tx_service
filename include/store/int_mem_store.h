@@ -78,16 +78,18 @@ public:
     {
     }
 
-    bool UpsertTableStatistics(const txservice::TableName &ccm_table_name,
-                               const std::string &statistics_binary,
-                               uint64_t schema_ts) override
-    {
-        assert(false);
-        return false;
-    }
-
     void FetchTableCatalog(const TableName &ccm_table_name,
                            void *fetch_req) override
+    {
+    }
+
+    void FetchCurrentTableStatistics(const txservice::TableName &ccm_table_name,
+                                     void *fetch_req) override
+    {
+    }
+
+    void FetchTableStatistics(const txservice::TableName &ccm_table_name,
+                              void *fetch_req) override
     {
     }
 
@@ -109,7 +111,6 @@ public:
 
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
-                    std::string &statistics_binary,
                     bool &found,
                     uint64_t &version_ts) const override
     {
@@ -162,6 +163,18 @@ public:
     {
         assert(false);
         return nullptr;
+    }
+
+    bool UpsertTableStatistics(
+        const txservice::TableName &ccm_table_name,
+        const std::unordered_map<
+            txservice::TableName,
+            std::pair<uint64_t, std::vector<txservice::TxKey::Uptr>>>
+            &sample_pool_map,
+        uint64_t version) override
+    {
+        assert(false);
+        return false;
     }
 
     bool UpsertRanges(

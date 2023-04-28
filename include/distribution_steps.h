@@ -8,69 +8,63 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
+#include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "schema.h"
+#include "tx_key.h"
+
 namespace txservice
 {
+
+/**
+ *_________________________________________________________
+ *_________________________________________________        |
+ *_________________________________________        |       |
+ *_________________________________        |       |       |
+ *_________________________        |       |       |       |
+ *_________________        |       |       |       |       |
+ *                 |       |       |       |       |       |
+ *---------------------------------------------------------------------------->
+ *-00            S[0]    S[1]    S[2]    S[3]    S[4]    S[5]              +00
+ *
+ * Example: DistributionSteps with step_values_.size() == 6,
+ *          (-00, +00) is divided into (step_values_.size() + 1) equal buckets.
+ * */
 template <typename KeyT>
 class DistributionSteps
 {
 public:
-public:
     DistributionSteps() = default;
 
-    DistributionSteps(const std::vector<KeyT> &sort_vector, int32_t hint_steps)
+    explicit DistributionSteps(
+        const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
     {
-        int64_t sz = sort_vector.size();
-        if (sz > hint_steps)
+        size_t sz = keys.size();
+        if (sz > most_steps_)
         {
-            steps_ = hint_steps;
-            step_ = (sz - 1) / steps_;
-            for (int32_t i = 0; i <= steps_; ++i)
-            {
-                uint64_t k = i * step_;
-                assert(k < sort_vector.size());
+            uint32_t step_length = sz / most_steps_;
 
-                step_values_.push_back(sort_vector[k]);
+            auto iter = keys.begin();
+            for (uint32_t i = 0; i < most_steps_; ++i)
+            {
+                const KeyT *key_ptr = *iter;
+                step_values_.push_back(*key_ptr);
+                std::advance(iter, step_length);
             }
         }
         else
         {
-            steps_ = sort_vector.size();
-            step_ = 1;
-            for (const KeyT &key : sort_vector)
+            for (const KeyT *key_ptr : keys)
             {
-                step_values_.push_back(key);
+                step_values_.push_back(*key_ptr);
             }
         }
-    }
 
-    DistributionSteps(const std::vector<const KeyT *> &sort_vector,
-                      int32_t hint_steps)
-    {
-        int64_t sz = sort_vector.size();
-        if (sz > hint_steps)
-        {
-            steps_ = hint_steps;
-            step_ = (sz - 1) / steps_;
-            for (int32_t i = 0; i <= steps_; ++i)
-            {
-                uint64_t k = i * step_;
-                assert(k < sort_vector.size());
-
-                step_values_.push_back(*sort_vector[k]);
-            }
-        }
-        else
-        {
-            steps_ = sort_vector.size();
-            step_ = 1;
-            for (const KeyT *key : sort_vector)
-            {
-                step_values_.push_back(*key);
-            }
-        }
+        std::is_sorted(step_values_.begin(), step_values_.end());
     }
 
     bool Available() const
@@ -80,19 +74,21 @@ public:
 
     // Return percentage of [min_key, max_key)
     double Selectivity(const Schema *key_schema,
-                       const MaybeInfinityKey<KeyT> &min_key,
-                       const MaybeInfinityKey<KeyT> &max_key) const
+                       const KeyT &min_key,
+                       const KeyT &max_key) const
     {
         double sel = 0;
 
-        if (*(max_key.Key()) < *(min_key.Key()) ||
-            *(max_key.Key()) == *(min_key.Key()))
+        if (max_key <= min_key)
         {
             return sel;
         }
 
-        sel =
-            Selectivity(key_schema, max_key) - Selectivity(key_schema, min_key);
+        double sel_less_max_key = Selectivity(key_schema, max_key);
+        double sel_less_min_key = Selectivity(key_schema, min_key);
+
+        sel = sel_less_max_key - sel_less_min_key;
+
         assert(sel >= 0 && sel <= 1);
 
         return sel;
@@ -100,37 +96,56 @@ public:
 
 private:
     // Percentage of Selectivity(<key)
-    double Selectivity(const Schema *key_schema,
-                       const MaybeInfinityKey<KeyT> &key) const
+    double Selectivity(const Schema *key_schema, const KeyT &key) const
     {
+        assert(Available());
+
         typename std::vector<KeyT>::const_iterator it;
 
-        it = std::lower_bound(
-            step_values_.begin(), step_values_.end(), *(key.Key()));
+        it = std::lower_bound(step_values_.begin(), step_values_.end(), key);
 
         if (it == step_values_.end())
         {
-            return 1;
+            return (step_values_.size() +
+                    (key.PosInInterval(
+                        key_schema,
+                        step_values_.back(),
+                        KeyT::PackedPositiveInfinity(key_schema)))) /
+                   (step_values_.size() + 1.0);
         }
         else if (it == step_values_.begin())
         {
-            return 0;
+            return key.PosInInterval(key_schema,
+                                     *KeyT::PackedNegativeInfinity(),
+                                     step_values_.front()) /
+                   (step_values_.size() + 1.0);
         }
         else
         {
-            assert(key.Key()->Type() == KeyType::Normal);
-
             size_t steps = std::distance(step_values_.begin(), it);
-            double pos =
-                key.Key()->PosInInterval(key_schema, *(std::prev(it)), *it);
+            double pos = key.PosInInterval(key_schema, *(std::prev(it)), *it);
 
-            return (static_cast<double>(steps) - (1.0 - pos)) / steps_;
+            return (steps + pos) / (step_values_.size() + 1.0);
         }
     }
 
+    std::string ToString() const
+    {
+        std::stringstream ss;
+        size_t sz = step_values_.size();
+        if (sz > 0)
+        {
+            for (size_t i = 0; i < sz - 1; ++i)
+            {
+                ss << step_values_[i].ToString() << ", ";
+            }
+            ss << step_values_.back().ToString();
+        }
+        return ss.str();
+    }
+
 private:
+    static constexpr uint32_t most_steps_{128};
     std::vector<KeyT> step_values_;
-    int32_t steps_{0};
-    int32_t step_{0};
 };
 }  // namespace txservice

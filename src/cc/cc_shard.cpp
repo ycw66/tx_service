@@ -16,6 +16,7 @@ CcShard::CcShard(uint16_t core_id,
                  uint32_t core_cnt,
                  uint32_t node_memory_limit_mb,
                  uint32_t node_log_limit_mb,
+                 bool realtime_sampling,
                  uint32_t node_id,
                  LocalCcShards &local_shards,
                  CatalogFactory *catalog_factory)
@@ -23,6 +24,7 @@ CcShard::CcShard(uint16_t core_id,
       core_id_(core_id),
       core_cnt_(core_cnt),
       local_shards_(local_shards),
+      realtime_sampling_(realtime_sampling),
       native_ccms_(),
       failover_ccms_(),
       cc_queue_(256),
@@ -588,11 +590,10 @@ std::pair<bool, const CatalogEntry *> CcShard::CreateCatalog(
     const TableName &table_name,
     NodeGroupId cc_ng_id,
     const std::string &catalog_image,
-    const std::string &statistics_binary,
     uint64_t commit_ts)
 {
     return local_shards_.CreateCatalog(
-        table_name, cc_ng_id, catalog_image, statistics_binary, commit_ts);
+        table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
 std::pair<bool, const CatalogEntry *> CcShard::CreateReplayCatalog(
@@ -614,11 +615,10 @@ std::pair<bool, const CatalogEntry *> CcShard::CreateReplayCatalog(
 CatalogEntry *CcShard::CreateDirtyCatalog(const TableName &table_name,
                                           NodeGroupId cc_ng_id,
                                           const std::string &catalog_image,
-                                          const std::string &statistics_binary,
                                           uint64_t commit_ts)
 {
     return local_shards_.CreateDirtyCatalog(
-        table_name, cc_ng_id, catalog_image, statistics_binary, commit_ts);
+        table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
 void CcShard::CommitDirtyCatalog(const TableName &table_name,
@@ -671,6 +671,33 @@ void CcShard::FetchCatalog(const TableName &table_name,
     if (fetch_req->RequesterCount() == 1)
     {
         local_shards_.store_hd_->FetchTableCatalog(table_name, fetch_req);
+    }
+}
+
+void CcShard::FetchTableStatistics(const TableName &table_name,
+                                   NodeGroupId cc_ng_id,
+                                   CcRequestBase *requester)
+{
+    FetchTableStatisticsCc *fetch_req = nullptr;
+    auto tab_it = fetch_reqs_.find(table_name);
+    if (tab_it != fetch_reqs_.end())
+    {
+        fetch_req = static_cast<FetchTableStatisticsCc *>(tab_it->second.get());
+    }
+    else
+    {
+        std::unique_ptr<FetchTableStatisticsCc> fetch_statistics_cc =
+            std::make_unique<FetchTableStatisticsCc>(
+                table_name, *this, cc_ng_id);
+        fetch_req = fetch_statistics_cc.get();
+        fetch_reqs_.emplace(table_name, std::move(fetch_statistics_cc));
+    }
+
+    fetch_req->AddRequester(requester);
+    if (fetch_req->RequesterCount() == 1)
+    {
+        local_shards_.store_hd_->FetchCurrentTableStatistics(table_name,
+                                                             fetch_req);
     }
 }
 
@@ -745,6 +772,74 @@ TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
                                              const TxKey *key)
 {
     return local_shards_.GetTableRangeEntry(table_name, ng_id, key);
+}
+
+const TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
+                                                   const NodeGroupId ng_id,
+                                                   int32_t range_id)
+{
+    return local_shards_.GetTableRangeEntry(table_name, ng_id, range_id);
+}
+
+const TableRangeEntry *CcShard::GetTableRangeEntryNonLocking(
+    const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
+{
+    return local_shards_.GetTableRangeEntryNonLocking(table_name, ng_id, key);
+}
+
+uint64_t CcShard::CountRanges(const TableName &table_name,
+                              const NodeGroupId ng_id,
+                              const NodeGroupId key_ng_id)
+{
+    return local_shards_.CountRanges(table_name, ng_id, key_ng_id);
+}
+
+uint64_t CcShard::CountSlices(const TableName &table_name,
+                              const NodeGroupId ng_id,
+                              const NodeGroupId local_ng_id) const
+{
+    return local_shards_.CountSlices(table_name, ng_id, local_ng_id);
+}
+
+std::vector<uint64_t> CcShard::AllNodeGroupBytesAtFetchRange(
+    const TableName &table_name, const NodeGroupId ng_id) const
+{
+    return local_shards_.AllNodeGroupBytesAtFetchRange(table_name, ng_id);
+}
+
+std::pair<Statistics *, bool> CcShard::InitTableStatistics(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    const TableSchema *table_schema)
+{
+    return local_shards_.InitTableStatistics(table_name, ng_id, table_schema);
+}
+
+std::pair<Statistics *, bool> CcShard::InitTableStatistics(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    const TableSchema *table_schema,
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+        &&sample_pool_map,
+    const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map)
+{
+    return local_shards_.InitTableStatistics(table_name,
+                                             ng_id,
+                                             table_schema,
+                                             std::move(sample_pool_map),
+                                             ng_weights_map,
+                                             this);
+}
+
+StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,
+                                             NodeGroupId ng_id)
+{
+    return local_shards_.GetTableStatistics(table_name, ng_id);
+}
+
+void CcShard::CleanTableStatistics(const TableName &table_name)
+{
+    return local_shards_.CleanTableStatistics(table_name);
 }
 
 void CcShard::RemoveFetchRequest(const TableName &table_name)

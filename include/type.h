@@ -126,7 +126,12 @@ struct TableName
     }
 
     explicit TableName(const std::string &name_str, TableType type)
-        : TableName(name_str.data(), name_str.length(), type)
+        : name_str_(name_str), own_string_(true), type_(type)
+    {
+    }
+
+    explicit TableName(std::string &&name_str, TableType type)
+        : name_str_(std::move(name_str)), own_string_(true), type_(type)
     {
     }
 
@@ -439,6 +444,18 @@ struct hash<txservice::TableName>
     }
 };
 }  // namespace std
+
+namespace txservice
+{
+template <typename KeyT>
+struct Copy
+{
+    constexpr void operator()(KeyT &lhs, const KeyT &rhs) const
+    {
+        lhs = rhs;
+    }
+};
+}  // namespace txservice
 
 namespace txservice
 {

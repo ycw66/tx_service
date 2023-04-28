@@ -1138,6 +1138,59 @@ void txservice::remote::RemoteFaultInjectCC::Reset(
     }
 }
 
+txservice::remote::RemoteAnalyzeTableAllCc::RemoteAnalyzeTableAllCc()
+    : cc_res_(nullptr)
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllResponse);
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        AnalyzeTableAllResponse *resp =
+            output_msg_.mutable_analyze_table_all_resp();
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+        const AnalyzeTableAllRequest &req = input_msg_->analyze_table_all_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_analyze_table_all_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_analyze_table_all_resp();
+
+    const AnalyzeTableAllRequest &req = input_msg->analyze_table_all_req();
+    std::string_view table_name_sv(req.table_name_str());
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+
+    AnalyzeTableAllCc::Reset(&remote_table_name_,
+                             req.node_group_id(),
+                             input_msg->tx_number(),
+                             &cc_res_);
+
+    input_msg_ = std::move(input_msg);
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
     : cc_res_(nullptr)
 {

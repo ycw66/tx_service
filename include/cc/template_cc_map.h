@@ -25,14 +25,13 @@
 #include "remote/remote_cc_request.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
-#include "statistics.h"
 #include "store/data_store_handler.h"
+#include "table_statistics.h"
 #include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_trace.h"
 #include "type.h"
-#include "typed_statistics.h"
 
 #ifdef RANGE_PARTITION_ENABLED
 #include "range_slice.h"
@@ -64,35 +63,25 @@ public:
           pg_ps_inf_(this),
           neg_inf_(this, &pg_ng_inf_),
           pos_inf_(this, &pg_ps_inf_),
-          maintain_statistics_(false),
-          shard_profile_(nullptr)
+          sample_pool_(nullptr)
     {
         pg_ng_inf_.prev_page_ = nullptr;
         pg_ng_inf_.next_page_ = &pg_ps_inf_;
         pg_ps_inf_.prev_page_ = &pg_ng_inf_;
         pg_ps_inf_.next_page_ = nullptr;
 
-        if (table_name.Type() == TableType::Primary ||
-            table_name.Type() == TableType::Secondary)
+        if (table_schema && (table_name.Type() == TableType::Primary ||
+                             table_name.Type() == TableType::Secondary))
         {
-            uint32_t shard_code = Sharder::Instance().ShardCode(
-                std::hash<std::string_view>{}(table_name.GetBaseTableNameSV()));
-            NodeGroupId shard_id =
-                Sharder::Instance().ShardToCcNodeGroup(shard_code);
-            uint16_t core_id = (shard_code & 0x3FF) %
-                               Sharder::Instance().GetLocalCcShards()->Count();
-            maintain_statistics_ =
-                (shard_id == cc_ng_id) && (core_id == shard->LocalCoreId());
-
-            if (maintain_statistics_ && table_schema)
+            TableStatistics<KeyT> *statistics =
+                static_cast<TableStatistics<KeyT> *>(
+                    table_schema->StatisticsObject());
+            assert(statistics != nullptr);
+            if (Statistics::CoreDoSample(table_name) == shard->core_id_)
             {
-                assert(table_schema->StatisticsObject());
-                ShardProfile *shard_profile = table_schema->StatisticsObject()
-                                                  ->GetShardProfile(table_name)
-                                                  .get();
-                assert(shard_profile);
-                shard_profile_ =
-                    static_cast<TypedShardProfile<KeyT> *>(shard_profile);
+                sample_pool_ = statistics->GetOrInitSamplePool(
+                    table_name, cc_ng_id, shard);
+                assert(sample_pool_);
             }
         }
 
@@ -513,9 +502,9 @@ public:
                 prior_cce.insert_intention_set_.erase(
                     --ite, prior_cce.insert_intention_set_.end());
 
-                if (maintain_statistics_)
+                if (shard_->realtime_sampling_ && sample_pool_)
                 {
-                    shard_profile_->OnInsert(*key_ptr);
+                    sample_pool_->OnInsert(*key_ptr);
                 }
             }
 
@@ -649,16 +638,16 @@ public:
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
 
-                if (maintain_statistics_)
+                if (shard_->realtime_sampling_ && sample_pool_ && !is_forward)
                 {
                     if (op_type == OperationType::Insert)
                     {
-                        shard_profile_->OnInsert(
+                        sample_pool_->OnInsert(
                             *static_cast<const KeyT *>(cce->Key()));
                     }
                     else if (op_type == OperationType::Delete)
                     {
-                        shard_profile_->OnDelete(
+                        sample_pool_->OnDelete(
                             *static_cast<const KeyT *>(cce->Key()));
                     }
                 }
@@ -4394,6 +4383,195 @@ public:
         return false;
     }
 
+    bool Execute(AnalyzeTableAllCc &req) override
+    {
+        CcHandlerResult<Void> *hd_res = req.Result();
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        assert(table_name_ == *req.GetTableName());
+        assert(req.NodeGroupId() == cc_ng_id_);
+        assert(Statistics::CoreDoSample(table_name_) == shard_->core_id_);
+
+        using KeySamplePool = AnalyzeTableAllCc::SamplePool<
+            AnalyzeTableAllCc::sample_pool_capacity_,
+            KeyT,
+            typename TemplateCcMapSamplePool<KeyT>::CopyKey>;
+        using SliceSamplePool = AnalyzeTableAllCc::SamplePool<
+            AnalyzeTableAllCc::sample_pool_capacity_,
+            std::pair<int32_t, const StoreSlice *>,
+            Copy<std::pair<int32_t, const StoreSlice *>>>;
+
+        KeySamplePool *key_sample_pool = nullptr;
+        SliceSamplePool *slice_sample_pool = nullptr;
+
+        bool first_enter;
+        if (req.key_sample_pool_ == nullptr)
+        {
+            assert(req.key_sample_pool_ == nullptr);
+
+            key_sample_pool = new KeySamplePool();
+            slice_sample_pool = new SliceSamplePool();
+
+            req.key_sample_pool_.reset(key_sample_pool);
+            req.slice_sample_pool_.reset(slice_sample_pool);
+
+            first_enter = true;
+        }
+        else
+        {
+            assert(req.key_sample_pool_ != nullptr);
+
+            key_sample_pool =
+                static_cast<KeySamplePool *>(req.key_sample_pool_.get());
+            slice_sample_pool =
+                static_cast<SliceSamplePool *>(req.slice_sample_pool_.get());
+
+            first_enter = false;
+        }
+
+        if (first_enter)
+        {
+            TableName range_table_name(table_name_.StringView(),
+                                       TableType::RangePartition);
+            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+            // All ranges has been added read lock. It is safe to access them.
+            const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+                *range_map = shard_->GetTableRangesForATable(range_table_name,
+                                                             cc_ng_id_);
+            for (const auto &[range_start_key, range_entry] : *range_map)
+            {
+                uint32_t range_id = range_entry.GetRangeInfo()->PartitionId();
+                if (range_id % ng_cnt == cc_ng_id_)
+                {
+                    const StoreRange *store_range = range_entry.RangeSlices();
+                    for (const std::unique_ptr<StoreSlice> &store_slice :
+                         store_range->Slices())
+                    {
+                        slice_sample_pool->Insert(std::make_pair(
+                            store_range->PartitionId(), store_slice.get()));
+                    }
+                }
+            }
+
+            assert(req.next_pin_slice_idx_ == 0);
+        }
+
+        // Pin-slice is necessary. On one hand, pin-slice would guarantee enough
+        // samples, even if the amount of sampled slice is very few. On the
+        // other hand, pin-slice would help estimating average bytes of records.
+        //
+        // Capacity of slice sample pool cannot be too small. Otherwise the
+        // final sampled keys could not reflect original key distribution.
+        // Capacity of slice sample pool cannot be too large. Otherwise too many
+        // pin-slice calls can lead to too many accesses to storage.
+        if (req.next_pin_slice_idx_ < slice_sample_pool->SampleKeys().size())
+        {
+            const auto [range_id, store_slice] =
+                slice_sample_pool->SampleKeys().at(req.next_pin_slice_idx_);
+            assert(store_slice->StartKey() != nullptr);
+
+            const KeyT *slice_start_key =
+                store_slice->StartKey()
+                    ? static_cast<const KeyT *>(store_slice->StartKey())
+                    : NegativeInfinity<KeyT>::Instance();
+            const KeyT *slice_end_key =
+                store_slice->EndKey()
+                    ? static_cast<const KeyT *>(store_slice->EndKey())
+                    : PositiveInfinity<KeyT>::Instance();
+
+            RangeSliceOpStatus pin_status;
+
+            // table_schema_
+            const Schema *key_schema = nullptr;
+            if (table_name_.Type() == TableType::Primary)
+            {
+                key_schema = table_schema_->KeySchema();
+            }
+            else
+            {
+                key_schema = table_schema_->IndexKeySchema(table_name_);
+            }
+
+            RangeSliceId slice_id =
+                shard_->PinRangeSlice(table_name_,
+                                      cc_ng_id_,
+                                      key_schema,
+                                      table_schema_->RecordSchema(),
+                                      table_schema_->Version(),
+                                      table_schema_->GetKVCatalogInfo(),
+                                      range_id,
+                                      *slice_start_key,
+                                      true,
+                                      &req,
+                                      pin_status);
+            if (pin_status == RangeSliceOpStatus::Successful)
+            {
+                slice_id.Unpin();
+
+                auto [iter, scan_type] =
+                    ForwardScanStart(*slice_start_key, true);
+                while (iter != End() &&
+                       *iter->first < static_cast<const KeyT &>(*slice_end_key))
+                {
+                    const KeyT &key = *iter->first;
+                    const CcEntry<KeyT, ValueT> &cc_entry = *iter->second;
+
+                    if (cc_entry.payload_status_ == RecordStatus::Normal)
+                    {
+                        if (key.Type() == KeyType::Normal)
+                        {
+                            key_sample_pool->Insert(key);
+
+                            req.visit_keys_ += 1;
+                        }
+                    }
+
+                    ++iter;
+                }
+
+                ++req.next_pin_slice_idx_;
+                shard_->Enqueue(&req);
+                return false;
+            }
+            else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
+            {
+                return false;
+            }
+            else
+            {
+                hd_res->SetError(CcErrorCode::DATA_STORE_ERR);
+                return true;
+            }
+        }
+        else
+        {
+            assert(sample_pool_ != nullptr);
+
+            uint64_t node_group_records = 0;
+            size_t visit_slices = slice_sample_pool->Size();
+            if (visit_slices > 0)
+            {
+                uint64_t ng_slices =
+                    shard_->CountSlices(table_name_, cc_ng_id_, cc_ng_id_);
+                node_group_records =
+                    (ng_slices * req.visit_keys_ * shard_->core_cnt_ +
+                     visit_slices - 1) /
+                    visit_slices;  // Ceiling divide
+            }
+
+            sample_pool_->Reset(std::move(key_sample_pool->random_pairing_),
+                                node_group_records);
+            hd_res->SetFinished();
+            return true;
+        }
+    }
+
     bool Execute(FaultInjectCC &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -6575,10 +6753,11 @@ protected:
     CcEntry<KeyT, ValueT> neg_inf_, pos_inf_;
     size_t size_{};
 
-    // When maintain_statistics_ is true, shard_profile_ is valid.
-    bool maintain_statistics_;
-
-    // shard_profile_ points to TypedShardProfile in TableSchema.
-    TypedShardProfile<KeyT> *shard_profile_;
+    // When sample_pool_ is not nullptr, sample_pool_ points to
+    // TemplateCcMapSamplePool in TableSchema.
+    //
+    // Notice that, for each given node, sample on one core only.
+    // For other cores, sample_pool_ is nullptr.
+    TemplateCcMapSamplePool<KeyT> *sample_pool_;
 };
 }  // namespace txservice

@@ -287,6 +287,13 @@ public:
         CcHandlerResult<Void> &hres,
         const txservice::AlterTableInfo *alter_table_info = nullptr) override;
 
+    void AnalyzeTableAll(const TableName &table_name,
+                         NodeGroupId ng_id,
+                         TxNumber tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         CcHandlerResult<Void> &hres) override;
+
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,
@@ -334,6 +341,7 @@ private:
     CcRequestPool<ScanOpenBatchCc> scan_open_pool;
     CcRequestPool<ScanNextBatchCc> scan_next_pool;
     CcRequestPool<ScanSliceCc> scan_slice_pool;
+    CcRequestPool<AnalyzeTableAllCc> analyze_table_all_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
 

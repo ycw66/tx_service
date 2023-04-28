@@ -403,6 +403,13 @@ public:
         CcHandlerResult<Void> &hres,
         const txservice::AlterTableInfo *alter_table_info = nullptr) = 0;
 
+    virtual void AnalyzeTableAll(const TableName &table_name,
+                                 NodeGroupId ng_id,
+                                 TxNumber tx_number,
+                                 int64_t tx_term,
+                                 uint16_t command_id,
+                                 CcHandlerResult<Void> &hres) = 0;
+
     virtual uint32_t GetNodeId() const = 0;
 
     virtual void CleanCcEntryForTest(const TableName &table_name,

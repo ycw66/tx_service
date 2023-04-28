@@ -24,6 +24,7 @@ struct ReadOutsideTxRequest;
 struct ScanOpenTxRequest;
 struct ScanBatchTxRequest;
 struct ScanBatchTuple;
+struct AnalyzeTableTxRequest;
 
 #define RETRY_NUM 5
 
@@ -822,6 +823,20 @@ struct ReleaseScanExtraLockOp : TransactionOperation
     size_t scan_batch_idx_;
     const TableName *table_name_;
     CcScanner *scanner_;
+};
+
+struct AnalyzeTableAllOp : TransactionOperation
+{
+private:
+    constexpr static uint32_t range_sample_pool_capacity_{128};
+
+public:
+    AnalyzeTableAllOp(TransactionExecution *txm);
+    void Reset(uint32_t hres_ref_cnt);
+    void Forward(TransactionExecution *txm) override;
+
+    AnalyzeTableTxRequest *analyze_tx_req_{nullptr};
+    CcHandlerResult<Void> hd_result_;
 };
 
 }  // namespace txservice
