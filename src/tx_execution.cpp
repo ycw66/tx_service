@@ -13,6 +13,7 @@
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_operation.h"
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
@@ -945,7 +946,29 @@ void TransactionExecution::Process(ReadOperation &read)
 
             uint32_t key_shard_code = 0;
 #ifdef RANGE_PARTITION_ENABLED
-            if (read.lock_range_result_.IsFinished())
+            if (!read.lock_range_result_.IsFinished())
+            {
+                read.is_running_ = false;
+                // First read and lock the range the key located in through
+                // lock_range_op_.
+                lock_range_op_.Reset();
+                read.lock_range_result_.Reset();
+                read.unlock_range_result_.Reset();
+
+                lock_range_op_.key_ = &key;
+                lock_range_op_.range_table_name_ =
+                    TableName(read.read_tx_req_->tab_name_->StringView(),
+                              TableType::RangePartition);
+                lock_range_op_.range_rec_ = &read.range_rec_;
+                lock_range_op_.lock_range_result_ = &read.lock_range_result_;
+
+                // Control flow jumps to lock_range_op_, do not execute further
+                // after `Process(lock_range_op_)` returns.
+                PushOperation(&lock_range_op_);
+                Process(lock_range_op_);
+                return;
+            }
+            else  // lock range finished and succeeded
             {
                 // If there is an error when getting the key's range ID, the
                 // error would be caught when forwarding the read operation,
@@ -960,28 +983,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 key_shard_code = read.range_rec_.GetRangeInfo()->PartitionId()
                                      << 10 |
                                  residual;
-            }
-            else
-            {
-                read.is_running_ = false;
-                read.range_table_name_ =
-                    TableName(read.read_tx_req_->tab_name_->StringView(),
-                              TableType::RangePartition);
-                read.lock_range_result_.Reset();
-                handler->ReadLocal(read.range_table_name_,
-                                   key,
-                                   read.range_rec_,
-                                   ReadType::Inside,
-                                   tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   CommandId(),
-                                   start_ts_,
-                                   read.lock_range_result_,
-                                   IsolationLevel::RepeatableRead,
-                                   CcProtocol::Locking);
-
-                read.Forward(this);
-                return;
             }
 #else
             key_shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -1118,6 +1119,10 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                         << " ,table: " << table_name->String();
                     rec_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+
+#ifdef RANGE_PARTITION_ENABLED
+                    ReleaseReadRangeLock(read);
+#endif
                     return;
                 }
             }
@@ -1138,8 +1143,78 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
 
         rec_resp_->Finish(read_res.rec_status_);
+
+#ifdef RANGE_PARTITION_ENABLED
+        // For isolation levels weaker than RepeatableRead, release
+        // the range lock once read finishes.
+        ReleaseReadRangeLock(read);
+#endif
     }
 }
+
+#ifdef RANGE_PARTITION_ENABLED
+void TransactionExecution::Process(LockReadRangeOperation &lock_range)
+{
+    handler->ReadLocal(lock_range.range_table_name_,
+                       *lock_range.key_,
+                       *lock_range.range_rec_,
+                       ReadType::Inside,
+                       tx_number_.load(std::memory_order_relaxed),
+                       tx_term_,
+                       CommandId(),
+                       start_ts_,
+                       *lock_range.lock_range_result_,
+                       IsolationLevel::RepeatableRead,
+                       CcProtocol::Locking);
+
+    lock_range.Forward(this);
+}
+
+void TransactionExecution::PostProcess(LockReadRangeOperation &lock_range)
+{
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(UnlockReadRangeOperation &unlock_range)
+{
+    // remove range entry from read set and do PostRead
+    rw_set_.DedupRead(*unlock_range.cce_addr_);
+
+    // just send post read cc request and return
+    handler->PostRead(TxNumber(),
+                      TxTerm(),
+                      CommandId(),
+                      0,
+                      0,
+                      0,
+                      *unlock_range.cce_addr_,
+                      *unlock_range.unlock_range_result_);
+}
+
+void TransactionExecution::PostProcess(UnlockReadRangeOperation &unlock_range)
+{
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::ReleaseReadRangeLock(txservice::ReadOperation &read)
+{
+    if (!read.read_tx_req_->read_local_ &&
+        iso_level_ < IsolationLevel::RepeatableRead &&
+        read.lock_range_result_.IsFinished() &&
+        !read.lock_range_result_.IsError())
+    {
+        read.unlock_range_result_.Reset();
+        unlock_range_op_.Reset();
+        unlock_range_op_.cce_addr_ = &read.lock_range_result_.Value().cce_addr_;
+        unlock_range_op_.unlock_range_result_ = &read.unlock_range_result_;
+
+        PushOperation(&unlock_range_op_);
+        Process(unlock_range_op_);
+    }
+}
+#endif
 
 void TransactionExecution::Process(ScanOpenOperation &scan_open)
 {

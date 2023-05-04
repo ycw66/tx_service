@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "catalog_key_record.h"
+#include "cc_entry.h"
 #include "cc_handler.h"
 #include "log_closure.h"
 #include "range_record.h"
@@ -84,6 +85,36 @@ struct CompositeTransactionOperation : TransactionOperation
      */
     TransactionOperation *op_{nullptr};
 };
+
+#ifdef RANGE_PARTITION_ENABLED
+struct LockReadRangeOperation : TransactionOperation
+{
+public:
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    // in-parameters
+    const TxKey *key_{};
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    RangeRecord *range_rec_{};
+
+    // out-parameters, to pass result to caller operation
+    CcHandlerResult<ReadKeyResult> *lock_range_result_{};
+};
+
+struct UnlockReadRangeOperation : TransactionOperation
+{
+public:
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    // in-parameters
+    const CcEntryAddr *cce_addr_{};
+
+    // out-parameters, to pass result to caller operation
+    CcHandlerResult<PostProcessResult> *unlock_range_result_;
+};
+#endif
 
 struct ReadOperation : TransactionOperation
 {

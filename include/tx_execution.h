@@ -241,6 +241,12 @@ private:
     void PostProcess(InitTxnOperation &init_txn);
     void Process(ReadOperation &read);
     void PostProcess(ReadOperation &read);
+#ifdef RANGE_PARTITION_ENABLED
+    void Process(LockReadRangeOperation &lock_range);
+    void PostProcess(LockReadRangeOperation &lock_range);
+    void Process(UnlockReadRangeOperation &unlock_range);
+    void PostProcess(UnlockReadRangeOperation &unlock_range);
+#endif
     void Process(ScanOpenOperation &scan_open);
     void PostProcess(ScanOpenOperation &scan_open);
     void Process(ScanNextOperation &scan_next);
@@ -325,6 +331,10 @@ private:
     void StartTiming();
 
     void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
+
+#ifdef RANGE_PARTITION_ENABLED
+    void ReleaseReadRangeLock(ReadOperation &read);
+#endif
 
     TxErrorCode ConvertCcError(CcErrorCode error);
 
@@ -430,13 +440,18 @@ private:
     InitTxnOperation init_txn_;
 
     // Execution phase.
+#ifdef RANGE_PARTITION_ENABLED
+    LockReadRangeOperation lock_range_op_;
+    UnlockReadRangeOperation unlock_range_op_;
+#endif
     ReadOperation read_;
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
-    // Tempory save scan tuple when drain out the remainder scan tiples.
-    // To avoid ccentry address to be save in stack
+    // Temporarily save scan tuple when drain out the remainder scan tuples.
+    // To avoid ccentry address to be saved in stack
     std::vector<ScanBatchTuple> drain_batch_;
-// Committing phase.
+
+    // Committing phase.
 #ifdef RANGE_PARTITION_ENABLED
     LockWriteRangesOp lock_write_ranges_;
 #endif
@@ -464,6 +479,10 @@ private:
     friend struct TransactionOperation;
     friend struct CompositeTransactionOperation;
     friend struct ReadOperation;
+#ifdef RANGE_PARTITION_ENABLED
+    friend struct LockReadRangeOperation;
+    friend struct UnlockReadRangeOperation;
+#endif
     friend struct ReadOutsideOperation;
     friend struct LockWriteRangesOp;
     friend struct AcquireWriteOperation;

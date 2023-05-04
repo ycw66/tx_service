@@ -111,39 +111,22 @@ void ReadOperation::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (lock_range_result_.IsFinished())
+        // Just returned from LockReadRangeOp, check lock_range_result_.
+        assert(lock_range_result_.IsFinished());
+        if (lock_range_result_.IsError())
         {
-            if (lock_range_result_.IsError())
-            {
-                // There is an error when getting the input key's range. The
-                // read operation is set to be errored.
-                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
-            }
-            else
-            {
-                if (iso_level_ >= IsolationLevel::RepeatableRead)
-                {
-                    // For isolation levels greater than or equal to Repeatable
-                    // Read, keeps the read lock on the range because there will
-                    // be a post read on the key in this range. The range cannot
-                    // be changed before this tx finishes post-processing.
-                    const ReadKeyResult &read_res = lock_range_result_.Value();
-                    txm->rw_set_.AddRead(
-                        read_res.cce_addr_, read_res.ts_, &range_table_name_);
-                }
+            // There is an error when getting the input key's range. The
+            // read operation is set to be errored.
+            hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
 
-                txm->Process(*this);
-            }
-        }
-        else
-        {
-            // The get-range request has not finished. The read operation cannot
-            // proceed without knowing the input key's range.
+            bool force_success = hd_result_.ForceError();
+            assert(force_success);
+
+            txm->PostProcess(*this);
             return;
         }
-#else
-        txm->Process(*this);
 #endif
+        txm->Process(*this);
     }
 
     const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
@@ -174,43 +157,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
             }
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        if (!read_tx_req_->read_local_ &&
-            iso_level_ < IsolationLevel::RepeatableRead)
-        {
-            if (lock_range_result_.IsFinished())
-            {
-                unlock_range_result_.Reset();
-                txm->handler->PostRead(txm->TxNumber(),
-                                       txm->TxTerm(),
-                                       txm->CommandId(),
-                                       0,
-                                       0,
-                                       0,
-                                       lock_range_result_.Value().cce_addr_,
-                                       unlock_range_result_);
-
-                // After the unlock range request is sent,
-                // lock_range_result_ is reset, so that when the tx machine
-                // is re-executed, its status is unfinished, indicating that
-                // the read operation has finished and is waiting for the
-                // response of unlocking the range.
-                lock_range_result_.Reset();
-            }
-            else if (unlock_range_result_.IsFinished())
-            {
-                txm->PostProcess(*this);
-            }
-        }
-        else
-        {
-            txm->PostProcess(*this);
-        }
-    }
-    // If lock range is not finished yet, just wait since lock range is
-    // always a local read.
-    else if (lock_range_result_.IsFinished())
-#else
+#ifndef RANGE_PARTITION_ENABLED
         if (hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
         {
             // If shard is full, keep retrying since checkpoint will
@@ -221,10 +168,10 @@ void ReadOperation::Forward(TransactionExecution *txm)
             ReRunOp(txm);
             return;
         }
+#endif
         txm->PostProcess(*this);
     }
     else
-#endif
     {
         bool timeout = txm->IsTimeOut();
         CODE_FAULT_INJECTOR("read_operation_timeout", {
@@ -284,6 +231,74 @@ void ReadOperation::Forward(TransactionExecution *txm)
     // need to periodically check liveness of the remote node and force the
     // tx to cancel if the remote node is unresponsive.
 }
+
+#ifdef RANGE_PARTITION_ENABLED
+void LockReadRangeOperation::Reset()
+{
+    key_ = nullptr;
+    range_table_name_ = TableName{empty_sv, TableType::RangePartition};
+    range_rec_ = nullptr;
+    lock_range_result_ = nullptr;
+}
+
+void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
+{
+    if (lock_range_result_->IsFinished())
+    {
+        if (!lock_range_result_->IsError())
+        {
+            const ReadKeyResult &read_res = lock_range_result_->Value();
+            // The read lock on the range is added, put the range cce into read
+            // set for later release read lock.
+            // For isolation level stronger than or equal to Repeatable Read,
+            // the range cannot be changed before this tx finishes
+            // post-processing, so the read lock on the range is kept until
+            // then; for isolation levels weaker than Repeatable Read, the read
+            // lock on the key's range is released once the read on the key
+            // finished.
+            txm->rw_set_.AddRead(
+                read_res.cce_addr_, read_res.ts_, &range_table_name_);
+        }
+        else
+        {
+            // There is an error when getting the input key's range. The caller
+            // operation will be set to be errored when checking the result in
+            // its `Forward()`.
+        }
+
+        // Pop out this LockRangeOperation from the stack and return control to
+        // the caller operation by forwarding the transaction state machine.
+        txm->PostProcess(*this);
+    }
+    else
+    {
+        // The get-range request has not finished. The caller operation of this
+        // LockRangeOperation cannot proceed without knowing the input key's
+        // range.
+        return;
+    }
+}
+
+void UnlockReadRangeOperation::Reset()
+{
+    cce_addr_ = nullptr;
+    unlock_range_result_ = nullptr;
+}
+
+void UnlockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
+{
+    if (unlock_range_result_->IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else
+    {
+        // The unlock-range request has not finished. Just wait since it is a
+        // local operation.
+        return;
+    }
+}
+#endif
 
 PostReadOperation::PostReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
