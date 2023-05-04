@@ -1252,6 +1252,53 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
     }
 }
 
+void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
+                                            uint32_t ng_id,
+                                            TxNumber tx_number,
+                                            int64_t tx_term,
+                                            uint64_t command_id,
+                                            uint64_t commit_ts,
+                                            CcHandlerResult<Void> &hres,
+                                            const TxKey *start_key,
+                                            const TxKey *end_key)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
+        req->Reset(table_name,
+                   ng_id,
+                   commit_ts,
+                   Sharder::Instance().GetLocalCcShardsCount(),
+                   &hres,
+                   start_key,
+                   end_key);
+
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+        // Dispatch the request to all cores and run in parallel
+        for (uint16_t idx = 0;
+             idx < Sharder::Instance().GetLocalCcShardsCount();
+             idx++)
+        {
+            cc_shards_.EnqueueToCcShard(idx, req);
+        }
+    }
+    else
+    {
+        assert(false);
+        // Wait for create index pr from YSW.
+        // remote_hd_.KickoutDataAll(cc_shards_.node_id_,
+        //                          tx_number,
+        //                          tx_term,
+        //                          command_id,
+        //                          table_name,
+        //                          ng_id,
+        //                          commit_ts,
+        //                          hres);
+    }
+}
+
 /*
  * Get the node id which runs the current transaction.
  */

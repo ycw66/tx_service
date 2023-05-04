@@ -428,6 +428,27 @@ public:
                                  CcHandlerResultBase *hres,
                                  ResultTemplateType type) = 0;
 
+    /**
+     * @brief Kickout the ccentrise whose commit_ts less than @@ckpt_ts
+     * and between start_key and end_key from ccmap.
+     *
+     * @param ng_id The node group id that to execute the operation.
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param command_id
+     * @param commit_ts
+     * @param hres Result handler of the request
+     */
+    virtual void KickoutData(const TableName &table_name,
+                             uint32_t ng_id,
+                             TxNumber tx_number,
+                             int64_t tx_term,
+                             uint64_t command_id,
+                             uint64_t commit_ts,
+                             CcHandlerResult<Void> &hres,
+                             const TxKey *start_key = nullptr,
+                             const TxKey *end_key = nullptr) = 0;
+
     // table_schema_op_pool_ is introduced to ensure the CcHandlerResult pointer
     // validation: if failover didn't happen, the pointer receivied from remote
     // PostWriteAll response CcMessage should always be valid(memory not freed).

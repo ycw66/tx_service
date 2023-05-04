@@ -320,6 +320,27 @@ public:
                          CcHandlerResultBase *hres,
                          ResultTemplateType type) override;
 
+    /// <summary>
+    /// Kickout the ccentrise whose commit_ts less than @@ckpt_ts and betwen
+    /// start_key and end_key from ccmap.
+    /// </summary>
+    /// <param name="table_name"></param>
+    /// <param name="ng_id">Id of the node group that to exec. the req.</param>
+    /// <param name="tx_number">Tx number</param>
+    /// <param name="tx_term">Term of the tx node</param>
+    /// <param name="command_id"></param>
+    /// <param name="commit_ts"></param>
+    /// <param name="hres">hres</param>
+    void KickoutData(const TableName &table_name,
+                     uint32_t ng_id,
+                     TxNumber tx_number,
+                     int64_t tx_term,
+                     uint64_t command_id,
+                     uint64_t commit_ts,
+                     CcHandlerResult<Void> &hres,
+                     const TxKey *start_key = nullptr,
+                     const TxKey *end_key = nullptr) override;
+
 private:
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is
@@ -344,6 +365,7 @@ private:
     CcRequestPool<AnalyzeTableAllCc> analyze_table_all_pool;
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
+    CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;
 
     friend class remote::RemoteCcHandler;
 };

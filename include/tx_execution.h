@@ -265,6 +265,8 @@ private:
     void PostProcess(CleanCcEntryForTestOp &clean_entry_op);
     void Process(AnalyzeTableAllOp &analyze_table_op);
     void PostProcess(AnalyzeTableAllOp &analyze_table_op);
+    void Process(KickoutDataOp &kickout_data_all_op);
+    void PostProcess(KickoutDataOp &kickout_data_all_op);
 
     void Process(AcquireAllOp &acq_all_op);
     void PostProcess(AcquireAllOp &acq_all_op);
@@ -486,6 +488,7 @@ private:
     friend struct FlushDataOp;
     friend struct DsSplitOp;
     friend struct AnalyzeTableAllOp;
+    friend struct KickoutDataOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct AsyncOp;

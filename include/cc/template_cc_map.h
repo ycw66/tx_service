@@ -4992,7 +4992,7 @@ public:
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return false;
+            return true;
         }
 
         // Iterate the cc map using the original page list.
@@ -5051,19 +5051,19 @@ public:
             ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
         }
 
-        if (ccp == &pg_ng_inf_ ||
+        if (ccp == &pg_ps_inf_ ||
             (end_key != nullptr && *end_key < ccp->FirstKey()))
         {
             req.SetFinish(shard_->core_id_);
+            return true;
         }
         else
         {
             // Set the resume key for next round
             req.SetResumeKey(&ccp->FirstKey(), shard_->core_id_);
             shard_->Enqueue(&req);
+            return false;
         }
-
-        return false;
     }
 
     size_t size() const override
@@ -5109,8 +5109,7 @@ public:
      * Clean erasable entries in lru_page, re-balance pages after clean.
      *
      * @param lru_page
-     * @param ckpt_ts [optional]
-     * @param is_single_ccmap [optional]
+     * @param kickout_cc [optional]
      * @param is_success [optional]
      * @return result pair of which the first is free count and the second is
      * the lru_next_ of the page or the next_page_ of the ccpage if

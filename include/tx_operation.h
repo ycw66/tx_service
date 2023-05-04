@@ -685,6 +685,21 @@ struct FlushDataOp : public TransactionOperation
     CcHandlerResult<Void> hd_result_;
 };
 
+struct KickoutDataOp : public TransactionOperation
+{
+    KickoutDataOp(TransactionExecution *txm);
+    void Reset();
+    void ResetHandlerTxm(TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName *table_name_{nullptr};
+    NodeGroupId node_group_;
+    uint64_t commit_ts_{0};
+    const TxKey *start_key_{nullptr};
+    const TxKey *end_key_{nullptr};
+    CcHandlerResult<Void> hd_result_;
+};
+
 struct SplitFlushRangeOp : public CompositeTransactionOperation
 {
     SplitFlushRangeOp() = delete;
@@ -724,6 +739,9 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::vector<FlushRecord> data_sync_vec_;
     std::vector<FlushRecord> archive_vec_;
     std::vector<const TxKey *> mv_base_vec_;
+
+    std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
+        kickout_data_it_;
 
     /**
      * @brief Acquire write lock on all node groups. Since split-flush op is
@@ -779,6 +797,11 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * @brief Upsert new ranges into range table in KV store.
      */
     AsyncOp<Void> ds_upsert_range_op_;
+    /**
+     * @brief Kickout old range data from cc map if the data now
+     * falls on a new node group.
+     */
+    KickoutDataOp kickout_old_range_data_op_;
     /**
      * @brief 1. Insert new range into range tables on all nodes
      * 2. Remove new range info from old range entry.

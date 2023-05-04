@@ -3649,4 +3649,47 @@ void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
     }
 }
 
+void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &kickout_data_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    kickout_data_op.is_running_ = true;
+    kickout_data_op.hd_result_.Reset();
+    handler->KickoutData(*kickout_data_op.table_name_,
+                         kickout_data_op.node_group_,
+                         tx_number_.load(std::memory_order_relaxed),
+                         tx_term_,
+                         command_id_.load(std::memory_order_relaxed),
+                         kickout_data_op.commit_ts_,
+                         kickout_data_op.hd_result_,
+                         kickout_data_op.start_key_,
+                         kickout_data_op.end_key_);
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &kickout_data_all_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_))
+        });
+    state_stack_.pop_back();
+    Forward();
+}
+
 }  // namespace txservice

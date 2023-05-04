@@ -236,7 +236,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
         if (!hd_result_.Value().is_local_ && cce_addr.Term() < 0 && timeout)
         {
-            LOG(INFO) << "read op timed out";
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
                 "Forward.Term<0,IsTimeout || TxNodeFail",
@@ -272,7 +271,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
         }
         else if (cce_addr.Term() > 0 && timeout)
         {
-            LOG(INFO) << "read op check block";
             txm->handler->BlockCcReqCheck(txm->TxNumber(),
                                           txm->TxTerm(),
                                           txm->CommandId(),
@@ -2430,6 +2428,51 @@ void FlushDataOp::Reset()
     hd_result_.Reset();
 }
 
+KickoutDataOp::KickoutDataOp(TransactionExecution *txm) : hd_result_(txm)
+{
+}
+
+void KickoutDataOp::Reset()
+{
+    table_name_ = nullptr;
+    start_key_ = nullptr;
+    end_key_ = nullptr;
+    commit_ts_ = 0;
+    node_group_ = 0;
+    hd_result_.Reset();
+}
+
+void KickoutDataOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+void KickoutDataOp::Forward(TransactionExecution *txm)
+{
+    // Start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        // If leader-transferred, do not need to kickout data any more.
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::TX_NODE_NOT_LEADER)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+    }
+}
+
 /**
  * @brief Construct a new Split Flush Range Op:: Split Flush Range Op object
  */
@@ -2460,6 +2503,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       commit_acquire_all_write_op_(txm),
       commit_log_op_(txm),
       ds_upsert_range_op_(txm),
+      kickout_old_range_data_op_(txm),
       post_all_lock_op_(txm),
       ds_clean_old_range_op_(txm),
       clean_log_op_(txm)
@@ -2488,6 +2532,9 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     commit_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
     commit_acquire_all_write_op_.key_ = old_start_key_;
+
+    kickout_old_range_data_op_.table_name_ = &table_name_;
+    kickout_old_range_data_op_.node_group_ = node_group;
 
     post_all_lock_op_.table_name_ = &range_table_name_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
@@ -3078,13 +3125,88 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &ds_upsert_range_op_);
             return;
         }
-        // Now broadcast slice info to all nodes through PostWriteAll. New
-        // ranges might land on other nodes.
-        post_all_lock_op_.rec_ = &range_record_;
-        range_record_.range_slices_ = &slice_info_;
-        range_record_.end_key_ = old_end_key_;
-        range_record_.SetRangeInfo(range_info_.Clone());
-        ForwardToSubOperation(txm, &post_all_lock_op_);
+        // Kickout old range data. For those data that now falls on a
+        // new node, we need to kickout them out from the old node's ccmap.
+        kickout_old_range_data_op_.commit_ts_ = txm->commit_ts_;
+        kickout_data_it_ = new_range_info_.cbegin();
+        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
+        {
+            NodeGroupId new_ng_id =
+                kickout_data_it_->second % Sharder::Instance().NodeGroupCount();
+            if (new_ng_id != node_group_)
+            {
+                // Note that even if the new node group falls on the same node,
+                // we still need to clean the cc entry from native ccmap since
+                // failover and native ccmaps are separated.
+                kickout_old_range_data_op_.start_key_ =
+                    kickout_data_it_->first.get();
+                if (std::next(kickout_data_it_) == new_range_info_.cend())
+                {
+                    kickout_old_range_data_op_.end_key_ = old_end_key_;
+                }
+                else
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        std::next(kickout_data_it_)->first.get();
+                }
+                break;
+            }
+        }
+
+        if (kickout_data_it_ == new_range_info_.cend())
+        {
+            // All of the new ranges falls on the same node, proceed to post
+            // write all. Now broadcast slice info to all nodes through
+            // PostWriteAll. New ranges might land on other nodes.
+            post_all_lock_op_.rec_ = &range_record_;
+            range_record_.range_slices_ = &slice_info_;
+            range_record_.end_key_ = old_end_key_;
+            range_record_.SetRangeInfo(range_info_.Clone());
+            ForwardToSubOperation(txm, &post_all_lock_op_);
+        }
+        else
+        {
+            ForwardToSubOperation(txm, &kickout_old_range_data_op_);
+        }
+    }
+    else if (op_ == &kickout_old_range_data_op_)
+    {
+        kickout_data_it_++;
+        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
+        {
+            NodeGroupId new_ng_id =
+                kickout_data_it_->second % Sharder::Instance().NodeGroupCount();
+            if (new_ng_id != node_group_)
+            {
+                kickout_old_range_data_op_.start_key_ =
+                    kickout_data_it_->first.get();
+                if (std::next(kickout_data_it_) == new_range_info_.cend())
+                {
+                    kickout_old_range_data_op_.end_key_ = old_end_key_;
+                }
+                else
+                {
+                    kickout_old_range_data_op_.end_key_ =
+                        std::next(kickout_data_it_)->first.get();
+                }
+                break;
+            }
+        }
+
+        if (kickout_data_it_ == new_range_info_.cend())
+        {
+            // Now broadcast slice info to all nodes through PostWriteAll. New
+            // ranges might land on other nodes.
+            post_all_lock_op_.rec_ = &range_record_;
+            range_record_.range_slices_ = &slice_info_;
+            range_record_.end_key_ = old_end_key_;
+            range_record_.SetRangeInfo(range_info_.Clone());
+            ForwardToSubOperation(txm, &post_all_lock_op_);
+        }
+        else
+        {
+            ForwardToSubOperation(txm, &kickout_old_range_data_op_);
+        }
     }
     else if (op_ == &post_all_lock_op_)
     {

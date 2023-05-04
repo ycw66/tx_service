@@ -1430,13 +1430,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // will never see unfinished_worker == 0 if they finish earlier
     // than the last launched flush data worker.
     data_sync_task->unfinished_worker_ = 1;
+    const TableSchema *table_schema =
+        is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 #ifdef RANGE_PARTITION_ENABLED
     // 4.1 For range partition, execute range split if necessary using
     // seperate thread per range.
     std::vector<std::pair<const TxKey *, const TxKey *>> split_ranges;
     size_t batch_idx = 0;
-    const TableSchema *table_schema =
-        is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 
     while (batch_idx < data_sync_vec->size())
     {

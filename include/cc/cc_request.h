@@ -3237,7 +3237,7 @@ public:
         Error
     };
 
-    KickoutCcEntryCc() = delete;
+    KickoutCcEntryCc() = default;
 
     KickoutCcEntryCc(const TableName &table_name,
                      const uint32_t ng_id,
@@ -3249,10 +3249,7 @@ public:
         : ckpt_ts_(ckpt_ts),
           start_key_(start_key),
           end_key_(end_key),
-          unfinished_cnt_(core_cnt),
-          status_(KickoutStatus::Ongoing),
-          mux_(),
-          cv_()
+          unfinished_cnt_(core_cnt)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
@@ -3266,11 +3263,31 @@ public:
     KickoutCcEntryCc(const KickoutCcEntryCc &rhs) = delete;
     KickoutCcEntryCc(KickoutCcEntryCc &&rhs) = delete;
 
+    void Reset(const TableName &table_name,
+               const uint32_t ng_id,
+               const uint64_t ckpt_ts,
+               uint16_t core_cnt,
+               CcHandlerResult<Void> *res,
+               const TxKey *start_key = nullptr,
+               const TxKey *end_key = nullptr)
+    {
+        // Reset struct members with passed in args
+        table_name_ = &table_name;
+        node_group_id_ = ng_id;
+        ckpt_ts_ = ckpt_ts;
+        res_ = res;
+        start_key_ = start_key;
+        end_key_ = end_key;
+        unfinished_cnt_ = core_cnt;
+        for (uint16_t i = 0; i < core_cnt; ++i)
+        {
+            resume_key_.emplace_back(nullptr);
+        }
+    }
+
     void Reset(uint32_t ng_id, uint16_t core_cnt)
     {
-        std::lock_guard<std::mutex> lk(mux_);
         node_group_id_ = ng_id;
-        status_ = KickoutStatus::Ongoing;
         ccm_ = nullptr;
         unfinished_cnt_ = core_cnt;
         resume_key_.resize(core_cnt);
@@ -3323,40 +3340,23 @@ public:
         return end_key_;
     }
 
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        if (status_ != KickoutStatus::Finished)
-        {
-            cv_.wait(lk, [this] { return status_ == KickoutStatus::Finished; });
-        }
-    }
-
     void SetFinish(size_t core_id)
     {
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
-            Notify();
+            if (res_)
+            {
+                res_->SetFinished();
+            }
         }
     }
 
 private:
-    void Notify()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        assert(unfinished_cnt_.load(std::memory_order_acq_rel) == 0);
-        status_ = KickoutStatus::Finished;
-        cv_.notify_one();
-    }
-    const uint64_t ckpt_ts_{0};
+    uint64_t ckpt_ts_{0};
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     std::vector<TxKey::Uptr> resume_key_;
-    std::atomic_uint16_t unfinished_cnt_;
-    KickoutStatus status_;
-    // Protect the status_ and cv_
-    std::mutex mux_;
-    std::condition_variable cv_;
+    std::atomic_uint16_t unfinished_cnt_{0};
 };
 
 struct ResetCleanStartPageCc : public CcRequestBase
