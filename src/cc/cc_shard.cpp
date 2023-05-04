@@ -533,31 +533,6 @@ size_t CcShard::Clean()
 }
 
 /**
- * @brief Notify checkpointer to put the passed in data to pending workload.
- *
- */
-void CcShard::FlushData(const TableName &table_name,
-                        const TableSchema *schema,
-                        uint64_t ckpt_ts,
-                        int64_t term,
-                        uint64_t node_group,
-                        std::vector<FlushRecord> *ckpt_vec,
-                        std::vector<FlushRecord> *archive_vec,
-                        std::vector<const TxKey *> *mv_vec,
-                        CcHandlerResult<Void> *res)
-{
-    ckpter_->FlushData(table_name,
-                       schema,
-                       node_group,
-                       term,
-                       ckpt_ts,
-                       ckpt_vec,
-                       archive_vec,
-                       mv_vec,
-                       res);
-}
-
-/**
  * @brief Flush Entry to KvStore. Now, only used for test.
  *
  */

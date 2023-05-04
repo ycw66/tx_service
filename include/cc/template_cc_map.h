@@ -4184,7 +4184,7 @@ public:
         }
     }
 
-    bool Execute(CkptScanCc &req) override
+    bool Execute(DataSyncScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -4259,11 +4259,11 @@ public:
                                shard_->core_id_);
         }
 
-        // CkptScanCc is running on TxProcessor thread. To avoid blocking
+        // DataSyncScanCc is running on TxProcessor thread. To avoid blocking
         // other transaction for a long time, we only process CkptScanBatch
         // number of pages in each round.
         for (size_t scan_cnt = 0;
-             scan_cnt < CkptScanCc::CkptScanBatchSize &&
+             scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_ &&
              it != End() && (end_key == nullptr || *(it->first) < *end_key);
@@ -4341,10 +4341,10 @@ public:
                 }
 #endif
                 cce->ExportForCkpt(key,
-                                   req.CkptVec(shard_->core_id_),
+                                   req.DataSyncVec(shard_->core_id_),
                                    req.ArchiveVec(shard_->core_id_),
                                    req.MoveBaseVec(shard_->core_id_),
-                                   req.ckpt_ts_,
+                                   req.data_sync_ts_,
                                    recycle_ts,
                                    Type(),
                                    shard_->EnableMvcc());

@@ -2455,7 +2455,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       prepare_log_op_(txm),
       install_new_range_op_(txm),
       ds_migrate_old_partition_op_(txm),
-      ckpt_scan_op_(txm),
+      data_sync_scan_op_(txm),
       flush_op_(txm),
       commit_acquire_all_write_op_(txm),
       commit_log_op_(txm),
@@ -2478,7 +2478,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     install_new_range_op_.key_ = old_start_key_;
 
     flush_op_.tab_name_ = &table_name_;
-    flush_op_.ckpt_vec_ = &ckpt_vec_;
+    flush_op_.data_sync_vec_ = &data_sync_vec_;
     flush_op_.archive_vec_ = &archive_vec_;
     flush_op_.mv_vec_ = &mv_base_vec_;
     flush_op_.schema_ = table_schema_;
@@ -2498,7 +2498,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
         this, &prepare_acquire_all_write_op_, "prepare_acquire_all_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
     TX_TRACE_ASSOCIATE(this, &install_new_range_op_, "install_new_range_op_");
-    TX_TRACE_ASSOCIATE(this, &ckpt_scan_op_, "ckpt_scan_op_");
+    TX_TRACE_ASSOCIATE(this, &data_sync_scan_op_, "data_sync_scan_op_");
     TX_TRACE_ASSOCIATE(this, &flush_op_, "flush_op_");
     TX_TRACE_ASSOCIATE(
         this, &commit_acquire_all_write_op_, "commit_acquire_all_op_");
@@ -2509,10 +2509,10 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
 }
 
-void SplitFlushRangeOp::ClearCkptVec()
+void SplitFlushRangeOp::ClearDataSyncVec()
 {
-    ckpt_vec_.clear();
-    ckpt_vec_.shrink_to_fit();
+    data_sync_vec_.clear();
+    data_sync_vec_.shrink_to_fit();
     archive_vec_.clear();
     archive_vec_.shrink_to_fit();
     mv_base_vec_.clear();
@@ -2699,18 +2699,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &ds_migrate_old_partition_op_);
             return;
         }
-
-        ckpt_scan_op_.op_func_ =
+        data_sync_scan_op_.op_func_ =
             [&table_name = table_name_,
              start_key = old_start_key_,
              end_key = old_end_key_,
-             ckpt_vec = &ckpt_vec_,
+             data_sync_vec = &data_sync_vec_,
              archive_vec = &archive_vec_,
              mv_base_vec = &mv_base_vec_,
              node_group = node_group_,
              ckpt_ts = txm->commit_ts_,
              &local_cc_shards = txm->GetTxProcessor()->local_cc_shards_,
-             &hd_res = ckpt_scan_op_.hd_result_]
+             &hd_res = data_sync_scan_op_.hd_result_]
         {
             TxWorkerPool *tx_worker_pool =
                 Sharder::Instance().GetTxWorkerPool();
@@ -2718,7 +2717,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 [table_name,
                  start_key,
                  end_key,
-                 ckpt_vec,
+                 data_sync_vec,
                  archive_vec,
                  mv_base_vec,
                  node_group,
@@ -2726,8 +2725,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                  &local_cc_shards,
                  &hd_res]
                 {
-                    std::vector<std::vector<FlushRecord>> ckpt_vecs;
+                    std::vector<std::vector<FlushRecord>> data_sync_vecs;
                     std::vector<std::vector<FlushRecord>> archive_vecs;
+                    std::vector<std::vector<const TxKey *>> mv_base_vecs;
 
                     std::vector<std::pair<TxKey::Uptr, bool>> resume_pos;
 
@@ -2735,19 +2735,20 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                          i < Sharder::Instance().GetLocalCcShardsCount();
                          i++)
                     {
-                        ckpt_vecs.emplace_back();
+                        data_sync_vecs.emplace_back();
                         archive_vecs.emplace_back();
+                        mv_base_vecs.emplace_back();
                         resume_pos.emplace_back(nullptr, false);
                     }
 
                     bool scan_data_drained = false;
-                    CkptScanCc scan_cc(
+                    DataSyncScanCc scan_cc(
                         table_name,
                         ckpt_ts,
                         node_group,
                         Sharder::Instance().GetLocalCcShardsCount(),
                         std::move(resume_pos),
-                        Checkpointer::CKPT_SCAN_BATCH_SIZE,
+                        LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
                         start_key,
                         end_key);
                     while (!scan_data_drained)
@@ -2762,6 +2763,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                         if (scan_cc.IsError())
                         {
+                            LOG(INFO) << "DataSync scan failed on table "
+                                      << table_name.StringView();
                             hd_res.SetError(scan_cc.ErrorCode());
                             return;
                         }
@@ -2779,42 +2782,63 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 scan_data_drained =
                                     res.at(i).second && scan_data_drained;
                                 // move the bucket into the tank
-                                std::move(scan_cc.CkptVec(i).begin(),
-                                          scan_cc.CkptVec(i).end(),
-                                          std::back_inserter(ckpt_vecs.at(i)));
+                                std::move(
+                                    scan_cc.DataSyncVec(i).begin(),
+                                    scan_cc.DataSyncVec(i).end(),
+                                    std::back_inserter(data_sync_vecs.at(i)));
 
                                 std::move(
                                     scan_cc.ArchiveVec(i).begin(),
                                     scan_cc.ArchiveVec(i).end(),
                                     std::back_inserter(archive_vecs.at(i)));
 
-                                std::move(scan_cc.MoveBaseVec(i).begin(),
-                                          scan_cc.MoveBaseVec(i).end(),
-                                          std::back_inserter(*mv_base_vec));
+                                std::move(
+                                    scan_cc.MoveBaseVec(i).begin(),
+                                    scan_cc.MoveBaseVec(i).end(),
+                                    std::back_inserter(mv_base_vecs.at(i)));
                             }
                             scan_cc.Reset(std::move(res));
                         }
                     }
 
                     // Sort output vectors in key sorting order.
-                    auto greater = [](const FlushRecord &r1,
-                                      const FlushRecord &r2) -> bool
+                    auto key_greater = [](const TxKey *r1,
+                                          const TxKey *r2) -> bool
+                    { return *r2 < *r1; };
+                    MergeSortedVectors(std::move(mv_base_vecs),
+                                       *mv_base_vec,
+                                       key_greater,
+                                       true);
+                    auto rec_greater = [](const FlushRecord &r1,
+                                          const FlushRecord &r2) -> bool
                     { return *r2.Key() < *r1.Key(); };
-                    MergeSortedVectors(
-                        std::move(ckpt_vecs), *ckpt_vec, greater, true);
-                    MergeSortedVectors(
-                        std::move(archive_vecs), *archive_vec, greater, true);
+                    // To avoid repeatedly set the ckpt_ts_ of a cc entry, which
+                    // might cause the ccentry become invalid in between, remove
+                    // duplicate flush record from ckpt_vec.
+                    MergeSortedVectors(std::move(data_sync_vecs),
+                                       *data_sync_vec,
+                                       rec_greater,
+                                       true);
+                    // For archive vec we don't need to worry about duplicate
+                    // causing issue since we're not visiting their cc entry.
+                    // Also we cannot rely on key compare to dedup archive vec
+                    // since a key could have multiple version of archive
+                    // versions.
+                    MergeSortedVectors(std::move(archive_vecs),
+                                       *archive_vec,
+                                       rec_greater,
+                                       false);
 
                     auto lower_bound_cmp =
                         [](const FlushRecord &rec, const TxKey &key)
                     { return *rec.Key() < key; };
-                    auto batch_it = ckpt_vec->begin();
+                    auto batch_it = data_sync_vec->begin();
                     size_t slice_start_idx = 0;
                     size_t slice_end_idx = 0;
                     StoreRange *range = local_cc_shards.FindRange(
                         table_name, node_group, *start_key);
 
-                    while (batch_it != ckpt_vec->end())
+                    while (batch_it != data_sync_vec->end())
                     {
                         const TxKey &slice_start_key = *batch_it->Key();
                         StoreSlice *curr_slice =
@@ -2822,14 +2846,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                         auto slice_end_it =
                             curr_slice->EndKey() == range->RangeEndKey()
-                                ? ckpt_vec->end()
+                                ? data_sync_vec->end()
                                 : std::lower_bound(batch_it,
-                                                   ckpt_vec->end(),
+                                                   data_sync_vec->end(),
                                                    *curr_slice->EndKey(),
                                                    lower_bound_cmp);
 
                         slice_end_idx =
-                            std::distance(ckpt_vec->begin(), slice_end_it);
+                            std::distance(data_sync_vec->begin(), slice_end_it);
                         int32_t slice_delta_size = 0;
                         uint32_t slice_size = 0;
 
@@ -2846,7 +2870,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                     table_name,
                                                     node_group,
                                                     ckpt_ts,
-                                                    *ckpt_vec,
+                                                    *data_sync_vec,
                                                     slice_start_idx,
                                                     slice_end_idx))
                         {
@@ -2862,29 +2886,29 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     hd_res.SetFinished();
                 });
         };
-        ForwardToSubOperation(txm, &ckpt_scan_op_);
+        ForwardToSubOperation(txm, &data_sync_scan_op_);
     }
-    else if (op_ == &ckpt_scan_op_)
+    else if (op_ == &data_sync_scan_op_)
     {
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
-            ClearCkptVec();
+            ClearDataSyncVec();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             ForceToFinish(txm);
             return;
         }
-        if (ckpt_scan_op_.hd_result_.IsError())
+        if (data_sync_scan_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to scan for "
-                          "checkpoint, tx number "
+                          "data sync, tx number "
                        << txm->TxNumber();
-            ClearCkptVec();
+            ClearDataSyncVec();
             // Set commit ts to 0 to indicate transaction failure.
             // post_all_lock_op_ will release locks acquired.
-            RetrySubOperation(txm, &ckpt_scan_op_);
+            RetrySubOperation(txm, &data_sync_scan_op_);
             return;
         }
-        flush_op_.ckpt_ts_ = txm->commit_ts_;
+        flush_op_.data_sync_ts_ = txm->commit_ts_;
         flush_op_.tx_term_ = txm->tx_term_;
         ForwardToSubOperation(txm, &flush_op_);
     }
@@ -2892,7 +2916,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
-            ClearCkptVec();
+            ClearDataSyncVec();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             ForceToFinish(txm);
             return;
@@ -2912,7 +2936,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         });
         // clear and release ckpt vecs
-        ClearCkptVec();
+        ClearDataSyncVec();
         // Now we can copy out the slice info since it's finalized after
         // flush data
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();

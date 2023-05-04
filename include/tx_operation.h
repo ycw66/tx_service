@@ -675,11 +675,11 @@ struct FlushDataOp : public TransactionOperation
     void Reset();
 
     const TableName *tab_name_{nullptr};
-    uint64_t ckpt_ts_;
+    uint64_t data_sync_ts_;
     NodeGroupId node_group_;
     int64_t tx_term_;
     const TableSchema *schema_{nullptr};
-    std::vector<FlushRecord> *ckpt_vec_{nullptr};
+    std::vector<FlushRecord> *data_sync_vec_{nullptr};
     std::vector<FlushRecord> *archive_vec_{nullptr};
     std::vector<const TxKey *> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
@@ -721,7 +721,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::vector<std::pair<TxKey::Uptr, size_t>> slice_info_;
 
     // vector buffer used during checkpoint scan
-    std::vector<FlushRecord> ckpt_vec_;
+    std::vector<FlushRecord> data_sync_vec_;
     std::vector<FlushRecord> archive_vec_;
     std::vector<const TxKey *> mv_base_vec_;
 
@@ -760,7 +760,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * make these data available to the new range before we commit the range
      * split.
      */
-    AsyncOp<Void> ckpt_scan_op_;
+    AsyncOp<Void> data_sync_scan_op_;
     /**
      * @brief Flush data in memory before commit_ts to KV storage. These data
      * will be flushed into both old and new partitions.
@@ -801,7 +801,7 @@ private:
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
-    void ClearCkptVec();
+    void ClearDataSyncVec();
 };
 
 // To remove remainder records' lock when scan close

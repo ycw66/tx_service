@@ -2199,33 +2199,26 @@ private:
     NodeGroupId cc_ng_id_;
 };
 
-struct CkptScanCc : public CcRequestBase
+struct DataSyncScanCc : public CcRequestBase
 {
 public:
-    enum struct CkptScanStatus
-    {
-        Ongoing,
-        Finish,
-        Error
-    };
-
     // how many pages to scan one time
-    // static constexpr size_t CkptScanBatch = 20;
+    // static constexpr size_t DataSyncScanBatch = 20;
     // todo: limit scan by scanned size
-    static constexpr size_t CkptScanBatchSize = 1024;
+    static constexpr size_t DataSyncScanBatchSize = 1024;
 
-    CkptScanCc() = default;
+    DataSyncScanCc() = default;
 
-    CkptScanCc(const TableName &table_name,
-               const uint64_t ckpt_ts,
-               const uint64_t node_group,
-               const uint16_t core_cnt,
-               std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
-               const size_t scan_batch_size,
-               const TxKey *target_start_key = nullptr,
-               const TxKey *target_end_key = nullptr)
+    DataSyncScanCc(const TableName &table_name,
+                   const uint64_t data_sync_ts,
+                   const uint64_t node_group,
+                   const uint16_t core_cnt,
+                   std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
+                   const size_t scan_batch_size,
+                   const TxKey *target_start_key = nullptr,
+                   const TxKey *target_end_key = nullptr)
         : core_cnt_(core_cnt),
-          ckpt_ts_(ckpt_ts),
+          data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
           pause_key_(std::move(resume_pos)),
@@ -2234,14 +2227,14 @@ public:
           mux_(),
           cv_()
     {
-        assert(scan_batch_size_ > CkptScanBatchSize);
+        assert(scan_batch_size_ > DataSyncScanBatchSize);
         this->table_name_ = &table_name;
         node_group_id_ = node_group;
         err_ = CcErrorCode::NO_ERROR;
         for (size_t i = 0; i < core_cnt; i++)
         {
-            ckpt_vec_.emplace_back();
-            ckpt_vec_.back().reserve(scan_batch_size);
+            data_sync_vec_.emplace_back();
+            data_sync_vec_.back().reserve(scan_batch_size);
             archive_vec_.emplace_back();
             archive_vec_.back().reserve(scan_batch_size);
             mv_base_vec_.emplace_back();
@@ -2252,9 +2245,9 @@ public:
         }
     }
 
-    // CkptScanCc is always stack object and won't be reused, worse, it might be
-    // destructed before Execute returns, so always return false as caller
-    // should never access this object after Execute returns
+    // DataSyncScanCc is always stack object and won't be reused, worse, it
+    // might be destructed before Execute returns, so always return false as
+    // callershould never access this object after Execute returns
     bool Execute(CcShard &ccs) override
     {
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -2270,7 +2263,7 @@ public:
             std::pair<TxKey::Uptr, bool> res{nullptr, true};
             SetFinish(std::move(res), ccs.core_id_);
         }
-        // return false since CkptScanCc is not re-used and does not need to
+        // return false since DataSyncScanCc is not re-used and does not need to
         // call CcRequestBase::Free
         return false;
     }
@@ -2296,7 +2289,7 @@ public:
         res_.clear();
         for (size_t i = 0; i < core_cnt_; i++)
         {
-            ckpt_vec_.at(i).clear();
+            data_sync_vec_.at(i).clear();
             archive_vec_.at(i).clear();
             mv_base_vec_.at(i).clear();
             loading_slice_.at(i) = RangeSliceId(nullptr, nullptr);
@@ -2356,9 +2349,9 @@ public:
         return loading_slice_.at(core_id);
     }
 
-    std::vector<FlushRecord> &CkptVec(uint16_t core_id)
+    std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
     {
-        return ckpt_vec_.at(core_id);
+        return data_sync_vec_.at(core_id);
     }
 
     std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
@@ -2381,8 +2374,8 @@ private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     uint16_t core_cnt_;
-    uint64_t ckpt_ts_;
-    std::vector<std::vector<FlushRecord>> ckpt_vec_;
+    uint64_t data_sync_ts_;
+    std::vector<std::vector<FlushRecord>> data_sync_vec_;
     std::vector<std::vector<FlushRecord>> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<std::vector<const TxKey *>> mv_base_vec_;
@@ -2411,7 +2404,7 @@ private:
     friend class TemplateCcMap;
 
     friend std::ostream &operator<<(std::ostream &outs,
-                                    txservice::CkptScanCc *r);
+                                    txservice::DataSyncScanCc *r);
 };
 
 // This cc request is used to convert parallel access on ccmap/samplepool into

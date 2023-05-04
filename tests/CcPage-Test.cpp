@@ -116,6 +116,8 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
         total_remain += remain;
     }
 
+    local_cc_shards.Terminate();
+
     REQUIRE(total_remain + total_free == MAP_NUM * MAP_SIZE);
 }
 

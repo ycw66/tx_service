@@ -36,6 +36,7 @@ class TxService;
 class LocalCcShards
 {
 public:
+    static const size_t DATA_SYNC_SCAN_BATCH_SIZE = 3 * 1024;
     LocalCcShards(uint32_t node_id = 0,
                   uint16_t core_cnt = 1,
                   uint32_t memory_limit_mb = 1000,
@@ -451,6 +452,24 @@ public:
                    std::vector<const TxKey *> *mv_vec,
                    CcHandlerResult<Void> &hres);
 
+    void EnqueueDataSyncTask(const TableName &table_name,
+                             uint32_t ng_id,
+                             int64_t ng_term,
+                             uint64_t data_sync_ts,
+                             std::mutex *task_sender_mux,
+                             std::condition_variable *task_sender_cv,
+                             uint16_t *finished_task_cnt,
+                             std::atomic_bool *tasks_failed,
+                             bool is_forward = false,
+                             CcHandlerResult<Void> *hres = nullptr);
+
+    /**
+     * @brief When TxService is stopping, this function will be called.
+     *
+     * NOTE: This function should be called after Checkpointer::Terminate
+     */
+    void Terminate();
+
     uint64_t StatsLocalActiveSiTxs()
     {
         uint64_t min_ts = UINT64_MAX;
@@ -587,6 +606,351 @@ private:
     TxService *tx_service_;
 
     bool enable_mvcc_;
+
+    /**
+     * DataSync Operation Interface
+     */
+    enum struct WorkerStatus
+    {
+        Active,
+        Terminating,
+        Terminated
+    };
+
+    struct DataSyncTask
+    {
+    public:
+        DataSyncTask(const TableName &table_name,
+                     uint32_t ng_id,
+                     int64_t ng_term,
+                     uint64_t data_sync_ts,
+                     std::mutex *task_sender_mux,
+                     std::condition_variable *task_sender_cv,
+                     uint16_t *finished_task_cnt,
+                     std::atomic_bool *tasks_failed,
+                     bool is_forward,
+                     CcHandlerResult<Void> *hres = nullptr)
+            : table_name_(table_name),
+              node_group_id_(ng_id),
+              ng_leader_term_(ng_term),
+              data_sync_ts_(data_sync_ts),
+              task_sender_mux_(task_sender_mux),
+              task_sender_cv_(task_sender_cv),
+              finished_task_cnt_(finished_task_cnt),
+              tasks_failed_(tasks_failed),
+              is_forward_(is_forward),
+              task_res_(hres)
+        {
+        }
+
+        bool SetFinish()
+        {
+            if (unfinished_worker_.fetch_sub(1, std::memory_order_release) == 1)
+            {
+                // Notify the caller that the task finished.
+                if (task_sender_mux_ != nullptr &&
+                    finished_task_cnt_ != nullptr)
+                {
+                    std::unique_lock<std::mutex> task_sender_lk(
+                        *task_sender_mux_);
+                    ++(*finished_task_cnt_);
+                    if (sync_task_failed_.load(std::memory_order_relaxed))
+                    {
+                        bool fail = false;
+                        tasks_failed_->compare_exchange_strong(fail, true);
+                    }
+                    task_sender_cv_->notify_one();
+                }
+
+                if (task_res_ != nullptr)
+                {
+                    if (sync_task_failed_.load(std::memory_order_relaxed))
+                    {
+                        task_res_->SetError(CcErrorCode::DATA_STORE_ERR);
+                    }
+                    else
+                    {
+                        task_res_->SetFinished();
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
+        bool SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR)
+        {
+            bool fail = false;
+            sync_task_failed_.compare_exchange_strong(fail, true);
+            if (unfinished_worker_.fetch_sub(1, std::memory_order_release) == 1)
+            {
+                // Notify the caller that the task finished.
+                if (task_sender_mux_ != nullptr &&
+                    finished_task_cnt_ != nullptr)
+                {
+                    std::unique_lock<std::mutex> task_sender_lk(
+                        *task_sender_mux_);
+                    tasks_failed_->compare_exchange_strong(fail, true);
+                    ++(*finished_task_cnt_);
+                    task_sender_cv_->notify_one();
+                }
+
+                if (task_res_ != nullptr)
+                {
+                    task_res_->SetError(err_code);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        bool IsError()
+        {
+            return sync_task_failed_.load(std::memory_order_relaxed);
+        }
+
+        const TableName &table_name_;
+        uint32_t node_group_id_;
+        int64_t ng_leader_term_{-1};
+        uint64_t data_sync_ts_{0};
+        // Used to protect and synchronize the task status between task_worker
+        // and task_sender.
+        std::mutex *task_sender_mux_{nullptr};
+        std::condition_variable *task_sender_cv_{nullptr};
+        uint16_t *finished_task_cnt_{nullptr};
+        // Set by range split worker and flush data worker to indicate data
+        // sync task result.
+        std::atomic_bool *tasks_failed_{nullptr};
+        std::atomic_bool sync_task_failed_{false};
+        // True if need to use the dirty schema..
+        bool is_forward_{false};
+        // Indicate the single task result.
+        CcHandlerResult<Void> *task_res_{nullptr};
+        std::atomic_uint16_t unfinished_worker_{1};
+    };
+
+    struct TableDataSyncStatus
+    {
+        bool is_ongoing_{false};
+        uint64_t last_sync_ts_{0};
+        // Multiple tasks on the same table are executed sequentially, so the
+        // subsequence tasks for this table should wait here.
+        std::vector<std::shared_ptr<DataSyncTask>> pending_task_;
+    };
+
+    // Protect data_sync_task_queue_ and tables_sync_status_
+    std::mutex task_worker_mux_;
+    std::condition_variable task_worker_cv_;
+    std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
+    std::vector<std::thread> data_sync_worker_thds_;
+    static const int data_sync_worker_num_ = 5;
+    std::unordered_map<TableName,
+                       std::unordered_map<NodeGroupId, TableDataSyncStatus>>
+        tables_sync_status_;
+    WorkerStatus data_sync_worker_status_;
+
+    void DataSyncWorker();
+
+    void DataSync(std::unique_lock<std::mutex> &task_worker_lk);
+
+    /**
+     * Range & Slice Update Interface
+     */
+
+    /**
+     * @brief Called before checkpoint to calculate the storage slice size after
+     * checkpoint and decide if the slice needs to be updated(merge/split).
+     * Update slice info accordingly, but does not update the actual slice size
+     * since the data is not flushed yet.
+     * Also decide the range update plan based on the number of slices after the
+     * slice update.
+     */
+    bool UpdateSliceAndCalculateRangeUpdate(
+        const TableName &table_name,
+        NodeGroupId node_group_id,
+        std::vector<FlushRecord> &data_sync_vec,
+        uint64_t data_sync_ts,
+        size_t &batch_idx,
+        std::pair<const StoreRange *, std::vector<const TxKey *>>
+            &splitting_info);
+    /**
+     * @brief Worker thread that split the target range and flush the data into
+     * data store in their new partitions. This is called during checkpoint on a
+     * table, after this function returns, we can assume the splitting ranges
+     * are flushed too.
+     */
+    void SplitFlushRange(
+        const TableName &table_name,
+        NodeGroupId node_group,
+        bool is_forward,
+        std::pair<const StoreRange *, std::vector<const TxKey *>> split_info,
+        std::shared_ptr<DataSyncTask> data_sync_task);
+
+    /**
+     * @brief Given a vector of checkpoint records and splitting ranges, moves
+     * the checkpoint records not in the splitting ranges into a new vector.
+     *
+     * @param flush_vec A vector of checkpoint records
+     * @param non_split_vec The new vector for checkpoint records not falling
+     * into splitting ranges
+     * @param split_ranges Ranges to be split
+     * @param lower_bound_cmp comapre func of type T and const TxKey *
+     */
+    template <typename T, class Compare>
+    void MoveNonSplittingRecords(
+        std::vector<T> &flush_vec,
+        std::vector<T> &non_split_vec,
+        const std::vector<std::pair<const TxKey *, const TxKey *>>
+            &split_ranges,
+        Compare lower_bound_cmp);
+
+    struct UpdateSliceSpecWork
+    {
+    public:
+        UpdateSliceSpecWork(uint32_t node_group,
+                            uint64_t data_sync_ts,
+                            const TableName &table_name,
+                            const std::vector<FlushRecord> &flush_vec,
+                            StoreRange *range,
+                            StoreSlice *slice,
+                            size_t start_idx,
+                            size_t end_idx,
+                            std::mutex &sender_mux,
+                            std::condition_variable &sender_cv,
+                            size_t &finish_work_cnt,
+                            bool &fail)
+            : node_group_(node_group),
+              data_sync_ts_(data_sync_ts),
+              table_name_(table_name),
+              flush_vec_(flush_vec),
+              range_(range),
+              slice_(slice),
+              start_idx_(start_idx),
+              end_idx_(end_idx),
+              sender_mux_(sender_mux),
+              sender_cv_(sender_cv),
+              finish_work_cnt_(finish_work_cnt),
+              fail_(fail)
+        {
+        }
+
+        uint32_t node_group_;
+        uint64_t data_sync_ts_;
+        TableName table_name_;
+        const std::vector<FlushRecord> &flush_vec_;
+        StoreRange *range_;
+        StoreSlice *slice_;
+        size_t start_idx_;
+        size_t end_idx_;
+
+        std::mutex &sender_mux_;
+        std::condition_variable &sender_cv_;
+        // Increased by worker after finishing the retrieved work.
+        size_t &finish_work_cnt_;
+        // Set by worker to indicate work result
+        bool &fail_;
+    };
+    // Workers for updating slice specs. Since update slice
+    // spec would cause potential data store read, we launched
+    // workers so we can have some degree of parallelism, but
+    // not to the degree where it slows down regular read from data store.
+    std::mutex slice_update_mux_;
+    std::condition_variable slice_update_cv_;
+    std::vector<UpdateSliceSpecWork> pending_slice_work_;
+    std::vector<std::thread> update_slice_spec_thds_;
+    WorkerStatus slice_thd_status_;
+    static const int slice_worker_num_ = 5;
+
+    void UpdateSliceSpecWorker();
+
+    /**
+     * @brief Called after data sync is done. Update data store slice size
+     * in memory and in data store. Reset post ckpt size in store slice.
+     */
+    bool UpdateStoreSlice(const TableName &tbl_name,
+                          uint64_t schema_ts,
+                          NodeGroupId node_group_id,
+                          std::vector<FlushRecord> &flush_batch,
+                          bool flush_res);
+
+    /**
+     * FlushData Operation Interface
+     */
+    struct FlushDataWork
+    {
+    public:
+        FlushDataWork(std::shared_ptr<DataSyncTask> data_sync_task,
+                      const TableSchema *schema,
+                      std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
+                      std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
+                      std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
+                      TransactionExecution *data_sync_txm)
+            : node_group_(data_sync_task->node_group_id_),
+              ng_leader_term_(data_sync_task->ng_leader_term_),
+              data_sync_ts_(data_sync_task->data_sync_ts_),
+              table_name_(data_sync_task->table_name_),
+              schema_(schema),
+              data_sync_vec_(std::move(data_sync_vec)),
+              archive_vec_(std::move(archive_vec)),
+              mv_base_vec_(std::move(mv_base_vec)),
+              vec_owner_(true),
+              data_sync_task_(data_sync_task),
+              data_sync_txm_(data_sync_txm),
+              hand_res_(nullptr)
+        {
+        }
+
+        FlushDataWork(uint32_t node_group,
+                      int64_t term,
+                      uint64_t data_sync_ts,
+                      const TableName &table_name,
+                      const TableSchema *schema,
+                      std::vector<FlushRecord> *data_sync_vec,
+                      std::vector<FlushRecord> *archive_vec,
+                      std::vector<const TxKey *> *mv_base_vec,
+                      CcHandlerResult<Void> *res)
+            : node_group_(node_group),
+              ng_leader_term_(term),
+              data_sync_ts_(data_sync_ts),
+              table_name_(table_name),
+              schema_(schema),
+              data_sync_vec_ptr_(data_sync_vec),
+              archive_vec_ptr_(archive_vec),
+              mv_base_vec_ptr_(mv_base_vec),
+              vec_owner_(false),
+              hand_res_(res)
+        {
+        }
+
+        uint32_t node_group_;
+        int64_t ng_leader_term_;
+        uint64_t data_sync_ts_;
+        TableName table_name_;
+        const TableSchema *schema_;
+        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
+        std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
+        std::unique_ptr<std::vector<const TxKey *>> mv_base_vec_{nullptr};
+        std::vector<FlushRecord> *data_sync_vec_ptr_{nullptr};
+        std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
+        std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
+        bool vec_owner_{true};
+
+        // Increased by worker after finishing the retrieved work.
+        std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
+        TransactionExecution *data_sync_txm_{nullptr};
+        CcHandlerResult<Void> *hand_res_{nullptr};
+    };
+    // For flush data work
+    std::mutex flush_worker_mux_;
+    std::condition_variable flush_worker_cv_;
+    // Flush work from data sync, and split range
+    std::vector<FlushDataWork> pending_flush_work_;
+    std::vector<std::thread> flush_worker_thds_;
+    WorkerStatus flush_worker_thd_status_;
+    static const int flush_worker_num_ = 5;
+
+    void FlushDataWorker();
+    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

@@ -210,20 +210,6 @@ public:
     void NotifyCkpt();
 
     /**
-     * @brief Checkpoint a table until ckpt_ts. This will notify checkpointer
-     * to start a new thread and do the checkpoint.
-     */
-    void FlushData(const TableName &table_name,
-                   const TableSchema *schema,
-                   uint64_t ckpt_ts,
-                   int64_t term,
-                   uint64_t node_group,
-                   std::vector<FlushRecord> *ckpt_vec,
-                   std::vector<FlushRecord> *archive_vec,
-                   std::vector<const TxKey *> *mv_vec,
-                   CcHandlerResult<Void> *hres);
-
-    /**
      * @brief Get the number of ccentries in this ccshard
      *
      */

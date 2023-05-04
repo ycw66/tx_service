@@ -34,7 +34,7 @@ struct ScanOpenBatchCc;
 struct ScanNextBatchCc;
 struct ScanSliceCc;
 struct NegotiateCc;
-struct CkptScanCc;
+struct DataSyncScanCc;
 struct CkptUpdateCc;
 struct CkptTs;
 struct AnalyzeTableAllCc;
@@ -92,7 +92,7 @@ public:
     virtual bool Execute(remote::RemoteScanOpen &req) = 0;
     virtual bool Execute(remote::RemoteScanNextBatch &req) = 0;
     virtual bool Execute(ScanSliceCc &req) = 0;
-    virtual bool Execute(CkptScanCc &req) = 0;
+    virtual bool Execute(DataSyncScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
     virtual bool Execute(AnalyzeTableAllCc &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;

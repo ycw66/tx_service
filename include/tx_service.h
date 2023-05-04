@@ -442,6 +442,8 @@ public:
         DeadLockCheck::SetStop();
         ckpt_.Terminate();
         ckpt_.Join();
+        // Terminate the DataSync thds.
+        local_cc_shards_.Terminate();
         if (local_cc_shards_.EnableMvcc())
         {
             TxStartTsCollector::Instance().Shutdown();
