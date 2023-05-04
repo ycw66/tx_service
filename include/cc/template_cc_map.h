@@ -4849,38 +4849,7 @@ public:
     {
         RangeSliceId slice_id = req.SliceId();
         std::vector<SliceChangeInfo> &item_vec = req.SliceRecordCollection();
-
-        if (shard_->core_id_ == 0)
-        {
-            uint64_t snapshot_ts =
-                shard_->EnableMvcc() ? shard_->GlobalMinSiTxStartTs() : 0;
-            RangeSliceOpStatus pin_status =
-                slice_id.Range()->PinSlice(table_name_,
-                                           slice_id.Slice(),
-                                           KeySchema(),
-                                           RecordSchema(),
-                                           schema_ts_,
-                                           snapshot_ts,
-                                           table_schema_->GetKVCatalogInfo(),
-                                           &req,
-                                           shard_,
-                                           shard_->local_shards_.store_hd_,
-                                           true);
-
-            if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-            {
-                req.SetOnLoad(true);
-                return false;
-            }
-            else if (pin_status == RangeSliceOpStatus::Error)
-            {
-                item_vec.clear();
-                req.SetError(CcErrorCode::DATA_STORE_ERR);
-                return false;
-            }
-
-            req.SetOnLoad(false);
-        }
+        // Caller should have already pinned the slice.
 
         Iterator map_it, map_end_it;
 
@@ -4986,7 +4955,6 @@ public:
 
         if (shard_->core_id_ == shard_->core_cnt_ - 1)
         {
-            slice_id.Unpin();
             std::sort(item_vec.begin(),
                       item_vec.end(),
                       [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)

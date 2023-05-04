@@ -2701,6 +2701,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
         data_sync_scan_op_.op_func_ =
             [&table_name = table_name_,
+             table_schema = table_schema_,
              start_key = old_start_key_,
              end_key = old_end_key_,
              data_sync_vec = &data_sync_vec_,
@@ -2715,6 +2716,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 Sharder::Instance().GetTxWorkerPool();
             tx_worker_pool->SubmitWork(
                 [table_name,
+                 table_schema,
                  start_key,
                  end_key,
                  data_sync_vec,
@@ -2868,6 +2870,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         if (slice_size > StoreSlice::slice_upper_bound &&
                             !range->UpdateSliceSpec(curr_slice,
                                                     table_name,
+                                                    table_schema,
                                                     node_group,
                                                     ckpt_ts,
                                                     *data_sync_vec,

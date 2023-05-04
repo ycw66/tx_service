@@ -1435,6 +1435,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // seperate thread per range.
     std::vector<std::pair<const TxKey *, const TxKey *>> split_ranges;
     size_t batch_idx = 0;
+    const TableSchema *table_schema =
+        is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 
     while (batch_idx < data_sync_vec->size())
     {
@@ -1442,6 +1444,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         split_pair.first = nullptr;
 
         bool ret = UpdateSliceAndCalculateRangeUpdate(table_name,
+                                                      table_schema,
                                                       ng_id,
                                                       *data_sync_vec,
                                                       target_data_sync_ts,
@@ -1541,8 +1544,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     if (data_sync_vec->size() != 0 || archive_vec->size() != 0 ||
         mv_base_vec->size() != 0)
     {
-        const TableSchema *table_schema =
-            is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
         std::unique_lock<std::mutex> worker_lk(flush_worker_mux_);
         pending_flush_work_.emplace_back(data_sync_task,
                                          table_schema,
@@ -1618,6 +1619,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
 bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
     const TableName &table_name,
+    const TableSchema *schema,
     NodeGroupId node_group_id,
     std::vector<FlushRecord> &flush_batch,
     uint64_t data_sync_ts,
@@ -1746,6 +1748,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
         {
             std::vector<const TxKey *> new_range_keys =
                 curr_range->CalculateRangeSplitKeys(table_name,
+                                                    schema,
                                                     node_group_id,
                                                     data_sync_ts,
                                                     post_ckpt_size,
@@ -1807,6 +1810,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                         pending_slice_work_.emplace_back(node_group_id,
                                                          data_sync_ts,
                                                          table_name,
+                                                         schema,
                                                          flush_batch,
                                                          curr_range,
                                                          curr_slice,
@@ -2354,6 +2358,7 @@ void LocalCcShards::UpdateSliceSpecWorker()
         uint64_t data_sync_ts = cur_work.data_sync_ts_;
         uint32_t node_group = cur_work.node_group_;
         TableName table_name = cur_work.table_name_;
+        const TableSchema *schema = cur_work.table_schema_;
         StoreRange *range = cur_work.range_;
         StoreSlice *slice = cur_work.slice_;
         size_t start_idx = cur_work.start_idx_;
@@ -2369,6 +2374,7 @@ void LocalCcShards::UpdateSliceSpecWorker()
 
         bool res = range->UpdateSliceSpec(slice,
                                           table_name,
+                                          schema,
                                           node_group,
                                           data_sync_ts,
                                           flush_vec,

@@ -227,8 +227,7 @@ public:
           start_key_(start_key),
           end_key_(end_key),
           snapshot_ts_(snapshot_ts),
-          slice_size_(0),
-          fill_slice_cc_(fill_slice_cc)
+          slice_size_(0)
     {
     }
 
@@ -291,6 +290,13 @@ public:
         return snapshot_ts_;
     }
 
+    bool IsError() const
+    {
+        return failed_;
+    }
+
+    std::function<void(LoadRangeSliceRequest *)> post_lambda_;
+
 private:
     const TableName *table_name_;
 
@@ -302,8 +308,7 @@ private:
     const TxKey *end_key_;
     uint64_t snapshot_ts_;
     uint32_t slice_size_;
-
-    FillStoreSliceCc *fill_slice_cc_;
+    bool failed_{false};
 };
 
 struct FillStoreSliceCc : public CcRequestBase
@@ -398,7 +403,8 @@ public:
                      const std::vector<FlushRecord> &ckpt_vec,
                      uint32_t first_slice_idx,
                      uint32_t last_slice_idx,
-                     uint64_t ckpt_ts);
+                     uint64_t ckpt_ts,
+                     std::vector<SliceChangeInfo> &slice_items);
 
     bool Execute(CcShard &ccs) override;
 
@@ -500,7 +506,7 @@ private:
      * the slice in the data store.
      *
      */
-    std::vector<SliceChangeInfo> slice_items_;
+    std::vector<SliceChangeInfo> &slice_items_;
 
     bool is_finished_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};

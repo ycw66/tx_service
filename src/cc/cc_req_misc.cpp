@@ -222,25 +222,16 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
 
 void LoadRangeSliceRequest::SetFinish()
 {
-    if (fill_slice_cc_ != nullptr)
+    if (post_lambda_)
     {
-        for (SliceDataItem &data_item : slice_data_)
-        {
-            fill_slice_cc_->AddDataItem(std::move(data_item.key_),
-                                        std::move(data_item.record_),
-                                        data_item.version_ts_,
-                                        data_item.is_deleted_);
-        }
-        fill_slice_cc_->StartFilling();
+        post_lambda_(this);
     }
 }
 
 void LoadRangeSliceRequest::SetError()
 {
-    if (fill_slice_cc_ != nullptr)
-    {
-        fill_slice_cc_->TerminateFilling();
-    }
+    failed_ = true;
+    SetFinish();
 }
 
 FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
@@ -263,13 +254,30 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                       schema_ts,
                       slice.StartKey(),
                       slice.EndKey(),
-                      snapshot_ts,
-                      this),
+                      snapshot_ts),
       range_slice_(slice),
       range_(range),
       local_cc_shards_(cc_shards)
 {
     partitioned_slice_data_.resize(cc_shards.Count());
+    load_slice_req_.post_lambda_ = [this](LoadRangeSliceRequest *req)
+    {
+        if (req->IsError())
+        {
+            TerminateFilling();
+        }
+        else
+        {
+            for (SliceDataItem &data_item : req->SliceData())
+            {
+                AddDataItem(std::move(data_item.key_),
+                            std::move(data_item.record_),
+                            data_item.version_ts_,
+                            data_item.is_deleted_);
+            }
+            StartFilling();
+        }
+    };
 }
 
 bool FillStoreSliceCc::Execute(CcShard &ccs)
@@ -426,7 +434,8 @@ GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
                                    const std::vector<FlushRecord> &ckpt_vec,
                                    uint32_t slice_first_idx,
                                    uint32_t slice_last_idx,
-                                   uint64_t ckpt_ts)
+                                   uint64_t ckpt_ts,
+                                   std::vector<SliceChangeInfo> &slice_items)
     : table_name_(table_name),
       cc_ng_id_(ng_id),
       slice_(slice),
@@ -434,7 +443,8 @@ GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
       ckpt_vec_(ckpt_vec),
       slice_first_idx_(slice_first_idx),
       slice_last_idx_(slice_last_idx),
-      ckpt_ts_(ckpt_ts)
+      ckpt_ts_(ckpt_ts),
+      slice_items_(slice_items)
 {
 }
 

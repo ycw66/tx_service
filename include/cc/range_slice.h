@@ -18,6 +18,7 @@ class CcMap;
 class LocalCcShards;
 struct FillStoreSliceCc;
 class StoreRange;
+struct LoadRangeSliceRequest;
 
 namespace store
 {
@@ -406,6 +407,7 @@ public:
 
     bool UpdateSliceSpec(StoreSlice *slice,
                          const TableName &table_name,
+                         const TableSchema *schema,
                          NodeGroupId ng_id,
                          uint64_t flush_ts,
                          const std::vector<FlushRecord> &flush_vec,
@@ -418,7 +420,8 @@ public:
      * this function and update range specs.
      */
     std::vector<const TxKey *> CalculateRangeSplitKeys(
-        const TableName &,
+        const TableName &table_name,
+        const TableSchema *schema,
         NodeGroupId ng_id,
         uint64_t flush_ts,
         size_t post_ckpt_size,

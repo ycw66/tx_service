@@ -767,6 +767,7 @@ private:
      */
     bool UpdateSliceAndCalculateRangeUpdate(
         const TableName &table_name,
+        const TableSchema *schema,
         NodeGroupId node_group_id,
         std::vector<FlushRecord> &data_sync_vec,
         uint64_t data_sync_ts,
@@ -810,6 +811,7 @@ private:
         UpdateSliceSpecWork(uint32_t node_group,
                             uint64_t data_sync_ts,
                             const TableName &table_name,
+                            const TableSchema *schema,
                             const std::vector<FlushRecord> &flush_vec,
                             StoreRange *range,
                             StoreSlice *slice,
@@ -822,6 +824,7 @@ private:
             : node_group_(node_group),
               data_sync_ts_(data_sync_ts),
               table_name_(table_name),
+              table_schema_(schema),
               flush_vec_(flush_vec),
               range_(range),
               slice_(slice),
@@ -837,6 +840,7 @@ private:
         uint32_t node_group_;
         uint64_t data_sync_ts_;
         TableName table_name_;
+        const TableSchema *table_schema_;
         const std::vector<FlushRecord> &flush_vec_;
         StoreRange *range_;
         StoreSlice *slice_;

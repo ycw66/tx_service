@@ -9,6 +9,7 @@
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
+#include "tx_start_ts_collector.h"
 
 namespace txservice
 {
@@ -271,6 +272,7 @@ void StoreRange::UpdateRange(const TxKey *start_key,
 
 bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  const TableName &table_name,
+                                 const TableSchema *schema,
                                  NodeGroupId ng_id,
                                  uint64_t flush_ts,
                                  const std::vector<FlushRecord> &flush_vec,
@@ -278,30 +280,150 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  size_t slice_end_idx,
                                  bool range_locked)
 {
-    GetPostCkptSlice post_ckpt_slice(table_name,
-                                     ng_id,
-                                     slice,
-                                     this,
-                                     flush_vec,
-                                     slice_first_idx,
-                                     slice_end_idx,
-                                     flush_ts);
-
-    do
+    std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+    std::vector<SliceChangeInfo> item_vec;
+    if (slice->status_ != SliceStatus::FullyCached)
     {
+        // Load the slice from data store
+        slice_lk.unlock();
+
+        std::mutex load_slice_mux;
+        std::condition_variable load_slice_cv;
+        bool finished = false;
+        uint64_t snapshot_ts =
+            local_cc_shards_.EnableMvcc()
+                ? TxStartTsCollector::Instance().GlobalMinSiTxStartTs()
+                : 0;
+        const Schema *key_schema;
+        if (table_name.Type() == TableType::Secondary)
+        {
+            key_schema = schema->IndexKeySchema(table_name);
+        }
+        else
+        {
+            key_schema = schema->KeySchema();
+        }
+        LoadRangeSliceRequest load_req(table_name,
+                                       key_schema,
+                                       schema->RecordSchema(),
+                                       schema->Version(),
+                                       slice->StartKey(),
+                                       slice->EndKey(),
+                                       snapshot_ts);
+        load_req.post_lambda_ =
+            [this, &load_slice_mux, &load_slice_cv, &finished](
+                LoadRangeSliceRequest *load_req)
+        {
+            // Signal the caller that the slice is loaded
+            std::unique_lock<std::mutex> lk(load_slice_mux);
+            finished = true;
+            load_slice_cv.notify_one();
+        };
+        // Load the slice from data store
+        if (!local_cc_shards_.store_hd_->LoadRangeSlice(
+                table_name,
+                schema->GetKVCatalogInfo(),
+                partition_id_,
+                &load_req))
+        {
+            // There is a data store error when loading the slice.
+            LOG(ERROR) << "Get post ckpt slice failed "
+                       << table_name.StringView();
+            return false;
+        }
+
+        std::unique_lock<std::mutex> load_slice_lk(load_slice_mux);
+        load_slice_cv.wait(load_slice_lk, [&finished] { return finished; });
+        if (load_req.IsError())
+        {
+            // There is a data store error when loading the slice.
+            LOG(ERROR) << "Get post ckpt slice failed "
+                       << table_name.StringView();
+            return false;
+        }
+
+        // Process the slice
+        auto &slice_data = load_req.SliceData();
+        auto flush_vec_it = flush_vec.begin() + slice_first_idx;
+        auto slice_end_it = flush_vec.begin() + slice_end_idx;
+        auto loaded_it = slice_data.begin();
+        while (flush_vec_it != slice_end_it && loaded_it != slice_data.end())
+        {
+            int32_t item_size = 0;
+            if (loaded_it == slice_data.end() ||
+                (flush_vec_it != slice_end_it &&
+                 (*flush_vec_it->Key() == *loaded_it->key_ ||
+                  *flush_vec_it->Key() < *loaded_it->key_)))
+            {
+                // Take the item from flush vector
+                if (flush_vec_it->payload_status_ == RecordStatus::Deleted)
+                {
+                    item_size = 0;
+                }
+                else
+                {
+                    item_size = flush_vec_it->Key()->Size() +
+                                flush_vec_it->PayloadSize();
+                }
+                item_vec.emplace_back(flush_vec_it->Key(),
+                                      item_size - flush_vec_it->delta_size_,
+                                      item_size);
+
+                if (loaded_it != slice_data.end() &&
+                    *flush_vec_it->Key() == *loaded_it->key_)
+                {
+                    loaded_it++;
+                }
+                flush_vec_it++;
+            }
+            else
+            {
+                if (!loaded_it->is_deleted_)
+                {
+                    // Take the item from loaded slice, this item will
+                    // not change in this round of checkpoint
+                    item_size =
+                        loaded_it->key_->Size() + loaded_it->record_->Size();
+                    item_vec.emplace_back(
+                        std::move(loaded_it->key_), item_size, item_size);
+                }
+                loaded_it++;
+            }
+        }
+    }
+    else
+    {
+        // If slice is already fully cached, pin the slice so that it won't get
+        // kickouted before GetPostCkptSlice is executed.
+        slice->pins_++;
+        slice_lk.unlock();
+        GetPostCkptSlice post_ckpt_slice(table_name,
+                                         ng_id,
+                                         slice,
+                                         this,
+                                         flush_vec,
+                                         slice_first_idx,
+                                         slice_end_idx,
+                                         flush_ts,
+                                         item_vec);
+
         post_ckpt_slice.Reset();
         local_cc_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
         post_ckpt_slice.Wait();
-    } while (post_ckpt_slice.ErrorCode() == CcErrorCode::OUT_OF_MEMORY);
 
-    if (post_ckpt_slice.ErrorCode() != CcErrorCode::NO_ERROR)
-    {
-        // There is a data store error when loading the slice.
-        LOG(ERROR) << "Get post ckpt slice failed " << table_name.StringView();
-        return false;
+        // unpin the slice
+        slice_lk.lock();
+        slice->pins_--;
+        slice_lk.unlock();
+        if (post_ckpt_slice.ErrorCode() != CcErrorCode::NO_ERROR)
+        {
+            // There is a data store error when loading the slice.
+            LOG(ERROR) << "Get post ckpt slice failed "
+                       << table_name.StringView();
+            return false;
+        }
     }
 
-    auto &item_vec = post_ckpt_slice.SliceRecordCollection();
     // Split the slice based on post checkpoint item size, but do
     // not update the slice size with the post checkpoint yet since
     // the data is still not flushed into data store yet.
@@ -358,7 +480,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     if (split_keys.size() > 1)
     {
         std::unique_lock<std::shared_mutex> range_lk(mux_);
-        std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
+        slice_lk.lock();
 
         assert(!slice->to_alter_);
         slice->to_alter_ = true;
@@ -438,14 +560,15 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             slices_.emplace(slices_.begin() + slice_idx + idx,
                             std::move(sub_slice));
         }
-
         slice->to_alter_ = false;
     }
+
     return true;
 }
 
 std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
     const TableName &table_name,
+    const TableSchema *schema,
     NodeGroupId ng_id,
     uint64_t flush_ts,
     size_t post_ckpt_size,
@@ -510,6 +633,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
             curr_subrange_size -= slices_.at(slice_idx - 1)->PostCkptSize();
             UpdateSliceSpec(slices_.at(slice_idx - 1).get(),
                             table_name,
+                            schema,
                             ng_id,
                             flush_ts,
                             flush_vec,
