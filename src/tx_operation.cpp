@@ -3143,8 +3143,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Kickout old range data. For those data that now falls on a
         // new node, we need to kickout them out from the old node's ccmap.
         kickout_old_range_data_op_.commit_ts_ = txm->commit_ts_;
-        kickout_data_it_ = new_range_info_.cbegin();
-        for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
+        for (kickout_data_it_ = new_range_info_.cbegin();
+             kickout_data_it_ != new_range_info_.cend();
+             kickout_data_it_++)
         {
             NodeGroupId new_ng_id =
                 kickout_data_it_->second % Sharder::Instance().NodeGroupCount();

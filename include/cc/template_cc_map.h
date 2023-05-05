@@ -6485,6 +6485,14 @@ protected:
                     entry_insert_it++;
                 }
             }
+            else
+            {
+                // keep the entries that are not in the target range
+                *key_insert_it = std::move(*key_it);
+                *entry_insert_it = std::move(*entry_it);
+                key_insert_it++;
+                entry_insert_it++;
+            }
         }
         keys.erase(key_insert_it, keys.end());
         entries.erase(entry_insert_it, entries.end());
