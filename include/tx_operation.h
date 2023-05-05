@@ -105,21 +105,21 @@ public:
 struct UnlockReadRangeOperation : TransactionOperation
 {
 public:
+    explicit UnlockReadRangeOperation(TransactionExecution *txm);
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
     // in-parameters
     const CcEntryAddr *cce_addr_{};
 
-    // out-parameters, to pass result to caller operation
-    CcHandlerResult<PostProcessResult> *unlock_range_result_;
+    CcHandlerResult<PostProcessResult> unlock_range_result_;
 };
 #endif
 
 struct ReadOperation : TransactionOperation
 {
 public:
-    ReadOperation(TransactionExecution *txm);
+    explicit ReadOperation(TransactionExecution *txm);
 
     void Reset();
     void Forward(TransactionExecution *txm) override;
@@ -136,7 +136,6 @@ public:
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
-    CcHandlerResult<PostProcessResult> unlock_range_result_;
 #endif
 };
 
@@ -156,7 +155,7 @@ public:
 struct SetCommitTsOperation : TransactionOperation
 {
 public:
-    SetCommitTsOperation(TransactionExecution *txm);
+    explicit SetCommitTsOperation(TransactionExecution *txm);
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
@@ -168,7 +167,7 @@ struct ValidateOperation : TransactionOperation
 public:
     static const uint32_t default_read_set_capacity = 16;
 
-    ValidateOperation(TransactionExecution *txm);
+    explicit ValidateOperation(TransactionExecution *txm);
     void Reset(size_t read_cnt);
     bool IsError();
     void Forward(TransactionExecution *txm) override;
@@ -185,7 +184,7 @@ public:
 struct AcquireWriteOperation : TransactionOperation
 {
 public:
-    AcquireWriteOperation(TransactionExecution *txm);
+    explicit AcquireWriteOperation(TransactionExecution *txm);
     void Reset(size_t acquire_write_cnt);
     void Reset();
     void AggregateAcquiredKeys(TransactionExecution *txm);
@@ -297,7 +296,7 @@ struct PostProcessOp : TransactionOperation
 
 struct InitTxnOperation : TransactionOperation
 {
-    InitTxnOperation(TransactionExecution *txm);
+    explicit InitTxnOperation(TransactionExecution *txm);
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
@@ -306,7 +305,7 @@ struct InitTxnOperation : TransactionOperation
 
 struct ScanOpenOperation : TransactionOperation
 {
-    ScanOpenOperation(TransactionExecution *txm);
+    explicit ScanOpenOperation(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
     void Set(const TableName *table_name,
@@ -428,7 +427,7 @@ struct ScanState
 
 struct ScanNextOperation : TransactionOperation
 {
-    ScanNextOperation(TransactionExecution *txm);
+    explicit ScanNextOperation(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
@@ -639,7 +638,7 @@ private:
 struct SleepOperation : TransactionOperation
 {
 public:
-    SleepOperation(TransactionExecution *txm);
+    explicit SleepOperation(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
 

@@ -50,6 +50,9 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       next_req_(nullptr),
       protocol_(proto),
       init_txn_(this),
+#ifdef RANGE_PARTITION_ENABLED
+      unlock_range_op_(this),
+#endif
       read_(this),
       scan_open_(this),
       scan_next_(this),
@@ -953,7 +956,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 // lock_range_op_.
                 lock_range_op_.Reset();
                 read.lock_range_result_.Reset();
-                read.unlock_range_result_.Reset();
 
                 lock_range_op_.key_ = &key;
                 lock_range_op_.range_table_name_ =
@@ -1063,6 +1065,15 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
+#ifdef RANGE_PARTITION_ENABLED
+    // For isolation levels weaker than RepeatableRead, release
+    // the range lock once read finishes.
+    bool release_range_lock = !read.read_tx_req_->read_local_ &&
+                              iso_level_ < IsolationLevel::RepeatableRead &&
+                              read.lock_range_result_.IsFinished() &&
+                              !read.lock_range_result_.IsError();
+#endif
+
     if (read_.hd_result_.IsError())
     {
         DLOG(ERROR) << "ReadOperation failed for cc error:"
@@ -1121,7 +1132,10 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
 
 #ifdef RANGE_PARTITION_ENABLED
-                    ReleaseReadRangeLock(read);
+                    if (release_range_lock)
+                    {
+                        ReleaseReadRangeLock(read);
+                    }
 #endif
                     return;
                 }
@@ -1145,9 +1159,10 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         rec_resp_->Finish(read_res.rec_status_);
 
 #ifdef RANGE_PARTITION_ENABLED
-        // For isolation levels weaker than RepeatableRead, release
-        // the range lock once read finishes.
-        ReleaseReadRangeLock(read);
+        if (release_range_lock)
+        {
+            ReleaseReadRangeLock(read);
+        }
 #endif
     }
 }
@@ -1189,7 +1204,7 @@ void TransactionExecution::Process(UnlockReadRangeOperation &unlock_range)
                       0,
                       0,
                       *unlock_range.cce_addr_,
-                      *unlock_range.unlock_range_result_);
+                      unlock_range.unlock_range_result_);
 }
 
 void TransactionExecution::PostProcess(UnlockReadRangeOperation &unlock_range)
@@ -1200,19 +1215,11 @@ void TransactionExecution::PostProcess(UnlockReadRangeOperation &unlock_range)
 
 void TransactionExecution::ReleaseReadRangeLock(txservice::ReadOperation &read)
 {
-    if (!read.read_tx_req_->read_local_ &&
-        iso_level_ < IsolationLevel::RepeatableRead &&
-        read.lock_range_result_.IsFinished() &&
-        !read.lock_range_result_.IsError())
-    {
-        read.unlock_range_result_.Reset();
-        unlock_range_op_.Reset();
-        unlock_range_op_.cce_addr_ = &read.lock_range_result_.Value().cce_addr_;
-        unlock_range_op_.unlock_range_result_ = &read.unlock_range_result_;
+    unlock_range_op_.Reset();
+    unlock_range_op_.cce_addr_ = &read.lock_range_result_.Value().cce_addr_;
 
-        PushOperation(&unlock_range_op_);
-        Process(unlock_range_op_);
-    }
+    PushOperation(&unlock_range_op_);
+    Process(unlock_range_op_);
 }
 #endif
 

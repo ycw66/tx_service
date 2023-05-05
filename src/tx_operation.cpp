@@ -81,8 +81,7 @@ ReadOperation::ReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(txm),
-      unlock_range_result_(txm)
+      lock_range_result_(txm)
 #endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -96,7 +95,6 @@ void ReadOperation::Reset()
 #ifdef RANGE_PARTITION_ENABLED
     lock_range_result_.Value().Reset();
     lock_range_result_.Reset();
-    unlock_range_result_.Reset();
 #endif
 }
 
@@ -279,15 +277,21 @@ void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
     }
 }
 
+UnlockReadRangeOperation::UnlockReadRangeOperation(
+    txservice::TransactionExecution *txm)
+    : unlock_range_result_(txm)
+{
+}
+
 void UnlockReadRangeOperation::Reset()
 {
     cce_addr_ = nullptr;
-    unlock_range_result_ = nullptr;
+    unlock_range_result_.Reset();
 }
 
 void UnlockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
 {
-    if (unlock_range_result_->IsFinished())
+    if (unlock_range_result_.IsFinished())
     {
         txm->PostProcess(*this);
     }
