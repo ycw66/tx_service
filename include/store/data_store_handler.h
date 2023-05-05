@@ -246,6 +246,8 @@ public:
         const txservice::TableSchema *current_table_schema,
         txservice::AlterTableInfo &alter_table_info) = 0;
 
+    virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
+
 protected:
     TxService *tx_service_;
 };

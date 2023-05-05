@@ -1528,17 +1528,17 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 cce = Find(*look_key).second;
 
-                // collect metrics: cache hits and miss
+                // collect metrics: read cache hits and miss
                 if (metrics::enable_cache_hit_rate)
                 {
                     auto meter = shard_->meter_.get();
                     if (cce != nullptr)
                     {
-                        meter->Collect("cache_hits", 1);
+                        meter->Collect("read_cache_hits", 1);
                     }
                     else
                     {
-                        meter->Collect("cache_miss", 1);
+                        meter->Collect("read_cache_miss", 1);
                     }
                 }
 

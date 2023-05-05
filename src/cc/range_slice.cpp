@@ -142,11 +142,24 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
 
     if (slice->status_ == SliceStatus::FullyCached)
     {
+        // collect metrics: slice cache hits
+        if (metrics::enable_cache_hit_rate)
+        {
+            auto meter = cc_shard->meter_.get();
+            meter->Collect("slice_cache_hits", 1);
+        }
         ++slice->pins_;
         pin_status = RangeSliceOpStatus::Successful;
     }
     else
     {
+        // collect metrics: slice cache miss
+        if (metrics::enable_cache_hit_rate)
+        {
+            auto meter = cc_shard->meter_.get();
+            meter->Collect("slice_cache_miss", 1);
+        }
+
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
                                              *slice,
                                              key_schema,

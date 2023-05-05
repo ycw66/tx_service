@@ -92,6 +92,7 @@ set(INCLUDE_DIR
    ${TX_SERVICE_SOURCE_DIR}/include/store
    ${TX_SERVICE_SOURCE_DIR}/log_service/proto
    ${TX_SERVICE_SOURCE_DIR}/log_service/include
+   ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/include
    ${Protobuf_INCLUDE_DIR})
 
 if ( CMAKE_COMPILER_IS_GNUCC )
@@ -113,11 +114,6 @@ if ( CMAKE_COMPILER_IS_GNUCC )
        ${OPENSSL_LIB}
     )
 endif()
-
-if (METRICS_COLLECTOR_ENABLE)
-    add_compile_definitions(METRICS_COLLECTOR_ENABLE)
-endif ()
-
 
 SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/tx_execution.cpp
@@ -147,6 +143,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
+    ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/src/metrics.cc
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})
