@@ -333,34 +333,52 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             load_slice_cv.notify_one();
         };
         // Load the slice from data store
-        if (!local_cc_shards_.store_hd_->LoadRangeSlice(
-                table_name,
-                schema->GetKVCatalogInfo(),
-                partition_id_,
-                &load_req))
+        while (true)
         {
-            // There is a data store error when loading the slice.
-            LOG(ERROR) << "Get post ckpt slice failed "
-                       << table_name.StringView();
-            return false;
-        }
+            if (!local_cc_shards_.store_hd_->LoadRangeSlice(
+                    table_name,
+                    schema->GetKVCatalogInfo(),
+                    partition_id_,
+                    &load_req))
+            {
+                // There is a data store error when loading the slice, retry
+                // until succeed.
+                LOG(ERROR) << "Get post ckpt slice failed "
+                           << table_name.StringView();
+                // sleep for a second before retrying so that we don't consume
+                // too much data store traffic
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
 
-        std::unique_lock<std::mutex> load_slice_lk(load_slice_mux);
-        load_slice_cv.wait(load_slice_lk, [&finished] { return finished; });
-        if (load_req.IsError())
-        {
+            std::unique_lock<std::mutex> load_slice_lk(load_slice_mux);
+            load_slice_cv.wait(load_slice_lk, [&finished] { return finished; });
+            if (!load_req.IsError())
+            {
+                break;
+            }
             // There is a data store error when loading the slice.
             LOG(ERROR) << "Get post ckpt slice failed "
                        << table_name.StringView();
-            return false;
+            finished = false;
+            load_req.Reset();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
         // Process the slice
         auto &slice_data = load_req.SliceData();
+        if (slice_data.empty())
+        {
+            // If the slice is empty in data store, mark the slice as fully
+            // cached
+            slice_lk.lock();
+            slice->status_ = SliceStatus::FullyCached;
+            slice_lk.unlock();
+        }
         auto flush_vec_it = flush_vec.begin() + slice_first_idx;
         auto slice_end_it = flush_vec.begin() + slice_end_idx;
         auto loaded_it = slice_data.begin();
-        while (flush_vec_it != slice_end_it && loaded_it != slice_data.end())
+        while (flush_vec_it != slice_end_it || loaded_it != slice_data.end())
         {
             int32_t item_size = 0;
             if (loaded_it == slice_data.end() ||
@@ -423,18 +441,13 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         post_ckpt_slice.Reset();
         local_cc_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
         post_ckpt_slice.Wait();
+        // GetPostCkptSlice should never fail.
+        assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
 
         // unpin the slice
         slice_lk.lock();
         slice->pins_--;
         slice_lk.unlock();
-        if (post_ckpt_slice.ErrorCode() != CcErrorCode::NO_ERROR)
-        {
-            // There is a data store error when loading the slice.
-            LOG(ERROR) << "Get post ckpt slice failed "
-                       << table_name.StringView();
-            return false;
-        }
     }
 
     // Split the slice based on post checkpoint item size, but do
@@ -452,10 +465,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     uint32_t subslice_start = 0;
     for (size_t pos = 0; pos < item_vec.size(); ++pos)
     {
-        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
-        curr_subslice_size += item_vec[pos].cur_slice_size_;
-
-        if (post_ckpt_subslice_size >= avg_subslice_size ||
+        if (post_ckpt_subslice_size + item_vec[pos].post_update_slice_size_ >=
+                avg_subslice_size ||
             pos == item_vec.size() - 1)
         {
             if (split_keys.empty())
@@ -485,9 +496,29 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             }
             post_ckpt_subslice_size = 0;
             curr_subslice_size = 0;
-            subslice_start = pos + 1;
+            subslice_start = pos;
+        }
+        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
+        curr_subslice_size += item_vec[pos].cur_slice_size_;
+    }
+    if (post_ckpt_subslice_size)
+    {
+        if (item_vec[subslice_start].is_key_owner_)
+        {
+            split_keys.emplace_back(
+                std::move(item_vec[subslice_start].key_.uptr_),
+                curr_subslice_size,
+                post_ckpt_subslice_size);
+            item_vec[subslice_start].is_key_owner_ = false;
+        }
+        else
+        {
+            split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
+                                    curr_subslice_size,
+                                    post_ckpt_subslice_size);
         }
     }
+
     // Split StoreSlice in memory. Slice info in KV store
     // will be updated after checkpoint.
     if (split_keys.size() > 1)

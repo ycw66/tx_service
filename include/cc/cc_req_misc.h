@@ -218,8 +218,7 @@ public:
                           uint64_t schema_ts,
                           const TxKey *start_key,
                           const TxKey *end_key,
-                          uint64_t snapshot_ts,
-                          FillStoreSliceCc *fill_slice_cc = nullptr)
+                          uint64_t snapshot_ts)
         : table_name_(&tbl_name),
           key_schema_(key_schema),
           rec_schema_(rec_schema),
@@ -229,6 +228,13 @@ public:
           snapshot_ts_(snapshot_ts),
           slice_size_(0)
     {
+    }
+
+    void Reset()
+    {
+        failed_ = false;
+        slice_size_ = 0;
+        slice_data_.clear();
     }
 
     void AddDataItem(txservice::TxKey::Uptr key,
