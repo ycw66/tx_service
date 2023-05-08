@@ -29,7 +29,7 @@ void StoreSlice::StartLoading(FillStoreSliceCc *fill_req,
     }
 }
 
-void StoreSlice::CommitLoading(uint32_t slice_size)
+void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
 {
     std::unique_lock<std::mutex> slice_lk(slice_mux_);
     assert(pins_ == 0);
@@ -37,6 +37,12 @@ void StoreSlice::CommitLoading(uint32_t slice_size)
 
     status_ = SliceStatus::FullyCached;
     size_ = slice_size;
+
+    if (to_alter_)
+    {
+        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
+        range.wait_cv_.notify_one();
+    }
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
@@ -438,16 +444,13 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                          flush_ts,
                                          item_vec);
 
-        post_ckpt_slice.Reset();
         local_cc_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
         post_ckpt_slice.Wait();
         // GetPostCkptSlice should never fail.
         assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
 
         // unpin the slice
-        slice_lk.lock();
-        slice->pins_--;
-        slice_lk.unlock();
+        UnpinSlice(slice);
     }
 
     // Split the slice based on post checkpoint item size, but do

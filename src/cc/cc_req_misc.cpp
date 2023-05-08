@@ -375,7 +375,7 @@ void FillStoreSliceCc::SetFinish()
     {
         if (err_code == CcErrorCode::NO_ERROR)
         {
-            range_slice_.CommitLoading(load_slice_req_.SliceSize());
+            range_slice_.CommitLoading(range_, load_slice_req_.SliceSize());
         }
         else
         {

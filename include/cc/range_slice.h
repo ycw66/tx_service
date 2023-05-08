@@ -210,7 +210,7 @@ public:
     StoreSlice(const StoreSlice &) = delete;
 
     void StartLoading(FillStoreSliceCc *fill_req, LocalCcShards &cc_shards);
-    void CommitLoading(uint32_t slice_size);
+    void CommitLoading(StoreRange &range, uint32_t slice_size);
 
     const TxKey *StartKey() const
     {
