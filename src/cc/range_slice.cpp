@@ -378,7 +378,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             // If the slice is empty in data store, mark the slice as fully
             // cached
             slice_lk.lock();
-            slice->status_ = SliceStatus::FullyCached;
+            if (slice->status_ != SliceStatus::BeingLoaded)
+            {
+                slice->status_ = SliceStatus::FullyCached;
+            }
             slice_lk.unlock();
         }
         auto flush_vec_it = flush_vec.begin() + slice_first_idx;
@@ -468,8 +471,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     uint32_t subslice_start = 0;
     for (size_t pos = 0; pos < item_vec.size(); ++pos)
     {
-        if (post_ckpt_subslice_size + item_vec[pos].post_update_slice_size_ >=
-                avg_subslice_size ||
+        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
+        curr_subslice_size += item_vec[pos].cur_slice_size_;
+
+        if (post_ckpt_subslice_size >= avg_subslice_size ||
             pos == item_vec.size() - 1)
         {
             if (split_keys.empty())
@@ -497,31 +502,12 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                             post_ckpt_subslice_size);
                 }
             }
-            post_ckpt_subslice_size = 0;
-            curr_subslice_size = 0;
+            // current pos will be the start key for next slice.
+            post_ckpt_subslice_size = item_vec[pos].post_update_slice_size_;
+            curr_subslice_size = item_vec[pos].cur_slice_size_;
             subslice_start = pos;
         }
-        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
-        curr_subslice_size += item_vec[pos].cur_slice_size_;
     }
-    if (post_ckpt_subslice_size)
-    {
-        if (item_vec[subslice_start].is_key_owner_)
-        {
-            split_keys.emplace_back(
-                std::move(item_vec[subslice_start].key_.uptr_),
-                curr_subslice_size,
-                post_ckpt_subslice_size);
-            item_vec[subslice_start].is_key_owner_ = false;
-        }
-        else
-        {
-            split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
-                                    curr_subslice_size,
-                                    post_ckpt_subslice_size);
-        }
-    }
-
     // Split StoreSlice in memory. Slice info in KV store
     // will be updated after checkpoint.
     if (split_keys.size() > 1)
