@@ -88,8 +88,6 @@ CcShard::CcShard(uint16_t core_id,
 
     if (metrics::enable_cache_hit_rate)
     {
-        meter_->Register("read_cache_hits", metrics::Type::Counter);
-        meter_->Register("read_cache_miss", metrics::Type::Counter);
         meter_->Register("slice_cache_hits", metrics::Type::Counter);
         meter_->Register("slice_cache_miss", metrics::Type::Counter);
     }
