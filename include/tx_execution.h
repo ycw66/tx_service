@@ -475,6 +475,7 @@ private:
     ReleaseScanExtraLockOp abundant_lock_op_;
 
     metrics::TimePoint tx_duration_start_;
+    metrics::TimePoint write_log_duration_start_;
 
     friend struct TransactionOperation;
     friend struct CompositeTransactionOperation;

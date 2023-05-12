@@ -83,6 +83,11 @@ public:
             meter_->Register("tx_duration", metrics::Type::Histogram);
             meter_->Register("tx_processed_total", metrics::Type::Counter);
         }
+
+        if (metrics::enable_log_metrics)
+        {
+            meter_->Register("write_log_duration", metrics::Type::Histogram);
+        }
     }
 
     TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)

@@ -798,14 +798,15 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    init_txn.is_running_ = true;
-    commit_ts_ = 0;
-    commit_ts_bound_ = 0;
 
     if (metrics::enable_transactions)
     {
         tx_duration_start_ = metrics::Clock::now();
     }
+
+    init_txn.is_running_ = true;
+    commit_ts_ = 0;
+    commit_ts_bound_ = 0;
 
     init_txn.Reset();
 
@@ -2729,6 +2730,12 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
+    if (metrics::enable_log_metrics)
+    {
+        write_log_duration_start_ = metrics::Clock::now();
+    }
+
     write_log.Reset();
     write_log.is_running_ = true;
 
@@ -2770,8 +2777,6 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
         if (!log_op->hd_result_.IsError())
         {
             tx_status_.store(TxnStatus::Committed, std::memory_order_release);
-            PushOperation(&update_txn_);
-            Process(update_txn_);
         }
         else
         {
@@ -2788,12 +2793,27 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
-            PushOperation(&update_txn_);
-            Process(update_txn_);
         }
+
+        // collect metrics: write log duration
+        if (metrics::enable_log_metrics)
+        {
+            auto meter = tx_processor_->meter_.get();
+            meter->CollectDuration("write_log_duration",
+                                   write_log_duration_start_);
+        }
+        PushOperation(&update_txn_);
+        Process(update_txn_);
     }
     else
     {
+        // collect metrics: write log duration
+        if (metrics::enable_log_metrics)
+        {
+            auto meter = tx_processor_->meter_.get();
+            meter->CollectDuration("write_log_duration",
+                                   write_log_duration_start_);
+        }
         // The tx is committing a multi-stage operation, e.g., schema
         // changes.
         Forward();
@@ -3050,6 +3070,8 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
+    Reset();
+
     // collect metrics: tx duration and tx processed total
     if (metrics::enable_transactions)
     {
@@ -3057,7 +3079,6 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
         meter->CollectDuration("tx_duration", tx_duration_start_);
         meter->Collect("tx_processed_total", 1);
     }
-    Reset();
 }
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)
