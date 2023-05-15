@@ -34,7 +34,7 @@ namespace txservice
 {
 
 // whether skip write redo log to log_service.
-bool txservice_skip_redo_log = false;
+extern bool txservice_skip_redo_log;
 
 /**
  * @brief TxProcessor is a worker processing concurrency control (cc) requests

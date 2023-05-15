@@ -24,6 +24,9 @@
 
 namespace txservice
 {
+// whether skip write redo log to log_service.
+bool txservice_skip_redo_log = false;
+
 TransactionExecution::TransactionExecution(CcHandler *_handler,
                                            TxLog *txlog,
                                            TxProcessor *tx_processor,
@@ -2748,7 +2751,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     write_log.log_group_id_ = txlog_->GetLogGroupId(tx_number_);
     ::txlog::WriteLogRequest *wlog_req =
         write_log.log_closure_.LogRequest().mutable_write_log_request();
-    wlog_req->set_log_group_id(write_log_.log_group_id_);
+    wlog_req->set_log_group_id(write_log.log_group_id_);
 
     txlog_->WriteLog(write_log.log_group_id_,
                      write_log.log_closure_.Controller(),
