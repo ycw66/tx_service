@@ -32,6 +32,10 @@ using namespace std::chrono_literals;
 
 namespace txservice
 {
+
+// whether skip write redo log to log_service.
+bool txservice_skip_redo_log = false;
+
 /**
  * @brief TxProcessor is a worker processing concurrency control (cc) requests
  * on one cc shard (identified by the thread/core ID), advances tx state
@@ -341,7 +345,8 @@ public:
               store::DataStoreHandler *store_hd = nullptr,
               metrics::MetricsRegistry *metrics_registry = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr,
-              bool enable_mvcc = true)
+              bool enable_mvcc = true,
+              bool skip_redo_log = false)
         : local_cc_shards_(node_id,
                            conf.find("core_num")->second,
                            conf.find("node_memory_limit_mb")->second,
@@ -393,6 +398,7 @@ public:
             &local_cc_shards_,
             conf.find("collect_active_tx_ts_interval_seconds")->second);
         DeadLockCheck::Init(local_cc_shards_);
+        txservice_skip_redo_log = skip_redo_log;
     }
 
     TxService(const std::string &local_path,
@@ -405,7 +411,8 @@ public:
               std::vector<uint16_t> *txlog_ports = nullptr,
               store::DataStoreHandler *store_hd = nullptr,
               std::unique_ptr<TxLog> log_hd = nullptr,
-              bool enable_mvcc = true)
+              bool enable_mvcc = true,
+              bool skip_redo_log = false)
         : TxService(local_path,
                     catalog_factory,
                     conf,
@@ -417,7 +424,8 @@ public:
                     store_hd,
                     nullptr,
                     std::move(log_hd),
-                    enable_mvcc)
+                    enable_mvcc,
+                    skip_redo_log)
     {
     }
 

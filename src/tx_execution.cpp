@@ -2443,7 +2443,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         }
         else
         {
-            if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
+            if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0 &&
+                !txservice_skip_redo_log)
             {
                 FillDataLogRequest(write_log_);
                 PushOperation(&write_log_);
