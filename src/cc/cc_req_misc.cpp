@@ -209,6 +209,9 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     {
         ccs.local_shards_.DropTableStatistics(cc_ng_id_);
         ccs.local_shards_.DropCatalogs(cc_ng_id_);
+#ifdef RANGE_PARTITION_ENABLED
+        ccs.local_shards_.DropTableRanges(cc_ng_id_);
+#endif
         LOG(INFO) << "ccshard: " << ccs.core_id_
                   << "; clear ccmaps and catalogs of node group: " << cc_ng_id_;
         wait_cv_.notify_one();

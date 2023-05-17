@@ -362,29 +362,45 @@ void LocalCcShards::CreateRemoteStatisticsTx(
 void LocalCcShards::CreateSplitRangeRecoveryTx(
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
     const TableSchema *table_schema,
-    const TxKey *range_key,
-    std::unique_ptr<RangeRecord> splitting_range_record,
-    uint32_t partition_id,
-    std::unique_ptr<TxKey> new_range_key,
-    uint32_t new_partition_id,
+    int32_t partition_id,
+    const TxKey *start_key,
+    const TxKey *end_key,
+    const RangeInfo *range_info,
+    std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
+    std::vector<int32_t> &&new_partition_ids,
     uint32_t node_group_id,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts,
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
+    std::shared_ptr<std::atomic_uint32_t> split_tx_started)
 {
+    // Mark the table as sync in progress to avoid concurrent data sync before
+    // range split tx finishes if this is the first started range split.
+    if (split_tx_started->fetch_add(1) == 0)
+    {
+        const TableName range_table_name = TableName{
+            ds_split_range_op_msg.table_name(), TableType::RangePartition};
+        const TableName base_table_name = TableName{
+            range_table_name.GetBaseTableNameSV(), TableType::Primary};
+        SetDataSyncOngoing(base_table_name, node_group_id, true);
+    }
+
     TransactionExecution *txm = tx_service_->NewTx();
     txm->RecoverSplitRangeTx(ds_split_range_op_msg,
                              table_schema,
-                             range_key,
-                             std::move(splitting_range_record),
                              partition_id,
-                             std::move(new_range_key),
-                             new_partition_id,
+                             start_key,
+                             end_key,
+                             range_info,
+                             std::move(new_range_keys),
+                             std::move(new_partition_ids),
+                             node_group_id,
                              txn,
                              tx_term,
                              commit_ts,
-                             std::move(catalog_cc_entry));
+                             std::move(catalog_cc_entry),
+                             split_tx_started);
 }
 
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,
@@ -515,7 +531,7 @@ std::unordered_map<uint32_t, TableRangeEntry *>
 }
 
 void LocalCcShards::CleanTableRange(const TableName &table_name,
-                                    const NodeGroupId ng_id)
+                                    NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     auto table_it = table_ranges_.find(table_name);
@@ -528,6 +544,19 @@ void LocalCcShards::CleanTableRange(const TableName &table_name,
     if (id_table_it != table_range_ids_.end())
     {
         id_table_it->second.erase(ng_id);
+    }
+}
+
+void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    for (auto &table_range : table_ranges_)
+    {
+        table_range.second.erase(ng_id);
+    }
+    for (auto &range_id : table_range_ids_)
+    {
+        range_id.second.erase(ng_id);
     }
 }
 
@@ -648,6 +677,11 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
+    if (!entry->RangeSlices())
+    {
+        pin_status = RangeSliceOpStatus::NotOwner;
+        return RangeSliceId(nullptr, nullptr);
+    }
 
     return entry->RangeSlices()->PinSlice(table_name,
                                           key,
@@ -691,6 +725,11 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         cc_shard->FetchTableRanges(
             range_table_name, kv_info, cc_request, ng_id);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
+        return RangeSliceId(nullptr, nullptr);
+    }
+    if (!entry->RangeSlices())
+    {
+        pin_status = RangeSliceOpStatus::NotOwner;
         return RangeSliceId(nullptr, nullptr);
     }
 
@@ -1139,6 +1178,35 @@ void LocalCcShards::Terminate()
     {
         update_slice_spec_thds_.at(id).join();
     }
+}
+
+bool LocalCcShards::SetDataSyncOngoing(const TableName &base_table_name,
+                                       NodeGroupId node_group_id,
+                                       bool is_ongoing)
+{
+    // Find or emplace item from table sync status for this table.
+    std::unique_lock<std::mutex> task_worker_lk(task_worker_mux_);
+    auto tbl_statuses_it =
+        tables_sync_status_.try_emplace(base_table_name).first;
+    std::unordered_map<NodeGroupId, TableDataSyncStatus> &ng_tbl_statuses =
+        tbl_statuses_it->second;
+    auto res_pair = ng_tbl_statuses.try_emplace(node_group_id);
+    TableDataSyncStatus &sync_status = res_pair.first->second;
+
+    if (sync_status.is_ongoing_ && is_ongoing)
+    {
+        return false;
+    }
+    sync_status.is_ongoing_ = is_ongoing;
+    if (!is_ongoing && sync_status.pending_task_.size() > 0)
+    {
+        // Put the waiting task back in processing queue.
+        data_sync_task_queue_.push_back(
+            std::move(sync_status.pending_task_.back()));
+        sync_status.pending_task_.pop_back();
+    }
+    task_worker_lk.unlock();
+    return true;
 }
 
 void LocalCcShards::DataSyncWorker()
@@ -1935,8 +2003,6 @@ void LocalCcShards::SplitFlushRange(
         log_output.append(std::to_string(new_part_id) + ",");
         new_range_ids.emplace_back(std::move(new_key->Clone()), new_part_id);
     }
-    log_output.back() = '.';
-    LOG(INFO) << log_output;
     // Issue read catalog tx_request to acquire read lock on catalog
     // cc_entry using base table name, and acquire read lock in one
     // shard is good enough to block schema change.
@@ -2039,6 +2105,8 @@ void LocalCcShards::SplitFlushRange(
         old_end_key = catalog_factory_->PositiveInfKey();
     }
 
+    log_output.append(" txn: " + std::to_string(split_txm->TxNumber()));
+    LOG(INFO) << log_output;
     const TableSchema *table_schema =
         is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 
@@ -2158,6 +2226,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     {
         // Flushes to the data store
         bool flush_ret = true;
+        std::unordered_set<uint32_t> skipped_record;
 
         if (EnableMvcc() && mv_base_vec->size() > 0)
         {
@@ -2173,7 +2242,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         if (flush_ret && !data_sync_vec->empty())
         {
             flush_ret = store_hd_->PutAll(
-                *data_sync_vec, table_name, schema, node_group);
+                *data_sync_vec, table_name, schema, node_group, skipped_record);
             if (!flush_ret)
             {
                 LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -2203,8 +2272,20 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         // entry in ccmap to latest checkpoint version's commit_ts.
         if (flush_ret)
         {
-            for (auto &ref : *data_sync_vec)
+            if (skipped_record.size())
             {
+                // There are records that are skipped during put all. We cannot
+                // truncate log, but we can update local checkpoint ts on
+                // ccentries.
+                succ = false;
+            }
+            for (size_t i = 0; i < data_sync_vec->size(); i++)
+            {
+                if (skipped_record.find(i) != skipped_record.end())
+                {
+                    continue;
+                }
+                auto &ref = data_sync_vec->at(i);
                 // todo: remove cce_
                 ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                          std::memory_order_release);
@@ -2428,12 +2509,17 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
                 // range.
                 curr_range =
                     FindRange(table_name, node_group_id, data_sync_key);
-                if (curr_range == nullptr)
+                while (curr_range == nullptr)
                 {
-                    LOG(ERROR) << "Fail to find the range for the "
-                                  "data sync key, "
-                               << table_name.StringView();
-                    return false;
+                    // Items that does not belong to this are skipped
+                    // during flush data.
+                    idx++;
+                    if (idx == data_sync_vec.size())
+                    {
+                        return true;
+                    }
+                    curr_range = FindRange(
+                        table_name, node_group_id, *data_sync_vec[idx].Key());
                 }
                 range_updated = false;
             }

@@ -126,6 +126,7 @@ struct RangeInfo
                   const std::vector<int32_t> &new_partition_id,
                   uint64_t dirty_ts)
     {
+        new_key_.clear();
         for (auto &key_uptr : new_key)
         {
             new_key_.push_back(key_uptr->Clone());

@@ -268,8 +268,9 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
     TableName table_name{ccm->table_name_.StringView(),
                          ccm->table_name_.Type()};
     uint32_t ng = Sharder::Instance().NodeId();
+    std::unordered_set<uint32_t> skipped_record;
     ckpt_ret = store_hd_->PutAll(
-        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng);
+        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng, skipped_record);
 
     return ckpt_ret;
 }

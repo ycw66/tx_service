@@ -153,15 +153,18 @@ public:
     void RecoverSplitRangeTx(
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
         const TableSchema *table_schema,
-        const TxKey *range_key,
-        std::unique_ptr<RangeRecord> splitting_range_record,
-        uint32_t partition_id,
-        std::unique_ptr<TxKey> new_range_key,
-        uint32_t new_partition_id,
+        int32_t partition_id,
+        const TxKey *start_key,
+        const TxKey *end_key,
+        const RangeInfo *range_info,
+        std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
+        std::vector<int32_t> &&new_partition_ids,
+        NodeGroupId node_group,
         uint64_t txn,
         int64_t tx_term,
         uint64_t commit_ts,
-        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry);
+        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
+        std::shared_ptr<std::atomic_uint32_t> split_tx_started);
 
     std::string GetErrorMessage() const;
 

@@ -265,16 +265,19 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
-        if (shard_->core_id_ == 0 && req.IsLocal())
+        if (shard_->core_id_ == 0)
         {
-            // If this is a local range split tx, mark the StoreRange as
-            // locked since we are the owner of this range.
+            // If this we are the owner of this range, mark the StoreRange as
+            // locked.
             const KeyT *range_key = static_cast<const KeyT *>(req.Key());
             TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
                 this->table_name_, req.NodeGroupId(), range_key);
 
             StoreRange *range = range_entry->RangeSlices();
-            range->Lock();
+            if (range)
+            {
+                range->Lock();
+            }
         }
 
         return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
@@ -361,11 +364,19 @@ public:
                             req.CommitTs())
                         ->GetRangeInfo());
 
-                if (req.IsLocal())
+                if (upload_range_rec->GetRangeInfo()->PartitionId() %
+                        Sharder::Instance().NodeGroupCount() ==
+                    this->cc_ng_id_)
                 {
                     TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
                         this->table_name_, req.NodeGroupId(), target_key);
+                    assert(range_entry->RangeSlices());
                     range_entry->RangeSlices()->Unlock();
+                }
+                else
+                {
+                    ACTION_FAULT_INJECTOR(
+                        "range_split_participant_prepare_post_all");
                 }
             }
         }
@@ -386,8 +397,22 @@ public:
                 // as the slice keys in the new ranges.
                 std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                     new_slice_keys;
-                if (!req.IsLocal())
+                if (upload_range_rec->GetRangeInfo()->PartitionId() %
+                        Sharder::Instance().NodeGroupCount() !=
+                    this->cc_ng_id_)
                 {
+                    if (range_slices.empty())
+                    {
+                        // This could happen if a participant ng failover to the
+                        // coordinator node. In this case, the participant will
+                        // receive a local cc req.
+                        for (auto &slice : *upload_range_rec->range_slices_)
+                        {
+                            range_slices.emplace_back(
+                                slice.first ? slice.first->Clone() : nullptr,
+                                slice.second);
+                        }
+                    }
                     std::unique_ptr<StoreRange> store_range =
                         std::make_unique<StoreRange>(
                             old_info->start_key_.get(),
@@ -464,7 +489,9 @@ public:
                     new_range_infos.front()->start_key_.get();
                 upload_range_rec->SetRangeInfo(old_info);
 
-                if (req.IsLocal())
+                if (upload_range_rec->GetRangeInfo()->PartitionId() %
+                        Sharder::Instance().NodeGroupCount() ==
+                    this->cc_ng_id_)
                 {
                     old_entry->RangeSlices()->Unlock();
                 }
@@ -546,194 +573,209 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
-        // uint32_t group_id = req.NodeGroupId();
-        // int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
-        // if (ng_term < 0)
-        //{
-        //    req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        //    return false;
-        //}
+        uint32_t group_id = req.NodeGroupId();
+        int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
 
-        //// restore the SplitRangeOpMessage
-        // const std::string_view &content = req.LogContentView();
-        //::txlog::SplitRangeOpMessage ds_split_range_op_msg;
-        // ds_split_range_op_msg.ParseFromArray(content.data(),
-        // content.length());
+        // restore the SplitRangeOpMessage
+        const std::string_view &content = req.LogContentView();
+        ::txlog::SplitRangeOpMessage ds_split_range_op_msg;
+        ds_split_range_op_msg.ParseFromArray(content.data(), content.length());
 
-        // const TableSchema *table_schema = req.GetTableSchema();
+        const TableSchema *table_schema = req.GetTableSchema();
 
-        //// Restore new_range_key, which can't be neg or pos inf
-        // size_t offset = 0;
-        // std::unique_ptr<KeyT> new_range_key = std::make_unique<KeyT>();
-        //  new_range_key->Deserialize(
-        //     const_cast<char
-        //     *>(ds_split_range_op_msg.new_range_key().c_str()), offset,
-        //     this->KeySchema());
+        // Restore old range key
+        std::unique_ptr<KeyT> old_range_key = std::make_unique<KeyT>();
+        const KeyT *old_range_key_ptr;
+        size_t offset = 0;
 
-        // offset = 0;
-        // std::unique_ptr<KeyT> new_range_key_for_recovery =
-        //    std::make_unique<KeyT>();
-        // new_range_key_for_recovery->Deserialize(
-        //    const_cast<char *>(ds_split_range_op_msg.new_range_key().c_str()),
-        //    offset,
-        //    this->KeySchema());
+        if (ds_split_range_op_msg.range_key_case() ==
+            txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyValue)
+        {
+            old_range_key->Deserialize(
+                const_cast<char *>(
+                    ds_split_range_op_msg.range_key_value().c_str()),
+                offset,
+                KeySchema());
+            old_range_key_ptr = old_range_key.get();
+        }
+        else
+        {
+            old_range_key_ptr = NegativeInfinity<KeyT>::Instance();
+        }
 
-        //// Restore partition partition id
-        // int32_t partition_id = ds_split_range_op_msg.partition_id();
-        // int32_t new_partition_id = ds_split_range_op_msg.new_partition_id();
+        size_t new_range_cnt = ds_split_range_op_msg.new_partition_id_size();
+        std::vector<std::unique_ptr<TxKey>> new_range_keys;
+        std::vector<int32_t> new_range_ids;
+        new_range_ids.reserve(new_range_cnt);
+        new_range_keys.reserve(new_range_cnt);
+        for (size_t i = 0; i < new_range_cnt; i++)
+        {
+            int32_t range_id = ds_split_range_op_msg.new_partition_id(i);
+            new_range_ids.push_back(range_id);
+            new_range_keys.push_back(std::make_unique<KeyT>());
+            offset = 0;
+            new_range_keys.back()->Deserialize(
+                const_cast<char *>(
+                    ds_split_range_op_msg.new_range_key(i).c_str()),
+                offset,
+                this->KeySchema());
+        }
 
-        //// Restore stage
-        //::txlog::SplitRangeOpMessage_Stage stage =
-        //    ds_split_range_op_msg.stage();
+        // Restore partition partition id
+        int32_t partition_id = ds_split_range_op_msg.partition_id();
 
-        // uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
-        // int64_t tx_candidate_term =
-        //    Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+        // Restore stage
+        ::txlog::SplitRangeOpMessage_Stage stage =
+            ds_split_range_op_msg.stage();
 
-        //// Restore local_cc_shards state at core 0
-        // TableRangeEntry *old_table_range_entry = nullptr;
-        // if (shard_->core_id_ == 0)
-        //{
-        //    if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
-        //    {
-        //        const TableRangeEntryWithShade *range_entry_shade =
-        //            shard_->GetTableRangeWithShade(
-        //                CcMap::table_name_, partition_id, req.NodeGroupId());
-        //        old_table_range_entry = range_entry_shade->shader_.get();
-        //    }
+        uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+        int64_t tx_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(tx_node_id);
+        bool is_coordinator =
+            tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0;
 
-        //    if (stage > ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
-        //        stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
-        //    {
-        //        // upload the dirty range attributes to local cc shards
-        //        const TableRangeEntryWithShade *range_entry_shade =
-        //            shard_->CreateDirtyTableRange(CcMap::table_name_,
-        //                                          partition_id,
-        //                                          std::move(new_range_key),
-        //                                          new_partition_id,
-        //                                          req.CommitTs(),
-        //                                          req.NodeGroupId());
-        //        old_table_range_entry = range_entry_shade->shade_.get();
-        //    }
+        // Restore local_cc_shards state at core 0
+        TableRangeEntry *old_table_range_entry = nullptr;
 
-        //    if (stage >= ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange
-        //    &&
-        //        stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
-        //    {
-        //        // commit dirty range, old_range_entry switch back to shader
-        //        std::pair<TableRangeEntry *, TableRangeEntry *> entries =
-        //            shard_->CommitDirtyTableRange(CcMap::table_name_,
-        //                                          partition_id,
-        //                                          req.CommitTs(),
-        //                                          group_id);
-        //        old_table_range_entry = entries.first;
-        //    }
-        //}
-        // else
-        //{
-        //    if (stage >= ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
-        //        stage < ::txlog::SplitRangeOpMessage::DeletingOldRangeData)
-        //    {
-        //        const TableRangeEntryWithShade *table_range_entry_with_shard =
-        //            shard_->GetTableRangeWithShade(
-        //                CcMap::table_name_, partition_id, group_id);
-        //        old_table_range_entry =
-        //            table_range_entry_with_shard->shade_.get();
-        //    }
-        //    else if (stage ==
-        //             ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
-        //    {
-        //        const TableRangeEntryWithShade
-        //            *old_table_range_entry_with_shard =
-        //                shard_->GetTableRangeWithShade(
-        //                    CcMap::table_name_, partition_id, group_id);
-        //        old_table_range_entry =
-        //            old_table_range_entry_with_shard->shader_.get();
-        //    }
-        //}
+        if (shard_->core_id_ == 0)
+        {
+            if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+            {
+                if (!is_coordinator)
+                {
+                    // Participants needs to be restored to state right before
+                    // commit log is written, so we need to install the dirty
+                    // range.
+                    old_table_range_entry = const_cast<TableRangeEntry *>(
+                        shard_->UploadNewRangeInfo(this->table_name_,
+                                                   this->cc_ng_id_,
+                                                   old_range_key_ptr,
+                                                   new_range_keys,
+                                                   new_range_ids,
+                                                   req.CommitTs()));
+                }
+                else
+                {
+                    // For coordinator, the replay tx will install the dirty
+                    // range for us.
+                    old_table_range_entry = shard_->GetTableRangeEntry(
+                        this->table_name_, this->cc_ng_id_, old_range_key_ptr);
+                    old_table_range_entry->RangeSlices()->Lock();
+                }
+            }
+            else if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit)
+            {
+                // TODO{liunyl}
+                assert(false);
+            }
+            else
+            {
+                // should not be here if log is in clean stage
+                assert(false);
+            }
+        }
+        else
+        {
+            old_table_range_entry = shard_->GetTableRangeEntry(
+                this->table_name_, this->cc_ng_id_, old_range_key_ptr);
+        }
+        assert(old_table_range_entry != nullptr);
 
-        //// Restore range cc map state
-        // CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
+        // Restore range cc map state
+        CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
 
-        // if (ds_split_range_op_msg.range_key_neg_inf() == true)
-        //{
-        //    old_range_cce = &neg_inf_;
-        //}
-        // else if (ds_split_range_op_msg.range_key_pos_inf() == true)
-        //{
-        //    old_range_cce = &pos_inf_;
-        //}
-        // else
-        //{
-        //    offset = 0;
-        //    std::unique_ptr<KeyT> range_tx_key = std::make_unique<KeyT>();
-        //    range_tx_key->Deserialize(
-        //        const_cast<char *>(
-        //            ds_split_range_op_msg.range_key_value().c_str()),
-        //        offset,
-        //        this->KeySchema());
-        //    auto it = ccm_.find(*range_tx_key.get());
-        //    assert(it != ccm_.end());
-        //    old_range_cce = &it->second;
-        //}
+        if (ds_split_range_op_msg.range_key_case() ==
+            txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyNegInf)
+        {
+            old_range_cce = &neg_inf_;
+        }
+        else
+        {
+            auto it = Find(*old_range_key_ptr);
+            assert(it.first);
+            old_range_cce = it.second;
+        }
 
-        //// Restore old range
-        // if (stage <= ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange)
-        //{
-        //    old_range_cce->payload_->range_entry_ = old_table_range_entry;
-        //}
+        if (ds_split_range_op_msg.stage() ==
+            ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+        {
+            // For coordinator node, we need to restore to the state right after
+            // the current log is written, for participant node, we need to
+            // restore to the state right before the next log is written. So if
+            // the log state is at prepare stage, we need to acquire write lock
+            // on range no matter what.
+            auto lock_pair = AcquireCceKeyLock(old_range_cce,
+                                               old_range_cce->payload_status_,
+                                               &req,
+                                               req.NodeGroupId(),
+                                               ng_term,
+                                               0,
+                                               CcOperation::Write,
+                                               IsolationLevel::RepeatableRead,
+                                               CcProtocol::Locking,
+                                               0,
+                                               false);
+            // When a cc node recovers, no one should be holding read locks. So,
+            // the acquire operation should always succeed.
+            assert(lock_pair.first == LockType::WriteLock &&
+                   lock_pair.second == CcErrorCode::NO_ERROR);
+        }
 
-        //// Recover locks on range cce
-        // if (stage == ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange ||
-        //    stage == ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange)
-        //{
-        //    // Add write lock on old range cce
-        //    bool success = old_range_cce->GetKeyLock().AcquireWriteLock(
-        //        &req, CcProtocol::Locking);
-        //    assert(success);
-        //}
-        // else if (stage == ::txlog::SplitRangeOpMessage::CopingOldRangeData)
-        //{
-        //    // Add write intention on old range cce
-        //    bool success = old_range_cce->GetKeyLock().AcquireWriteIntent(
-        //        &req, CcProtocol::Locking);
-        //    assert(success);
-        //}
+        // Move to next core
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            // Restore transaction and catalog read lock at last core if this
+            // recovering node group is the tx coordinator
+            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
+            {
+                const TxKey *old_end_key;
+                if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+                {
+                    // We can safely use the end key of the old range ccentry,
+                    // since we know for sure that the new range ccentries have
+                    // not been inserted into ccmap yet.
+                    old_end_key = old_range_cce->payload_->end_key_;
+                }
+                else
+                {
+                    // Find the next cce of the last new range key, since we
+                    // don't know if the new range cce has been created or not.
+                }
+                const RangeInfo *old_range_info =
+                    old_table_range_entry->GetRangeInfo();
+                shard_->local_shards_.CreateSplitRangeRecoveryTx(
+                    ds_split_range_op_msg,
+                    table_schema,
+                    partition_id,
+                    old_range_info->StartKey()
+                        ? old_range_info->StartKey()
+                        : NegativeInfinity<KeyT>::Instance(),
+                    old_end_key ? old_end_key
+                                : PositiveInfinity<KeyT>::Instance(),
+                    old_range_info,
+                    std::move(new_range_keys),
+                    std::move(new_range_ids),
+                    tx_node_id,
+                    req.Txn(),
+                    tx_candidate_term,
+                    req.CommitTs(),
+                    std::move(req.GetCatalogCcEntry()),
+                    req.RangeSplitStarted());
+            }
 
-        //// Move to next core
-        // if (shard_->core_id_ < shard_->core_cnt_ - 1)
-        //{
-        //    req.ResetCcm();
-        //    MoveRequest(&req, shard_->core_id_ + 1);
-        //}
-        // else
-        //{
-        //    std::unique_ptr<RangeRecord> old_range_record =
-        //        std::make_unique<RangeRecord>(*old_range_cce->payload_.get());
-        //    // Restore transaction and catalog read lock at last core if this
-        //    is
-        //    // the recovering node group is the tx coordinator
-        //    if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
-        //    {
-        //        shard_->local_shards_.CreateSplitRangeRecoveryTx(
-        //            ds_split_range_op_msg,
-        //            table_schema,
-        //            old_range_cce->key_,
-        //            std::move(old_range_record),
-        //            partition_id,
-        //            std::move(new_range_key_for_recovery),
-        //            new_partition_id,
-        //            tx_node_id,
-        //            req.Txn(),
-        //            tx_candidate_term,
-        //            req.CommitTs(),
-        //            std::move(req.GetCatalogCcEntry()));
-        //    }
+            req.SetFinish();
+        }
 
-        //    req.SetFinish();
-        //}
-
-        req.SetFinish();
         return false;
     }
 

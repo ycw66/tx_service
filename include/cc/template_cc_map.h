@@ -4254,6 +4254,7 @@ public:
             req.SetLoadingSlce(RangeSliceId(nullptr, nullptr),
                                shard_->core_id_);
         }
+        std::vector<LruEntry *> remove_entries;
 
         // DataSyncScanCc is running on TxProcessor thread. To avoid blocking
         // other transaction for a long time, we only process CkptScanBatch
@@ -4322,6 +4323,18 @@ public:
                         req.pause_key_.at(shard_->core_id_).first = key.Clone();
                         return false;
                     }
+                    else if (pin_status == RangeSliceOpStatus::NotOwner)
+                    {
+                        // The recovered cc entry does not belong to this ng
+                        // anymore. This will happen if ng failover after a
+                        // range split just finished but before checkpointer is
+                        // able to truncate the log. In this case the log
+                        // records of the data that now falls on another ng will
+                        // still be replayed on the old ng on recover. Skip the
+                        // cc entry and remove it at the end.
+                        remove_entries.push_back(cce);
+                        continue;
+                    }
                     else
                     {
                         // Checkpointing needs to load a slice only if one or
@@ -4347,6 +4360,11 @@ public:
                 req.accumulated_scan_cnt_.at(shard_->core_id_)++;
             }
             scan_cnt++;
+        }
+
+        for (LruEntry *cce : remove_entries)
+        {
+            Clean(cce);
         }
 
         if (it == End() || (end_key != nullptr && !(*it->first < *end_key)))
@@ -5048,7 +5066,7 @@ public:
         }
 
         if (ccp == &pg_ps_inf_ ||
-            (end_key != nullptr && *end_key < ccp->FirstKey()))
+            (end_key != nullptr && !(ccp->FirstKey() < *end_key)))
         {
             req.SetFinish(shard_->core_id_);
             return true;
@@ -6430,60 +6448,53 @@ protected:
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
             last_read_ts = std::max(last_read_ts, cce->last_read_ts_);
-            if (!kickout_cc || KeyInRange(&(*key_it), start_key, end_key))
+            if ((!kickout_cc && cce->IsFree()) ||
+                (kickout_cc && KeyInRange(&(*key_it), start_key, end_key) &&
+                 cce->commit_ts_ < kickout_cc->CkptTs()))
             {
-                if (cce->IsFree())
-                {
 #ifdef RANGE_PARTITION_ENABLED
-                    bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
-                        table_name_, cc_ng_id_, *key_it);
-                    if (!kick_ret)
-                    {
-                        // If the slice is being loaded or pinned, do not clean
-                        // it.
-                        *key_insert_it = std::move(*key_it);
-                        *entry_insert_it = std::move(*entry_it);
-                        key_insert_it++;
-                        entry_insert_it++;
-                        // The ccentry that expect to clean cannot be kick out.
-                        if (kickout_cc != nullptr &&
-                            cce->commit_ts_ < kickout_cc->CkptTs())
-                        {
-                            clean_success = false;
-                        }
-                    }
-                    else
-                    {
-                        // free entries will be erased
-                        mem_decreased += cce->GetCcEntryMemUsage() +
-                                         key_it->MemUsage() - sizeof(KeyT);
-                        free_cnt++;
-                    }
-#else
-                    // free entries will be erased
-                    mem_decreased += cce->GetCcEntryMemUsage() +
-                                     key_it->MemUsage() - sizeof(KeyT);
-                    free_cnt++;
-#endif
-                }
-                else
+                bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
+                    table_name_, cc_ng_id_, *key_it);
+                if (!kick_ret)
                 {
-                    // The ccentry that expect to clean cannot be kick out.
-                    if (kickout_cc != nullptr &&
-                        cce->commit_ts_ < kickout_cc->CkptTs())
-                    {
-                        clean_success = false;
-                    }
-                    // keep the entries that are not free
+                    // If the slice is being loaded or pinned, do not clean
+                    // it.
                     *key_insert_it = std::move(*key_it);
                     *entry_insert_it = std::move(*entry_it);
                     key_insert_it++;
                     entry_insert_it++;
+                    // The ccentry that expect to clean cannot be kick out.
+                    if (kickout_cc != nullptr &&
+                        KeyInRange(&(*key_it), start_key, end_key) &&
+                        cce->commit_ts_ < kickout_cc->CkptTs())
+                    {
+                        clean_success = false;
+                    }
                 }
+                else
+                {
+                    // free entries will be erased
+                    mem_decreased += cce->GetCcEntryMemUsage() +
+                                     key_it->MemUsage() - sizeof(KeyT);
+                    free_cnt++;
+                }
+#else
+                // free entries will be erased
+                mem_decreased += cce->GetCcEntryMemUsage() +
+                                 key_it->MemUsage() - sizeof(KeyT);
+                free_cnt++;
+#endif
             }
             else
             {
-                // keep the entries that are not in the target range
+                // The ccentry that expect to clean cannot be kick out.
+                if (kickout_cc != nullptr &&
+                    KeyInRange(&(*key_it), start_key, end_key) &&
+                    cce->commit_ts_ < kickout_cc->CkptTs())
+                {
+                    clean_success = false;
+                }
+                // keep the entries that are not free
                 *key_insert_it = std::move(*key_it);
                 *entry_insert_it = std::move(*entry_it);
                 key_insert_it++;

@@ -77,6 +77,14 @@ enum struct RangeSliceOpStatus
      *
      */
     Delay,
+    /**
+     * @brief The node group is not the owner of the slice. This should only
+     * happen if ng failover after a range split just finished  but before
+     * checkpointer is able to truncate the log. In this case the log records of
+     * the data that now falls on another ng will still be replayed on the old
+     * ng on recover.
+     */
+    NotOwner,
     Error,
 };
 

@@ -293,6 +293,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     std::vector<::txlog::ReplayMessage> msg_vec(size);
     std::vector<std::unique_ptr<ReplayLogCc>> cc_req_vec;
     std::vector<std::unique_ptr<ReadCc>> catalog_read_cc_req_vec;
+    std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
+        table_range_split_cnt;
 
     std::mutex mux;
     std::condition_variable cv;
@@ -342,8 +344,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         {
             const std::string &split_range_op_blob =
                 split_range_msg.split_range_op_blob();
-            DLOG(INFO) << "split_range_op_blob length: "
-                       << split_range_op_blob.length();
             size_t blob_offset = 0;
             uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
                 split_range_op_blob.data() + blob_offset);
@@ -363,7 +363,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 Sharder::Instance().CandidateLeaderTerm(tx_node_id);
             TableName table_name{table_name_view,
                                  TableName::Type(table_name_view)};
-            CatalogKey catalog_key(table_name);
+            TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                      TableType::Primary};
+            CatalogKey catalog_key(base_table_name);
             CatalogRecord catalog_rec;
             CcHandlerResult<ReadKeyResult> catalog_read_cc_result(nullptr);
             std::mutex read_mux;
@@ -378,6 +380,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             };
 
             // Add read lock on catalog at the first
+            // TODO{liunyl}: potential dead lock here? schema replay could've
+            // acquired write lock on catalog and this read cc will be blocked.
             ReadCc read_cc;
             read_cc.Reset(&catalog_ccm_name,
                           &catalog_key,
@@ -410,6 +414,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             // ReadSetEntry catalog_read_set_entry = ReadSetEntry(
             //     catalog_version_ts, CcProtocol::Locking, catalog_lock_type);
 
+            auto res_pair = table_range_split_cnt.try_emplace(
+                base_table_name, std::make_shared<std::atomic_uint32_t>(0));
+
             // Replay Split
             blob_offset += table_name_len;
             std::unique_ptr<ReplayLogCc> &cc_req =
@@ -425,7 +432,8 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     mux,
                     cv,
                     finish_log_cnt,
-                    recovery_error));
+                    recovery_error,
+                    res_pair.first->second));
             cc_req->SetCatalogCcEntry(catalog_cce_addr, catalog_read_set_entry);
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());

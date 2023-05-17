@@ -747,8 +747,8 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     void Forward(TransactionExecution *txm) override;
 
     const TableSchema *table_schema_{nullptr};
-    const TableName table_name_;
-    const TableName range_table_name_;
+    const TableName table_name_;        // TableName owner.
+    const TableName range_table_name_;  // References table_name_.
     NodeGroupId node_group_;
 
     RangeInfo range_info_;
@@ -772,6 +772,18 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
 
     std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
         kickout_data_it_;
+
+    // Store the catalog read lock information, only effect for recovering
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
+        std::nullopt};
+    // Number of recovery range split tx started on this table. The last
+    // finished tx needs to set data sync ongoing flag to false.
+    std::shared_ptr<std::atomic_uint32_t> recover_split_started_{nullptr};
+    // If still need to pin the ng in recovery mode. Normally we'll pin the ng
+    // at the start of the op, but during recovery we're not the ng leader when
+    // this op is created. We need to keep trying to pin data until replay
+    // finishes and we become the leader of the ng.
+    bool pending_pin_data_{false};
 
     /**
      * @brief Acquire write lock on all node groups. Since split-flush op is
@@ -848,6 +860,10 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * @brief Remove split-flush log.
      */
     WriteToLogOp clean_log_op_;
+    /**
+     * @brief Release catalog read lock on recovery mode.
+     */
+    PostReadOperation release_catalog_read_lock_op_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);

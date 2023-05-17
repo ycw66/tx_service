@@ -32,12 +32,15 @@ public:
      * @param table_schema
      * @param schema_ts
      * @param node_group
+     * @param skipped_recordrecord idx of the records that are not flushed due
+     * to range transfer has not finished yet.
      * @return whether all entries are written to data store successfully
      */
     bool PutAll(std::vector<txservice::FlushRecord> &batch,
                 const txservice::TableName &table_name,
                 const txservice::TableSchema *table_schema,
-                uint32_t node_group) override
+                uint32_t node_group,
+                std::unordered_set<uint32_t> &skipped_record) override
     {
         for (const auto &ref : batch)
         {

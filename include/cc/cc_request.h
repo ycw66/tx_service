@@ -901,7 +901,6 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
-        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
@@ -929,7 +928,6 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
-        is_local_ = true;
     }
 
     void Reset(const TableName *tname,
@@ -958,7 +956,6 @@ public:
         op_type_ = op_type;
         commit_type_ = commit_type;
         tx_term_ = tx_term;
-        is_local_ = false;
     }
 
     uint64_t CommitTs() const
@@ -1033,16 +1030,6 @@ public:
         ccm_ = nullptr;
     }
 
-    bool IsLocal() const
-    {
-        return is_local_;
-    }
-
-    // int64_t TxTerm()
-    // {
-    //     return tx_term_;
-    // }
-
 private:
     const TxKey *key_{nullptr};
     const std::string *key_str_{nullptr};
@@ -1065,7 +1052,6 @@ private:
     OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
     int64_t tx_term_{0};
-    bool is_local_{false};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
@@ -2620,16 +2606,18 @@ private:
 struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 {
 public:
-    ReplayLogCc(uint32_t ng_id,
-                const std::string_view &table_name_view,
-                const TableType table_type,
-                std::string_view &&blob,
-                uint64_t commit_ts,
-                uint64_t txn,
-                std::mutex &mux,
-                std::condition_variable &cv,
-                uint32_t &finish_cnt,
-                bool &recovery_error)
+    ReplayLogCc(
+        uint32_t ng_id,
+        const std::string_view &table_name_view,
+        const TableType table_type,
+        std::string_view &&blob,
+        uint64_t commit_ts,
+        uint64_t txn,
+        std::mutex &mux,
+        std::condition_variable &cv,
+        uint32_t &finish_cnt,
+        bool &recovery_error,
+        std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr)
         : table_name_holder_(table_name_view, table_type),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
@@ -2637,7 +2625,8 @@ public:
           external_mux_(mux),
           external_cv_(cv),
           finish_cnt_(finish_cnt),
-          recovery_error_(recovery_error)
+          recovery_error_(recovery_error),
+          range_split_started_(range_split_started)
     {
         table_name_ = &table_name_holder_;
         node_group_id_ = ng_id;
@@ -2779,6 +2768,10 @@ public:
                     }
                 }
             }
+            else
+            {
+                table_schema_ = ccm_->GetTableSchema();
+            }
         }
 
         ccm_->Execute(*this);
@@ -2850,6 +2843,11 @@ public:
             std::make_pair(cce_addr, read_set_entry)};
     }
 
+    std::shared_ptr<std::atomic_uint32_t> RangeSplitStarted()
+    {
+        return range_split_started_;
+    }
+
 private:
     TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
@@ -2862,6 +2860,7 @@ private:
     const struct TableSchema *table_schema_{nullptr};
     std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
         std::nullopt};
+    std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
@@ -3299,11 +3298,11 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
 
-        if (ccm_ != nullptr)
+        if (ccm != nullptr)
         {
-            ccm_->Execute(*this);
+            ccm->Execute(*this);
         }
         else
         {

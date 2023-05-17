@@ -299,93 +299,69 @@ void TransactionExecution::RemoteStatisticsTx(
 void TransactionExecution::RecoverSplitRangeTx(
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
     const TableSchema *table_schema,
-    const TxKey *range_key,
-    std::unique_ptr<RangeRecord> splitting_range_record,
-    uint32_t partition_id,
-    std::unique_ptr<TxKey> new_range_key,
-    uint32_t new_partition_id,
+    int32_t partition_id,
+    const TxKey *range_start_key,
+    const TxKey *range_end_key,
+    const RangeInfo *range_info,
+    std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
+    std::vector<int32_t> &&new_partition_ids,
+    NodeGroupId node_group,
     uint64_t txn,
     int64_t tx_term,
     uint64_t commit_ts,
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry)
+    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
+    std::shared_ptr<std::atomic_uint32_t> split_tx_started)
 {
-    // tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
-    // tx_number_.store(txn, std::memory_order_relaxed);
-    // tx_term_ = tx_term;
-    // commit_ts_ = commit_ts;
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    tx_number_.store(txn, std::memory_order_relaxed);
+    tx_term_ = tx_term;
+    commit_ts_ = commit_ts;
 
-    // const TableName range_table_name = TableName{
-    //     ds_split_range_op_msg.table_name(), TableType::RangePartition};
-    // const TableName base_table_name =
-    //     TableName{range_table_name.StringView(), TableType::Primary};
+    const TableName range_table_name = TableName{
+        ds_split_range_op_msg.table_name(), TableType::RangePartition};
+    const TableName table_name =
+        TableName{range_table_name.StringView(),
+                  TableName::Type(range_table_name.StringView())};
 
-    // std::unique_ptr<DsSplitRangeOp> split_range_op =
-    //     std::make_unique<DsSplitRangeOp>(base_table_name,
-    //                                      table_schema,
-    //                                      range_key,
-    //                                      std::move(splitting_range_record),
-    //                                      this);
+    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info;
+    for (size_t i = 0; i < new_range_keys.size(); i++)
+    {
+        new_range_info.emplace_back(std::move(new_range_keys[i]),
+                                    new_partition_ids[i]);
+    }
+    std::unique_ptr<SplitFlushRangeOp> split_range_op =
+        std::make_unique<SplitFlushRangeOp>(table_name,
+                                            table_schema,
+                                            node_group,
+                                            range_start_key,
+                                            range_end_key,
+                                            range_info,
+                                            std::move(new_range_info),
+                                            this);
 
-    // const ::txlog::SplitRangeOpMessage::Stage stage =
-    //     ds_split_range_op_msg.stage();
+    split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
+    split_range_op->recover_split_started_ = split_tx_started;
+    split_range_op->pending_pin_data_ = true;
 
-    // if (stage != ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange &&
-    //     stage != ::txlog::SplitRangeOpMessage::CopingOldRangeData &&
-    //     stage != ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange &&
-    //     stage != ::txlog::SplitRangeOpMessage::DeletingOldRangeData &&
-    //     stage != ::txlog::SplitRangeOpMessage::CleanLog)
-    //{
-    //     tx_status_.store(TxnStatus::Finished);
-    //     return;
-    // }
+    const ::txlog::SplitRangeOpMessage::Stage stage =
+        ds_split_range_op_msg.stage();
 
-    // split_range_op->new_range_key_ = std::move(new_range_key);
-    // split_range_op->new_partition_id_ = new_partition_id;
-    // split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
+    if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+    {
+        split_range_op->prepare_log_op_.hd_result_.SetFinished();
+        split_range_op->op_ = &split_range_op->prepare_log_op_;
+    }
+    else
+    {
+        split_range_op->commit_log_op_.hd_result_.SetFinished();
+        split_range_op->op_ = &split_range_op->commit_log_op_;
+    }
 
-    // if (stage >= ::txlog::SplitRangeOpMessage::CopingOldRangeData)
-    //{
-    //     split_range_op->upload_range_entry_->new_key_ =
-    //         split_range_op->new_range_key_->Clone();
-    //     split_range_op->upload_range_entry_->new_partition_id_ =
-    //         split_range_op->new_partition_id_;
-    //     split_range_op->upload_range_record_->range_entry_ =
-    //         split_range_op->upload_range_entry_.get();
-    // }
-
-    // switch (stage)
-    //{
-    // case ::txlog::SplitRangeOpMessage::PrepareDirtyOldRange:
-    //     split_range_op->prepare_log_for_update_old_range_op_.hd_result_
-    //         .SetFinished();
-    //     split_range_op->op_ =
-    //         &split_range_op->prepare_log_for_update_old_range_op_;
-    //     break;
-    // case ::txlog::SplitRangeOpMessage::CopingOldRangeData:
-    //     split_range_op->ds_copy_old_range_data_finished_log_op_.hd_result_
-    //         .SetFinished();
-    //     split_range_op->op_ =
-    //         &split_range_op->ds_copy_old_range_data_finished_log_op_;
-    //     break;
-    // case ::txlog::SplitRangeOpMessage::CommitOldRangeNewRange:
-    //     split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
-    //         .SetFinished();
-    //     split_range_op->op_ =
-    //         &split_range_op->commit_log_for_dirty_old_range_op_;
-    //     break;
-    // case ::txlog::SplitRangeOpMessage::DeletingOldRangeData:
-    //     split_range_op->commit_log_for_dirty_old_range_op_.hd_result_
-    //         .SetFinished();
-    //     split_range_op->op_ =
-    //         &split_range_op->delete_out_of_old_range_data_log_op_;
-    //     break;
-    // case ::txlog::SplitRangeOpMessage::CleanLog:
-    // default:
-    //     break;
-    // }
-
-    // ds_split_range_op_ = std::move(split_range_op);
-    // state_stack_.push_back(ds_split_range_op_.get());
+    LOG(INFO) << "Recovering split flush tx " << TxNumber() << " on table "
+              << table_name.StringView() << ", range id "
+              << range_info->PartitionId();
+    split_flush_op_ = std::move(split_range_op);
+    state_stack_.push_back(split_flush_op_.get());
 }
 
 void TransactionExecution::Forward()
@@ -3779,8 +3755,6 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                          kickout_data_op.hd_result_,
                          kickout_data_op.start_key_,
                          kickout_data_op.end_key_);
-
-    StartTiming();
 }
 
 void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)

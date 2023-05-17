@@ -63,12 +63,15 @@ public:
      * @param table_name base table name or sk index name
      * @param table_schema
      * @param node_group
+     * @param skipped_record record idx of the records that are not flushed due
+     * to range transfer has not finished yet.
      * @return whether all entries are written to data store successfully
      */
     virtual bool PutAll(std::vector<txservice::FlushRecord> &batch,
                         const txservice::TableName &table_name,
                         const txservice::TableSchema *table_schema,
-                        uint32_t node_group) = 0;
+                        uint32_t node_group,
+                        std::unordered_set<uint32_t> &skipped_record) = 0;
 
     virtual void UpsertTable(
         const TableSchema *table_schema,
