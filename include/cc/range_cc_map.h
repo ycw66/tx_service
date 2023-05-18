@@ -389,7 +389,38 @@ public:
 
             if (shard_->core_id_ == 0)
             {
+                // Check if the range entry is still dirty.
+                // If not, that means the post write has already been executed
+                // on this ng. We cannot execute the code below repeatedly,
+                // since the code below will install the slice specs received
+                // from the post write message. However once the write lock has
+                // been removed, the slice specs could already be updated by
+                // others(i.e. checkpointer). In this case we shold not
+                // overwrite the udpated slice specs with the ones received from
+                // the post write message.
+                if (!old_info->IsDirty())
+                {
+                    assert(old_info->VersionTs() >= req.CommitTs());
+                    req.Result()->SetFinished();
+                    req.SetDecodedPayload(nullptr);
+                    return true;
+                }
                 // Update table_ranges_ in local cc shard on the first core
+                // Do not trust the stability of the end key pointer passed in,
+                // it could be a pointer to the coordinator ng range key if
+                // multiple ng lands on a single cc node. Find the next cce and
+                // use the key ptr in range info.
+                if (upload_range_rec->end_key_ !=
+                    PositiveInfinity<KeyT>::Instance())
+                {
+                    CcEntry<KeyT, RangeRecord> *next_cce =
+                        Find(*static_cast<const KeyT *>(
+                                 upload_range_rec->end_key_))
+                            .second;
+                    assert(next_cce != nullptr);
+                    upload_range_rec->end_key_ =
+                        next_cce->payload_->range_info_->start_key_.get();
+                }
                 const TxKey *old_end_key = upload_range_rec->end_key_;
 
                 // Split the StoreRange struct in old TableRangeEntry and get
@@ -486,14 +517,22 @@ public:
                 // update range cc map.
                 old_info->CommitDirty();
                 upload_range_rec->end_key_ =
-                    new_range_infos.front()->start_key_.get();
+                    new_range_infos.front()->StartKey();
                 upload_range_rec->SetRangeInfo(old_info);
 
                 if (upload_range_rec->GetRangeInfo()->PartitionId() %
                         Sharder::Instance().NodeGroupCount() ==
                     this->cc_ng_id_)
                 {
+                    ACTION_FAULT_INJECTOR("range_split_post_commit");
+                    old_entry->RangeSlices()->SetRangeEndKey(
+                        new_range_infos.front()->StartKey());
                     old_entry->RangeSlices()->Unlock();
+                }
+                else
+                {
+                    ACTION_FAULT_INJECTOR(
+                        "range_split_post_commit_participant");
                 }
             }
             else
@@ -520,9 +559,20 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
 
+                if (cce->commit_ts_ >= new_range_info->version_ts_)
+                {
+                    // Skip if the new range entry is already committed.
+                    continue;
+                }
                 cce->commit_ts_ = new_range_info->version_ts_;
                 cce->payload_ = std::make_shared<RangeRecord>();
                 cce->payload_.get()->range_info_ = new_range_info;
+
+                // update previous cce's end key
+                it--;
+                it->second->payload_->end_key_ = new_range_info->StartKey();
+                it++;
+
                 if (idx != new_range_infos.size() - 1)
                 {
                     cce->payload_.get()->end_key_ =
@@ -641,11 +691,30 @@ public:
 
         // Restore local_cc_shards state at core 0
         TableRangeEntry *old_table_range_entry = nullptr;
+        const TxKey *old_end_key = nullptr;
+        CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
 
+        if (ds_split_range_op_msg.range_key_case() ==
+            txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyNegInf)
+        {
+            old_range_cce = &neg_inf_;
+        }
+        else
+        {
+            auto it = Find(*old_range_key_ptr);
+            assert(it.first);
+            old_range_cce = it.second;
+        }
+
+        std::vector<const RangeInfo *> new_range_infos;
         if (shard_->core_id_ == 0)
         {
             if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
             {
+                // We can safely use the end key of the old range ccentry,
+                // since we know for sure that the new range ccentries have
+                // not been inserted into ccmap yet.
+                old_end_key = old_range_cce->payload_->end_key_;
                 if (!is_coordinator)
                 {
                     // Participants needs to be restored to state right before
@@ -670,8 +739,119 @@ public:
             }
             else if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit)
             {
-                // TODO{liunyl}
-                assert(false);
+                std::vector<std::pair<TxKey::Uptr, uint32_t>> range_slices;
+                range_slices.emplace_back(nullptr,
+                                          ds_split_range_op_msg.slice_sizes(0));
+                for (int idx = 0; idx < ds_split_range_op_msg.slice_keys_size();
+                     idx++)
+                {
+                    std::unique_ptr<KeyT> slice_key = std::make_unique<KeyT>();
+                    offset = 0;
+                    slice_key->Deserialize(
+                        const_cast<char *>(
+                            ds_split_range_op_msg.slice_keys(idx).c_str()),
+                        offset,
+                        this->KeySchema());
+                    range_slices.emplace_back(
+                        std::move(slice_key),
+                        ds_split_range_op_msg.slice_sizes(idx + 1));
+                }
+
+                // Find the next cce of the last new range key, since we
+                // don't know if the new range cce has been created or not.
+                auto it =
+                    Floor(static_cast<const KeyT &>(*new_range_keys.back()));
+                CcEntry<KeyT, RangeRecord> *prev_cce = it->second;
+                old_end_key = prev_cce->payload_->end_key_;
+
+                if (!is_coordinator)
+                {
+                    // For non coordinator, we need to assume that the
+                    // postwriteall has already been executed. So install the
+                    // dirty range info as the current range info and no lock is
+                    // needed.
+                    old_table_range_entry = shard_->GetTableRangeEntry(
+                        this->table_name_, this->cc_ng_id_, old_range_key_ptr);
+                    RangeInfo *old_info = const_cast<RangeInfo *>(
+                        old_table_range_entry->GetRangeInfo());
+                    // Initialize slice specs if any of the new ranges falls on
+                    // this ng.
+                    std::unique_ptr<StoreRange> store_range =
+                        std::make_unique<StoreRange>(
+                            old_info->start_key_.get(),
+                            old_end_key,
+                            old_info->partition_id_,
+                            *Sharder::Instance().GetLocalCcShards());
+                    store_range->InitSlices(range_slices);
+                    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                        new_slice_keys = store_range->SplitRange(
+                            new_range_keys.front().get());
+
+                    auto cur_slice = new_slice_keys.begin();
+                    // Create new range entries in local cc shard
+                    for (uint idx = 0; idx < new_range_ids.size(); idx++)
+                    {
+                        std::vector<
+                            std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                            cur_range_slices;
+                        // First slice start key will reuse the new range start
+                        // key, so we can just pass in nullptr.
+                        TxKey::Uptr range_start_key =
+                            std::move(std::get<0>(*cur_slice));
+                        std::get<0>(*cur_slice) = nullptr;
+                        cur_range_slices.push_back(std::move(*cur_slice));
+                        cur_slice++;
+
+                        // Move the range slices that falls into the new range.
+                        while (cur_slice != new_slice_keys.end() &&
+                               (idx + 1 == new_range_keys.size() ||
+                                *std::get<0>(*cur_slice) <
+                                    *new_range_keys.at(idx + 1)))
+                        {
+                            cur_range_slices.push_back(std::move(*cur_slice));
+                            cur_slice++;
+                        }
+                        // Check which node group the new range falls on.
+                        uint32_t cc_ng_id =
+                            new_range_ids.at(idx) %
+                            Sharder::Instance().NodeGroupCount();
+
+                        // If the new range falls on this ng, keep the range
+                        // slices info, otherwise pass in nullptr
+                        const TableRangeEntry *new_range =
+                            shard_->CreateTableRange(
+                                this->table_name_,
+                                this->cc_ng_id_,
+                                new_range_ids.at(idx),
+                                std::move(range_start_key),
+                                cur_slice == new_slice_keys.end()
+                                    ? old_end_key
+                                    : std::get<0>(*cur_slice).get(),
+                                req.CommitTs(),
+                                cc_ng_id == this->cc_ng_id_ ? &cur_range_slices
+                                                            : nullptr);
+                        new_range_infos.push_back(new_range->GetRangeInfo());
+                    }
+                    old_info->ClearDirty(req.CommitTs());
+                }
+                else
+                {
+                    // Restore the current and dirty range info. Acquire write
+                    // lock.
+                    old_table_range_entry = const_cast<TableRangeEntry *>(
+                        shard_->UploadNewRangeInfo(this->table_name_,
+                                                   this->cc_ng_id_,
+                                                   old_range_key_ptr,
+                                                   new_range_keys,
+                                                   new_range_ids,
+                                                   req.CommitTs()));
+                    // Restore range slice specs from log message. the range
+                    // slice specs we read from data store is unreliable since
+                    // it could've already been updated before the crash.
+                    old_table_range_entry->RangeSlices()->InitSlices(
+                        range_slices);
+                    old_table_range_entry->RangeSlices()->Lock();
+                }
             }
             else
             {
@@ -683,32 +863,89 @@ public:
         {
             old_table_range_entry = shard_->GetTableRangeEntry(
                 this->table_name_, this->cc_ng_id_, old_range_key_ptr);
+            if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit &&
+                !is_coordinator)
+            {
+                for (auto &new_key : new_range_keys)
+                {
+                    new_range_infos.push_back(
+                        shard_
+                            ->GetTableRangeEntry(this->table_name_,
+                                                 this->cc_ng_id_,
+                                                 new_key.get())
+                            ->GetRangeInfo());
+                }
+            }
         }
         assert(old_table_range_entry != nullptr);
 
-        // Restore range cc map state
-        CcEntry<KeyT, RangeRecord> *old_range_cce = nullptr;
+        // Create new range records in ccmap if commit log and as participant.
+        // In this case we should recover to the stage where post write all
+        // has already been executed on this ng.
+        if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit &&
+            !is_coordinator)
+        {
+            // add new range entry to range cc map
+            for (uint idx = 0; idx < new_range_infos.size(); idx++)
+            {
+                auto new_range_info = new_range_infos.at(idx);
+                const KeyT *start_key = (static_cast<const KeyT *>(
+                    new_range_info->start_key_.get()));
+                auto it =
+                    TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
+                CcEntry<KeyT, RangeRecord> *cce = it->second;
 
-        if (ds_split_range_op_msg.range_key_case() ==
-            txlog::SplitRangeOpMessage::RangeKeyCase::kRangeKeyNegInf)
-        {
-            old_range_cce = &neg_inf_;
-        }
-        else
-        {
-            auto it = Find(*old_range_key_ptr);
-            assert(it.first);
-            old_range_cce = it.second;
+                if (cce->commit_ts_ >= new_range_info->version_ts_)
+                {
+                    continue;
+                }
+                cce->commit_ts_ = new_range_info->version_ts_;
+                cce->payload_ = std::make_shared<RangeRecord>();
+                cce->payload_.get()->range_info_ = new_range_info;
+
+                // update previous cce's end key
+                it--;
+                it->second->payload_->end_key_ = new_range_info->StartKey();
+                it++;
+
+                if (idx != new_range_infos.size() - 1)
+                {
+                    cce->payload_.get()->end_key_ =
+                        new_range_infos.at(idx + 1)->start_key_.get();
+                }
+                else
+                {
+                    // Do not point end key to the map key (it->first)
+                    // since it does not have pointer stability.
+                    it++;
+                    if (it->second)
+                    {
+                        cce->payload_.get()->end_key_ =
+                            it->second->payload_->range_info_->start_key_.get();
+                    }
+                    else
+                    {
+                        // end key is pos inf
+                        cce->payload_.get()->end_key_ = it->first;
+                    }
+                }
+                cce->payload_status_ = RecordStatus::Normal;
+                shard_->mem_usage_ += cce->PayloadMemUsage();
+            }
         }
 
         if (ds_split_range_op_msg.stage() ==
-            ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+                ::txlog::SplitRangeOpMessage_Stage_PrepareSplit ||
+            (ds_split_range_op_msg.stage() ==
+                 ::txlog::SplitRangeOpMessage_Stage_CommitSplit &&
+             is_coordinator))
         {
-            // For coordinator node, we need to restore to the state right after
-            // the current log is written, for participant node, we need to
-            // restore to the state right before the next log is written. So if
-            // the log state is at prepare stage, we need to acquire write lock
-            // on range no matter what.
+            // For coordinator node, we need to restore to the state
+            // right after the current log is written, for participant
+            // node, we need to restore to the state right before the
+            // next log is written. So if the log state is at prepare
+            // stage, we need to acquire write lock on range no matter
+            // what.
             auto lock_pair = AcquireCceKeyLock(old_range_cce,
                                                old_range_cce->payload_status_,
                                                &req,
@@ -720,8 +957,8 @@ public:
                                                CcProtocol::Locking,
                                                0,
                                                false);
-            // When a cc node recovers, no one should be holding read locks. So,
-            // the acquire operation should always succeed.
+            // When a cc node recovers, no one should be holding read
+            // locks. So, the acquire operation should always succeed.
             assert(lock_pair.first == LockType::WriteLock &&
                    lock_pair.second == CcErrorCode::NO_ERROR);
         }
@@ -738,19 +975,6 @@ public:
             // recovering node group is the tx coordinator
             if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
             {
-                const TxKey *old_end_key;
-                if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
-                {
-                    // We can safely use the end key of the old range ccentry,
-                    // since we know for sure that the new range ccentries have
-                    // not been inserted into ccmap yet.
-                    old_end_key = old_range_cce->payload_->end_key_;
-                }
-                else
-                {
-                    // Find the next cce of the last new range key, since we
-                    // don't know if the new range cce has been created or not.
-                }
                 const RangeInfo *old_range_info =
                     old_table_range_entry->GetRangeInfo();
                 shard_->local_shards_.CreateSplitRangeRecoveryTx(

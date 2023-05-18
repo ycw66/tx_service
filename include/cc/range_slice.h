@@ -542,6 +542,12 @@ public:
         return has_write_lock_.store(false, std::memory_order_relaxed);
     }
 
+    void SetRangeEndKey(const TxKey *end_key)
+    {
+        range_end_key_ = end_key;
+        slices_.back()->end_key_ = end_key;
+    }
+
 private:
     static size_t LowerBound(
         const std::vector<std::unique_ptr<TxKey>> &slice_key_,

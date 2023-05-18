@@ -5106,6 +5106,10 @@ public:
         if (page->Empty())
         {
             mem_decreased += page->MemUsage();
+            if (page->lru_next_ != nullptr)
+            {
+                shard_->DetachLru(page);
+            }
             ccmp_.erase(old_page_key);
         }
         else if (page->FirstKey() != old_page_key)

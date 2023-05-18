@@ -353,6 +353,24 @@ void TransactionExecution::RecoverSplitRangeTx(
     }
     else
     {
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        const StoreRange *range =
+            shards->FindRange(table_name, node_group, *range_start_key);
+        const auto &slices = range->Slices();
+        for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
+             ++slice_it)
+        {
+            if (slice_it == slices.cbegin())
+            {
+                split_range_op->slice_info_.emplace_back(nullptr,
+                                                         (*slice_it)->Size());
+            }
+            else
+            {
+                split_range_op->slice_info_.emplace_back(
+                    (*slice_it)->StartKey()->Clone(), (*slice_it)->Size());
+            }
+        }
         split_range_op->commit_log_op_.hd_result_.SetFinished();
         split_range_op->op_ = &split_range_op->commit_log_op_;
     }

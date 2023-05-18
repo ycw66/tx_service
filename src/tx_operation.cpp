@@ -3508,8 +3508,7 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
         prepare_split_msg->add_new_partition_id(new_range.second);
         std::string new_range_key;
         new_range.first->Serialize(new_range_key);
-        prepare_split_msg->add_new_range_key(new_range_key.data(),
-                                             new_range_key.size());
+        prepare_split_msg->add_new_range_key(new_range_key);
     }
 }
 
@@ -3525,8 +3524,23 @@ void SplitFlushRangeOp::FillCommitLogRequest(TransactionExecution *txm)
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
     auto commit_split_msg =
         commit_log_rec->mutable_log_content()->mutable_split_range_log();
-    commit_split_msg->set_stage(
-        ::txlog::SplitRangeOpMessage_Stage_CommitSplit);
+    commit_split_msg->set_stage(::txlog::SplitRangeOpMessage_Stage_CommitSplit);
+
+    // Fill the slice info
+    LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+    StoreRange *old_range =
+        shards->FindRange(table_name_, node_group_, *old_start_key_);
+    auto &slices = old_range->Slices();
+    auto slice_it = slices.begin();
+    commit_split_msg->add_slice_sizes((*slice_it)->Size());
+    slice_it++;
+    for (; slice_it != slices.end(); slice_it++)
+    {
+        std::string slice_key;
+        (*slice_it)->StartKey()->Serialize(slice_key);
+        commit_split_msg->add_slice_keys(slice_key);
+        commit_split_msg->add_slice_sizes((*slice_it)->Size());
+    }
 
     // The prepare log keeps all cc nodes' terms and match them in the log
     // service to detect invalidated write intents. The commit log, however,

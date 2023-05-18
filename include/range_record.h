@@ -126,29 +126,35 @@ struct RangeInfo
                   const std::vector<int32_t> &new_partition_id,
                   uint64_t dirty_ts)
     {
-        new_key_.clear();
-        for (auto &key_uptr : new_key)
+        if (dirty_ts >= version_ts_ && dirty_ts >= dirty_ts_)
         {
-            new_key_.push_back(key_uptr->Clone());
+            new_key_.clear();
+            for (auto &key_uptr : new_key)
+            {
+                new_key_.push_back(key_uptr->Clone());
+            }
+            new_partition_id_ = new_partition_id;
+            dirty_ts_ = dirty_ts;
+            is_dirty_ = true;
         }
-        new_partition_id_ = new_partition_id;
-        dirty_ts_ = dirty_ts;
-        is_dirty_ = true;
     }
 
     void SetDirty(std::vector<std::unique_ptr<TxKey>> &&new_key,
                   std::vector<int32_t> &&new_partition_id,
                   uint64_t dirty_ts)
     {
-        new_key_ = std::move(new_key);
-        new_partition_id_ = std::move(new_partition_id);
-        dirty_ts_ = dirty_ts;
-        is_dirty_ = true;
+        if (dirty_ts >= version_ts_ && dirty_ts >= dirty_ts_)
+        {
+            new_key_ = std::move(new_key);
+            new_partition_id_ = std::move(new_partition_id);
+            dirty_ts_ = dirty_ts;
+            is_dirty_ = true;
+        }
     }
 
     void CommitDirty()
     {
-        if (dirty_ts_ > version_ts_)
+        if (dirty_ts_ >= version_ts_)
         {
             version_ts_ = dirty_ts_;
             is_dirty_ = false;
@@ -160,7 +166,7 @@ struct RangeInfo
         new_key_.clear();
         new_partition_id_.clear();
         dirty_ts_ = 0;
-        if (commit_ts != 0)
+        if (commit_ts != 0 && commit_ts > version_ts_)
         {
             version_ts_ = commit_ts;
         }
@@ -262,6 +268,7 @@ private:
     template <typename KeyT>
     friend class RangeCcMap;
     friend struct RangeRecord;
+    friend struct TableRangeEntry;
     friend struct SplitFlushRangeOp;
 };
 
@@ -280,6 +287,15 @@ public:
           range_slices_(std::move(slices)),
           range_bytes_at_fetch_(range_bytes)
     {
+    }
+
+    void UpdateRangeEntry(uint64_t version_ts,
+                          uint64_t range_bytes = 0,
+                          std::unique_ptr<StoreRange> slices = nullptr)
+    {
+        range_info_->version_ts_ = version_ts;
+        range_slices_ = std::move(slices);
+        range_bytes_at_fetch_ = range_bytes;
     }
 
     /**
@@ -329,7 +345,7 @@ private:
     std::unique_ptr<StoreRange> range_slices_;
 
     // This is used to rebuild statistics from storage.
-    const uint64_t range_bytes_at_fetch_{0};
+    uint64_t range_bytes_at_fetch_{0};
 
     template <typename KeyT>
     friend class RangeCcMap;

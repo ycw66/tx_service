@@ -2617,7 +2617,8 @@ public:
         std::condition_variable &cv,
         uint32_t &finish_cnt,
         bool &recovery_error,
-        std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr)
+        std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
+        std::unordered_set<TableName> *range_splitting = nullptr)
         : table_name_holder_(table_name_view, table_type),
           log_blob_view_(blob),
           commit_ts_(commit_ts),
@@ -2626,7 +2627,8 @@ public:
           external_cv_(cv),
           finish_cnt_(finish_cnt),
           recovery_error_(recovery_error),
-          range_split_started_(range_split_started)
+          range_split_started_(range_split_started),
+          range_splitting_(range_splitting)
     {
         table_name_ = &table_name_holder_;
         node_group_id_ = ng_id;
@@ -2848,6 +2850,12 @@ public:
         return range_split_started_;
     }
 
+    bool RangeSplitting(const TableName &table_name) const
+    {
+        return range_splitting_ &&
+               range_splitting_->find(table_name) == range_splitting_->end();
+    }
+
 private:
     TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
@@ -2858,9 +2866,13 @@ private:
     uint32_t &finish_cnt_;
     bool &recovery_error_;
     const struct TableSchema *table_schema_{nullptr};
+    // Reserved for range split log replay
     std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
         std::nullopt};
     std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
+
+    // Reserved for schema op log replay
+    const std::unordered_set<TableName> *range_splitting_;
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);

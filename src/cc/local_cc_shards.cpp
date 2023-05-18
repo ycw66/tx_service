@@ -644,8 +644,46 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
                                                     range_bytes,
                                                     std::move(range_slices));
 
-    assert(new_range_entry_pair.second);
-    range_ids->try_emplace(partition_id, &new_range_entry_pair.first->second);
+    bool updated = false;
+
+    if (!new_range_entry_pair.second)
+    {
+        if (new_range_entry_pair.first->second.Version() > version)
+        {
+            if (ng_id == partition_id % Sharder::Instance().NodeGroupCount())
+            {
+                range_slices = std::make_unique<StoreRange>(
+                    new_range_entry_pair.first->second.GetRangeInfo()
+                        ->StartKey(),
+                    end_key,
+                    partition_id,
+                    *this);
+                range_slices->InitSlices(*slice_keys);
+            }
+            new_range_entry_pair.first->second.UpdateRangeEntry(
+                version, range_bytes, std::move(range_slices));
+            updated = true;
+        }
+    }
+    else
+    {
+        updated = true;
+    }
+
+    if (updated)
+    {
+        // The new inserted range is always not the smallest range since
+        // negative inf is one of the first default range start key.
+        auto prev_it = std::prev(new_range_entry_pair.first);
+        if (prev_it->second.RangeSlices())
+        {
+            prev_it->second.RangeSlices()->SetRangeEndKey(
+                new_range_entry_pair.first->second.GetRangeInfo()->StartKey());
+        }
+        range_ids->try_emplace(partition_id,
+                               &new_range_entry_pair.first->second);
+    }
+
     return &new_range_entry_pair.first->second;
 }
 

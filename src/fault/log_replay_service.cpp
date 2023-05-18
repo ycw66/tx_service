@@ -295,6 +295,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     std::vector<std::unique_ptr<ReadCc>> catalog_read_cc_req_vec;
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
+    std::unordered_set<TableName> range_split_tables;
 
     std::mutex mux;
     std::condition_variable cv;
@@ -306,6 +307,34 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         ::txlog::ReplayMessage &msg = msg_vec.at(idx);
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
         msg.ParseFromZeroCopyStream(&wrapper);
+        if (idx == 0)
+        {
+            // All of the shema and range split logs should be in the first msg.
+            // Collect which tables are range splitting. For these table we only
+            // need to recover write intent on catalog entry instead of write
+            // lock when processing schema op msg.
+            for (const ::txlog::ReplaySplitRangeMsg &split_range_msg :
+                 msg.split_range_op_msgs())
+            {
+                const std::string &split_range_op_blob =
+                    split_range_msg.split_range_op_blob();
+                size_t blob_offset = 0;
+                uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
+                    split_range_op_blob.data() + blob_offset);
+                blob_offset += sizeof(uint8_t);
+
+                // Table name string
+                std::string_view table_name_view(
+                    split_range_op_blob.data() + blob_offset, table_name_len);
+
+                // Add read lock on catalog
+                TableName table_name{table_name_view,
+                                     TableName::Type(table_name_view)};
+                TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                          TableType::Primary};
+                range_split_tables.insert(base_table_name);
+            }
+        }
 
         uint32_t cc_ng_id = msg.cc_node_group_id();
         int64_t cc_ng_term = msg.cc_node_group_term();
@@ -328,7 +357,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     mux,
                     cv,
                     finish_log_cnt,
-                    recovery_error));
+                    recovery_error,
+                    nullptr,
+                    &range_split_tables));
 
             local_shards_.EnqueueCcRequest(0, cc_req.get());
 

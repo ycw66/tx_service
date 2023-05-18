@@ -952,22 +952,47 @@ public:
             // When coordinator is recovering from commit log, we need to
             // restore the state right after commit log is flushed, so we need
             // to acquire write lock as well.
-            auto lock_pair = AcquireCceKeyLock(cce,
-                                               cce->payload_status_,
-                                               &req,
-                                               req.NodeGroupId(),
-                                               ng_term,
-                                               0,
-                                               CcOperation::Write,
-                                               IsolationLevel::RepeatableRead,
-                                               CcProtocol::Locking,
-                                               0,
-                                               false);
-
-            // When a cc node recovers, no one should be holding read locks. So,
-            // the acquire operation should always succeed.
-            assert(lock_pair.first == LockType::WriteLock &&
-                   lock_pair.second == CcErrorCode::NO_ERROR);
+            TableName base_table_name(table_name.GetBaseTableNameSV(),
+                                      TableType::Primary);
+            if (req.RangeSplitting(base_table_name))
+            {
+                // If range splitting is also happening on this table, which
+                // must have acquired a read lock on the catalog entry, that
+                // means we only need to recover a write intent.
+                auto lock_pair =
+                    AcquireCceKeyLock(cce,
+                                      cce->payload_status_,
+                                      &req,
+                                      req.NodeGroupId(),
+                                      ng_term,
+                                      0,
+                                      CcOperation::ReadForWrite,
+                                      IsolationLevel::RepeatableRead,
+                                      CcProtocol::OCC,
+                                      0,
+                                      false);
+                assert(lock_pair.first == LockType::WriteIntent &&
+                       lock_pair.second == CcErrorCode::NO_ERROR);
+            }
+            else
+            {
+                auto lock_pair =
+                    AcquireCceKeyLock(cce,
+                                      cce->payload_status_,
+                                      &req,
+                                      req.NodeGroupId(),
+                                      ng_term,
+                                      0,
+                                      CcOperation::Write,
+                                      IsolationLevel::RepeatableRead,
+                                      CcProtocol::Locking,
+                                      0,
+                                      false);
+                // When a cc node recovers, no one should be holding read locks.
+                // So, the acquire operation should always succeed.
+                assert(lock_pair.first == LockType::WriteLock &&
+                       lock_pair.second == CcErrorCode::NO_ERROR);
+            }
         }
 
         if (cce->payload_ == nullptr)
