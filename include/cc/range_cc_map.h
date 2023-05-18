@@ -265,10 +265,11 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
-        if (shard_->core_id_ == 0)
+        if (shard_->core_id_ == 0 && req.Key() != nullptr)
         {
             // If this we are the owner of this range, mark the StoreRange as
-            // locked.
+            // locked. Note that req.Key() is always not null if we're the owner
+            // since the owner if always the split range coordinator.
             const KeyT *range_key = static_cast<const KeyT *>(req.Key());
             TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
                 this->table_name_, req.NodeGroupId(), range_key);
