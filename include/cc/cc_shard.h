@@ -139,18 +139,12 @@ public:
     {
         size_t req_cnt = cc_queue_.try_dequeue_bulk(req_buf_, 100);
 
-        // collect metric: cc queue length
-        if (metrics::enable_busy_loop_metrics)
+        for (size_t i = 0; i < req_cnt; ++i)
         {
-            if (busy_loop_round_ == metrics::busy_loop_sample_round)
+            bool finish = req_buf_[i]->Execute(*this);
+            if (finish)
             {
-                auto len = req_cnt < 100 ? req_cnt : cc_queue_.size_approx();
-                meter_->Collect("cc_queue_length", len);
-                busy_loop_round_ = 1;
-            }
-            else
-            {
-                ++busy_loop_round_;
+                req_buf_[i]->Free();
             }
         }
 
@@ -165,14 +159,6 @@ public:
             else
             {
                 ++memory_usage_round_;
-            }
-        }
-        for (size_t i = 0; i < req_cnt; ++i)
-        {
-            bool finish = req_buf_[i]->Execute(*this);
-            if (finish)
-            {
-                req_buf_[i]->Free();
             }
         }
         return req_cnt;
@@ -616,7 +602,6 @@ private:
         processor_sleep_.store(false, std::memory_order_release);
     }
 
-    size_t busy_loop_round_ = 1;
     size_t memory_usage_round_ = 1;
 
     /**

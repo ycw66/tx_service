@@ -92,11 +92,6 @@ CcShard::CcShard(uint16_t core_id,
         meter_->Register("slice_cache_miss", metrics::Type::Counter);
     }
 
-    if (metrics::enable_busy_loop_metrics)
-    {
-        meter_->Register("cc_queue_length", metrics::Type::Gauge);
-    }
-
     if (metrics::enable_memory_usage)
     {
         meter_->Register("memory_usage", metrics::Type::Gauge);

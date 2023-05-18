@@ -80,6 +80,8 @@ public:
         {
             meter_->Register("run_one_round_duration",
                              metrics::Type::Histogram);
+            meter_->Register("tx_requests_count", metrics::Type::Gauge);
+            meter_->Register("cc_requests_count", metrics::Type::Gauge);
         }
 
         if (metrics::enable_transactions)
@@ -208,12 +210,17 @@ public:
         req_cnt = local_cc_shards_.ProcessRequests(thd_id_);
 
         // collect metrics: run one round duration
+        // collect metrics: tx requests count
+        // collect metrics: cc requests count
         if (metrics::enable_busy_loop_metrics)
         {
             if (busy_loop_round_ == metrics::busy_loop_sample_round)
             {
                 meter_->CollectDuration("run_one_round_duration",
                                         run_one_round_start_);
+                meter_->Collect("tx_requests_count", active_cnt);
+                meter_->Collect("cc_requests_count", req_cnt);
+
                 busy_loop_round_ = 1;
             }
             else
