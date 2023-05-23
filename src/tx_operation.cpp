@@ -243,27 +243,6 @@ void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
 {
     if (lock_range_result_->IsFinished())
     {
-        if (!lock_range_result_->IsError())
-        {
-            const ReadKeyResult &read_res = lock_range_result_->Value();
-            // The read lock on the range is added, put the range cce into read
-            // set for later release read lock.
-            // For isolation level stronger than or equal to Repeatable Read,
-            // the range cannot be changed before this tx finishes
-            // post-processing, so the read lock on the range is kept until
-            // then; for isolation levels weaker than Repeatable Read, the read
-            // lock on the key's range is released once the read on the key
-            // finished.
-            txm->rw_set_.AddRead(
-                read_res.cce_addr_, read_res.ts_, &range_table_name_);
-        }
-        else
-        {
-            // There is an error when getting the input key's range. The caller
-            // operation will be set to be errored when checking the result in
-            // its `Forward()`.
-        }
-
         // Pop out this LockRangeOperation from the stack and return control to
         // the caller operation by forwarding the transaction state machine.
         txm->PostProcess(*this);
@@ -272,7 +251,8 @@ void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
     {
         // The get-range request has not finished. The caller operation of this
         // LockRangeOperation cannot proceed without knowing the input key's
-        // range.
+        // range. Since lock read range is always a local request, we don't need
+        // to check for timeout.
         return;
     }
 }
@@ -816,7 +796,6 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         }
         else if (!is_running_)
         {
-            txm->StartTiming();
             is_running_ = true;
             txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
         }
@@ -838,7 +817,6 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
-            txm->StartTiming();
             is_running_ = true;
             txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
         }

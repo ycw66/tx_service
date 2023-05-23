@@ -1063,15 +1063,6 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-#ifdef RANGE_PARTITION_ENABLED
-    // For isolation levels weaker than RepeatableRead, release
-    // the range lock once read finishes.
-    bool release_range_lock = !read.read_tx_req_->read_local_ &&
-                              iso_level_ < IsolationLevel::RepeatableRead &&
-                              read.lock_range_result_.IsFinished() &&
-                              !read.lock_range_result_.IsError();
-#endif
-
     if (read_.hd_result_.IsError())
     {
         DLOG(ERROR) << "ReadOperation failed for cc error:"
@@ -1129,12 +1120,6 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                     rec_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
 
-#ifdef RANGE_PARTITION_ENABLED
-                    if (release_range_lock)
-                    {
-                        ReleaseReadRangeLock(read);
-                    }
-#endif
                     return;
                 }
             }
@@ -1155,13 +1140,6 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         }
 
         rec_resp_->Finish(read_res.rec_status_);
-
-#ifdef RANGE_PARTITION_ENABLED
-        if (release_range_lock)
-        {
-            ReleaseReadRangeLock(read);
-        }
-#endif
     }
 }
 
@@ -1185,6 +1163,25 @@ void TransactionExecution::Process(LockReadRangeOperation &lock_range)
 
 void TransactionExecution::PostProcess(LockReadRangeOperation &lock_range)
 {
+    if (lock_range.lock_range_result_->IsError())
+    {
+        DLOG(ERROR) << "LockReadRangeOperation failed for cc error:"
+                    << lock_range.lock_range_result_->ErrorMsg();
+        rec_resp_->FinishError(
+            ConvertCcError(lock_range.lock_range_result_->ErrorCode()));
+    }
+    else if (lock_range.lock_range_result_->Value().rec_status_ ==
+             RecordStatus::Normal)
+    {
+        // The read lock on the range is added, put the range cce into read
+        // set for later release read lock.
+        // The range cannot be changed before this tx finishes
+        // post-processing, so the read lock on the range is kept until
+        // then.
+        const ReadKeyResult &read_res = lock_range.lock_range_result_->Value();
+        rw_set_.AddRead(
+            read_res.cce_addr_, read_res.ts_, &lock_range.range_table_name_);
+    }
     state_stack_.pop_back();
     Forward();
 }
@@ -2204,6 +2201,8 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
         lock_write_ranges.init_ = true;
     }
 
+    // TODO{liunyl}: find in readset? no need to read the range again if
+    // already in rset.
     assert(lock_write_ranges.table_it_ != lock_write_ranges.table_end_);
     assert(lock_write_ranges.write_key_it_ != lock_write_ranges.write_key_end_);
 
