@@ -616,7 +616,12 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         {
             ScanCache *cache = scanner.Cache(core_id);
             const ScanTuple *last_tuple = cache->LastTuple();
-            if (last_tuple != nullptr)
+
+            // The entry address is available only after lock has been acquired.
+            // But Occ|ReadCommitted won't acquire any lock.
+            LockType lock_type = scanner.DeduceScanTupleLockType(last_tuple);
+
+            if (lock_type != LockType::NoLock)
             {
                 scan_slice->add_prior_cce_vec(last_tuple->cce_addr_.CcePtr());
             }
