@@ -346,5 +346,6 @@ struct PostProcessResult
 
     std::vector<TxNumber> conflicting_txs_;
     std::mutex mux_;
+    bool is_local_ = true;
 };
 }  // namespace txservice

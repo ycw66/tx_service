@@ -80,7 +80,7 @@ public:
         {
             meter_->Register("run_one_round_duration",
                              metrics::Type::Histogram);
-            meter_->Register("tx_requests_count", metrics::Type::Gauge);
+            meter_->Register("active_tx_count", metrics::Type::Gauge);
             meter_->Register("cc_requests_count", metrics::Type::Gauge);
         }
 
@@ -88,11 +88,36 @@ public:
         {
             meter_->Register("tx_duration", metrics::Type::Histogram);
             meter_->Register("tx_processed_total", metrics::Type::Counter);
+
+            meter_->Register("remote_read_duration", metrics::Type::Histogram);
+            meter_->Register("remote_read_on_fly_count",
+                             metrics::Type::Counter);
+
+            meter_->Register("remote_acquire_write_duration",
+                             metrics::Type::Histogram);
+            meter_->Register("remote_acquire_write_on_fly_count",
+                             metrics::Type::Counter);
+
+            meter_->Register("remote_validate_duration",
+                             metrics::Type::Histogram);
+            meter_->Register("remote_validate_on_fly_count",
+                             metrics::Type::Counter);
+
+            meter_->Register("remote_post_process_duration",
+                             metrics::Type::Histogram);
+            meter_->Register("remote_post_process_on_fly_count",
+                             metrics::Type::Counter);
+
+            meter_->Register("remote_scan_next_duration",
+                             metrics::Type::Histogram);
+            meter_->Register("remote_scan_next_on_fly_count",
+                             metrics::Type::Counter);
         }
 
         if (metrics::enable_log_metrics)
         {
             meter_->Register("write_log_duration", metrics::Type::Histogram);
+            meter_->Register("write_log_on_fly_count", metrics::Type::Counter);
         }
     }
 
@@ -218,7 +243,7 @@ public:
             {
                 meter_->CollectDuration("run_one_round_duration",
                                         run_one_round_start_);
-                meter_->Collect("tx_requests_count", active_cnt);
+                meter_->Collect("active_tx_count", active_cnt);
                 meter_->Collect("cc_requests_count", req_cnt);
 
                 busy_loop_round_ = 1;

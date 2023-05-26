@@ -10,6 +10,7 @@
 #include "cc_entry.h"
 #include "cc_handler.h"
 #include "log_closure.h"
+#include "metrics.h"
 #include "range_record.h"
 #include "read_write_set.h"
 #include "tx_key.h"
@@ -63,6 +64,7 @@ struct TransactionOperation
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
     static const uint64_t tx_op_failed_ts_ = 0;
+    metrics::TimePoint op_start_{};
 };
 
 struct CompositeTransactionOperation : TransactionOperation

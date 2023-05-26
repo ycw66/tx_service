@@ -242,8 +242,8 @@ void txservice::LocalCcHandler::PostWrite(
     }
     else
     {
+        hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
-
         remote_hd_.PostWrite(cc_shards_.node_id_,
                              tx_number,
                              tx_term,
@@ -301,6 +301,7 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     }
     else
     {
+        hres.Value().is_local_ = false;
         remote_hd_.ForwardPostWrite(cc_shards_.node_id_,
                                     tx_number,
                                     tx_term,
@@ -347,6 +348,7 @@ void txservice::LocalCcHandler::PostRead(
     }
     else
     {
+        hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
         remote_hd_.PostRead(cc_shards_.node_id_,
                             tx_number,

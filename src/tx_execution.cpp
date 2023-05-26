@@ -1020,6 +1020,14 @@ void TransactionExecution::Process(ReadOperation &read)
                           read.protocol_,
                           read.read_tx_req_->is_for_write_);
 
+            if (metrics::enable_transactions &&
+                !read.hd_result_.Value().is_local_)
+            {
+                auto meter = tx_processor_->meter_.get();
+                meter->Collect("remote_read_on_fly_count", 1);
+                read.op_start_ = metrics::Clock::now();
+            }
+
             StartTiming();
         }
     }
@@ -1050,6 +1058,14 @@ void TransactionExecution::Process(ReadOperation &read)
 
 void TransactionExecution::PostProcess(ReadOperation &read)
 {
+    // collect metrics: remote read duration
+    if (metrics::enable_transactions && !read.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("remote_read_duration", read.op_start_);
+        meter->Collect("remote_read_on_fly_count", -1);
+    }
+
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &read,
@@ -1581,11 +1597,26 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     }
 #endif
 
+    if (metrics::enable_transactions && !scan_next.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->Collect("remote_scan_next_on_fly_count", 1);
+        scan_next.op_start_ = metrics::Clock::now();
+    }
     StartTiming();
 }
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
+    // collect metrics: remote scan next duration
+    if (metrics::enable_transactions && !scan_next.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("remote_scan_next_duration",
+                               scan_next.op_start_);
+        meter->Collect("remote_scan_next_on_fly_count", -1);
+    }
+
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &scan_next,
@@ -2324,11 +2355,31 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         }
     }
 
+    if (metrics::enable_transactions &&
+        acquire_write.hd_result_.Value().at(0).remote_ack_cnt_->load(
+            std::memory_order_relaxed) > 0)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->Collect("remote_acquire_write_on_fly_count", 1);
+        acquire_write.op_start_ = metrics::Clock::now();
+    }
+
     StartTiming();
 }
 
 void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
 {
+    // collect metrics: remote acquire write duration
+    if (metrics::enable_transactions &&
+        acquire_write.hd_result_.Value().at(0).remote_ack_cnt_->load(
+            std::memory_order_relaxed) > 0)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("remote_acquire_write_duration",
+                               acquire_write.op_start_);
+        meter->Collect("remote_acquire_write_on_fly_count", -1);
+    }
+
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &acquire_write,
@@ -2498,11 +2549,26 @@ void TransactionExecution::Process(ValidateOperation &validate)
         }
     }
 
+    if (metrics::enable_transactions && validate.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->Collect("remote_validate_on_fly_count", 1);
+        validate.op_start_ = metrics::Clock::now();
+    }
+
     StartTiming();
 }
 
 void TransactionExecution::PostProcess(ValidateOperation &validate)
 {
+    // collect metrics: remote validate duration
+    if (metrics::enable_transactions && validate.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("remote_validate_duration", validate.op_start_);
+        meter->Collect("remote_validate_on_fly_count", -1);
+    }
+
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &validate,
@@ -2730,7 +2796,9 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 
     if (metrics::enable_log_metrics)
     {
-        write_log_duration_start_ = metrics::Clock::now();
+        auto meter = tx_processor_->meter_.get();
+        meter->Collect("write_log_on_fly_count", 1);
+        write_log.op_start_ = metrics::Clock::now();
     }
 
     write_log.Reset();
@@ -2756,6 +2824,13 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 {
+    // collect metrics: write log duration
+    if (metrics::enable_log_metrics)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->CollectDuration("write_log_duration", write_log.op_start_);
+        meter->Collect("write_log_on_fly_count", -1);
+    }
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &write_log,
@@ -2791,26 +2866,11 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
-
-        // collect metrics: write log duration
-        if (metrics::enable_log_metrics)
-        {
-            auto meter = tx_processor_->meter_.get();
-            meter->CollectDuration("write_log_duration",
-                                   write_log_duration_start_);
-        }
         PushOperation(&update_txn_);
         Process(update_txn_);
     }
     else
     {
-        // collect metrics: write log duration
-        if (metrics::enable_log_metrics)
-        {
-            auto meter = tx_processor_->meter_.get();
-            meter->CollectDuration("write_log_duration",
-                                   write_log_duration_start_);
-        }
         // The tx is committing a multi-stage operation, e.g., schema
         // changes.
         Forward();
@@ -3030,11 +3090,34 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         }
     }
 
+    if (metrics::enable_transactions &&
+        post_process.hd_result_.Value().is_local_)
+    {
+        auto meter = tx_processor_->meter_.get();
+        meter->Collect("remote_post_process_on_fly_count", 1);
+        post_process.op_start_ = metrics::Clock::now();
+    }
+
     StartTiming();
 }
 
 void TransactionExecution::PostProcess(PostProcessOp &post_process)
 {
+    // collect metrics: remote post process duration
+    // collect metrics: tx duration, and tx processed total
+    if (metrics::enable_transactions)
+    {
+        auto meter = tx_processor_->meter_.get();
+        if (post_process.hd_result_.Value().is_local_)
+        {
+            meter->CollectDuration("remote_post_process_duration",
+                                   post_process.op_start_);
+            meter->Collect("remote_post_process_on_fly_count", -1);
+        }
+        meter->CollectDuration("tx_duration", tx_duration_start_);
+        meter->Collect("tx_processed_total", 1);
+    }
+
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &post_process,
@@ -3068,14 +3151,6 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
     Reset();
-
-    // collect metrics: tx duration and tx processed total
-    if (metrics::enable_transactions)
-    {
-        auto meter = tx_processor_->meter_.get();
-        meter->CollectDuration("tx_duration", tx_duration_start_);
-        meter->Collect("tx_processed_total", 1);
-    }
 }
 
 void TransactionExecution::Process(AcquireAllOp &acq_all_op)
