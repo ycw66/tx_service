@@ -90,34 +90,33 @@ public:
             meter_->Register("tx_processed_total", metrics::Type::Counter);
 
             meter_->Register("remote_read_duration", metrics::Type::Histogram);
-            meter_->Register("remote_read_on_fly_count",
-                             metrics::Type::Counter);
+            meter_->Register("remote_read_on_fly_count", metrics::Type::Gauge);
 
             meter_->Register("remote_acquire_write_duration",
                              metrics::Type::Histogram);
             meter_->Register("remote_acquire_write_on_fly_count",
-                             metrics::Type::Counter);
+                             metrics::Type::Gauge);
 
             meter_->Register("remote_validate_duration",
                              metrics::Type::Histogram);
             meter_->Register("remote_validate_on_fly_count",
-                             metrics::Type::Counter);
+                             metrics::Type::Gauge);
 
             meter_->Register("remote_post_process_duration",
                              metrics::Type::Histogram);
             meter_->Register("remote_post_process_on_fly_count",
-                             metrics::Type::Counter);
+                             metrics::Type::Gauge);
 
             meter_->Register("remote_scan_next_duration",
                              metrics::Type::Histogram);
             meter_->Register("remote_scan_next_on_fly_count",
-                             metrics::Type::Counter);
+                             metrics::Type::Gauge);
         }
 
         if (metrics::enable_log_metrics)
         {
             meter_->Register("write_log_duration", metrics::Type::Histogram);
-            meter_->Register("write_log_on_fly_count", metrics::Type::Counter);
+            meter_->Register("write_log_on_fly_count", metrics::Type::Gauge);
         }
     }
 

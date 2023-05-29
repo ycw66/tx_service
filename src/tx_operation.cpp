@@ -96,6 +96,7 @@ void ReadOperation::Reset()
     lock_range_result_.Value().Reset();
     lock_range_result_.Reset();
 #endif
+    op_start_ = metrics::TimePoint::max();
 }
 
 void ReadOperation::Forward(TransactionExecution *txm)
@@ -333,6 +334,7 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
     acquire_write_entries_.resize(acquire_write_cnt);
 
     rset_has_expired_ = false;
+    op_start_ = metrics::TimePoint::max();
 }
 
 void AcquireWriteOperation::Reset()
@@ -343,6 +345,7 @@ void AcquireWriteOperation::Reset()
         acquire_key_vec.resize(16);
         acquire_key_vec.shrink_to_fit();
     }
+    op_start_ = metrics::TimePoint::max();
 }
 
 void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
@@ -577,6 +580,7 @@ void ValidateOperation::Reset(size_t read_cnt)
     hd_result_.Reset();
     hd_result_.SetRefCnt(read_cnt);
     hd_result_.Value().Clear();
+    op_start_ = metrics::TimePoint::max();
 }
 
 bool ValidateOperation::IsError()
@@ -690,6 +694,7 @@ void WriteToLogOp::Reset()
     log_group_id_ = 0;
     hd_result_.Reset();
     log_closure_.Reset();
+    op_start_ = metrics::TimePoint::max();
 }
 
 void WriteToLogOp::ResetHandlerTxm(TransactionExecution *txm)
@@ -784,6 +789,7 @@ void PostProcessOp::Reset(size_t write_cnt,
     {
         catalog_range_hd_result_.SetRefCnt(catalog_range_read_cnt);
     }
+    op_start_ = metrics::TimePoint::max();
 }
 
 void PostProcessOp::Forward(TransactionExecution *txm)
@@ -948,6 +954,7 @@ void ScanNextOperation::Reset()
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
 #endif
+    op_start_ = metrics::TimePoint::max();
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)

@@ -64,7 +64,7 @@ struct TransactionOperation
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
     static const uint64_t tx_op_failed_ts_ = 0;
-    metrics::TimePoint op_start_{};
+    metrics::TimePoint op_start_{metrics::TimePoint::max()};
 };
 
 struct CompositeTransactionOperation : TransactionOperation

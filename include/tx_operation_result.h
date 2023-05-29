@@ -342,10 +342,11 @@ struct PostProcessResult
     {
         std::lock_guard<std::mutex> lk(mux_);
         conflicting_txs_.clear();
+        is_local_ = true;
     }
 
     std::vector<TxNumber> conflicting_txs_;
     std::mutex mux_;
-    bool is_local_ = true;
+    bool is_local_{true};
 };
 }  // namespace txservice
