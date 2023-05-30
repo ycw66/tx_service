@@ -35,9 +35,9 @@ public:
     {
     }
 
-    NonBlockingLock(const NonBlockingLock &rhs) = default;
+    NonBlockingLock(const NonBlockingLock &rhs) = delete;
 
-    NonBlockingLock(const NonBlockingLock &&rhs)
+    NonBlockingLock(NonBlockingLock &&rhs)
     {
         read_intentions_ = std::move(rhs.read_intentions_);
         read_locks_ = std::move(rhs.read_locks_);

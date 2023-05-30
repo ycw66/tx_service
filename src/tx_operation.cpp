@@ -217,12 +217,13 @@ void ReadOperation::Forward(TransactionExecution *txm)
         }
         else if (cce_addr.Term() > 0 && timeout)
         {
-            txm->handler->BlockCcReqCheck(txm->TxNumber(),
-                                          txm->TxTerm(),
-                                          txm->CommandId(),
-                                          cce_addr,
-                                          &hd_result_,
-                                          ResultTemplateType::ReadKeyResult);
+            txm->cc_handler_->BlockCcReqCheck(
+                txm->TxNumber(),
+                txm->TxTerm(),
+                txm->CommandId(),
+                cce_addr,
+                &hd_result_,
+                ResultTemplateType::ReadKeyResult);
         }
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
@@ -449,7 +450,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
                 if (akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
                 {
-                    txm->handler->BlockCcReqCheck(
+                    txm->cc_handler_->BlockCcReqCheck(
                         txm->TxNumber(),
                         txm->TxTerm(),
                         txm->CommandId(),
@@ -1070,14 +1071,14 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                     txm->rw_set_.DedupRead(range_table_name_,
                                            scan_state_->range_cce_addr_);
 
-                    txm->handler->PostRead(txm->TxNumber(),
-                                           txm->TxTerm(),
-                                           txm->CommandId(),
-                                           0,
-                                           0,
-                                           0,
-                                           scan_state_->range_cce_addr_,
-                                           unlock_range_result_);
+                    txm->cc_handler_->PostRead(txm->TxNumber(),
+                                               txm->TxTerm(),
+                                               txm->CommandId(),
+                                               0,
+                                               0,
+                                               0,
+                                               scan_state_->range_cce_addr_,
+                                               unlock_range_result_);
 
                     // After the unlock range request is sent,
                     // lock_range_result_ is reset. When the tx machine is
@@ -1662,7 +1663,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     txm->bool_resp_->Finish(false);
                     txm->state_stack_.pop_back();
                     assert(txm->state_stack_.empty());
-                    txm->handler->table_schema_op_pool_.emplace_back(
+                    txm->cc_handler_->table_schema_op_pool_.emplace_back(
                         std::move(txm->schema_op_));
                 }
             }
@@ -1942,7 +1943,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
-            txm->handler->table_schema_op_pool_.emplace_back(
+            txm->cc_handler_->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
         else if (failed)
@@ -2024,7 +2025,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // When the tx is in the recovery state, no external caller is
             // waiting for the response. So, txm->bool_resp_ is null.
 
-            txm->handler->table_schema_op_pool_.emplace_back(
+            txm->cc_handler_->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
             txm->Reset();
             // Setting the tx's status to finished signals that this tx
@@ -2049,7 +2050,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
-            txm->handler->table_schema_op_pool_.emplace_back(
+            txm->cc_handler_->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
     }
@@ -3563,27 +3564,14 @@ void SplitFlushRangeOp::ForceToFinish(TransactionExecution *txm)
     Forward(txm);
 }
 ReleaseScanExtraLockOp::ReleaseScanExtraLockOp(TransactionExecution *txm)
-    : hd_result_(txm),
-      scan_open_tx_result_(nullptr),
-      scan_close_tx_result_(nullptr)
+    : hd_result_(txm)
 {
 }
 
-void ReleaseScanExtraLockOp::Reset(std::vector<ScanBatchTuple> *scan_batch,
-                                   size_t scan_batch_idx,
-                                   const TableName *table_name,
-                                   CcScanner *scanner,
-                                   TxResult<size_t> *scan_open_tx_result,
-                                   TxResult<Void> *scan_close_tx_result)
+void ReleaseScanExtraLockOp::Reset()
 {
     hd_result_.Reset();
     hd_result_.Value().Clear();
-    scan_open_tx_result_ = scan_open_tx_result;
-    scan_close_tx_result_ = scan_close_tx_result;
-    scan_batch_ = scan_batch;
-    scan_batch_idx_ = scan_batch_idx;
-    table_name_ = table_name;
-    scanner_ = scanner;
 }
 
 void ReleaseScanExtraLockOp::Forward(TransactionExecution *txm)

@@ -1402,7 +1402,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         // Use AbortTxRequest to release read lock.
         AbortTxRequest abort_req;
-        abort_req.Reset();
         data_sync_txm->Execute(&abort_req);
         abort_req.Wait();
         assert(abort_req.Result() == false);

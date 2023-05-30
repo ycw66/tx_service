@@ -30,7 +30,8 @@ public:
     RemoteAcquire();
     RemoteAcquire(const RemoteAcquire &rhs) = delete;
     RemoteAcquire(RemoteAcquire &&rhs) = delete;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -45,8 +46,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
 
@@ -59,7 +61,8 @@ public:
     RemoteAcquireAll();
     RemoteAcquireAll(const RemoteAcquireAll &rhs) = delete;
     RemoteAcquireAll(RemoteAcquireAll &&rhs) = delete;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -74,8 +77,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
     KeyType key_type_{KeyType::Normal};
@@ -87,7 +91,8 @@ struct RemotePostRead : public PostReadCc
 {
 public:
     RemotePostRead();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -101,8 +106,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
 
@@ -114,7 +120,8 @@ struct RemoteRead : public ReadCc
 {
 public:
     RemoteRead();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     void Acknowledge();
     uint64_t handler_addr()
     {
@@ -129,8 +136,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
     CcHandlerResult<ReadKeyResult> cc_res_{nullptr};
@@ -140,7 +148,8 @@ struct RemoteReadOutside : public CcRequestBase
 {
 public:
     RemoteReadOutside() = default;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -193,7 +202,8 @@ public:
     }
 
 private:
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 
     const std::string *rec_str_{nullptr};
@@ -213,7 +223,8 @@ struct RemotePostWrite : public PostWriteCc
 {
 public:
     RemotePostWrite();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -227,8 +238,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
 
@@ -240,7 +252,8 @@ struct RemotePostWriteAll : public PostWriteAllCc
 {
 public:
     RemotePostWriteAll();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     uint64_t handler_addr()
     {
         if (input_msg_)
@@ -254,8 +267,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
     KeyType key_type_{KeyType::Normal};
@@ -268,7 +282,9 @@ struct RemoteScanOpen : public TemplatedCcRequest<RemoteScanOpen, Void>
 public:
     RemoteScanOpen();
 
-    void Reset(std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena,
+               uint32_t core_cnt);
     void Free() override;
     uint64_t handler_addr()
     {
@@ -338,8 +354,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
 
@@ -378,7 +395,8 @@ struct RemoteScanNextBatch
 {
 public:
     RemoteScanNextBatch();
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     bool ValidTermCheck() override;
 
     uint64_t handler_addr()
@@ -449,8 +467,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 
     CcEntryAddr prior_cce_addr_;
@@ -484,11 +503,14 @@ struct RemoteScanSlice : public ScanSliceCc
 {
 public:
     RemoteScanSlice();
-    void Reset(std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena,
+               uint16_t core_cnt);
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcMessage *output_msg_;
+    CcMessage *input_msg_{nullptr};
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 
     TableName remote_tbl_name_{empty_sv, TableType::Primary};
@@ -504,7 +526,8 @@ public:
     RemoteFaultInjectCC(const RemoteFaultInjectCC &rhs) = delete;
     RemoteFaultInjectCC(RemoteFaultInjectCC &&rhs) = delete;
 
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
 
     uint64_t handler_addr()
     {
@@ -519,8 +542,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 
     CcHandlerResult<bool> cc_res_{nullptr};
@@ -535,7 +559,8 @@ public:
     RemoteAnalyzeTableAllCc(const RemoteAnalyzeTableAllCc &rhs) = delete;
     RemoteAnalyzeTableAllCc(RemoteAnalyzeTableAllCc &&rhs) = delete;
 
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
 
     uint64_t handler_addr()
     {
@@ -550,8 +575,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
     CcHandlerResult<Void> cc_res_{nullptr};
@@ -568,7 +594,8 @@ public:
         delete;
     RemoteCleanCcEntryForTestCc(RemoteCleanCcEntryForTestCc &&rhs) = delete;
 
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
 
     uint64_t handler_addr()
     {
@@ -583,8 +610,9 @@ public:
     }
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
     TableName remote_table_name_{empty_sv, TableType::Primary};
 
@@ -604,12 +632,14 @@ public:
     RemoteCheckDeadLockCc(const RemoteCheckDeadLockCc &rhs) = delete;
     RemoteCheckDeadLockCc(RemoteCheckDeadLockCc &&rhs) = delete;
 
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     bool Execute(CcShard &ccs) override;
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 };
 
@@ -622,12 +652,14 @@ public:
     virtual ~RemoteAbortTransactionCc() = default;
     RemoteAbortTransactionCc(const RemoteAbortTransactionCc &rhs) = delete;
     RemoteAbortTransactionCc(RemoteAbortTransactionCc &&rhs) = delete;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     bool Execute(CcShard &ccs) override;
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 };
 
@@ -640,12 +672,14 @@ public:
     virtual ~RemoteBlockReqCheckCc() = default;
     RemoteBlockReqCheckCc(const RemoteBlockReqCheckCc &rhs) = delete;
     RemoteBlockReqCheckCc(RemoteBlockReqCheckCc &&rhs) = delete;
-    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Reset(CcMessage *input_msg,
+               std::unique_ptr<google::protobuf::Arena> arena);
     bool Execute(CcShard &ccs) override;
 
 private:
-    CcMessage output_msg_;
-    std::unique_ptr<CcMessage> input_msg_;
+    CcMessage *output_msg_;
+    CcMessage *input_msg_;
+    std::unique_ptr<google::protobuf::Arena> arena_;
     CcStreamSender *hd_{nullptr};
 };
 }  // namespace remote

@@ -879,21 +879,10 @@ private:
 struct ReleaseScanExtraLockOp : TransactionOperation
 {
     explicit ReleaseScanExtraLockOp(TransactionExecution *txm);
-    void Reset(std::vector<ScanBatchTuple> *scan_batch,
-               size_t scan_batch_idx,
-               const TableName *table_name,
-               CcScanner *scanner,
-               TxResult<size_t> *scan_open_tx_result,
-               TxResult<Void> *scan_close_tx_result);
+    void Reset();
     void Forward(TransactionExecution *txm) override;
 
     CcHandlerResult<PostProcessResult> hd_result_;
-    TxResult<size_t> *scan_open_tx_result_;
-    TxResult<Void> *scan_close_tx_result_;
-    std::vector<ScanBatchTuple> *scan_batch_;
-    size_t scan_batch_idx_;
-    const TableName *table_name_;
-    CcScanner *scanner_;
 };
 
 struct AnalyzeTableAllOp : TransactionOperation

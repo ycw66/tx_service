@@ -27,11 +27,11 @@ namespace txservice
 // whether skip write redo log to log_service.
 bool txservice_skip_redo_log = false;
 
-TransactionExecution::TransactionExecution(CcHandler *_handler,
+TransactionExecution::TransactionExecution(CcHandler *handler,
                                            TxLog *txlog,
                                            TxProcessor *tx_processor,
                                            CcProtocol proto)
-    : handler(_handler),
+    : cc_handler_(handler),
       txlog_(txlog),
       tx_processor_(tx_processor),
       txid_(UINT32_MAX),
@@ -50,7 +50,6 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       kvp_resp_(nullptr),
       uint64_resp_(nullptr),
       detailed_error_msg_(""),
-      next_req_(nullptr),
       protocol_(proto),
       init_txn_(this),
 #ifdef RANGE_PARTITION_ENABLED
@@ -74,7 +73,12 @@ TransactionExecution::TransactionExecution(CcHandler *_handler,
       clean_entry_op_(this),
       abundant_lock_op_(this)
 {
-    TX_TRACE_ASSOCIATE(this, handler);
+    TX_TRACE_ASSOCIATE(this, cc_handler_);
+
+    init_tx_req_ = std::make_unique<InitTxRequest>();
+    commit_tx_req_ = std::make_unique<CommitTxRequest>();
+    scan_close_req_pool_ =
+        std::make_unique<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>(8);
 }
 
 void TransactionExecution::Reset(CcProtocol proto)
@@ -97,20 +101,36 @@ void TransactionExecution::Reset(CcProtocol proto)
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
     detailed_error_msg_ = "";
-    next_req_.store(nullptr);
+    tx_req_queue_.Reset();
     protocol_ = proto;
     schema_op_ = nullptr;
     split_flush_op_ = nullptr;
+    drain_batch_.clear();
+    scan_alias_cnt_ = 0;
 }
 
-void TransactionExecution::Restart()
+void TransactionExecution::Restart(CcHandler *handler,
+                                   TxLog *txlog,
+                                   TxProcessor *tx_processor)
 {
+    cc_handler_ = handler;
+    txlog_ = txlog;
+    tx_processor_ = tx_processor;
     tx_status_.store(TxnStatus::Ongoing, std::memory_order_relaxed);
 }
 
-bool TransactionExecution::Idle() const
+bool TransactionExecution::IsIdle()
 {
-    return state_stack_.empty();
+    if (!state_stack_.empty())
+    {
+        return false;
+    }
+
+    tx_req_lk_.Lock();
+    bool empty_tx_req = tx_req_queue_.Size() == 0;
+    tx_req_lk_.Unlock();
+
+    return empty_tx_req;
 }
 
 uint64_t TransactionExecution::TxNumber() const
@@ -215,7 +235,7 @@ void TransactionExecution::RecoverSchemaTx(
     {
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
-        if (handler->table_schema_op_pool_.empty())
+        if (cc_handler_->table_schema_op_pool_.empty())
         {
             std::unique_ptr<UpsertTableOp> table_op = nullptr;
             table_op = std::make_unique<UpsertTableOp>(
@@ -230,9 +250,9 @@ void TransactionExecution::RecoverSchemaTx(
         }
         else
         {
-            assert(handler->table_schema_op_pool_.back() != nullptr);
-            schema_op_ = std::move(handler->table_schema_op_pool_.back());
-            handler->table_schema_op_pool_.pop_back();
+            assert(cc_handler_->table_schema_op_pool_.back() != nullptr);
+            schema_op_ = std::move(cc_handler_->table_schema_op_pool_.back());
+            cc_handler_->table_schema_op_pool_.pop_back();
 
             schema_op_->Reset(schema_op.table_name_str(),
                               schema_op.old_catalog_blob(),
@@ -283,8 +303,8 @@ void TransactionExecution::RemoteStatisticsTx(
                            true);
 
     bool exists = false;
-    bool ok = TxReadCatalog(this, read_req, exists);
-    if (ok && exists)
+    TxErrorCode err = TxReadCatalog(this, read_req, exists);
+    if (err == TxErrorCode::NO_ERROR && exists)
     {
         const TableSchema *table_schema = catalog_rec.Schema();
         if (table_schema->Version() == schema_version)
@@ -382,14 +402,46 @@ void TransactionExecution::RecoverSplitRangeTx(
     state_stack_.push_back(split_flush_op_.get());
 }
 
-void TransactionExecution::Forward()
+TxmStatus TransactionExecution::Forward()
 {
+    bool has_more_req = false;
     if (state_stack_.empty())
     {
-        return;
+        TxRequest *req = nullptr;
+        tx_req_lk_.Lock();
+        size_t req_cnt = tx_req_queue_.Size();
+        if (req_cnt > 0)
+        {
+            req = tx_req_queue_.Peek();
+            tx_req_queue_.Dequeue();
+            has_more_req = req_cnt >= 2;
+        }
+        tx_req_lk_.Unlock();
+
+        if (req != nullptr)
+        {
+            req->Process(this);
+        }
     }
-    prev_op_ = state_stack_.back();
-    prev_op_->Forward(this);
+    else
+    {
+        TransactionOperation *curr_op = state_stack_.back();
+        curr_op->Forward(this);
+    }
+
+    TxnStatus status = TxStatus();
+    if (status == TxnStatus::Finished)
+    {
+        return TxmStatus::Finished;
+    }
+    else if (state_stack_.empty() && !has_more_req)
+    {
+        return TxmStatus::Idle;
+    }
+    else
+    {
+        return TxmStatus::Busy;
+    }
 }
 
 void TransactionExecution::ForwardTs(uint64_t candidate_ts)
@@ -412,8 +464,10 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 
     if (status == TxnStatus::Ongoing)
     {
-        assert(next_req_.load(std::memory_order_acquire) == nullptr);
-        next_req_.store(tx_req, std::memory_order_release);
+        tx_req_lk_.Lock();
+        tx_req_queue_.Enqueue(tx_req);
+        tx_req_lk_.Unlock();
+
         return 0;
     }
     else
@@ -421,6 +475,69 @@ int TransactionExecution::Execute(TxRequest *tx_req)
         // The tx has started committing/aborting or has committed/aborted. Does
         // not accept new requests.
         return 1;
+    }
+}
+
+void TransactionExecution::InitTx(IsolationLevel iso_level, CcProtocol protocol)
+{
+    init_tx_req_->Reset();
+    init_tx_req_->iso_level_ = iso_level;
+    init_tx_req_->protocol_ = protocol;
+    Execute(init_tx_req_.get());
+}
+
+bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
+{
+    if (rw_set_.WriteSetSize() == 0 && rw_set_.ReadSetSize() == 0)
+    {
+        commit_tx_req_->Reset();
+        Execute(commit_tx_req_.get());
+        return true;
+    }
+    else
+    {
+        Execute(&commit_req);
+        commit_req.Wait();
+        bool success = commit_req.Result();
+        return success;
+    }
+}
+
+size_t TransactionExecution::OpenTxScan(ScanOpenTxRequest &scan_open_tx_req)
+{
+    scan_open_tx_req.scan_alias_ = scan_alias_cnt_;
+    scan_alias_cnt_++;
+    Execute(&scan_open_tx_req);
+    return scan_open_tx_req.scan_alias_;
+}
+
+void TransactionExecution::CloseTxScan(size_t alias,
+                                       const TableName *table_name,
+                                       std::vector<UnlockTuple> &unlock_vec)
+{
+    ScanCloseTxRequest *scan_close_req = NextScanCloseTxReq(alias, table_name);
+    assert(scan_close_req->unlock_batch_.empty());
+
+    if (!unlock_vec.empty())
+    {
+        scan_close_req->unlock_batch_.swap(unlock_vec);
+    }
+
+    Execute(scan_close_req);
+}
+
+TxErrorCode TransactionExecution::TxUpsert(const TableName &table_name,
+                                           TxKey::Uptr key,
+                                           TxRecord::Uptr rec,
+                                           OperationType op)
+{
+    if (!rw_set_.AddWrite(table_name, std::move(key), std::move(rec), op))
+    {
+        return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
+    }
+    else
+    {
+        return TxErrorCode::NO_ERROR;
     }
 }
 
@@ -477,7 +594,6 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
 {
     TX_TRACE_ACTION(this, &init_txn_req);
     uint64_resp_ = &init_txn_req.tx_result_;
-    uint64_resp_->Reset();
     iso_level_ = init_txn_req.iso_level_;
     protocol_ = init_txn_req.protocol_;
 
@@ -497,12 +613,19 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
+    if (tx_term_ < 0)
+    {
+        read_req.SetError(TxErrorCode::TX_INIT_FAIL);
+        return;
+    }
+
     rec_resp_ = &read_req.tx_result_;
-    rec_resp_->Reset();
 
     read_.read_type_ = ReadType::Inside;
     read_.read_tx_req_ = &read_req;
     read_.Reset();
+
     PushOperation(&read_);
     Process(read_);
 }
@@ -521,7 +644,6 @@ void TransactionExecution::ProcessTxRequest(
                 .append(std::to_string(this->tx_term_));
         });
     rec_resp_ = &read_outside_req.tx_result_;
-    rec_resp_->Reset();
 
     read_.read_type_ = read_outside_req.is_deleted_ ? ReadType::OutsideDeleted
                                                     : ReadType::OutsideNormal;
@@ -546,8 +668,13 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
                 .append(scan_open_req.tab_name_->String());
         });
 
+    if (scan_open_req.scan_alias_ == UINT16_MAX)
+    {
+        scan_open_req.scan_alias_ = scan_alias_cnt_;
+        ++scan_alias_cnt_;
+    }
     uint64_resp_ = &scan_open_req.tx_result_;
-    uint64_resp_->Reset();
+
     scan_open_.tx_req_ = &scan_open_req;
     PushOperation(&scan_open_);
     Process(scan_open_);
@@ -565,8 +692,7 @@ void TransactionExecution::ProcessTxRequest(ScanBatchTxRequest &scan_batch_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    void_resp_ = &scan_batch_req.tx_result_;
-    void_resp_->Reset();
+    bool_resp_ = &scan_batch_req.tx_result_;
 
     scan_next_.Reset();
     scan_next_.tx_req_ = &scan_batch_req;
@@ -586,14 +712,16 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    void_resp_ = &scan_close_req.tx_result_;
-    void_resp_->Reset();
 
-    ScanClose(scan_close_req.scan_batch_,
-              scan_close_req.scan_batch_idx_,
+    void_resp_ = nullptr;
+
+    ScanClose(scan_close_req.unlock_batch_,
               scan_close_req.alias_,
-              *scan_close_req.end_key_,
-              scan_close_req.table_name_);
+              *scan_close_req.table_name_);
+
+    scan_close_req.tx_result_.Finish(void_);
+    scan_close_req.unlock_batch_.clear();
+    scan_close_req.in_use_.store(false, std::memory_order_relaxed);
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
@@ -611,7 +739,6 @@ void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)
                 .append(upsert_req.tab_name_->String());
         });
     void_resp_ = &upsert_req.tx_result_;
-    void_resp_->Reset();
     Upsert(*upsert_req.tab_name_,
            std::move(upsert_req.key_),
            std::move(upsert_req.rec_),
@@ -632,7 +759,6 @@ void TransactionExecution::ProcessTxRequest(CommitTxRequest &commit_req)
         });
 
     bool_resp_ = &commit_req.tx_result_;
-    bool_resp_->Reset();
     Commit();
 }
 
@@ -649,8 +775,8 @@ void TransactionExecution::ProcessTxRequest(AbortTxRequest &abort_req)
                 .append(std::to_string(this->tx_term_));
         });
 
-    bool_resp_ = &abort_req.tx_result_;
-    bool_resp_->Reset();
+    abort_req.tx_result_.Finish(false);
+    bool_resp_ = nullptr;
     // When the tx is aborted/rolled back by the user, write intentions must
     // have not acquired. Clear the write set before entering post-processing.
     rw_set_.ClearWriteSet();
@@ -673,7 +799,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
-    if (handler->table_schema_op_pool_.empty())
+    if (cc_handler_->table_schema_op_pool_.empty())
     {
         std::unique_ptr<UpsertTableOp> table_op = nullptr;
         table_op =
@@ -688,9 +814,9 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     }
     else
     {
-        assert(handler->table_schema_op_pool_.back() != nullptr);
-        schema_op_ = std::move(handler->table_schema_op_pool_.back());
-        handler->table_schema_op_pool_.pop_back();
+        assert(cc_handler_->table_schema_op_pool_.back() != nullptr);
+        schema_op_ = std::move(cc_handler_->table_schema_op_pool_.back());
+        cc_handler_->table_schema_op_pool_.pop_back();
 
         schema_op_->Reset(req.table_name_->StringView(),
                           *req.curr_image_,
@@ -718,7 +844,6 @@ void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
                 .append(std::to_string(this->tx_term_));
         });
     bool_resp_ = &fi_req.tx_result_;
-    bool_resp_->Reset();
 
     fault_inject_op_.Set(
         fi_req.fault_name_, fi_req.fault_paras_, fi_req.vct_node_id_);
@@ -740,7 +865,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         });
 
     bool_resp_ = &req.tx_result_;
-    bool_resp_->Reset();
 
     split_flush_op_ =
         std::make_unique<SplitFlushRangeOp>(*req.table_name_,
@@ -772,8 +896,6 @@ void TransactionExecution::ProcessTxRequest(AnalyzeTableTxRequest &analyze_req)
         });
 
     void_resp_ = &analyze_req.tx_result_;
-    void_resp_->Reset();
-
     analyze_table_all_op_.analyze_tx_req_ = &analyze_req;
 
     uint32_t hres_ref_cnt = Sharder::Instance().NodeGroupCount();
@@ -807,7 +929,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
     init_txn.Reset();
 
-    handler->NewTxn(init_txn.hd_result_, iso_level_);
+    cc_handler_->NewTxn(init_txn.hd_result_, iso_level_);
     init_txn.Forward(this);
 }
 
@@ -828,10 +950,28 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
         DLOG(ERROR) << "InitTxnOperation failed for cc error:"
                     << init_txn.hd_result_.ErrorMsg();
         state_stack_.clear();
-        uint64_resp_->FinishError();
-        // transaction can be recycled and put into free list.
-        tx_status_.store(TxnStatus::Finished, std::memory_order_release);
-        Reset();
+
+        if (uint64_resp_ != &init_tx_req_->tx_result_)
+        {
+            uint64_resp_->FinishError(TxErrorCode::TX_INIT_FAIL);
+            // transaction can be recycled and put into free list.
+            tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+            Reset();
+        }
+        else
+        {
+            tx_req_lk_.Lock();
+
+            while (tx_req_queue_.Size() > 0)
+            {
+                TxRequest *req = tx_req_queue_.Peek();
+                tx_req_queue_.Dequeue();
+
+                req->SetError(TxErrorCode::TX_INIT_FAIL);
+            }
+
+            tx_req_lk_.Unlock();
+        }
         return;
     }
 
@@ -842,7 +982,13 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     commit_ts_bound_ = init_result.start_ts_ + 1;
     tx_term_ = init_result.term_;
     state_stack_.pop_back();
-    uint64_resp_->Finish(tx_number_.load(std::memory_order_acquire));
+
+    if (uint64_resp_ != &init_tx_req_->tx_result_)
+    {
+        uint64_resp_->Finish(tx_number_.load(std::memory_order_acquire));
+    }
+
+    Forward();
 }
 
 /**
@@ -862,6 +1008,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     read.is_running_ = true;
     if (read.read_type_ == ReadType::Inside)
     {
@@ -891,18 +1038,18 @@ void TransactionExecution::Process(ReadOperation &read)
             }
             read.protocol_ = CcProtocol::Locking;
 
-            handler->ReadLocal(table_name,
-                               key,
-                               rec,
-                               read.read_type_,
-                               tx_number_.load(std::memory_order_relaxed),
-                               tx_term_,
-                               command_id_.load(std::memory_order_relaxed),
-                               start_ts_,
-                               read.hd_result_,
-                               read.iso_level_,
-                               read.protocol_,
-                               read.read_tx_req_->is_for_write_);
+            cc_handler_->ReadLocal(table_name,
+                                   key,
+                                   rec,
+                                   read.read_type_,
+                                   tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
+                                   start_ts_,
+                                   read.hd_result_,
+                                   read.iso_level_,
+                                   read.protocol_,
+                                   read.read_tx_req_->is_for_write_);
         }
         else
         {
@@ -1006,19 +1153,27 @@ void TransactionExecution::Process(ReadOperation &read)
                 read_ts = corresponding_sk_commit_ts;
             }
 
-            handler->Read(table_name,
-                          key,
-                          key_shard_code,
-                          rec,
-                          read.read_type_,
-                          tx_number_.load(std::memory_order_relaxed),
-                          tx_term_,
-                          command_id_.load(std::memory_order_relaxed),
-                          read_ts,
-                          read.hd_result_,
-                          read.iso_level_,
-                          read.protocol_,
-                          read.read_tx_req_->is_for_write_);
+            cc_handler_->Read(table_name,
+                              key,
+                              key_shard_code,
+                              rec,
+                              read.read_type_,
+                              tx_number_.load(std::memory_order_relaxed),
+                              tx_term_,
+                              command_id_.load(std::memory_order_relaxed),
+                              read_ts,
+                              read.hd_result_,
+                              read.iso_level_,
+                              read.protocol_,
+                              read.read_tx_req_->is_for_write_);
+
+            if (metrics::enable_transactions &&
+                !read.hd_result_.Value().is_local_)
+            {
+                auto meter = tx_processor_->meter_.get();
+                meter->Collect("remote_read_on_fly_count", 1);
+                read.op_start_ = metrics::Clock::now();
+            }
 
             if (metrics::enable_transactions &&
                 !read.hd_result_.Value().is_local_)
@@ -1039,13 +1194,13 @@ void TransactionExecution::Process(ReadOperation &read)
 
         rw_set_.UpdateRead(cache_miss_read_cce_addr_,
                            read.read_outside_tx_req_->commit_ts_);
-        handler->ReadOutside(tx_term_,
-                             command_id_.load(std::memory_order_relaxed),
-                             record,
-                             is_deleted,
-                             read.read_outside_tx_req_->commit_ts_,
-                             cache_miss_read_cce_addr_,
-                             read.hd_result_);
+        cc_handler_->ReadOutside(tx_term_,
+                                 command_id_.load(std::memory_order_relaxed),
+                                 record,
+                                 is_deleted,
+                                 read.read_outside_tx_req_->commit_ts_,
+                                 cache_miss_read_cce_addr_,
+                                 read.hd_result_);
 
         DLOG_IF(INFO, TRACE_OCC_ERR)
             << "ReadOutside ,txn: " << tx_number_ << " ,cce:" << std::hex
@@ -1093,10 +1248,11 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
         // optimization for case that we read the same key continuously
         // especially speed up remote read. e.g. Read A, Write B, Read A.
-        if (read_res.rec_status_ == RecordStatus::Normal)
+        if (!read.read_tx_req_->read_local_ &&
+            read_res.rec_status_ == RecordStatus::Normal)
         {
-            rw_set_.AddCacheRead(
-                *read_req->tab_name_, *read_req->key_, *read_req->rec_);
+            // rw_set_.AddCacheRead(
+            //     *read_req->tab_name_, *read_req->key_, *read_req->rec_);
         }
 
         if (read_.read_type_ == ReadType::Inside)
@@ -1163,17 +1319,17 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 #ifdef RANGE_PARTITION_ENABLED
 void TransactionExecution::Process(LockReadRangeOperation &lock_range)
 {
-    handler->ReadLocal(lock_range.range_table_name_,
-                       *lock_range.key_,
-                       *lock_range.range_rec_,
-                       ReadType::Inside,
-                       tx_number_.load(std::memory_order_relaxed),
-                       tx_term_,
-                       CommandId(),
-                       start_ts_,
-                       *lock_range.lock_range_result_,
-                       IsolationLevel::RepeatableRead,
-                       CcProtocol::Locking);
+    cc_handler_->ReadLocal(lock_range.range_table_name_,
+                           *lock_range.key_,
+                           *lock_range.range_rec_,
+                           ReadType::Inside,
+                           tx_number_.load(std::memory_order_relaxed),
+                           tx_term_,
+                           CommandId(),
+                           start_ts_,
+                           *lock_range.lock_range_result_,
+                           IsolationLevel::RepeatableRead,
+                           CcProtocol::Locking);
 
     lock_range.Forward(this);
 }
@@ -1209,14 +1365,14 @@ void TransactionExecution::Process(UnlockReadRangeOperation &unlock_range)
     rw_set_.DedupRead(*unlock_range.cce_addr_);
 
     // just send post read cc request and return
-    handler->PostRead(TxNumber(),
-                      TxTerm(),
-                      CommandId(),
-                      0,
-                      0,
-                      0,
-                      *unlock_range.cce_addr_,
-                      unlock_range.unlock_range_result_);
+    cc_handler_->PostRead(TxNumber(),
+                          TxTerm(),
+                          CommandId(),
+                          0,
+                          0,
+                          0,
+                          *unlock_range.cce_addr_,
+                          unlock_range.unlock_range_result_);
 }
 
 void TransactionExecution::PostProcess(UnlockReadRangeOperation &unlock_range)
@@ -1266,22 +1422,24 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                   direction,
                   is_ckpt_delta);
 
+    scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
+
     if (scan_open.tx_req_->read_local_)
     {
-        handler->ScanOpenLocal(table_name,
-                               index_type,
-                               start_key,
-                               inclusive,
-                               tx_number_.load(std::memory_order_relaxed),
-                               tx_term_,
-                               command_id_.load(std::memory_order_relaxed),
-                               commit_ts_bound_,
-                               scan_open.hd_result_,
-                               direction,
-                               IsolationLevel::RepeatableRead,
-                               CcProtocol::Locking,
-                               is_for_write,
-                               is_ckpt_delta);
+        cc_handler_->ScanOpenLocal(table_name,
+                                   index_type,
+                                   start_key,
+                                   inclusive,
+                                   tx_number_.load(std::memory_order_relaxed),
+                                   tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
+                                   commit_ts_bound_,
+                                   scan_open.hd_result_,
+                                   direction,
+                                   IsolationLevel::RepeatableRead,
+                                   CcProtocol::Locking,
+                                   is_for_write,
+                                   is_ckpt_delta);
     }
     else
     {
@@ -1291,21 +1449,21 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
             iso_lvl = IsolationLevel::RepeatableRead;
         }
 
-        handler->ScanOpen(table_name,
-                          index_type,
-                          start_key,
-                          inclusive,
-                          tx_number_.load(std::memory_order_relaxed),
-                          tx_term_,
-                          command_id_.load(std::memory_order_relaxed),
-                          start_ts_,
-                          scan_open.hd_result_,
-                          direction,
-                          iso_lvl,
-                          protocol_,
-                          is_for_write,
-                          is_ckpt_delta,
-                          is_covering_keys);
+        cc_handler_->ScanOpen(table_name,
+                              index_type,
+                              start_key,
+                              inclusive,
+                              tx_number_.load(std::memory_order_relaxed),
+                              tx_term_,
+                              command_id_.load(std::memory_order_relaxed),
+                              start_ts_,
+                              scan_open.hd_result_,
+                              direction,
+                              iso_lvl,
+                              protocol_,
+                              is_for_write,
+                              is_ckpt_delta,
+                              is_covering_keys);
     }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -1330,42 +1488,36 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (scan_open_.hd_result_.IsError())
+    ScanOpenResult &open_result = scan_open.hd_result_.Value();
+
+    if (scan_open.hd_result_.IsError())
     {
         DLOG(ERROR) << "ScanOpenOperation failed for cc error:"
                     << scan_open_.hd_result_.ErrorMsg();
-        if (scan_open_.hd_result_.Value().scanner_ != nullptr)
+
+        uint64_resp_->FinishError(
+            ConvertCcError(scan_open.hd_result_.ErrorCode()));
+
+        if (open_result.scanner_ != nullptr)
         {
-            uint64_resp_->SetErrorCode(
-                ConvertCcError(scan_open_.hd_result_.ErrorCode()));
-            const TableName &table_name = *scan_open_.tx_req_->tab_name_;
-            CcScanner *scanner = scan_open_.hd_result_.Value().scanner_.get();
-            abundant_lock_op_.Reset(
-                nullptr, 0, &table_name, scanner, uint64_resp_, nullptr);
+            DrainScanner(open_result.scanner_.get(), *scan_open.table_name_);
+            open_result.scanner_ = nullptr;
+
+            abundant_lock_op_.Reset();
             PushOperation(&abundant_lock_op_);
             Process(abundant_lock_op_);
-        }
-        else
-        {
-            DLOG(ERROR) << "ScanOpenOperation failed for cc error:"
-                        << scan_open_.hd_result_.ErrorMsg();
-            uint64_resp_->FinishError(
-                ConvertCcError(scan_open_.hd_result_.ErrorCode()));
         }
 
         return;
     }
 
-    ScanOpenResult &open_result = scan_open_.hd_result_.Value();
-
-    auto table_iter = rw_set_.WriteSet().find(*scan_open_.table_name_);
+    auto table_iter = rw_set_.WriteSet().find(*scan_open.table_name_);
     if (table_iter != rw_set_.WriteSet().end())
     {
-        if (scan_open_.direction_ == ScanDirection::Forward)
+        if (scan_open.direction_ == ScanDirection::Forward)
         {
-            auto wset_it = rw_set_.InitIter(table_iter->second,
-                                            scan_open_.start_key_,
-                                            scan_open_.inclusive_);
+            auto wset_it = rw_set_.InitIter(
+                table_iter->second, scan_open.start_key_, scan_open.inclusive_);
             if (wset_it.first != wset_it.second)
             {
                 wset_iters_.emplace(open_result.scan_alias_, wset_it);
@@ -1373,9 +1525,8 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         }
         else
         {
-            auto wset_rit = rw_set_.InitReverseIter(table_iter->second,
-                                                    scan_open_.start_key_,
-                                                    scan_open_.inclusive_);
+            auto wset_rit = rw_set_.InitReverseIter(
+                table_iter->second, scan_open.start_key_, scan_open.inclusive_);
             if (wset_rit.first != wset_rit.second)
             {
                 wset_reverse_iters_.emplace(open_result.scan_alias_, wset_rit);
@@ -1415,7 +1566,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                                ? SlicePosition::LastSliceInRange
                                : SlicePosition::FirstSliceInRange);
     }
-
 #else
     scans_.try_emplace(open_result.scan_alias_,
                        std::move(open_result.scanner_),
@@ -1423,7 +1573,10 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                        scan_open.tx_req_->end_inclusive_);
 #endif
 
-    uint64_resp_->Finish(open_result.scan_alias_);
+    if (uint64_resp_ != nullptr)
+    {
+        uint64_resp_->Finish(open_result.scan_alias_);
+    }
 }
 
 void TransactionExecution::Process(ScanNextOperation &scan_next)
@@ -1458,7 +1611,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     {
         if (scanner.read_local_)
         {
-            handler->ScanNextBatchLocal(
+            cc_handler_->ScanNextBatchLocal(
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
@@ -1468,12 +1621,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
         else
         {
-            handler->ScanNextBatch(tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   command_id_.load(std::memory_order_relaxed),
-                                   start_ts_,
-                                   scanner,
-                                   scan_next.hd_result_);
+            cc_handler_->ScanNextBatch(
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                start_ts_,
+                scanner,
+                scan_next.hd_result_);
         }
     }
 #ifdef RANGE_PARTITION_ENABLED
@@ -1501,20 +1655,21 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             // range lock is released when the scan request returns.
             scan_next.lock_range_result_.SetFinished();
 
-            handler->ScanNextBatch(scan_next.tx_req_->table_name_,
-                                   scan_state.range_id_,
-                                   scan_next.RangeNgTerm(),
-                                   scan_state.SliceLastKey(),
-                                   !scan_state.inclusive_,
-                                   scan_state.scan_end_key_,
-                                   scan_state.scan_end_inclusive_,
-                                   start_ts_,
-                                   tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   CommandId(),
-                                   scan_next.slice_hd_result_,
-                                   iso_level_,
-                                   protocol_);
+            cc_handler_->ScanNextBatch(
+                scan_next.tx_req_->table_name_,
+                scan_state.range_id_,
+                scan_next.RangeNgTerm(),
+                scan_state.SliceLastKey(),
+                !scan_state.inclusive_,
+                scan_state.scan_end_key_,
+                scan_state.scan_end_inclusive_,
+                start_ts_,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                CommandId(),
+                scan_next.slice_hd_result_,
+                iso_level_,
+                protocol_);
         }
         else if (scanner.Direction() == ScanDirection::Forward &&
                      scan_state.slice_position_ ==
@@ -1543,7 +1698,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 // range. The first scan of the range will return the cc node's
                 // term and subsequence scans of the remaining slices in the
                 // range will match the term.
-                handler->ScanNextBatch(
+                cc_handler_->ScanNextBatch(
                     scan_next.tx_req_->table_name_,
                     scan_state.range_id_,
                     -1,
@@ -1571,17 +1726,18 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     TableName(scan_next.tx_req_->table_name_.StringView(),
                               TableType::RangePartition);
 
-                handler->ReadLocal(scan_next.range_table_name_,
-                                   *scan_state.SliceLastKey(),
-                                   scan_next.range_rec_,
-                                   lock_range_read_type,
-                                   tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   CommandId(),
-                                   start_ts_,
-                                   scan_next.lock_range_result_,
-                                   IsolationLevel::RepeatableRead,
-                                   CcProtocol::Locking);
+                cc_handler_->ReadLocal(
+                    scan_next.range_table_name_,
+                    *scan_state.SliceLastKey(),
+                    scan_next.range_rec_,
+                    lock_range_read_type,
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    CommandId(),
+                    start_ts_,
+                    scan_next.lock_range_result_,
+                    IsolationLevel::RepeatableRead,
+                    CcProtocol::Locking);
             }
         }
     }
@@ -1630,7 +1786,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    prev_op_ = state_stack_.back();
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
@@ -1641,7 +1796,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     {
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.hd_result_.ErrorMsg();
-        void_resp_->FinishError(
+        bool_resp_->FinishError(
             ConvertCcError(scan_next.hd_result_.ErrorCode()));
         return;
     }
@@ -1651,7 +1806,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     {
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.slice_hd_result_.ErrorMsg();
-        void_resp_->FinishError(
+        bool_resp_->FinishError(
             ConvertCcError(scan_next.slice_hd_result_.ErrorCode()));
         return;
     }
@@ -1735,7 +1890,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // entry, adds the entry into the read set, so that the tx
                 // releases the lock in the commit phase.
                 LockType scan_tuple_lock_type =
-                    scanner.DeduceScanTupleLockType(cc_scan_tuple);
+                    scanner.DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
@@ -1767,7 +1922,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
-                        void_resp_->FinishError(
+                        bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         return;
                     }
@@ -1950,7 +2105,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 // entry, adds the entry into the read set, so that the tx
                 // releases the lock in the commit phase.
                 LockType scan_tuple_lock_type =
-                    scanner.DeduceScanTupleLockType(cc_scan_tuple);
+                    scanner.DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
                 // "key_ts_ == 0", means the lock is added on gap. Now, gap
                 // lock is not used when do scan operation.
                 if (scan_tuple_lock_type != LockType::NoLock &&
@@ -1980,7 +2135,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         cc_scan_tuple->cce_addr_, read_ts, &table_name);
                     if (!add_res)
                     {
-                        void_resp_->FinishError(
+                        bool_resp_->FinishError(
                             TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                         return;
                     }
@@ -2099,18 +2254,19 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     }
 
 #ifdef RANGE_PARTITION_ENABLED
+    ScanDirection dir = scan_next.Direction();
+    SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
+    bool scan_finished = dir == ScanDirection::Forward &&
+                             slice_pos == SlicePosition::LastSlice ||
+                         dir == ScanDirection::Backward &&
+                             slice_pos == SlicePosition::FirstSlice;
+
     if (scanner.Type() == CcmScannerType::RangePartition && scan_batch.empty())
     {
-        ScanDirection dir = scan_next.Direction();
-        SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
-
         // Scan next batch in range partition scans a slice at a time.
         // Keep scanning until we reach the last slice in last range or
         // we get something from the last slice scanned.
-        if (dir == ScanDirection::Forward &&
-                slice_pos != SlicePosition::LastSlice ||
-            dir == ScanDirection::Backward &&
-                slice_pos != SlicePosition::FirstSlice)
+        if (!scan_finished)
         {
             scan_next.Reset();
             PushOperation(&scan_next);
@@ -2118,37 +2274,65 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             return;
         }
     }
-#endif
 
-    void_resp_->Finish(void_);
+    bool_resp_->Finish(scan_finished);
+#else
+    bool_resp_->Finish(false);
+#endif
 }
 
-void TransactionExecution::ScanClose(std::vector<ScanBatchTuple> *scan_batch,
-                                     size_t scan_batch_idx,
-                                     size_t alias,
-                                     const TxKey &end_key,
-                                     const TableName &table_name)
+void TransactionExecution::ScanClose(
+    const std::vector<UnlockTuple> &unlock_batch,
+    size_t alias,
+    const TableName &table_name)
 {
     CcScanner *scanner = nullptr;
     auto scan_it = scans_.find(alias);
-    if (scan_it == scans_.end())
+    assert(scan_it != scans_.end());
+    scanner = scan_it->second.scanner_.get();
+
+    if (!unlock_batch.empty())
     {
-        if (scan_batch == nullptr)
+        drain_batch_.reserve(unlock_batch.size());
+
+        for (const UnlockTuple &tpl : unlock_batch)
         {
-            void_resp_->Finish(void_);
-            return;
+            // Newly-inserted records in the write set have empty cc entry
+            // address.
+            if (tpl.cce_addr_.Empty())
+            {
+                continue;
+            }
+
+            LockType lk_type = scanner->DeduceScanTupleLockType(tpl.status_);
+            if (lk_type == LockType::NoLock)
+            {
+                continue;
+            }
+
+            uint16_t read_cnt =
+                rw_set_.RemoveReadEntry(table_name, tpl.cce_addr_);
+
+            if (read_cnt == 0)
+            {
+                drain_batch_.emplace_back(tpl.cce_addr_, tpl.version_ts_);
+            }
         }
     }
-    else
-    {
-        scanner = scan_it->second.scanner_.get();
-    }
 
-    abundant_lock_op_.Reset(
-        scan_batch, scan_batch_idx, &table_name, scanner, nullptr, void_resp_);
+#ifndef RANGE_PARTITION_ENABLED
+    if (scanner != nullptr)
+    {
+        DrainScanner(scanner, table_name);
+    }
+#endif
+
+    cc_handler_->ScanClose(
+        table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
+
+    abundant_lock_op_.Reset();
     PushOperation(&abundant_lock_op_);
     Process(abundant_lock_op_);
-    handler->ScanClose(alias, end_key, false);
     scans_.erase(scan_it);
 }
 
@@ -2159,12 +2343,34 @@ void TransactionExecution::Update(const TableName &table_name,
     Upsert(table_name, std::move(key), std::move(rec), OperationType::Update);
 }
 
-void TransactionExecution::Insert(const TableName &table_name,
-                                  TxKey::Uptr key,
-                                  TxRecord::Uptr rec)
+TxErrorCode TransactionExecution::Insert(const TableName &table_name,
+                                         TxKey::Uptr key,
+                                         TxRecord::Uptr rec)
 {
+    TxResult<Void> tx_result(nullptr, nullptr);
+    void_resp_ = &tx_result;
     Upsert(table_name, std::move(key), std::move(rec), OperationType::Insert);
+    assert(tx_result.Status() != TxResultStatus::Unknown);
+
+    return tx_result.ErrorCode();
 }
+
+#ifdef EXT_TX_PROC_ENABLED
+void TransactionExecution::ExternalForward()
+{
+    tx_processor_->ExternalForward(this);
+}
+
+std::atomic<uint16_t> *TransactionExecution::ExternalProcessorCnt()
+{
+    return &tx_processor_->external_processor_num_;
+}
+
+std::function<void()> *TransactionExecution::ExternalProcessorFunctor()
+{
+    return tx_processor_->ExtProcessorFunctor();
+}
+#endif
 
 void TransactionExecution::Delete(const TableName &table_name, TxKey::Uptr key)
 {
@@ -2188,6 +2394,15 @@ void TransactionExecution::Upsert(const TableName &table_name,
 
 void TransactionExecution::Commit()
 {
+    if (tx_term_ < 0)
+    {
+        bool_resp_->Finish(false);
+        // transaction can be recycled and put into free list.
+        tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+        Reset();
+        return;
+    }
+
     tx_status_.store(TxnStatus::Committing, std::memory_order_release);
 
     if (rw_set_.WriteSetSize() > 0)
@@ -2210,6 +2425,19 @@ void TransactionExecution::Commit()
 
 void TransactionExecution::Abort()
 {
+    if (tx_term_ < 0)
+    {
+        if (bool_resp_ != nullptr)
+        {
+            bool_resp_->Finish(false);
+        }
+
+        // transaction can be recycled and put into free list.
+        tx_status_.store(TxnStatus::Finished, std::memory_order_release);
+        Reset();
+        return;
+    }
+
     tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
     PushOperation(&update_txn_);
     Process(update_txn_);
@@ -2244,17 +2472,17 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
 
     lock_write_ranges.lock_range_result_.Reset();
     lock_write_ranges.is_running_ = true;
-    handler->ReadLocal(lock_write_ranges.range_table_name_,
-                       *write_key,
-                       lock_write_ranges.range_rec_,
-                       ReadType::Inside,
-                       tx_number_.load(std::memory_order_relaxed),
-                       tx_term_,
-                       command_id_.load(std::memory_order_relaxed),
-                       start_ts_,
-                       lock_write_ranges.lock_range_result_,
-                       IsolationLevel::RepeatableRead,
-                       CcProtocol::Locking);
+    cc_handler_->ReadLocal(lock_write_ranges.range_table_name_,
+                           *write_key,
+                           lock_write_ranges.range_rec_,
+                           ReadType::Inside,
+                           tx_number_.load(std::memory_order_relaxed),
+                           tx_term_,
+                           command_id_.load(std::memory_order_relaxed),
+                           start_ts_,
+                           lock_write_ranges.lock_range_result_,
+                           IsolationLevel::RepeatableRead,
+                           CcProtocol::Locking);
 
     lock_write_ranges.Forward(this);
 }
@@ -2321,7 +2549,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     acquire_write.is_running_ = true;
 
     uint64_t current_ts =
-        static_cast<LocalCcHandler *>(handler)->GetTsBaseValue();
+        static_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
 
     size_t idx = 0;
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
@@ -2342,18 +2570,19 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 
             // TODO: enable is_insert after Serializable Isolation is
             // supported.
-            handler->AcquireWrite(table_name,
-                                  *write_entry.key_,
-                                  write_entry.key_shard_code_,
-                                  TxNumber(),
-                                  tx_term_,
-                                  command_id_.load(std::memory_order_relaxed),
-                                  current_ts,
-                                  false,
-                                  acquire_write.hd_result_,
-                                  idx,
-                                  protocol_,
-                                  iso_level_);
+            cc_handler_->AcquireWrite(
+                table_name,
+                *write_entry.key_,
+                write_entry.key_shard_code_,
+                TxNumber(),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                current_ts,
+                false,
+                acquire_write.hd_result_,
+                idx,
+                protocol_,
+                iso_level_);
             ++idx;
         }
     }
@@ -2402,6 +2631,7 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
         if (acquire_write.rset_has_expired_)
         {
             bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
+            bool_resp_->Finish(false);
         }
         else
         {
@@ -2410,7 +2640,10 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
                         << (int) acquire_write.hd_result_.ErrorCode();
             bool_resp_->SetErrorCode(
                 ConvertCcError(acquire_write.hd_result_.ErrorCode()));
+            bool_resp_->Finish(false);
         }
+
+        bool_resp_ = nullptr;
         Abort();
     }
     else
@@ -2458,7 +2691,7 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
     }
 
     set_ts.Reset();
-    handler->SetCommitTimestamp(txid_, candidate, set_ts.hd_result_);
+    cc_handler_->SetCommitTimestamp(txid_, candidate, set_ts.hd_result_);
     set_ts.Forward(this);
 }
 
@@ -2542,14 +2775,14 @@ void TransactionExecution::Process(ValidateOperation &validate)
 
         for (const auto &[cce_addr, read_entry] : tbl_read_set)
         {
-            handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                              tx_term_,
-                              command_id_.load(std::memory_order_relaxed),
-                              read_entry.version_ts_,
-                              0,
-                              commit_ts_,
-                              cce_addr,
-                              validate.hd_result_);
+            cc_handler_->PostRead(tx_number_.load(std::memory_order_relaxed),
+                                  tx_term_,
+                                  command_id_.load(std::memory_order_relaxed),
+                                  read_entry.version_ts_,
+                                  0,
+                                  commit_ts_,
+                                  cce_addr,
+                                  validate.hd_result_);
         }
     }
 
@@ -2603,8 +2836,11 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
 
         DLOG(ERROR) << "ValidateOperation failed for cc error:"
                     << validate.hd_result_.ErrorMsg();
+
         bool_resp_->SetErrorCode(
             ConvertCcError(validate.hd_result_.ErrorCode()));
+        bool_resp_->Finish(false);
+        bool_resp_ = nullptr;
 
         Abort();
     }
@@ -2617,6 +2853,11 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     else
     {
         tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+
+        // This is a read-only tx. Notifies early before post-processing.
+        bool_resp_->Finish(true);
+        bool_resp_ = nullptr;
+
         PushOperation(&update_txn_);
         Process(update_txn_);
     }
@@ -2862,6 +3103,8 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
             {
                 bool_resp_->SetErrorCode(TxErrorCode::LOG_SERVICE_UNREACHABLE);
+                bool_resp_->Finish(false);
+                bool_resp_ = nullptr;
                 tx_status_.store(TxnStatus::Unknown, std::memory_order_release);
             }
             else
@@ -2869,6 +3112,8 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                 DLOG(ERROR) << "WriteToLogOp failed for cc error:"
                             << log_op->hd_result_.ErrorMsg();
                 bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                bool_resp_->Finish(false);
+                bool_resp_ = nullptr;
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
@@ -2897,10 +3142,10 @@ void TransactionExecution::Process(UpdateTxnStatus &update_txn)
         });
     update_txn.Reset();
     update_txn.is_running_ = true;
-    handler->UpdateTxnStatus(txid_,
-                             iso_level_,
-                             tx_status_.load(std::memory_order_relaxed),
-                             update_txn.hd_result_);
+    cc_handler_->UpdateTxnStatus(txid_,
+                                 iso_level_,
+                                 tx_status_.load(std::memory_order_relaxed),
+                                 update_txn.hd_result_);
     update_txn.Forward(this);
 }
 
@@ -2988,18 +3233,19 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : table_write_set)
             {
-                handler->PostWrite(tx_number_.load(std::memory_order_relaxed),
-                                   tx_term_,
-                                   command_id_.load(std::memory_order_relaxed),
-                                   commit_ts_,
-                                   write_entry.cce_addr_,
-                                   write_entry.rec_.get(),
-                                   write_entry.op_,
-                                   write_entry.key_shard_code_,
-                                   post_process.hd_result_);
+                cc_handler_->PostWrite(
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    commit_ts_,
+                    write_entry.cce_addr_,
+                    write_entry.rec_.get(),
+                    write_entry.op_,
+                    write_entry.key_shard_code_,
+                    post_process.hd_result_);
                 if (write_entry.forward_key_shard_code_ != 0)
                 {
-                    handler->ForwardPostWrite(
+                    cc_handler_->ForwardPostWrite(
                         tx_number_.load(std::memory_order_relaxed),
                         tx_term_,
                         command_id_.load(std::memory_order_relaxed),
@@ -3048,7 +3294,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
                     // Abort doesn't care the OperationType, since PostWrite is
                     // just used to release the lock.
-                    handler->PostWrite(
+                    cc_handler_->PostWrite(
                         tx_number_.load(std::memory_order_relaxed),
                         tx_term_,
                         command_id_.load(std::memory_order_relaxed),
@@ -3078,14 +3324,15 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
             for (const auto &[cce_addr, read_entry] : data_read_set)
             {
-                handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                                  tx_term_,
-                                  command_id_.load(std::memory_order_relaxed),
-                                  0,
-                                  0,
-                                  0,
-                                  cce_addr,
-                                  post_process.hd_result_);
+                cc_handler_->PostRead(
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    0,
+                    0,
+                    0,
+                    cce_addr,
+                    post_process.hd_result_);
                 ++idx;
             }
         }
@@ -3143,7 +3390,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     }
     assert(state_stack_.empty());
 
-    if (bool_resp_ != nullptr)
+    if (bool_resp_ != nullptr && bool_resp_ != &commit_tx_req_->tx_result_)
     {
         if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
         {
@@ -3182,16 +3429,17 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
         CcHandlerResult<AcquireAllResult> &hres = acq_all_op.hd_results_[nid];
         hres.Reset();
         hres.Value().remote_ack_cnt_ = &acq_all_op.remote_ack_cnt_;
-        handler->AcquireWriteAll(*acq_all_op.table_name_,
-                                 *acq_all_op.key_,
-                                 nid,
-                                 tx_number_.load(std::memory_order_relaxed),
-                                 tx_term_,
-                                 command_id_.load(std::memory_order_relaxed),
-                                 false,
-                                 hres,
-                                 acq_all_op.protocol_,
-                                 acq_all_op.cc_op_);
+        cc_handler_->AcquireWriteAll(
+            *acq_all_op.table_name_,
+            *acq_all_op.key_,
+            nid,
+            tx_number_.load(std::memory_order_relaxed),
+            tx_term_,
+            command_id_.load(std::memory_order_relaxed),
+            false,
+            hres,
+            acq_all_op.protocol_,
+            acq_all_op.cc_op_);
     }
     StartTiming();
 }
@@ -3236,10 +3484,23 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
             // modifying rec_ while the handler is still using it.
             continue;
         }
-        handler->PostWriteAll(*post_write_all_op.table_name_,
+        cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
+                                  *post_write_all_op.key_,
+                                  *post_write_all_op.rec_,
+                                  nid,
+                                  tx_number_.load(std::memory_order_relaxed),
+                                  tx_term_,
+                                  command_id_.load(std::memory_order_relaxed),
+                                  commit_ts_,
+                                  post_write_all_op.hd_result_,
+                                  post_write_all_op.op_type_,
+                                  post_write_all_op.write_type_);
+    }
+
+    cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
                               *post_write_all_op.key_,
                               *post_write_all_op.rec_,
-                              nid,
+                              Sharder::Instance().NodeId(),
                               tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
                               command_id_.load(std::memory_order_relaxed),
@@ -3247,19 +3508,6 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                               post_write_all_op.hd_result_,
                               post_write_all_op.op_type_,
                               post_write_all_op.write_type_);
-    }
-
-    handler->PostWriteAll(*post_write_all_op.table_name_,
-                          *post_write_all_op.key_,
-                          *post_write_all_op.rec_,
-                          Sharder::Instance().NodeId(),
-                          tx_number_.load(std::memory_order_relaxed),
-                          tx_term_,
-                          command_id_.load(std::memory_order_relaxed),
-                          commit_ts_,
-                          post_write_all_op.hd_result_,
-                          post_write_all_op.op_type_,
-                          post_write_all_op.write_type_);
     StartTiming();
 }
 
@@ -3301,17 +3549,74 @@ void TransactionExecution::ReleaseCatalogRangeLock(
         for (const auto &[cce_addr, read_entry] : tbl_set)
         {
             --ref_cnt;
-            handler->PostRead(TxNumber(),
-                              TxTerm(),
-                              CommandId(),
-                              read_entry.version_ts_,
-                              0,
-                              commit_ts_,
-                              cce_addr,
-                              catalog_range_hd_result);
+            cc_handler_->PostRead(TxNumber(),
+                                  TxTerm(),
+                                  CommandId(),
+                                  read_entry.version_ts_,
+                                  0,
+                                  commit_ts_,
+                                  cce_addr,
+                                  catalog_range_hd_result);
         }
     }
     assert(ref_cnt == 0);
+}
+
+void TransactionExecution::DrainScanner(CcScanner *scanner,
+                                        const TableName &table_name)
+{
+    assert(scanner != nullptr);
+
+    // drain out the scan tuple in the scan cache
+    scanner->SetDrainCacheMode(true);
+    const ScanTuple *cc_scan_tuple = scanner->Current();
+    // In case the scan status is blocked before
+    if (cc_scan_tuple == nullptr && scanner->Status() == ScannerStatus::Blocked)
+    {
+        scanner->MoveNext();
+        cc_scan_tuple = scanner->Current();
+    }
+
+    while (cc_scan_tuple != nullptr)
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+            &rw_set_,
+            (
+                [this, cc_scan_tuple]() -> std::string
+                {
+                    return std::string("\"tx_number\":")
+                        .append(std::to_string(this->TxNumber()))
+                        .append(",\"tx_term\":")
+                        .append(std::to_string(this->tx_term_))
+                        .append(",\"cce_ptr\":")
+                        .append(
+                            std::to_string(cc_scan_tuple->cce_addr_.CcePtr()));
+                }));
+
+        LockType scan_tuple_lock_type =
+            scanner->DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
+        // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
+        // not used when do scan operation.
+        if (scan_tuple_lock_type != LockType::NoLock &&
+            cc_scan_tuple->key_ts_ != 0 &&
+            rw_set_.RemoveReadEntry(table_name, cc_scan_tuple->cce_addr_) == 0)
+        {
+            if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
+            {
+                // Only used to release lock.
+                drain_batch_.emplace_back(cc_scan_tuple->cce_addr_, 0);
+            }
+            else
+            {
+                drain_batch_.emplace_back(cc_scan_tuple->cce_addr_,
+                                          cc_scan_tuple->key_ts_);
+            }
+        }
+        scanner->MoveNext();
+        cc_scan_tuple = scanner->Current();
+    }
 }
 
 void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
@@ -3328,11 +3633,11 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
-    handler->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
-                                  ds_upsert_table_op.op_type_,
-                                  commit_ts_,
-                                  ds_upsert_table_op.hd_result_,
-                                  ds_upsert_table_op.alter_table_info_);
+    cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
+                                      ds_upsert_table_op.op_type_,
+                                      commit_ts_,
+                                      ds_upsert_table_op.hd_result_,
+                                      ds_upsert_table_op.alter_table_info_);
 }
 
 void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)
@@ -3367,13 +3672,13 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
     fault_inject_op_.Reset();
     fault_inject_op_.is_running_ = true;
 
-    handler->FaultInject(fault_inject_op_.fault_name_,
-                         fault_inject_op_.fault_paras_,
-                         tx_term_,
-                         command_id_.load(std::memory_order_relaxed),
-                         txid_,
-                         fault_inject_op_.vct_node_id_,
-                         fault_inject_op_.hd_result_);
+    cc_handler_->FaultInject(fault_inject_op_.fault_name_,
+                             fault_inject_op_.fault_paras_,
+                             tx_term_,
+                             command_id_.load(std::memory_order_relaxed),
+                             txid_,
+                             fault_inject_op_.vct_node_id_,
+                             fault_inject_op_.hd_result_);
     return;
 }
 
@@ -3409,7 +3714,6 @@ void TransactionExecution::ProcessTxRequest(
                 .append(std::to_string(this->tx_term_));
         });
     bool_resp_ = &clean_req.tx_result_;
-    bool_resp_->Reset();
 
     clean_entry_op_.Set(clean_req.tab_name_,
                         clean_req.key_,
@@ -3434,14 +3738,15 @@ void TransactionExecution::Process(CleanCcEntryForTestOp &clean_entry_op)
     clean_entry_op_.Reset();
     clean_entry_op_.is_running_ = true;
 
-    handler->CleanCcEntryForTest(*clean_entry_op_.tab_name_,
-                                 *clean_entry_op_.key_,
-                                 clean_entry_op_.only_archives_,
-                                 clean_entry_op_.flush_,
-                                 tx_number_.load(std::memory_order_relaxed),
-                                 tx_term_,
-                                 command_id_.load(std::memory_order_relaxed),
-                                 clean_entry_op_.hd_result_);
+    cc_handler_->CleanCcEntryForTest(
+        *clean_entry_op_.tab_name_,
+        *clean_entry_op_.key_,
+        clean_entry_op_.only_archives_,
+        clean_entry_op_.flush_,
+        tx_number_.load(std::memory_order_relaxed),
+        tx_term_,
+        command_id_.load(std::memory_order_relaxed),
+        clean_entry_op_.hd_result_);
     return;
 }
 
@@ -3483,7 +3788,7 @@ void TransactionExecution::Process(AnalyzeTableAllOp &analyze_table_all_op)
 
     for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
     {
-        handler->AnalyzeTableAll(
+        cc_handler_->AnalyzeTableAll(
             *analyze_table_all_op.analyze_tx_req_->table_name_,
             ng_id,
             TxNumber(),
@@ -3519,6 +3824,7 @@ void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
     }
     else
     {
+        LOG(INFO) << "txm notifies analyze tx request ";
         void_resp_->Finish(void_);
     }
 }
@@ -3645,14 +3951,14 @@ void TransactionExecution::Process(PostReadOperation &post_read_operation)
     post_read_operation.is_running_ = true;
     CcEntryAddr *cce_addr = post_read_operation.cce_entry_.first;
     ReadSetEntry *read_set_entry = post_read_operation.cce_entry_.second;
-    handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                      this->tx_term_,
-                      command_id_.load(std::memory_order_relaxed),
-                      read_set_entry->version_ts_,
-                      0,
-                      commit_ts_,
-                      *cce_addr,
-                      post_read_operation.hd_result_);
+    cc_handler_->PostRead(tx_number_.load(std::memory_order_relaxed),
+                          this->tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
+                          read_set_entry->version_ts_,
+                          0,
+                          commit_ts_,
+                          *cce_addr,
+                          post_read_operation.hd_result_);
 }
 
 void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
@@ -3661,11 +3967,11 @@ void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
     Forward();
 }
 
-void TransactionExecution::Process(ReleaseScanExtraLockOp &lock_op)
+void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &lock_op,
+        &unlock_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")
@@ -3674,123 +3980,28 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &lock_op)
                 .append(std::to_string(this->tx_term_));
         });
 
-    lock_op.is_running_ = true;
+    unlock_op.is_running_ = true;
     StartTiming();
-
-    drain_batch_.clear();
-    if (lock_op.scan_batch_ != nullptr)
-    {
-        for (size_t i = lock_op.scan_batch_idx_;
-             i < lock_op.scan_batch_->size();
-             i++)
-        {
-            ScanBatchTuple &tpl = (*lock_op.scan_batch_)[i];
-            if (tpl.cce_addr_.Empty())
-            {
-                continue;
-            }
-
-            if (rw_set_.FindReadSet(*lock_op.table_name_, tpl.cce_addr_) ==
-                ReadEntryResult::INSERT_REPEAT)
-            {
-                continue;
-            }
-
-            if (rw_set_.FindReadSet(*lock_op.table_name_, tpl.cce_addr_) !=
-                ReadEntryResult::NO_INSERT)
-            {
-                drain_batch_.push_back(tpl);
-                rw_set_.DedupRead(tpl.cce_addr_);
-            }
-        }
-    }
-    // Add remaining ScanTuple into batch, and release their lock
-
-    if (lock_op.scanner_ != nullptr)
-    {
-        // drain out the scan tuple in the scan cache
-        lock_op.scanner_->SetDrainCacheMode(true);
-        const ScanTuple *cc_scan_tuple = lock_op.scanner_->Current();
-        // In case the scan status is blocked before
-        if (cc_scan_tuple == nullptr &&
-            lock_op.scanner_->Status() == ScannerStatus::Blocked)
-        {
-            lock_op.scanner_->MoveNext();
-            cc_scan_tuple = lock_op.scanner_->Current();
-        }
-
-        while (cc_scan_tuple != nullptr)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                &rw_set_,
-                (
-                    [this, cc_scan_tuple]() -> std::string
-                    {
-                        return std::string("\"tx_number\":")
-                            .append(std::to_string(this->TxNumber()))
-                            .append(",\"tx_term\":")
-                            .append(std::to_string(this->tx_term_))
-                            .append(",\"cce_ptr\":")
-                            .append(std::to_string(
-                                cc_scan_tuple->cce_addr_.CcePtr()));
-                    }));
-
-            LockType scan_tuple_lock_type =
-                lock_op.scanner_->DeduceScanTupleLockType(cc_scan_tuple);
-            // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
-            // not used when do scan operation.
-            if (scan_tuple_lock_type != LockType::NoLock &&
-                cc_scan_tuple->key_ts_ != 0 &&
-                rw_set_.FindReadSet(*lock_op.table_name_,
-                                    cc_scan_tuple->cce_addr_) ==
-                    ReadEntryResult::NO_INSERT)
-            {
-                if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
-                {
-                    // Only used to release lock.
-                    drain_batch_.emplace_back(cc_scan_tuple->Key(),
-                                              cc_scan_tuple->Record(),
-                                              RecordStatus::Normal,
-                                              0,
-                                              cc_scan_tuple->cce_addr_,
-                                              scan_tuple_lock_type);
-                }
-                else
-                {
-                    drain_batch_.emplace_back(cc_scan_tuple->Key(),
-                                              cc_scan_tuple->Record(),
-                                              RecordStatus::Normal,
-                                              cc_scan_tuple->key_ts_,
-                                              cc_scan_tuple->cce_addr_,
-                                              scan_tuple_lock_type);
-                }
-            }
-            lock_op.scanner_->MoveNext();
-            cc_scan_tuple = lock_op.scanner_->Current();
-        }
-    }
 
     if (drain_batch_.size() == 0)
     {
-        lock_op.hd_result_.SetFinished();
+        unlock_op.hd_result_.SetFinished();
     }
     else
     {
-        lock_op.hd_result_.SetRefCnt((uint32_t) drain_batch_.size());
+        unlock_op.hd_result_.SetRefCnt((uint32_t) drain_batch_.size());
     }
 
-    for (ScanBatchTuple &tpl : drain_batch_)
+    for (const auto &addr_pair : drain_batch_)
     {
-        handler->PostRead(tx_number_.load(std::memory_order_relaxed),
-                          tx_term_,
-                          command_id_.load(std::memory_order_relaxed),
-                          tpl.version_ts_,
-                          0,
-                          commit_ts_,
-                          tpl.cce_addr_,
-                          lock_op.hd_result_);
+        cc_handler_->PostRead(TxNumber(),
+                              TxTerm(),
+                              CommandId(),
+                              addr_pair.second,
+                              0,
+                              commit_ts_,
+                              addr_pair.first,
+                              unlock_op.hd_result_);
     }
 }
 
@@ -3806,29 +4017,14 @@ void TransactionExecution::PostProcess(ReleaseScanExtraLockOp &lock_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
+    drain_batch_.clear();
     // The lock_op step is optional. Only pops the stack if the last step
     // is the validation step.
     if (!state_stack_.empty())
     {
         assert(state_stack_.back() == &lock_op);
         state_stack_.pop_back();
-    }
-
-    if (lock_op.scan_open_tx_result_ != nullptr)
-    {
-        if (lock_op.scan_open_tx_result_->ErrorCode() != TxErrorCode::NO_ERROR)
-        {
-            lock_op.scan_open_tx_result_->FinishError(
-                lock_op.scan_open_tx_result_->ErrorCode());
-        }
-        else
-        {
-            lock_op.scan_open_tx_result_->FinishError();
-        }
-    }
-    else if (lock_op.scan_close_tx_result_ != nullptr)
-    {
-        lock_op.scan_close_tx_result_->Finish(void_);
     }
 }
 
@@ -3846,15 +4042,15 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
         });
     kickout_data_op.is_running_ = true;
     kickout_data_op.hd_result_.Reset();
-    handler->KickoutData(*kickout_data_op.table_name_,
-                         kickout_data_op.node_group_,
-                         tx_number_.load(std::memory_order_relaxed),
-                         tx_term_,
-                         command_id_.load(std::memory_order_relaxed),
-                         kickout_data_op.commit_ts_,
-                         kickout_data_op.hd_result_,
-                         kickout_data_op.start_key_,
-                         kickout_data_op.end_key_);
+    cc_handler_->KickoutData(*kickout_data_op.table_name_,
+                             kickout_data_op.node_group_,
+                             tx_number_.load(std::memory_order_relaxed),
+                             tx_term_,
+                             command_id_.load(std::memory_order_relaxed),
+                             kickout_data_op.commit_ts_,
+                             kickout_data_op.hd_result_,
+                             kickout_data_op.start_key_,
+                             kickout_data_op.end_key_);
 }
 
 void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
@@ -3871,6 +4067,34 @@ void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
         });
     state_stack_.pop_back();
     Forward();
+}
+
+ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
+    size_t alias, const TableName *table_name)
+{
+    size_t pool_size = scan_close_req_pool_->Size();
+    for (size_t idx = 0; idx < pool_size; ++idx)
+    {
+        std::unique_ptr<ScanCloseTxRequest> scan_close_req =
+            std::move(scan_close_req_pool_->Peek());
+        scan_close_req_pool_->Dequeue();
+
+        ScanCloseTxRequest *req = scan_close_req.get();
+        scan_close_req_pool_->Enqueue(std::move(scan_close_req));
+
+        if (!req->in_use_.load(std::memory_order_relaxed))
+        {
+            req->Reset(alias, table_name);
+            return req;
+        }
+    }
+
+    std::unique_ptr<ScanCloseTxRequest> scan_close_req =
+        std::make_unique<ScanCloseTxRequest>(alias, table_name);
+    ScanCloseTxRequest *req = scan_close_req.get();
+    scan_close_req_pool_->Enqueue(std::move(scan_close_req));
+
+    return req;
 }
 
 }  // namespace txservice

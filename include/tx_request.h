@@ -6,7 +6,6 @@
 
 #include "catalog_key_record.h"
 #include "scan.h"
-#include "tx_container.h"
 #include "tx_execution.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -23,12 +22,28 @@ public:
     virtual ~TxRequest() = default;
     virtual void Process(TransactionExecution *txm) = 0;
     // virtual bool Finish() const = 0;
+
+    static std::string ErrorMessage(TxErrorCode err_code)
+    {
+        auto it = tx_error_messages.find(err_code);
+        if (it != tx_error_messages.end())
+        {
+            return it->second;
+        }
+        return "";
+    }
+
+    virtual void SetError(
+        TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR) = 0;
 };
 
 template <typename Subtype, typename T>
 struct TemplateTxRequest : TxRequest
 {
-    TemplateTxRequest() : tx_result_()
+    TemplateTxRequest(const std::function<void()> *yield_fptr,
+                      const std::function<void()> *resume_fptr,
+                      TransactionExecution *txm)
+        : tx_result_(yield_fptr, resume_fptr), txm_(txm)
     {
     }
 
@@ -40,7 +55,7 @@ struct TemplateTxRequest : TxRequest
         return;
     }
 
-    bool Finish()
+    bool IsFinished()
     {
         return tx_result_.Status() != TxResultStatus::Unknown;
     }
@@ -55,19 +70,34 @@ struct TemplateTxRequest : TxRequest
         return tx_result_.ErrorCode();
     }
 
-    std::string ErrorMsg() const
+    const std::string &ErrorMsg() const
     {
         auto it = tx_error_messages.find(ErrorCode());
         if (it != tx_error_messages.end())
         {
             return it->second;
         }
-        return "";
+
+        static std::string empty_err_msg;
+        return empty_err_msg;
     }
 
     void Wait()
     {
-        tx_result_.Wait();
+        TxResultStatus result_status = TxResultStatus::Unknown;
+        do
+        {
+#ifdef EXT_TX_PROC_ENABLED
+            if (txm_ != nullptr)
+            {
+                txm_->ExternalForward();
+            }
+#endif
+
+            tx_result_.Wait();
+
+            result_status = tx_result_.Status();
+        } while (result_status == TxResultStatus::Unknown);
     }
 
     const T &Result() const
@@ -80,19 +110,32 @@ struct TemplateTxRequest : TxRequest
         tx_result_.Reset();
     }
 
-protected:
-    TxResult<T> tx_result_;
+    void SetError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR) override
+    {
+        tx_result_.FinishError(err_code);
+    }
 
+    TxResult<T> tx_result_;
+    TransactionExecution *txm_{nullptr};
+
+protected:
     friend class TransactionExecution;
 };
 
 struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
 {
     InitTxRequest(IsolationLevel level = IsolationLevel::ReadCommitted,
-                  CcProtocol proto = CcProtocol::OCC)
-        : iso_level_(level), protocol_(proto)
+                  CcProtocol proto = CcProtocol::OCC,
+                  const std::function<void()> *yield_fptr = nullptr,
+                  const std::function<void()> *resume_fptr = nullptr,
+                  TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          iso_level_(level),
+          protocol_(proto)
     {
     }
+
+    ~InitTxRequest() = default;
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
@@ -107,8 +150,12 @@ public:
                   bool is_for_write = false,
                   bool is_for_share = false,
                   bool read_local = false,
+                  const std::function<void()> *yield_fptr = nullptr,
+                  const std::function<void()> *resume_fptr = nullptr,
+                  TransactionExecution *txm = nullptr,
                   uint64_t corresponding_sk_commit_ts = 0)
-        : tab_name_(tab_name),
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          tab_name_(tab_name),
           key_(key),
           rec_(rec),
           is_for_write_(is_for_write),
@@ -153,8 +200,12 @@ public:
     ReadOutsideTxRequest(TxRecord &rec,
                          bool is_deleted,
                          uint64_t commit_ts,
+                         const std::function<void()> *yield_fptr = nullptr,
+                         const std::function<void()> *resume_fptr = nullptr,
+                         TransactionExecution *txm = nullptr,
                          std::vector<VersionTxRecord> *archives = nullptr)
-        : rec_(rec),
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          rec_(rec),
           is_deleted_(is_deleted),
           commit_ts_(commit_ts),
           archives_(archives)
@@ -172,8 +223,12 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     UpsertTxRequest(const TableName *tab_name,
                     TxKey::Uptr key,
                     TxRecord::Uptr rec,
-                    OperationType operation_type)
-        : tab_name_(tab_name),
+                    OperationType operation_type,
+                    const std::function<void()> *yield_fptr = nullptr,
+                    const std::function<void()> *resume_fptr = nullptr,
+                    TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
           operation_type_(operation_type)
@@ -188,7 +243,9 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
-    ScanOpenTxRequest() = delete;
+    ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr, nullptr)
+    {
+    }
 
     ScanOpenTxRequest(const TableName *tabname,
                       ScanIndexType index_type,
@@ -201,8 +258,12 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       bool is_for_write = false,
                       bool is_for_share = false,
                       bool is_covering_keys = false,
-                      bool is_read_local = false)
-        : tab_name_(tabname),
+                      bool is_read_local = false,
+                      const std::function<void()> *yield_fptr = nullptr,
+                      const std::function<void()> *resume_fptr = nullptr,
+                      TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          tab_name_(tabname),
           indx_type_(index_type),
           start_key_(start_key),
           start_inclusive_(start_inclusive),
@@ -213,8 +274,41 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           is_covering_keys_(is_covering_keys),
-          read_local_(is_read_local)
+          read_local_(is_read_local),
+          scan_alias_(UINT16_MAX)
     {
+    }
+
+    void Reset(const TableName *tabname,
+               ScanIndexType index_type,
+               const TxKey *start_key,
+               bool start_inclusive = true,
+               const TxKey *end_key = nullptr,
+               bool end_inclusive = true,
+               ScanDirection direction = ScanDirection::Forward,
+               bool is_ckpt = false,
+               bool is_for_write = false,
+               bool is_for_share = false,
+               bool is_covering_keys = false,
+               bool is_read_local = false,
+               const std::function<void()> *yield_fptr = nullptr,
+               const std::function<void()> *resume_fptr = nullptr,
+               TransactionExecution *txm = nullptr)
+    {
+        tx_result_.Reset(yield_fptr, resume_fptr);
+        tab_name_ = tabname;
+        indx_type_ = index_type;
+        start_key_ = start_key;
+        start_inclusive_ = start_inclusive;
+        end_key_ = end_key;
+        end_inclusive_ = end_inclusive;
+        direct_ = direction;
+        is_ckpt_delta_ = is_ckpt;
+        is_for_write_ = is_for_write;
+        is_for_share_ = is_for_share;
+        is_covering_keys_ = is_covering_keys;
+        read_local_ = is_read_local;
+        scan_alias_ = UINT16_MAX;
     }
 
     const TxKey *StartKey() const
@@ -227,18 +321,19 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         return end_key_;
     }
 
-    const TableName *tab_name_;
-    ScanIndexType indx_type_;
-    const TxKey *start_key_;
-    bool start_inclusive_;
-    const TxKey *end_key_;
-    bool end_inclusive_;
-    ScanDirection direct_;
-    bool is_ckpt_delta_;
-    bool is_for_write_;
-    bool is_for_share_;
-    bool is_covering_keys_;
-    bool read_local_;
+    const TableName *tab_name_{nullptr};
+    ScanIndexType indx_type_{ScanIndexType::Primary};
+    const TxKey *start_key_{nullptr};
+    bool start_inclusive_{false};
+    const TxKey *end_key_{nullptr};
+    bool end_inclusive_{false};
+    ScanDirection direct_{ScanDirection::Forward};
+    bool is_ckpt_delta_{false};
+    bool is_for_write_{false};
+    bool is_for_share_{false};
+    bool is_covering_keys_{true};
+    bool read_local_{false};
+    uint16_t scan_alias_{UINT16_MAX};
 };
 
 struct ScanBatchTuple
@@ -256,7 +351,7 @@ struct ScanBatchTuple
                    const TxRecord *rec,
                    RecordStatus status,
                    uint64_t version,
-                   const CcEntryAddr cce_addr,
+                   const CcEntryAddr &cce_addr,
                    LockType lock_type)
         : key_(key),
           record_(rec),
@@ -282,14 +377,20 @@ struct ScanBatchTuple
     const CcEntryAddr cce_addr_;
 };
 
-struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
+struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 {
     ScanBatchTxRequest() = delete;
 
     ScanBatchTxRequest(size_t alias,
                        const TableName &table_name,
-                       std::vector<ScanBatchTuple> *batch_vec)
-        : alias_(alias), table_name_(table_name), batch_(batch_vec)
+                       std::vector<ScanBatchTuple> *batch_vec,
+                       const std::function<void()> *yield_fptr = nullptr,
+                       const std::function<void()> *resume_fptr = nullptr,
+                       TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          alias_(alias),
+          table_name_(table_name),
+          batch_(batch_vec)
     {
         batch_->clear();
     }
@@ -299,37 +400,90 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, Void>
     std::vector<ScanBatchTuple> *batch_;
 };
 
-struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
+struct UnlockTuple
 {
-    ScanCloseTxRequest(std::vector<txservice::ScanBatchTuple> *scan_batch,
-                       size_t scan_batch_idx,
-                       size_t alias,
-                       TxKey *end_key,
-                       const TableName &table_name)
-        : scan_batch_(scan_batch),
-          scan_batch_idx_(scan_batch_idx),
-          alias_(alias),
-          end_key_(end_key),
-          table_name_(table_name)
+    UnlockTuple(const CcEntryAddr &cce_addr,
+                uint64_t version_ts,
+                RecordStatus status)
+        : cce_addr_(cce_addr), version_ts_(version_ts), status_(status)
     {
     }
 
-    std::vector<txservice::ScanBatchTuple> *scan_batch_;
-    size_t scan_batch_idx_;
+    CcEntryAddr cce_addr_;
+    uint64_t version_ts_;
+    RecordStatus status_;
+};
 
-    size_t alias_;
-    TxKey *end_key_;
-    const TableName &table_name_;
+struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
+{
+    ScanCloseTxRequest() = delete;
+
+    ScanCloseTxRequest(size_t alias,
+                       const TableName *table_name,
+                       const std::function<void()> *yield_fptr = nullptr,
+                       const std::function<void()> *resume_fptr = nullptr,
+                       TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          alias_(alias),
+          table_name_(table_name),
+          in_use_(true)
+    {
+    }
+
+    ScanCloseTxRequest(const std::vector<ScanBatchTuple> &scan_batch,
+                       size_t scan_batch_idx,
+                       size_t alias,
+                       const TableName *table_name,
+                       const std::function<void()> *yield_fptr = nullptr,
+                       const std::function<void()> *resume_fptr = nullptr,
+                       TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          alias_(alias),
+          table_name_(table_name),
+          in_use_(true)
+    {
+        for (size_t idx = scan_batch_idx; idx < scan_batch.size(); ++idx)
+        {
+            const ScanBatchTuple &tuple = scan_batch[idx];
+            unlock_batch_.emplace_back(
+                tuple.cce_addr_, tuple.version_ts_, tuple.status_);
+        }
+    }
+
+    void Reset(size_t alias, const TableName *table_name)
+    {
+        assert(!in_use_.load(std::memory_order_relaxed));
+
+        tx_result_.Reset();
+        alias_ = alias;
+        table_name_ = table_name;
+        in_use_.store(true, std::memory_order_relaxed);
+    }
+
+    std::vector<UnlockTuple> unlock_batch_;
+    size_t alias_{UINT64_MAX};
+    const TableName *table_name_{nullptr};
+    std::atomic<bool> in_use_{false};
 };
 
 struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>
 {
-    AbortTxRequest() = default;
+    AbortTxRequest(const std::function<void()> *yield_fptr = nullptr,
+                   const std::function<void()> *resume_fptr = nullptr,
+                   TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm)
+    {
+    }
 };
 
 struct CommitTxRequest : public TemplateTxRequest<CommitTxRequest, bool>
 {
-    CommitTxRequest() = default;
+    CommitTxRequest(const std::function<void()> *yield_fptr = nullptr,
+                    const std::function<void()> *resume_fptr = nullptr,
+                    TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm)
+    {
+    }
 };
 
 struct UpsertTableTxRequest
@@ -340,8 +494,12 @@ struct UpsertTableTxRequest
                          uint64_t schema_ts,
                          const std::string *dirty_image,
                          txservice::OperationType op_type,
-                         const std::string *alter_table_info_image = nullptr)
-        : table_name_(table_name),
+                         const std::string *alter_table_info_image = nullptr,
+                         const std::function<void()> *yield_fptr = nullptr,
+                         const std::function<void()> *resume_fptr = nullptr,
+                         TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          table_name_(table_name),
           curr_image_(curr_image),
           curr_schema_ts_(schema_ts),
           dirty_image_(dirty_image),
@@ -368,7 +526,8 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
         const TxKey *old_end_key,
         const RangeInfo *old_info,
         std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_id)
-        : table_name_(&table_name),
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(&table_name),
           schema_(schema),
           node_group_(node_group),
           old_start_key_(old_start_key),
@@ -389,14 +548,13 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
 struct AnalyzeTableTxRequest
     : public TemplateTxRequest<AnalyzeTableTxRequest, Void>
 {
-    AnalyzeTableTxRequest(const TableName *table_name = nullptr)
-        : table_name_(table_name)
+    AnalyzeTableTxRequest(const TableName *table_name = nullptr,
+                          const std::function<void()> *yield_fptr = nullptr,
+                          const std::function<void()> *resume_fptr = nullptr,
+                          TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          table_name_(table_name)
     {
-    }
-
-    void Set(const TableName *table_name)
-    {
-        table_name_ = table_name;
     }
 
     const TableName *table_name_{nullptr};
@@ -408,7 +566,9 @@ struct FaultInjectTxRequest
     FaultInjectTxRequest(const std::string &fault_name,
                          const std::string &fault_paras,
                          std::vector<int> &vct_node_id)
-        : fault_name_(fault_name), fault_paras_(fault_paras)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          fault_name_(fault_name),
+          fault_paras_(fault_paras)
     {
         vct_node_id_.swap(vct_node_id);
     }
@@ -426,7 +586,8 @@ struct CleanCcEntryForTestTxRequest
                                  const TxKey *key = nullptr,
                                  bool only_archives = false,
                                  bool flush = true)
-        : tab_name_(tab_name),
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          tab_name_(tab_name),
           key_(key),
           only_archives_{only_archives},
           flush_{flush}

@@ -20,16 +20,9 @@ CcStreamSender::~CcStreamSender()
     connect_thd_.join();
 }
 
-CcStreamSender::CcStreamSender(
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
-    : msg_pool_(msg_pool), terminate_(false)
+CcStreamSender::CcStreamSender() : terminate_(false)
 {
     connect_thd_ = std::thread([this] { ConnectStreams(); });
-}
-
-void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
-{
-    msg_pool_.enqueue(std::move(msg));
 }
 
 /**

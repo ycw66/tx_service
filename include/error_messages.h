@@ -11,6 +11,7 @@ enum struct TxErrorCode
     NO_ERROR = 0,
     UNDEFINED_ERR,
     INTERNAL_ERR_TIMEOUT,
+    TX_INIT_FAIL,
     // A cc request is directed to a follower of the target cc node group.
     CC_REQ_FOLLOWER,
 

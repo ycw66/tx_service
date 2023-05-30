@@ -12,6 +12,7 @@
 namespace txservice
 {
 class CcScanner;
+class TransactionExecution;
 
 enum class AckStatus : unsigned char
 {

@@ -321,11 +321,9 @@ public:
         return index_type_;
     }
 
-    LockType DeduceScanTupleLockType(const ScanTuple *scan_tuple)
+    LockType DeduceScanTupleLockType(RecordStatus rec_status)
     {
-        if (scan_tuple == nullptr ||
-            (scan_tuple->rec_status_ == RecordStatus::Deleted &&
-             !is_for_write_))
+        if (rec_status == RecordStatus::Deleted && !is_for_write_)
         {
             return LockType::NoLock;
         }
@@ -341,6 +339,8 @@ public:
         return LockTypeUtil::DeduceLockType(
             cc_op, iso_level_, protocol_, is_covering_keys_);
     }
+
+    virtual void Reset(const Schema *key_schema) = 0;
 
 protected:
     ScanDirection direct_;
@@ -378,7 +378,7 @@ public:
     {
         std::unique_lock<std::mutex> lock(mutex_);
         auto em_it = scans_.try_emplace(shard_code, this, key_schema_);
-        assert(em_it.second == true);
+        em_it.first->second.Reset();
         return &em_it.first->second;
     }
 
@@ -524,6 +524,19 @@ public:
     uint32_t CacheCount() const override
     {
         return scans_.size();
+    }
+
+    void Reset(const Schema *key_schema) override
+    {
+        key_schema_ = key_schema;
+        curr_shard_code_ = 0;
+        curr_tuple_ = nullptr;
+
+        for (auto cache_it = scans_.begin(); cache_it != scans_.end();
+             ++cache_it)
+        {
+            cache_it->second.Reset();
+        }
     }
 
 private:
@@ -712,6 +725,23 @@ public:
     uint32_t CacheCount() const override
     {
         return scans_.size();
+    }
+
+    void Reset(const Schema *key_schema) override
+    {
+        key_schema_ = key_schema;
+        partition_ng_term_ = -1;
+
+        for (auto cache_it = scans_.begin(); cache_it != scans_.end();
+             ++cache_it)
+        {
+            cache_it->Reset();
+        }
+
+        while (!heap_.empty())
+        {
+            heap_.pop();
+        }
     }
 
 private:

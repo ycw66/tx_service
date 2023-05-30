@@ -17,8 +17,7 @@ txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
     : thd_id_(thd_id),
       cc_shards_(shards),
-      remote_hd_(*Sharder::Instance().GetCcStreamSender()),
-      scan_alias_cnt_(0)
+      remote_hd_(*Sharder::Instance().GetCcStreamSender())
 {
 }
 
@@ -604,8 +603,25 @@ void txservice::LocalCcHandler::ScanOpen(
             return;
         }
 
-        ccm_scanner = local_shard.catalog_factory_->CreateSkCcmScanner(
-            direction, index_key_schema);
+        if (direction == ScanDirection::Forward &&
+            sk_forward_scanner_.Size() > 0)
+        {
+            ccm_scanner = std::move(sk_forward_scanner_.Peek());
+            sk_forward_scanner_.Dequeue();
+            ccm_scanner->Reset(index_key_schema);
+        }
+        else if (direction == ScanDirection::Backward &&
+                 sk_backward_scanner_.Size() > 0)
+        {
+            ccm_scanner = std::move(sk_backward_scanner_.Peek());
+            sk_backward_scanner_.Dequeue();
+            ccm_scanner->Reset(index_key_schema);
+        }
+        else
+        {
+            ccm_scanner = local_shard.catalog_factory_->CreateSkCcmScanner(
+                direction, index_key_schema);
+        }
     }
     else
     {
@@ -618,16 +634,34 @@ void txservice::LocalCcHandler::ScanOpen(
             return;
         }
 
-        ccm_scanner = local_shard.catalog_factory_->CreatePkCcmScanner(
-            direction, catalog_entry->schema_->KeySchema());
+        const Schema *key_schema = catalog_entry->schema_->KeySchema();
+
+        if (direction == ScanDirection::Forward &&
+            pk_forward_scanner_.Size() > 0)
+        {
+            ccm_scanner = std::move(pk_forward_scanner_.Peek());
+            pk_forward_scanner_.Dequeue();
+            ccm_scanner->Reset(key_schema);
+        }
+        else if (direction == ScanDirection::Backward &&
+                 pk_backward_scanner_.Size() > 0)
+        {
+            ccm_scanner = std::move(pk_backward_scanner_.Peek());
+            pk_backward_scanner_.Dequeue();
+            ccm_scanner->Reset(key_schema);
+        }
+        else
+        {
+            ccm_scanner = local_shard.catalog_factory_->CreatePkCcmScanner(
+                direction, key_schema);
+        }
     }
 
     ScanOpenResult &open_result = hd_res.Value();
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
-    open_result.scan_alias_ = scan_alias_cnt_;
-    ++scan_alias_cnt_;
+    assert(open_result.scan_alias_ < UINT16_MAX);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->is_covering_keys_ = is_covering_keys;
@@ -809,7 +843,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
-    open_result.scan_alias_ = scan_alias_cnt_++;
+    assert(open_result.scan_alias_ < UINT16_MAX);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->iso_level_ = iso_level;
@@ -968,7 +1002,12 @@ void txservice::LocalCcHandler::ScanNextBatch(
 
             // The entry address is available only after lock has been acquired.
             // But Occ|ReadCommitted won't acquire any lock.
-            LockType lock_type = scanner.DeduceScanTupleLockType(last_tuple);
+            LockType lock_type = LockType::NoLock;
+            if (last_tuple != nullptr)
+            {
+                lock_type =
+                    scanner.DeduceScanTupleLockType(last_tuple->rec_status_);
+            }
 
             req->SetPriorCceAddr(lock_type == LockType::NoLock
                                      ? 0
@@ -1035,6 +1074,40 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
     local_shard.Enqueue(req);
+}
+
+void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
+                                          ScanDirection direction,
+                                          std::unique_ptr<CcScanner> scanner)
+{
+    assert(scanner->Direction() == direction);
+
+    if (table_name.Type() == TableType::Primary)
+    {
+        assert(scanner->IndexType() == ScanIndexType::Primary);
+
+        if (direction == ScanDirection::Forward)
+        {
+            pk_forward_scanner_.Enqueue(std::move(scanner));
+        }
+        else
+        {
+            pk_backward_scanner_.Enqueue(std::move(scanner));
+        }
+    }
+    else if (table_name.Type() == TableType::Secondary)
+    {
+        assert(scanner->IndexType() == ScanIndexType::Secondary);
+
+        if (direction == ScanDirection::Forward)
+        {
+            sk_forward_scanner_.Enqueue(std::move(scanner));
+        }
+        else
+        {
+            sk_backward_scanner_.Enqueue(std::move(scanner));
+        }
+    }
 }
 
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,

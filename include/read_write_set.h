@@ -139,7 +139,7 @@ public:
                 it->second.version_ts_ = read_ts;
             }
 
-            it->second.is_relock = true;
+            it->second.read_cnt_++;
         }
         else if (!(*table_name == catalog_ccm_name) &&
                  (table_name->Type() != TableType::RangePartition))
@@ -228,6 +228,11 @@ public:
 
             uint64_t read_ts = cce_it->second.version_ts_;
             tbl_read_set.erase(cce_it);
+
+            if (tbl_it->second.empty())
+            {
+                rset_.erase(tbl_it);
+            }
 
             return read_ts;
         }
@@ -383,9 +388,13 @@ public:
             wset_cnt_ -= tab_wset.size();
             for (auto &key_it : tab_wset)
             {
-                wset_bytes_cnt_ -=
-                    (key_it.second.key_.get()->SerializedLength() +
-                     key_it.second.rec_.get()->SerializedLength());
+                assert(key_it.second.key_ != nullptr);
+
+                wset_bytes_cnt_ -= key_it.second.key_->SerializedLength();
+                wset_bytes_cnt_ -= key_it.second.rec_ != nullptr
+                                       ? key_it.second.rec_->SerializedLength()
+                                       : 0;
+
                 if (key_it.second.forward_key_shard_code_ != 0)
                 {
                     forward_write_cnt_--;
@@ -457,25 +466,34 @@ public:
 #endif
     }
 
-    // To find if a ccentry has been inserted into readset and if repeated to
-    // inserted into it.
-    ReadEntryResult FindReadSet(const TableName &tname,
-                                const CcEntryAddr &ety_addr)
+    uint16_t RemoveReadEntry(const TableName &table_name,
+                             const CcEntryAddr &addr)
     {
-        auto iter = rset_.find(tname);
+        assert(table_name.Type() != TableType::Catalog ||
+               table_name.Type() != TableType::RangePartition);
+
+        auto iter = rset_.find(table_name);
         if (iter == rset_.end())
         {
-            return ReadEntryResult::NO_INSERT;
+            return 0;
         }
 
-        auto it_addr = iter->second.find(ety_addr);
+        auto it_addr = iter->second.find(addr);
         if (it_addr == iter->second.end())
         {
-            return ReadEntryResult::NO_INSERT;
+            return 0;
         }
 
-        return (it_addr->second.is_relock ? ReadEntryResult::INSERT_REPEAT
-                                          : ReadEntryResult::INSERT_ONE);
+        assert(it_addr->second.read_cnt_ > 0);
+        it_addr->second.read_cnt_--;
+        uint16_t read_cnt = it_addr->second.read_cnt_;
+        if (read_cnt == 0)
+        {
+            --data_rset_cnt_;
+            iter->second.erase(it_addr);
+        }
+
+        return read_cnt;
     }
 
 private:

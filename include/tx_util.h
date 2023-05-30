@@ -8,14 +8,18 @@
 
 namespace txservice
 {
-static inline void AbortTx(txservice::TransactionExecution *tx)
+static inline void AbortTx(txservice::TransactionExecution *tx,
+                           const std::function<void()> *yield_fptr,
+                           const std::function<void()> *resume_fptr)
 {
     if (tx == nullptr)
         return;
-    txservice::AbortTxRequest abort_req;
-    abort_req.Reset();
-    tx->Execute(&abort_req);
-    abort_req.Wait();
+    txservice::AbortTxRequest abort_req(yield_fptr, resume_fptr);
+    int err = tx->Execute(&abort_req);
+    if (err == 0)
+    {
+        abort_req.Wait();
+    }
 }
 
 static inline bool InitTx(txservice::TransactionExecution *txm,
@@ -23,7 +27,6 @@ static inline bool InitTx(txservice::TransactionExecution *txm,
                           txservice::IsolationLevel level,
                           txservice::CcProtocol proto)
 {
-    init_txn_ptr->Reset();
     init_txn_ptr->iso_level_ = level;
     init_txn_ptr->protocol_ = proto;
     txm->Execute(init_txn_ptr);
@@ -39,7 +42,8 @@ static inline TransactionExecution *NewTxInit(
     txservice::TxService *tx_service,
     txservice::IsolationLevel level = txservice::IsolationLevel::ReadCommitted,
     txservice::CcProtocol proto = txservice::CcProtocol::Locking,
-    txservice::InitTxRequest *init_tx_ptr = nullptr,
+    const std::function<void()> *yield_fptr = nullptr,
+    const std::function<void()> *resume_fptr = nullptr,
     int retry_count = 8)
 {
     assert(tx_service != nullptr);
@@ -48,15 +52,20 @@ static inline TransactionExecution *NewTxInit(
     {
         txm = tx_service->NewTx();
         bool init_tx_success = false;
-        if (init_tx_ptr == nullptr)
+        txservice::InitTxRequest init_tx_req(
+            level, proto, yield_fptr, resume_fptr);
+
+        txm->Execute(&init_tx_req);
+        init_tx_req.Wait();
+        if (init_tx_req.IsError())
         {
-            txservice::InitTxRequest init_tx_req;
-            init_tx_success = InitTx(txm, &init_tx_req, level, proto);
+            init_tx_success = false;
         }
         else
         {
-            init_tx_success = InitTx(txm, init_tx_ptr, level, proto);
+            init_tx_success = true;
         }
+
         if (!init_tx_success)
         {
             txm = nullptr;
@@ -74,14 +83,18 @@ static inline TransactionExecution *NewTxInit(
     return txm;
 }
 
-static inline bool TxReadCatalog(TransactionExecution *txm,
-                                 ReadTxRequest &read_tx_req,
-                                 bool &exists)
+static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
+                                        ReadTxRequest &read_tx_req,
+                                        bool &exists)
 {
     assert(txm != nullptr);
 
     txm->Execute(&read_tx_req);
     read_tx_req.Wait();
+    if (read_tx_req.IsError())
+    {
+        return read_tx_req.ErrorCode();
+    }
 
     bool ok = !read_tx_req.IsError();
     if (ok)
@@ -103,13 +116,13 @@ static inline bool TxReadCatalog(TransactionExecution *txm,
             }
             else
             {
-                ok = false;
+                return TxErrorCode::UNDEFINED_ERR;
             }
 
             catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
         }
     }
 
-    return ok;
+    return TxErrorCode::NO_ERROR;
 }
 }  // namespace txservice

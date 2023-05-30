@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>  // std::unique_ptr
 #include <utility>
 #include <vector>
 
@@ -215,9 +216,9 @@ public:
                             CcScanner &scanner,
                             CcHandlerResult<ScanNextResult> &hd_res) override;
 
-    void ScanClose(size_t alias, const TxKey &end_key, bool inclusive) override
-    {
-    }
+    void ScanClose(const TableName &table_name,
+                   ScanDirection direction,
+                   std::unique_ptr<CcScanner> scanner) override;
 
     void UploadRecord(const TableName &table_name,
                       const TxKey &key,
@@ -350,8 +351,6 @@ private:
     LocalCcShards &cc_shards_;
     remote::RemoteCcHandler remote_hd_;
 
-    size_t scan_alias_cnt_;
-
     CcRequestPool<AcquireCc> acquire_pool;
     CcRequestPool<AcquireAllCc> acquire_all_pool_;
     CcRequestPool<PostWriteCc> postwrite_pool;
@@ -366,6 +365,11 @@ private:
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
     CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;
+
+    CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
+    CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};
+    CircularQueue<std::unique_ptr<CcScanner>> sk_forward_scanner_{64};
+    CircularQueue<std::unique_ptr<CcScanner>> sk_backward_scanner_{64};
 
     friend class remote::RemoteCcHandler;
 };

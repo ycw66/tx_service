@@ -1912,7 +1912,6 @@ public:
 
         hd_res->Value().ts_ = cce->commit_ts_;
         hd_res->Value().rec_status_ = cce->payload_status_;
-
         hd_res->SetFinished();
 
         return true;

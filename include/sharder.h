@@ -358,8 +358,6 @@ private:
      */
     std::atomic<bool> cc_nodes_init_{false};
 
-    moodycamel::ConcurrentQueue<std::unique_ptr<remote::CcMessage>> msg_pool_;
-
     // The cc stream sender establishes connections to remote nodes and sends cc
     // requests and responses to remote nodes via streams. It is initialized
     // before the cc stream receiver, given that the cc stream receiver

@@ -17,6 +17,7 @@
 #include "log_closure.h"
 #include "metrics.h"
 #include "read_write_set.h"
+#include "simple_spinlock.h"
 #include "tx_operation.h"
 #include "tx_req_result.h"
 #include "txlog.h"
@@ -41,8 +42,16 @@ struct ScanBatchTuple;
 struct SplitFlushTxRequest;
 struct CkptScanTxRequest;
 struct AnalyzeTableTxRequest;
+struct UnlockTuple;
 
 class TxProcessor;
+
+enum struct TxmStatus
+{
+    Idle = 0,
+    Busy,
+    Finished
+};
 
 class TransactionExecution
 {
@@ -77,7 +86,7 @@ public:
      * user-level tx, allowing it to receive tx requests.
      *
      */
-    void Restart();
+    void Restart(CcHandler *handler, TxLog *tx_log, TxProcessor *tx_processor);
 
     void Recycle()
     {
@@ -90,7 +99,7 @@ public:
      * @brief Check whether transction is idle and waiting for new TxRequest
      * from runtime.
      */
-    bool Idle() const;
+    bool IsIdle();
 
     /**
      * @brief Process different kinds of TxRequests based on the request state
@@ -126,6 +135,30 @@ public:
      * and needs to call request.Wait() to wait for finish signal.
      */
     int Execute(TxRequest *tx_req);
+
+    void InitTx(IsolationLevel iso_level, CcProtocol protocol);
+    std::unique_ptr<InitTxRequest> init_tx_req_;
+    bool CommitTx(CommitTxRequest &commit_req);
+    std::unique_ptr<CommitTxRequest> commit_tx_req_;
+    size_t OpenTxScan(ScanOpenTxRequest &scan_open_tx_req);
+    void CloseTxScan(size_t alias,
+                     const TableName *table_name,
+                     std::vector<UnlockTuple> &unlock_vec);
+
+    TxErrorCode Insert(const TableName &table_name,
+                       TxKey::Uptr key,
+                       TxRecord::Uptr rec);
+
+    TxErrorCode TxUpsert(const TableName &table_name,
+                         TxKey::Uptr key,
+                         TxRecord::Uptr rec,
+                         OperationType op);
+
+#ifdef EXT_TX_PROC_ENABLED
+    void ExternalForward();
+    std::atomic<uint16_t> *ExternalProcessorCnt();
+    std::function<void()> *ExternalProcessorFunctor();
+#endif
 
     /**
      * General Interface
@@ -218,7 +251,7 @@ private:
      * control requests directed to the binding shard.
      *
      */
-    void Forward();
+    TxmStatus Forward();
 
     void PushOperation(TransactionOperation *op, int retry_num = RETRY_NUM);
 
@@ -304,10 +337,8 @@ private:
 
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(std::vector<ScanBatchTuple> *scan_batch,
-                   size_t scan_batch_idx,
+    void ScanClose(const std::vector<UnlockTuple> &unlock_batch,
                    size_t alias,
-                   const TxKey &end_key,
                    const TableName &table_name);
 
     void Update(const TableName &table_name,
@@ -321,10 +352,6 @@ private:
                 TxRecord::Uptr rec,
                 OperationType op);
 
-    void Insert(const TableName &table_name,
-                TxKey::Uptr key,
-                TxRecord::Uptr rec);
-
     void Commit();
     void Abort();
 
@@ -334,12 +361,16 @@ private:
     void StartTiming();
 
     void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
+    void DrainScanner(CcScanner *scanner, const TableName &table_name);
 
 #ifdef RANGE_PARTITION_ENABLED
     void ReleaseReadRangeLock(ReadOperation &read);
 #endif
 
     TxErrorCode ConvertCcError(CcErrorCode error);
+
+    ScanCloseTxRequest *NextScanCloseTxReq(size_t alias,
+                                           const TableName *table_name);
 
     enum struct TxType
     {
@@ -348,9 +379,9 @@ private:
         PartitionFunction
     };
 
-    CcHandler *handler;
+    CcHandler *cc_handler_;
     TxLog *txlog_;
-    TxProcessor *const tx_processor_;
+    TxProcessor *tx_processor_;
 
     TxId txid_;
     // The tx number is a global identifier of the tx in the cluster. It differs
@@ -384,7 +415,6 @@ private:
     uint64_t state_clock_;
 
     std::vector<TransactionOperation *> state_stack_;
-    TransactionOperation *prev_op_;
     size_t idle_rep_;
 
     // local cache of read/write entries.
@@ -415,6 +445,7 @@ private:
      *
      */
     std::unordered_map<size_t, ScanState> scans_;
+    uint16_t scan_alias_cnt_{0};
 
     // Response whose returned result is void
     TxResult<Void> *void_resp_;
@@ -434,7 +465,8 @@ private:
     std::string detailed_error_msg_;
 
     // next_req_ is used to exchange request between runtime and TxProcessor.
-    std::atomic<TxRequest *> next_req_;
+    CircularQueue<TxRequest *> tx_req_queue_{8};
+    SimpleSpinlock tx_req_lk_;
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
@@ -452,7 +484,10 @@ private:
     ScanNextOperation scan_next_;
     // Temporarily save scan tuple when drain out the remainder scan tuples.
     // To avoid ccentry address to be saved in stack
-    std::vector<ScanBatchTuple> drain_batch_;
+    std::vector<std::pair<CcEntryAddr, uint64_t>> drain_batch_;
+
+    std::unique_ptr<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>
+        scan_close_req_pool_{nullptr};
 
     // Committing phase.
 #ifdef RANGE_PARTITION_ENABLED

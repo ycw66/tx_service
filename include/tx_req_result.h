@@ -30,12 +30,16 @@ template <typename T>
 class TxResult
 {
 public:
-    TxResult()
+    TxResult(const std::function<void()> *yield_fp,
+             const std::function<void()> *resume_fp)
         : value_(),
           status_(TxResultStatus::Unknown),
           error_code_(TxErrorCode::NO_ERROR),
           mutex_(),
-          cv_()
+          cv_(),
+          waiting_(false),
+          yield_func_(yield_fp),
+          resume_func_(resume_fp)
     {
     }
 
@@ -67,26 +71,74 @@ public:
 
     void Finish(const T &val)
     {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::unique_lock<std::mutex> lk(mutex_);
         value_ = val;
         status_ = TxResultStatus::Finished;
-        cv_.notify_one();
+
+        if (waiting_)
+        {
+            if (resume_func_ != nullptr)
+            {
+                lk.unlock();
+                // The resume functor schedules the coroutine waiting for the
+                // result to re-run/resume from the point it yields, i.e.,
+                // inside Wait().
+                (*resume_func_)();
+            }
+            else if (yield_func_ == nullptr)
+            {
+                // cv notification needs to be in the lock scope. This is
+                // because the tx request is owned by the sender and the sending
+                // thread may wake up spuriously before notify_one() is called.
+                // If so, the sending thread moves forward and de-allocate the
+                // tx request, before notify_one() is called, causing invalid
+                // memory access.
+                cv_.notify_one();
+            }
+        }
     }
 
     void Finish(T &&val)
     {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::unique_lock<std::mutex> lk(mutex_);
         value_ = std::move(val);
         status_ = TxResultStatus::Finished;
-        cv_.notify_one();
+
+        if (waiting_)
+        {
+            if (resume_func_ != nullptr)
+            {
+                lk.unlock();
+                // The resume functor schedules the waiting coroutine to
+                // re-run/resume from the point it is blocking for the result,
+                // i.e., inside Wait().
+                (*resume_func_)();
+            }
+            else if (yield_func_ == nullptr)
+            {
+                cv_.notify_one();
+            }
+        }
     }
 
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::unique_lock<std::mutex> lk(mutex_);
         status_ = TxResultStatus::Error;
         error_code_ = err_code;
-        cv_.notify_one();
+
+        if (waiting_)
+        {
+            if (resume_func_ != nullptr)
+            {
+                lk.unlock();
+                (*resume_func_)();
+            }
+            else if (yield_func_ == nullptr)
+            {
+                cv_.notify_one();
+            }
+        }
     }
 
     /**
@@ -100,57 +152,41 @@ public:
         error_code_ = err_code;
     }
 
-    void Reset()
+    void Reset(const std::function<void()> *yield_fptr = nullptr,
+               const std::function<void()> *resume_fptr = nullptr)
     {
         std::lock_guard<std::mutex> lk(mutex_);
         status_ = TxResultStatus::Unknown;
+        error_code_ = TxErrorCode::NO_ERROR;
+        waiting_ = false;
+        yield_func_ = yield_fptr;
+        resume_func_ = resume_fptr;
     }
 
     int Wait()
     {
-        using namespace std::chrono_literals;
-
-        std::unique_lock<std::mutex> lk(mutex_);
-        cv_.wait(lk, [this] { return status_ != TxResultStatus::Unknown; });
-
-        /*while (status_ == TxResultStatus::Unknown)
-        {
-            cv_.wait_for(lk, 50us, [this] {
-                return status_ != TxResultStatus::Unknown;
-            });
-        }*/
-
-        /*for (size_t idx = 0; idx < 200; ++idx)
-        {
-            if (returned_.load(std::memory_order_acquire))
-            {
-                return 0;
-            }
-#if __GNUC__
-            __asm volatile("pause" :::);
-#endif
-        }
-
-        auto start = std::chrono::steady_clock::now();
-        auto now = start;
-        while (now - start <= std::chrono::microseconds(100))
-        {
-            std::this_thread::yield();
-            if (returned_.load(std::memory_order_acquire))
-            {
-                return 0;
-            }
-            now = std::chrono::steady_clock::now();
-        }
-
-        using namespace std::chrono_literals;
-        while (!returned_.load(std::memory_order_acquire))
+        if (yield_func_ != nullptr)
         {
             std::unique_lock<std::mutex> lk(mutex_);
-            cv_.wait_for(lk, 10ms, [this] {
-                return returned_.load(std::memory_order_acquire);
-            });
-        }*/
+            if (status_ == TxResultStatus::Unknown)
+            {
+                waiting_ = true;
+                lk.unlock();
+
+                // The yield functor invokes the coroutine's resume() and
+                // returns the control to the caller of the coroutine that sends
+                // the tx request, i.e., the runtime thread executing the query.
+                // The runtime thread skips the blocking coroutine and moves on
+                // to process the next command.
+                (*yield_func_)();
+            }
+        }
+        else
+        {
+            std::unique_lock<std::mutex> lk(mutex_);
+            waiting_ = true;
+            cv_.wait(lk, [this] { return status_ != TxResultStatus::Unknown; });
+        }
 
         return 0;
     }
@@ -161,5 +197,11 @@ private:
     TxErrorCode error_code_;
     std::mutex mutex_;
     std::condition_variable cv_;
+
+    bool waiting_{false};
+    const std::function<void()> *yield_func_;
+    const std::function<void()> *resume_func_;
+
+    friend class TxRequest;
 };
 }  // namespace txservice

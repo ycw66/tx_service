@@ -2257,14 +2257,7 @@ public:
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        if (unfinished_cnt_.load(std::memory_order_acquire) != 0)
-        {
-            cv_.wait(
-                lk,
-                [this] {
-                    return unfinished_cnt_.load(std::memory_order_acq_rel) == 0;
-                });
-        }
+        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
     void Reset(std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos)
@@ -2288,9 +2281,10 @@ public:
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
         {
-            Notify();
+            cv_.notify_one();
         }
     }
 
@@ -2308,10 +2302,12 @@ public:
 
     void SetFinish(std::pair<TxKey::Uptr, bool> &&res, size_t core_id)
     {
+        std::unique_lock<std::mutex> lk(mux_);
         res_.at(core_id) = std::move(res);
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
         {
-            Notify();
+            cv_.notify_one();
         }
     }
 
@@ -2351,12 +2347,6 @@ public:
     }
 
 private:
-    void Notify()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.notify_one();
-    }
-
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     uint16_t core_cnt_;
@@ -2377,7 +2367,7 @@ private:
     std::vector<size_t> accumulated_scan_cnt_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    std::atomic_uint32_t unfinished_cnt_;
+    uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
 

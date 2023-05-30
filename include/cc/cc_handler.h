@@ -333,9 +333,9 @@ public:
         CcScanner &scanner,
         CcHandlerResult<ScanNextResult> &hd_res) = 0;
 
-    virtual void ScanClose(size_t alias,
-                           const TxKey &end_key,
-                           bool inclusive) = 0;
+    virtual void ScanClose(const TableName &table_name,
+                           ScanDirection direction,
+                           std::unique_ptr<CcScanner> scanner) = 0;
 
     virtual void UploadRecord(const TableName &table_name,
                               const TxKey &key,

@@ -63,7 +63,7 @@ struct ReadSetEntry
     }
 
     uint64_t version_ts_;
-    bool is_relock = false;
+    uint16_t read_cnt_{1};
 };
 
 struct ScanSetEntry

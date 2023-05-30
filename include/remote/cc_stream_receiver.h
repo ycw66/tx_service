@@ -1,8 +1,10 @@
 #pragma once
 
 #include <brpc/stream.h>
+#include <google/protobuf/arena.h>
 
 #include <condition_variable>
+#include <memory>  // std::unique_ptr
 #include <mutex>
 #include <unordered_set>
 
@@ -23,9 +25,7 @@ class CcStreamSender;
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:
-    CcStreamReceiver(
-        LocalCcShards &local_shards,
-        moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
+    explicit CcStreamReceiver(LocalCcShards &local_shards);
     ~CcStreamReceiver() = default;
 
     void Shutdown();
@@ -46,19 +46,15 @@ public:
     void on_closed(brpc::StreamId stream) override;
 
 private:
-    std::unique_ptr<CcMessage> GetCcMsg();
-    void OnReceiveCcMsg(std::unique_ptr<CcMessage> msg);
+    std::unique_ptr<google::protobuf::Arena> GetArena();
+    void RecycleArena(std::unique_ptr<google::protobuf::Arena> arena);
+    void OnReceiveCcMsg(CcMessage *msg,
+                        std::unique_ptr<google::protobuf::Arena> arena);
 
     std::mutex inbound_mux_;
     std::condition_variable inbound_cv_;
     std::unordered_set<brpc::StreamId> inbound_streams_;
     LocalCcShards &local_shards_;
-
-    // A pool of protobuf messages for remote cc requests. The stream service
-    // receives a message, de-serializes it and dispatches it to local shards
-    // for processing. The message is put back into the pool after the cc
-    // request is processed.
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
 };
 }  // namespace remote
 }  // namespace txservice

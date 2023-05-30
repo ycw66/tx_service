@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <memory>  // std::unique_ptr
 #include <mutex>
 #include <unordered_map>
 
@@ -38,11 +39,10 @@ public:
 class CcStreamSender
 {
 public:
-    CcStreamSender(
-        moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
+    CcStreamSender();
     ~CcStreamSender();
 
-    void RecycleCcMsg(std::unique_ptr<CcMessage> msg);
+    void RecycleArena(std::unique_ptr<google::protobuf::Arena> arena);
     bool SendMessageToNg(uint32_t node_group_id,
                          const CcMessage &msg,
                          CcHandlerResultBase *res = nullptr,
@@ -62,8 +62,6 @@ public:
 private:
     void ConnectStreams();
     int ConnectStream(uint32_t node_id, int64_t version);
-
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
 
     std::mutex outbound_mux_;
     std::condition_variable out_cv_;

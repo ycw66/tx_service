@@ -239,25 +239,6 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
         return true;
     }
 
-    if (!NoWriteLockConflict(tx_number))
-    {
-        LOG(INFO) << "existing write lock holder: " << write_lock_tx_
-                  << ", current txn: " << tx_number;
-    }
-    if (!NoWriteIntentConflict(tx_number))
-    {
-        LOG(INFO) << "existing write intent holder: " << write_intent_tx_
-                  << ", current txn: " << tx_number;
-    }
-    if (!NoReadLockConflict(tx_number))
-    {
-        for (auto &read_lk_tx : read_locks_)
-        {
-            LOG(INFO) << "existing read lock: " << read_lk_tx
-                      << ", current txn: " << tx_number;
-        }
-    }
-
     // lock succeeds if there is no conflict.
     if (NoWriteLockConflict(tx_number) && NoWriteIntentConflict(tx_number) &&
         NoReadLockConflict(tx_number))
@@ -414,7 +395,6 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
         if (protocol != CcProtocol::OCC)
         {
             // block the request by putting it into the blocking queue.
-            LOG(INFO) << "write intent enqueue block queue " << cc_req->Txn();
             blocking_queue_.Enqueue(
                 LockQueueEntry(cc_req, LockType::WriteIntent));
         }

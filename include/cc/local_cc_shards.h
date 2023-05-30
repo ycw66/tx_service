@@ -89,14 +89,13 @@ public:
         return cc_shards_[thd_id]->IsIdle();
     }
 
-    void SleepNotify(uint32_t thd_id)
+    void ProcessorSleepFlag(uint16_t thd_id,
+                            std::atomic<bool> *sleep_flag,
+                            std::mutex *processor_mux,
+                            std::condition_variable *processor_cv)
     {
-        cc_shards_[thd_id]->SleepNotify();
-    }
-
-    void WorkNotify(uint32_t thd_id)
-    {
-        cc_shards_[thd_id]->WorkNotify();
+        return cc_shards_[thd_id]->SetProcessorSleepFlag(
+            sleep_flag, processor_mux, processor_cv);
     }
 
     size_t Count() const
@@ -224,16 +223,6 @@ public:
     uint32_t NodeId() const
     {
         return node_id_;
-    }
-
-    std::condition_variable &ShardCv(uint32_t core_id)
-    {
-        return cc_shards_.at(core_id)->shard_cv_;
-    }
-
-    std::mutex &ShardMutex(uint32_t core_id)
-    {
-        return cc_shards_.at(core_id)->shard_mux_;
     }
 
     void EnqueueToCcShard(uint16_t cc_shard_idx, CcRequestBase *req)

@@ -32,33 +32,8 @@ public:
         return *this;
     }
 
-    CircularQueue(const CircularQueue &rhs)
-    {
-        head_ = rhs.head_;
-        cnt_ = rhs.cnt_;
-        capacity_ = rhs.capacity_;
-        vec_ = std::make_unique<T[]>(capacity_);
-        for (size_t i = 0; i < capacity_; i++)
-        {
-            vec_[i] = rhs.vec_[i];
-        }
-    }
-
-    CircularQueue &operator=(const CircularQueue &rhs)
-    {
-        if (this != &rhs)
-        {
-            head_ = rhs.head_;
-            cnt_ = rhs.cnt_;
-            capacity_ = rhs.capacity_;
-            vec_ = std::make_unique<T[]>(capacity_);
-            for (size_t i = 0; i < capacity_; i++)
-            {
-                vec_[i] = rhs.vec_[i];
-            }
-        }
-        return *this;
-    }
+    CircularQueue(const CircularQueue &rhs) = delete;
+    CircularQueue &operator=(const CircularQueue &rhs) = delete;
 
     ~CircularQueue() = default;
 
@@ -83,7 +58,7 @@ public:
         }
         else if (cnt_ == capacity_)
         {
-            size_t new_capacity = (size_t) (capacity_ * 1.5);
+            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
             std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
 
             // Before: 0-------Tail-Head---------N-1
@@ -110,6 +85,48 @@ public:
         }
     }
 
+    void Enqueue(T &&item)
+    {
+        if (cnt_ == 0)
+        {
+            vec_[0] = std::move(item);
+            head_ = 0;
+            cnt_ = 1;
+        }
+        else if (cnt_ == capacity_)
+        {
+            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
+            std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
+
+            // Before: 0-------Tail-Head---------N-1
+            // After:  0----------------------------Tail------------M-1
+            // Copy Head --> N-1
+            size_t end = 0;
+            for (size_t idx = head_; idx < capacity_; ++idx, ++end)
+            {
+                new_vec[end] = std::move(vec_[idx]);
+            }
+
+            // Copy 0 --> Tail
+            for (size_t idx = 0; idx < head_; ++idx, ++end)
+            {
+                new_vec[end] = std::move(vec_[idx]);
+            }
+
+            new_vec[capacity_] = std::move(item);
+            cnt_ = capacity_ + 1;
+            capacity_ = new_capacity;
+            head_ = 0;
+            vec_ = std::move(new_vec);
+        }
+        else
+        {
+            size_t tail = (head_ + cnt_) % capacity_;
+            vec_[tail] = std::move(item);
+            ++cnt_;
+        }
+    }
+
     void EnqueueAsFirst(const T &item)
     {
         if (cnt_ == 0)
@@ -120,7 +137,7 @@ public:
         }
         else if (cnt_ == capacity_)
         {
-            size_t new_capacity = (size_t) (capacity_ * 1.5);
+            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
             std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
 
             // Before: 0-------Tail-Head---------N-1
@@ -168,7 +185,7 @@ public:
         }
     }
 
-    const T &Peek()
+    T &Peek()
     {
         return vec_[head_];
     }

@@ -130,24 +130,14 @@ public:
      */
     void Enqueue(CcRequestBase *req);
 
-    bool IsIdle() const
+    bool IsIdle()
     {
-        return cc_queue_.is_empty();
+        return cc_queue_size_.load(std::memory_order_relaxed) == 0;
     }
 
     size_t ProcessRequests()
     {
-        size_t req_cnt = cc_queue_.try_dequeue_bulk(req_buf_, 100);
-
-        for (size_t i = 0; i < req_cnt; ++i)
-        {
-            bool finish = req_buf_[i]->Execute(*this);
-            if (finish)
-            {
-                req_buf_[i]->Free();
-            }
-        }
-
+        uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
         // collect metrics: memory usage
         if (metrics::enable_memory_usage)
         {
@@ -161,8 +151,34 @@ public:
                 ++memory_usage_round_;
             }
         }
-        return req_cnt;
-    };
+
+        if (queue_size == 0)
+        {
+            return 0;
+        }
+
+        size_t total = 0;
+        size_t req_cnt = 0;
+        do
+        {
+            req_cnt = cc_queue_.try_dequeue_bulk(req_buf_, 100);
+            total += req_cnt;
+            assert(cc_queue_size_.load(std::memory_order_relaxed) >= req_cnt);
+            cc_queue_size_.fetch_sub(req_cnt, std::memory_order_acq_rel);
+
+            for (size_t i = 0; i < req_cnt; ++i)
+            {
+                bool finish = req_buf_[i]->Execute(*this);
+                if (finish)
+                {
+                    req_buf_[i]->Free();
+                }
+            }
+        } while (req_cnt > 50 && total < 1000);
+
+        return total;
+    }
+
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
@@ -219,9 +235,9 @@ public:
     uint64_t Now() const;
     void UpdateTsBase(uint64_t ts);
 
-    size_t QueueSize() const
+    size_t QueueSize()
     {
-        return cc_queue_.size_approx();
+        return cc_queue_size_.load(std::memory_order_relaxed);
     }
 
     Catalog *GetCatalog()
@@ -375,9 +391,9 @@ public:
                          const NodeGroupId ng_id,
                          bool fully_cached = false);
 
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
-        *GetTableRangesForATable(const TableName &range_table_name,
-                                 const NodeGroupId ng_id);
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *
+    GetTableRangesForATable(const TableName &range_table_name,
+                            const NodeGroupId ng_id);
 
     const TableRangeEntry *CreateTableRange(
         const TableName &table_name,
@@ -563,8 +579,8 @@ public:
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.
     void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
-        &GetLockHoldingTxs()
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>> &
+    GetLockHoldingTxs()
     {
         return lock_holding_txs_;
     }
@@ -582,24 +598,13 @@ public:
     }
 
 private:
-    /**
-     * @brief The method invoked by the processing thread to notify the cc shard
-     * that it enters into the sleep mode.
-     *
-     */
-    void SleepNotify()
+    void SetProcessorSleepFlag(std::atomic<bool> *processor_sleep,
+                               std::mutex *processor_mux,
+                               std::condition_variable *processor_cv)
     {
-        processor_sleep_.store(true, std::memory_order_release);
-    }
-
-    /**
-     * @brief The method invoked by the processing thread to notify the cc shard
-     * that it wakes up from the sleep mode and is working.
-     *
-     */
-    void WorkNotify()
-    {
-        processor_sleep_.store(false, std::memory_order_release);
+        processor_sleep_ = processor_sleep;
+        processor_mux_ = processor_mux;
+        processor_cv_ = processor_cv;
     }
 
     size_t memory_usage_round_ = 1;
@@ -623,8 +628,10 @@ private:
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
+    std::atomic<uint32_t> cc_queue_size_{0};
     CcRequestBase *req_buf_[100];
     std::vector<moodycamel::ProducerToken> thd_token_;
+
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array
     // and find an available one.
@@ -657,19 +664,13 @@ private:
     Checkpointer *ckpter_;
 
     /**
-     * @brief The condition variable via which the cc shard wakes up the
-     * processing thread dedicated to it from the sleep mode.
-     *
-     */
-    std::condition_variable shard_cv_;
-    std::mutex shard_mux_;
-
-    /**
      * @brief The variable via which the dedicated processing thread notifies
      * the shard that it enters into the sleep mode.
      *
      */
-    std::atomic<bool> processor_sleep_;
+    std::atomic<bool> *processor_sleep_{nullptr};
+    std::mutex *processor_mux_{nullptr};
+    std::condition_variable *processor_cv_{nullptr};
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
