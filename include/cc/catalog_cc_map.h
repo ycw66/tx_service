@@ -194,13 +194,11 @@ public:
                                 catalog_entry->dirty_schema_.get(),
                                 catalog_entry->Version());
 
-                if (req.OpType() == OperationType::AddIndex)
+                if (catalog_entry->dirty_schema_)
                 {
-                    Statistics *statistics =
-                        catalog_entry->schema_->StatisticsObject();
+                    auto [statistics, inserted] = shard_->InitTableStatistics(
+                        table_key->Name(), req.NodeGroupId());
                     catalog_entry->dirty_schema_->BindStatistics(statistics);
-                    statistics->ResetTableSchema(
-                        catalog_entry->dirty_schema_.get());
                 }
             }
             else
@@ -289,28 +287,6 @@ public:
                 schema_rec->Set(catalog_entry->dirty_schema_,
                                 nullptr,
                                 catalog_entry->DirtyVersion());
-
-                if (req.OpType() == OperationType::CreateTable)
-                {
-                    auto [statistics, inserted] = shard_->InitTableStatistics(
-                        table_key->Name(),
-                        req.NodeGroupId(),
-                        catalog_entry->dirty_schema_.get());
-                    catalog_entry->dirty_schema_->BindStatistics(statistics);
-                }
-                else if (req.OpType() == OperationType::AddIndex)
-                {
-                    // Already rebind statistics and table schema at
-                    // PrepareCommit stage
-                }
-                else if (req.OpType() == OperationType::DropIndex)
-                {
-                    Statistics *statistics =
-                        catalog_entry->schema_->StatisticsObject();
-                    statistics->ResetTableSchema(
-                        catalog_entry->dirty_schema_.get());
-                    catalog_entry->dirty_schema_->BindStatistics(statistics);
-                }
             }
             else
             {
@@ -592,7 +568,7 @@ public:
                                 TableType::RangePartition};
                             shard_->CleanTableRange(old_index_range_table_name,
                                                     req.NodeGroupId());
-                            // Rebind table statistics and table schema
+
                             Statistics *statistics =
                                 old_schema->StatisticsObject();
                             statistics->DropIndex(old_index_name);
@@ -619,7 +595,6 @@ public:
                                   new_index_names.end(),
                                   old_index_name) == new_index_names.end())
                     {
-                        // Rebind table statistics and table schema
                         Statistics *statistics = old_schema->StatisticsObject();
                         statistics->DropIndex(old_index_name);
                     }
@@ -891,6 +866,17 @@ public:
                     return false;
                 }
                 catalog_entry = new_catalog_entry;
+            }
+
+            auto [statistics, inserted] =
+                shard_->InitTableStatistics(table_name, req.NodeGroupId());
+            if (catalog_entry->schema_)
+            {
+                catalog_entry->schema_->BindStatistics(statistics);
+            }
+            if (catalog_entry->dirty_schema_)
+            {
+                catalog_entry->dirty_schema_->BindStatistics(statistics);
             }
         }
         else

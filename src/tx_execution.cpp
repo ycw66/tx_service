@@ -310,8 +310,8 @@ void TransactionExecution::RemoteStatisticsTx(
         if (table_schema->Version() == schema_version)
         {
             Statistics *statistics = table_schema->StatisticsObject();
-            statistics->OnRemoteStatisticsMessage(table_or_index_name,
-                                                  remote_sample_pool);
+            statistics->OnRemoteStatisticsMessage(
+                table_or_index_name, table_schema, remote_sample_pool);
         }
     }
 }

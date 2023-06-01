@@ -797,27 +797,20 @@ std::vector<uint64_t> CcShard::AllNodeGroupBytesAtFetchRange(
 }
 
 std::pair<Statistics *, bool> CcShard::InitTableStatistics(
-    const TableName &table_name,
-    NodeGroupId ng_id,
-    const TableSchema *table_schema)
+    const TableName &table_name, NodeGroupId ng_id)
 {
-    return local_shards_.InitTableStatistics(table_name, ng_id, table_schema);
+    return local_shards_.InitTableStatistics(table_name, ng_id);
 }
 
 std::pair<Statistics *, bool> CcShard::InitTableStatistics(
     const TableName &table_name,
     NodeGroupId ng_id,
-    const TableSchema *table_schema,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
     const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map)
 {
-    return local_shards_.InitTableStatistics(table_name,
-                                             ng_id,
-                                             table_schema,
-                                             std::move(sample_pool_map),
-                                             ng_weights_map,
-                                             this);
+    return local_shards_.InitTableStatistics(
+        table_name, ng_id, std::move(sample_pool_map), ng_weights_map, this);
 }
 
 StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,

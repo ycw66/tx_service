@@ -504,7 +504,7 @@ public:
 
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
-                    sample_pool_->OnInsert(*key_ptr);
+                    sample_pool_->OnInsert(*key_ptr, schema_ts_);
                 }
             }
 
@@ -643,12 +643,12 @@ public:
                     if (op_type == OperationType::Insert)
                     {
                         sample_pool_->OnInsert(
-                            *static_cast<const KeyT *>(cce->Key()));
+                            static_cast<const KeyT &>(*cce->Key()), schema_ts_);
                     }
                     else if (op_type == OperationType::Delete)
                     {
                         sample_pool_->OnDelete(
-                            *static_cast<const KeyT *>(cce->Key()));
+                            static_cast<const KeyT &>(*cce->Key()), schema_ts_);
                     }
                 }
             }
@@ -4579,7 +4579,8 @@ public:
             }
 
             sample_pool_->Reset(std::move(key_sample_pool->random_pairing_),
-                                node_group_records);
+                                node_group_records,
+                                schema_ts_);
             hd_res->SetFinished();
             return true;
         }
@@ -4986,7 +4987,7 @@ public:
         return false;
     }
 
-    bool Execute(KickoutCcEntryCc &req)
+    bool Execute(KickoutCcEntryCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,

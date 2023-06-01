@@ -127,7 +127,6 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
         auto [statistics, inserted] =
             ccs.InitTableStatistics(table_name_,
                                     cc_ng_id_,
-                                    table_schema,
                                     std::move(sample_pool_map_),
                                     ng_weights_map);
         if (inserted)

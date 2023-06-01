@@ -391,9 +391,9 @@ public:
                          const NodeGroupId ng_id,
                          bool fully_cached = false);
 
-    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *
-    GetTableRangesForATable(const TableName &range_table_name,
-                            const NodeGroupId ng_id);
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+        *GetTableRangesForATable(const TableName &range_table_name,
+                                 const NodeGroupId ng_id);
 
     const TableRangeEntry *CreateTableRange(
         const TableName &table_name,
@@ -438,14 +438,11 @@ public:
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
     std::pair<Statistics *, bool> InitTableStatistics(
-        const TableName &table_name,
-        NodeGroupId ng_id,
-        const TableSchema *table_schema);
+        const TableName &table_name, NodeGroupId ng_id);
 
     std::pair<Statistics *, bool> InitTableStatistics(
         const TableName &table_name,
         NodeGroupId ng_id,
-        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
@@ -579,8 +576,8 @@ public:
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.
     void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>> &
-    GetLockHoldingTxs()
+    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+        &GetLockHoldingTxs()
     {
         return lock_holding_txs_;
     }

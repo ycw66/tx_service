@@ -1064,9 +1064,7 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(
 }
 
 std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
-    const TableName &table_name,
-    NodeGroupId ng_id,
-    const TableSchema *table_schema)
+    const TableName &table_name, NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -1077,7 +1075,7 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
         statistics_entry.statistics_ =
-            catalog_factory_->CreateTableStatistics(table_schema);
+            catalog_factory_->CreateTableStatistics(table_name);
     }
 
     return {statistics_it.first->second.statistics_.get(),
@@ -1087,7 +1085,6 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
 std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     const TableName &table_name,
     NodeGroupId ng_id,
-    const TableSchema *table_schema,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
     const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map,
@@ -1101,12 +1098,8 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ =
-            catalog_factory_->CreateTableStatistics(table_schema,
-                                                    std::move(sample_pool_map),
-                                                    ng_weights_map,
-                                                    ccs,
-                                                    ng_id);
+        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
+            table_name, std::move(sample_pool_map), ng_weights_map, ccs, ng_id);
     }
 
     return {statistics_it.first->second.statistics_.get(),
@@ -1661,7 +1654,12 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     else
     {
         bool ok = catalog_rec.Schema()->StatisticsObject()->PostCheckpoint(
-            store_hd_, table_name, ng_id, target_data_sync_ts, true);
+            store_hd_,
+            table_name,
+            ng_id,
+            catalog_rec.SchemaTs(),
+            target_data_sync_ts,
+            true);
         if (!ok)
         {
             AbortTxRequest abort_req;
@@ -2121,8 +2119,8 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(table_name,
-                                                              node_group);
+    catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
+        table_name, node_group, catalog_rec.SchemaTs());
 
     // Start the SplitFlush tx. This would split the range, flush the data and
     // update slice metadata.
@@ -2361,8 +2359,12 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         if (succ)
         {
-            succ = schema->StatisticsObject()->PostCheckpoint(
-                store_hd_, table_name, node_group, data_sync_ts, false);
+            succ = schema->StatisticsObject()->PostCheckpoint(store_hd_,
+                                                              table_name,
+                                                              node_group,
+                                                              schema->Version(),
+                                                              data_sync_ts,
+                                                              false);
         }
     }
 

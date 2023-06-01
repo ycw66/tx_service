@@ -54,7 +54,8 @@ public:
 public:
     using SamplePool = RandomPairing<1024, KeyT, CopyKey>;
     using OnMassChange = std::function<void(
-        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool)>;
+        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
+        uint64_t schema_version)>;
 
 public:
     TemplateCcMapSamplePool(const TableName &table_or_index_name,
@@ -76,14 +77,16 @@ public:
     {
     }
 
-    void Reset(SamplePool &&sample_pool, size_t records)
+    void Reset(SamplePool &&sample_pool,
+               uint64_t records,
+               uint64_t schema_version)
     {
         units_ = Units(records);
 
         assert(sample_pool.Capacity() == sample_pool_.Capacity());
         sample_pool_ = std::move(sample_pool);
 
-        on_mass_change_(*this);
+        on_mass_change_(*this, schema_version);
     }
 
     void SetOnMassChange(OnMassChange on_mass_change)
@@ -91,7 +94,7 @@ public:
         on_mass_change_ = on_mass_change;
     }
 
-    void OnInsert(const KeyT &key)
+    void OnInsert(const KeyT &key, uint64_t schema_version)
     {
         assert(is_local_);
 
@@ -101,12 +104,12 @@ public:
 
         if (insert_delete_counter_ > units_ / 10)
         {
-            on_mass_change_(*this);
+            on_mass_change_(*this, schema_version);
             insert_delete_counter_ = 0;
         }
     }
 
-    void OnDelete(const KeyT &key)
+    void OnDelete(const KeyT &key, uint64_t schema_version)
     {
         assert(is_local_);
 
@@ -118,7 +121,7 @@ public:
 
             if (insert_delete_counter_ > units_ / 10)
             {
-                on_mass_change_(*this);
+                on_mass_change_(*this, schema_version);
                 insert_delete_counter_ = 0;
             }
         }
@@ -227,6 +230,7 @@ private:
 
 private:
     TableName table_or_index_name_;
+
     NodeGroupId ng_id_{0};
 
     bool is_local_{false};
@@ -252,15 +256,13 @@ template <typename KeyT>
 class IndexDistribution : public Distribution
 {
 public:
-    explicit IndexDistribution(const Schema *key_schema)
-        : key_schema_(key_schema), records_(0), distribution_steps_()
+    IndexDistribution() : records_(0), distribution_steps_()
     {
     }
 
-    IndexDistribution(const Schema *key_schema,
-                      uint64_t records,
+    IndexDistribution(uint64_t records,
                       const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
-        : key_schema_(key_schema), records_(records), distribution_steps_(keys)
+        : records_(records), distribution_steps_(keys)
     {
     }
 
@@ -269,14 +271,16 @@ public:
         return records_;
     }
 
-    uint64_t Records(const KeyT &min_key, const KeyT &max_key) const
+    uint64_t Records(const Schema *key_schema,
+                     const KeyT &min_key,
+                     const KeyT &max_key) const
     {
         uint64_t records = 0;
 
         if (distribution_steps_.Available())
         {
             records = records_ * distribution_steps_.Selectivity(
-                                     key_schema_, min_key, max_key);
+                                     key_schema, min_key, max_key);
         }
         else
         {
@@ -287,8 +291,6 @@ public:
     }
 
 private:
-    const Schema *key_schema_{nullptr};
-
     uint64_t records_{0};
     DistributionSteps<KeyT> distribution_steps_;
 };
@@ -297,14 +299,13 @@ template <typename KeyT>
 class TableStatistics : public Statistics
 {
 public:
-    TableStatistics(const TableSchema *table_schema)
-        : table_schema_(table_schema)
+    explicit TableStatistics(const TableName &base_table_name)
+        : base_table_name_(base_table_name)
     {
-        BuildEmptyDistributionMap();
     }
 
     TableStatistics(
-        const TableSchema *table_schema,
+        const TableName &base_table_name,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
@@ -312,13 +313,9 @@ public:
             &ng_weights_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id)
-        : table_schema_(table_schema)
+        : base_table_name_(base_table_name)
     {
-        if (sample_pool_map.empty())
-        {
-            BuildEmptyDistributionMap();
-        }
-        else
+        if (!sample_pool_map.empty())
         {
             BuildSamplePoolMap(
                 *ccs, cc_ng_id, std::move(sample_pool_map), ng_weights_map);
@@ -329,13 +326,6 @@ public:
                 BuildDistribution(table_or_index_name);
             }
         }
-    }
-
-    void ResetTableSchema(const TableSchema *table_schema) override
-    {
-        assert(table_schema_->GetBaseTableName() ==
-               table_schema->GetBaseTableName());
-        table_schema_ = table_schema;
     }
 
     std::shared_ptr<Distribution> GetDistribution(
@@ -371,9 +361,9 @@ public:
         {
             NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
-            typename NodeGroupSamplePoolMap::iterator it =
+            typename NodeGroupSamplePoolMap::iterator iter =
                 ng_sample_pool_map.find(ng_id);
-            if (it == ng_sample_pool_map.end())
+            if (iter == ng_sample_pool_map.end())
             {
                 ng_sample_pool_map.emplace(
                     std::piecewise_construct,
@@ -390,26 +380,29 @@ public:
         ccmap_sample_pool.SetOnMassChange(
             std::bind(&TableStatistics<KeyT>::OnLocalStatisticsMessage,
                       this,
-                      std::placeholders::_1));
+                      std::placeholders::_1,
+                      std::placeholders::_2));
 
         return &ccmap_sample_pool;
     }
 
     void DropIndex(const TableName &index_name) override
     {
-        std::unique_lock<std::shared_mutex> ulk(index_distribution_map_mutex_);
-
+        // No lock is required. Because Transaction already acquire write lock
+        // on table catalog
         index_distribution_map_.erase(index_name);
-        index_distribution_map_.erase(index_name);
+        index_sample_pool_map_.erase(index_name);
     }
 
     // This method is called in one of Sharder::tx_worker_pool_ thread.
     void OnRemoteStatisticsMessage(
         const TableName &table_or_index_name,
+        const TableSchema *table_schema,
         const remote::NodeGroupSamplePool &remote_sample_pool) override
     {
         Task task =
-            [this, &table_or_index_name, &remote_sample_pool](CcShard &ccs)
+            [this, &table_or_index_name, table_schema, &remote_sample_pool](
+                CcShard &ccs)
         {
             NodeGroupId ng_id =
                 static_cast<NodeGroupId>(remote_sample_pool.ng_id());
@@ -417,7 +410,11 @@ public:
             SamplePoolParam<KeyT> param;
             param.records_ = remote_sample_pool.records();
 
-            const Schema *key_schema = KeySchema(table_or_index_name);
+            const Schema *key_schema =
+                table_or_index_name.IsBase()
+                    ? table_schema->KeySchema()
+                    : table_schema->IndexKeySchema(table_or_index_name);
+
             for (const std::string &sample : remote_sample_pool.samples())
             {
                 KeyT key;
@@ -440,13 +437,15 @@ public:
 
     // This method is called in checkpointer range split thread.
     void PriorSplitRange(const TableName &table_or_index_name,
-                         NodeGroupId ng_id) const override
+                         NodeGroupId ng_id,
+                         uint64_t schema_version) const override
     {
-        Task task = [this, &table_or_index_name, ng_id](CcShard &ccs)
+        Task task =
+            [this, &table_or_index_name, ng_id, schema_version](CcShard &ccs)
         {
             const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool =
                 index_sample_pool_map_.at(table_or_index_name).at(ng_id);
-            Broadcast(ccmap_sample_pool);
+            Broadcast(ccmap_sample_pool, schema_version);
         };
         RunOnBindingCcShard(task);
     }
@@ -455,6 +454,7 @@ public:
     bool PostCheckpoint(store::DataStoreHandler *store_hd,
                         const TableName &table_or_index_name,
                         NodeGroupId ng_id,
+                        uint64_t schema_version,
                         uint64_t ckpt_ts,
                         bool ckpt_empty) const override
     {
@@ -470,6 +470,7 @@ public:
             Task task = [this,
                          &table_or_index_name,
                          ng_id,
+                         schema_version,
                          ckpt_empty,
                          &sample_pool_map](CcShard &ccs)
             {
@@ -484,7 +485,7 @@ public:
                         iter->second;
                     if (!ckpt_empty)
                     {
-                        Broadcast(ccmap_sample_pool);
+                        Broadcast(ccmap_sample_pool, schema_version);
                     }
                 }
             };
@@ -561,29 +562,14 @@ public:
 private:
     // This method is called in tx_processor thread.
     void OnLocalStatisticsMessage(
-        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool)
+        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
+        uint64_t schema_version)
     {
         BuildDistribution(ccmap_sample_pool.GetTableOrIndexName());
         CODE_FAULT_INJECTOR("broadcast_statistics_early",
-                            { Broadcast(ccmap_sample_pool); });
+                            { Broadcast(ccmap_sample_pool, schema_version); });
 
         need_save_counter_.fetch_add(1, std::memory_order_release);
-    }
-
-    void BuildEmptyDistributionMap()
-    {
-        const TableName &table_name = table_schema_->GetBaseTableName();
-        index_distribution_map_.try_emplace(
-            table_name,
-            std::make_shared<IndexDistribution<KeyT>>(KeySchema(table_name)));
-
-        for (const TableName &index_name : table_schema_->IndexNames())
-        {
-            index_distribution_map_.try_emplace(
-                index_name,
-                std::make_shared<IndexDistribution<KeyT>>(
-                    KeySchema(index_name)));
-        }
     }
 
     void BuildSamplePoolMap(
@@ -663,14 +649,13 @@ private:
 
         index_distribution_map_.insert_or_assign(
             table_or_index_name,
-            std::make_shared<IndexDistribution<KeyT>>(
-                KeySchema(table_or_index_name),
-                index_total_keys,
-                index_sample_keys));
+            std::make_shared<IndexDistribution<KeyT>>(index_total_keys,
+                                                      index_sample_keys));
     }
 
     // This method must called in tx_processor thread.
-    void Broadcast(const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool) const
+    void Broadcast(const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
+                   uint64_t schema_version) const
     {
         remote::CcStreamSender *stream_sender =
             Sharder::Instance().GetCcStreamSender();
@@ -691,7 +676,7 @@ private:
                 ccmap_sample_pool.GetTableOrIndexName().Type()));
         broadcast_stat_req->set_table_name_str(
             ccmap_sample_pool.GetTableOrIndexName().String());
-        broadcast_stat_req->set_schema_version(table_schema_->Version());
+        broadcast_stat_req->set_schema_version(schema_version);
         remote::NodeGroupSamplePool *remote_sample_pool =
             broadcast_stat_req->mutable_node_group_sample_pool();
         ccmap_sample_pool.To(remote_sample_pool);
@@ -714,13 +699,14 @@ private:
                     Sharder::Instance().GetTxWorkerPool()->SubmitWork(
                         [this,
                          table_name = ccmap_sample_pool.GetTableOrIndexName(),
+                         schema_version,
                          remote_sample_pool = *remote_sample_pool]() mutable
                         {
                             Sharder::Instance()
                                 .GetLocalCcShards()
                                 ->CreateRemoteStatisticsTx(
                                     std::move(table_name),
-                                    table_schema_->Version(),
+                                    schema_version,
                                     std::move(remote_sample_pool));
                         });
                 }
@@ -732,7 +718,7 @@ private:
     // write.
     bool DoStore(NodeGroupId ng_id) const
     {
-        return NodeGroupDoStore(table_schema_->GetBaseTableName()) == ng_id;
+        return NodeGroupDoStore(base_table_name_) == ng_id;
     }
 
     bool Store(
@@ -747,7 +733,7 @@ private:
         while (retry-- > 0 && !ok)
         {
             ok = store_hd->UpsertTableStatistics(
-                table_schema_->GetBaseTableName(), sample_pool_map, ckpt_ts);
+                base_table_name_, sample_pool_map, ckpt_ts);
             if (!ok)
             {
                 std::this_thread::sleep_for(100ms);
@@ -755,27 +741,6 @@ private:
         }
 
         return ok;
-    }
-
-    const Schema *KeySchema(const TableName &table_or_index_name) const
-    {
-        TableType table_type = table_or_index_name.Type();
-        assert(table_type == TableType::Primary ||
-               table_type == TableType::Secondary);
-
-        const Schema *key_schema = nullptr;
-
-        if (table_type == TableType::Primary)
-        {
-            key_schema = table_schema_->KeySchema();
-        }
-        else
-        {
-            key_schema = table_schema_->IndexKeySchema(table_or_index_name);
-        }
-
-        assert(key_schema != nullptr);
-        return key_schema;
     }
 
 private:
@@ -809,8 +774,7 @@ private:
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
     {
-        uint32_t shard_code =
-            ShardCode(table_schema_->GetBaseTableName().StringView());
+        uint32_t shard_code = ShardCode(base_table_name_.StringView());
 
         RunOnTxProcessorCc cc_req(task);
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(shard_code,
@@ -937,7 +901,7 @@ private:
     }
 
 private:
-    const TableSchema *table_schema_{nullptr};
+    TableName base_table_name_;
 
     // tx_processor thread may modify index_distribution_map_, and SQL thread
     // may read index_distribution_map_. Mutex protection is required.

@@ -503,14 +503,11 @@ public:
                            const TxKey &key);
 
     std::pair<Statistics *, bool> InitTableStatistics(
-        const TableName &table_name,
-        NodeGroupId ng_id,
-        const TableSchema *table_schema);
+        const TableName &table_name, NodeGroupId ng_id);
 
     std::pair<Statistics *, bool> InitTableStatistics(
         const TableName &table_name,
         NodeGroupId ng_id,
-        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
