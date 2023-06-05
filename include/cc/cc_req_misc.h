@@ -142,7 +142,7 @@ public:
 
     bool Execute(CcShard &ccs) override;
     void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
-    void SetFinish(std::vector<InitRangeEntry> &&ranges, int err);
+    void SetFinish(std::vector<InitRangeEntry> &&ranges);
     void SetFinish(int err);
 
 public:

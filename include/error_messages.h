@@ -32,9 +32,7 @@ enum struct TxErrorCode
     LOG_SERVICE_UNREACHABLE,
     WRITE_LOG_FAIL,
 
-    DATA_STORE_READ_ERR,
-    DATA_STORE_WRITE_ERR,
-    DATA_STORE_CONNECT_ERR,
+    DATA_STORE_ERROR,
     UPSERT_TABLE_PREPARE_FAIL,
     TRANSACTION_NODE_NOT_LEADER,
     UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL,
@@ -77,6 +75,7 @@ static const std::map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::LOG_SERVICE_UNREACHABLE,
      "Log service is unreachable, transaction status is unknown."},
     {TxErrorCode::WRITE_LOG_FAIL, "Write Log fails."},
+    {TxErrorCode::DATA_STORE_ERROR, "Data storage is not available."},
     {TxErrorCode::UPSERT_TABLE_PREPARE_FAIL, "Failed at prepare phase."},
     {TxErrorCode::TRANSACTION_NODE_NOT_LEADER,
      "Transaction failed due to the transaction node is no longer the raft "
@@ -142,7 +141,6 @@ enum struct CcErrorCode
     PIN_RANGE_SLICE_FAILED,
 
     // data store handler
-    DATA_STORE_UPSERT_TABLE_ERR,
     DATA_STORE_ERR,
 
     // log service
@@ -200,7 +198,7 @@ static const std::map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::PIN_RANGE_SLICE_FAILED, "PIN_RANGE_SLICE_FAILED"},
 
     // data store handler
-    {CcErrorCode::DATA_STORE_UPSERT_TABLE_ERR, "DATA_STORE_UPSERT_TABLE_ERR"},
+    {CcErrorCode::DATA_STORE_ERR, "DATA_STORE_ERR"},
 
     // log service
     {CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR,

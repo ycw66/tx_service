@@ -1793,7 +1793,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     if (txm->tx_status_ != TxnStatus::Recovering)
                     {
                         txm->bool_resp_->SetErrorCode(
-                            TxErrorCode::DATA_STORE_WRITE_ERR);
+                            TxErrorCode::DATA_STORE_ERROR);
                     }
 
                     // Set txm->commit_ts_ to 0 to indicate there is a flush

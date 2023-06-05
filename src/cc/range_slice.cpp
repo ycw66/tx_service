@@ -79,7 +79,7 @@ void StoreSlice::SetLoadingError(StoreRange &range)
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
-        cc_shard->Enqueue(cc_req);
+        cc_req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
     }
 
     if (cc_queue_.size() > 8)

@@ -5,6 +5,7 @@
 #include <atomic>
 
 #include "cc_protocol.h"
+#include "error_messages.h"
 #include "tx_id.h"
 #include "type.h"
 
@@ -58,8 +59,12 @@ public:
         return isolation_level_;
     }
 
-    virtual void AbortCcRequest()
+    // Remember to call Free() when implement AbortCcRequest in case it may be
+    // recycled in CcRequestPool
+    virtual void AbortCcRequest(CcErrorCode err_code)
     {
+        Free();
+        assert(false && "Unimplemented virtual method");
     }
 
     // The previous time to run it. The interval time is const variable array.

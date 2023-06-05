@@ -36,37 +36,42 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
 
 bool FetchCatalogCc::Execute(CcShard &ccs)
 {
-    int64_t cc_ng_candid_term =
-        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-
-    if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+    if (error_code_ == 0)
     {
-        if (status_ == RecordStatus::Normal)
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+        if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
         {
-            assert(commit_ts_ > 0);
-            ccs.CreateCatalog(
-                table_name_, cc_ng_id_, catalog_image_, commit_ts_);
+            if (status_ == RecordStatus::Normal)
+            {
+                assert(commit_ts_ > 0);
+                ccs.CreateCatalog(
+                    table_name_, cc_ng_id_, catalog_image_, commit_ts_);
+            }
+            else
+            {
+                assert(status_ == RecordStatus::Deleted);
+                assert(catalog_image_.empty());
+                // The catalog of the specified table does not exists. The
+                // version of the non-existent catalog starts from the beginning
+                // of history, i.e., ts=1.
+                ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
+            }
         }
-        else if (status_ == RecordStatus::Deleted)
+
+        for (CcRequestBase *&req : requesters_)
         {
-            assert(catalog_image_.empty());
-            // The catalog of the specified table does not exists. The version
-            // of the non-existent catalog starts from the beginning of history,
-            // i.e., ts=1.
-            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
-        }
-        else
-        {
-            // Timestamp being 0 means that there is an error when fetching from
-            // the data store and the catalog status is unknown.
-            ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 0);
+            ccs.Enqueue(ccs.core_id_, req);
         }
     }
-
-    for (CcRequestBase *&req : requesters_)
+    else
     {
-        ccs.Enqueue(ccs.core_id_, req);
+        for (CcRequestBase *&req : requesters_)
+        {
+            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        }
     }
 
     ccs.RemoveFetchRequest(table_name_);
@@ -77,6 +82,13 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 {
     status_ = status;
     error_code_ = err;
+
+    CODE_FAULT_INJECTOR("FetchCatalogCc_SetFinish_Error", {
+        status_ = RecordStatus::Unknown;
+        error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
+        commit_ts_ = 0;
+        catalog_image_.clear();
+    });
     ccs_.Enqueue(this);
 }
 
@@ -92,52 +104,64 @@ FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
 
 bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 {
-    int64_t cc_ng_candid_term =
-        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-
-    if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+    if (error_code_ == 0)
     {
-        CatalogEntry *catalog_entry = ccs.GetCatalog(table_name_, cc_ng_id_);
-        TableSchema *table_schema = catalog_entry->schema_.get();
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
 
-        std::unordered_map<TableName, std::vector<uint64_t>> ng_weights_map;
+        if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+        {
+            CatalogEntry *catalog_entry =
+                ccs.GetCatalog(table_name_, cc_ng_id_);
+            TableSchema *table_schema = catalog_entry->schema_.get();
+
+            std::unordered_map<TableName, std::vector<uint64_t>> ng_weights_map;
 
 #ifdef RANGE_PARTITION_ENABLED
-        ng_weights_map.try_emplace(
-            table_name_,
-            ccs.AllNodeGroupBytesAtFetchRange(table_name_, cc_ng_id_));
-        for (const TableName &index_name : table_schema->IndexNames())
-        {
             ng_weights_map.try_emplace(
-                index_name,
-                ccs.AllNodeGroupBytesAtFetchRange(index_name, cc_ng_id_));
-        }
+                table_name_,
+                ccs.AllNodeGroupBytesAtFetchRange(table_name_, cc_ng_id_));
+            for (const TableName &index_name : table_schema->IndexNames())
+            {
+                ng_weights_map.try_emplace(
+                    index_name,
+                    ccs.AllNodeGroupBytesAtFetchRange(index_name, cc_ng_id_));
+            }
 
 #else
-        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        ng_weights_map.try_emplace(table_name_,
-                                   std::vector<uint64_t>(ng_cnt, 1UL));
-        for (const TableName &index_name : table_schema->IndexNames())
-        {
-            ng_weights_map.try_emplace(index_name, std::vector(ng_cnt, 1UL));
-        }
+            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+            ng_weights_map.try_emplace(table_name_,
+                                       std::vector<uint64_t>(ng_cnt, 1UL));
+            for (const TableName &index_name : table_schema->IndexNames())
+            {
+                ng_weights_map.try_emplace(index_name,
+                                           std::vector(ng_cnt, 1UL));
+            }
 #endif
 
-        auto [statistics, inserted] =
-            ccs.InitTableStatistics(table_name_,
-                                    cc_ng_id_,
-                                    std::move(sample_pool_map_),
-                                    ng_weights_map);
-        if (inserted)
+            auto [statistics, inserted] =
+                ccs.InitTableStatistics(table_name_,
+                                        cc_ng_id_,
+                                        std::move(sample_pool_map_),
+                                        ng_weights_map);
+            if (inserted)
+            {
+                table_schema->BindStatistics(statistics);
+            }
+        }
+
+        for (CcRequestBase *&req : requesters_)
         {
-            table_schema->BindStatistics(statistics);
+            ccs.Enqueue(ccs.core_id_, req);
         }
     }
-
-    for (CcRequestBase *&req : requesters_)
+    else
     {
-        ccs.Enqueue(ccs.core_id_, req);
+        for (CcRequestBase *&req : requesters_)
+        {
+            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        }
     }
 
     ccs.RemoveFetchRequest(table_name_);
@@ -147,6 +171,12 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 void FetchTableStatisticsCc::SetFinish(int err)
 {
     error_code_ = err;
+
+    CODE_FAULT_INJECTOR("FetchTableStatisticsCc_SetFinish_Error", {
+        error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
+        current_version_ = 0;
+        sample_pool_map_.clear();
+    });
     ccs_.Enqueue(this);
 }
 
@@ -159,22 +189,36 @@ FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
 
 bool FetchTableRangesCc::Execute(CcShard &ccs)
 {
-    ccs.InitTableRanges(table_name_, ranges_vec_, cc_ng_id_);
-
-    for (CcRequestBase *&req : requesters_)
+    if (error_code_ == 0)
     {
-        ccs.Enqueue(ccs.core_id_, req);
+        ccs.InitTableRanges(table_name_, ranges_vec_, cc_ng_id_);
+
+        for (CcRequestBase *&req : requesters_)
+        {
+            ccs.Enqueue(ccs.core_id_, req);
+        }
+    }
+    else
+    {
+        for (CcRequestBase *&req : requesters_)
+        {
+            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        }
     }
 
     ccs.RemoveFetchRequest(table_name_);
     return false;
 }
 
-void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges,
-                                   int err)
+void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges)
 {
     ranges_vec_ = std::move(ranges);
-    error_code_ = err;
+    error_code_ = 0;
+
+    CODE_FAULT_INJECTOR("FetchTableRangesCc_SetFinish_Error", {
+        error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
+        ranges_vec_.clear();
+    });
     ccs_.Enqueue(this);
 }
 
@@ -224,6 +268,13 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
 
 void LoadRangeSliceRequest::SetFinish()
 {
+    CODE_FAULT_INJECTOR("LoadRangeSliceRequest_SetFinish_Error", {
+        failed_ = true;
+        slice_data_.clear();
+        slice_size_ = 0;
+        snapshot_ts_ = 0;
+    });
+
     if (post_lambda_)
     {
         post_lambda_(this);
@@ -302,32 +353,16 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
         if (catalog_entry != nullptr)
         {
-            if (catalog_entry->Version() == 0)
-            {
-                // The schema view is initialized but the current schema is
-                // unset (version_ts is 0). This means that there is an error
-                // when reading the catalog from the data store. Returns an
-                // error.
-                LOG(INFO) << "Filling range slice request is directed to a "
-                             "non-existent cc "
-                             "map. Table name: "
-                          << table_name_->StringView() << ", cc ng#"
-                          << cc_ng_id_
-                          << ". Fail to initialize the ccm, as there is a data "
-                             "store error when reading the schema.";
-                SetError(CcErrorCode::DATA_STORE_ERR);
-                return false;
-            }
-            else
-            {
-                // For a filling range slice request, there must be a prior
-                // request reading and locking the table's schema, to prevent
-                // others from dropping the table. Hence, the table's schema
-                // must be avaliable.
-                assert(catalog_entry->schema_ != nullptr);
-                ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
-                assert(ccm != nullptr);
-            }
+            // Successfully load table catalog from data store.
+            assert(catalog_entry->Version() > 0);
+
+            // For a filling range slice request, there must be a prior
+            // request reading and locking the table's schema, to prevent
+            // others from dropping the table. Hence, the table's schema
+            // must be avaliable.
+            assert(catalog_entry->schema_ != nullptr);
+            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+            assert(ccm != nullptr);
         }
         else
         {

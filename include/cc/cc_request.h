@@ -357,9 +357,11 @@ public:
         isolation_level_ = iso_level;
     }
 
-    void AbortCcRequest() override
+    void AbortCcRequest(CcErrorCode err_code) override
     {
-        res_->SetError(CcErrorCode::DEAD_LOCK_ABORT);
+        assert(err_code != CcErrorCode::NO_ERROR);
+        res_->SetError(err_code);
+        Free();
     }
 
 protected:
@@ -2684,11 +2686,10 @@ public:
                         SetFinish();
                         return false;
                     }
-                    else if (catalog_entry->Version() == 0)
-                    {
-                        SetRecoveryError();
-                        return false;
-                    }
+
+                    // If FetchCatalogCc failure due to storage fault,
+                    // FetchCatalogCc::Execute() abort the ReplayLogCc
+                    assert(catalog_entry->Version() > 0);
 
                     table_schema_ = catalog_entry->schema_.get();
 
@@ -2726,18 +2727,12 @@ public:
 
                     if (catalog_entry != nullptr)
                     {
-                        if (catalog_entry->Version() == 0)
-                        {
-                            // The schema view is initialized but the current
-                            // schema is unset (version_ts is 0). This means
-                            // that there is an error when reading the catalog
-                            // from the data store. Returns the request with an
-                            // error.
-                            SetRecoveryError();
-                            return false;
-                        }
-                        else if (catalog_entry->schema_ != nullptr &&
-                                 commit_ts_ >= catalog_entry->Version())
+                        // If FetchCatalogCc failure due to storage fault,
+                        // FetchCatalogCc::Execute() abort the ReplayLogCc
+                        assert(catalog_entry->Version() > 0);
+
+                        if (catalog_entry->schema_ != nullptr &&
+                            commit_ts_ >= catalog_entry->Version())
                         {
                             ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                             assert(ccm_ != nullptr);
@@ -2781,12 +2776,16 @@ public:
         external_cv_.notify_all();
     }
 
-    void SetRecoveryError()
+    void AbortCcRequest(CcErrorCode err_code) override
     {
+        assert(err_code != CcErrorCode::NO_ERROR);
+
         std::lock_guard<std::mutex> lk(external_mux_);
         ++finish_cnt_;
         recovery_error_ = true;
         external_cv_.notify_all();
+
+        Free();
     }
 
     const std::string_view &LogContentView() const

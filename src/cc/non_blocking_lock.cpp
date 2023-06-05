@@ -539,7 +539,7 @@ void NonBlockingLock::AbortQueueRequest(TxNumber txid)
         const LockQueueEntry &ety = blocking_queue_.Get(i);
         if (ety.req_->Txn() == txid)
         {
-            ety.req_->AbortCcRequest();
+            ety.req_->AbortCcRequest(CcErrorCode::DEAD_LOCK_ABORT);
             blocking_queue_.Erase(i);
             i--;
         }
