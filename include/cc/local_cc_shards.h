@@ -740,7 +740,7 @@ private:
     std::condition_variable task_worker_cv_;
     std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
     std::vector<std::thread> data_sync_worker_thds_;
-    static const int data_sync_worker_num_ = 5;
+    const int data_sync_worker_num_;
     std::unordered_map<TableName,
                        std::unordered_map<NodeGroupId, TableDataSyncStatus>>
         tables_sync_status_;
@@ -860,7 +860,7 @@ private:
     std::vector<UpdateSliceSpecWork> pending_slice_work_;
     std::vector<std::thread> update_slice_spec_thds_;
     WorkerStatus slice_thd_status_;
-    static const int slice_worker_num_ = 5;
+    const int slice_worker_num_;
 
     void UpdateSliceSpecWorker();
 
@@ -948,7 +948,7 @@ private:
     std::vector<FlushDataWork> pending_flush_work_;
     std::vector<std::thread> flush_worker_thds_;
     WorkerStatus flush_worker_thd_status_;
-    static const int flush_worker_num_ = 5;
+    const int flush_worker_num_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);

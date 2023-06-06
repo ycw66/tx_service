@@ -275,16 +275,16 @@ public:
 
     bool UpdateSize()
     {
-        if (post_ckpt_size_ >= 0)
+        if (post_ckpt_size_ != UINT32_MAX)
         {
             size_ = post_ckpt_size_;
-            post_ckpt_size_ = -1;
+            post_ckpt_size_ = UINT32_MAX;
             return true;
         }
         return false;
     }
 
-    int32_t PostCkptSize() const
+    uint32_t PostCkptSize() const
     {
         return post_ckpt_size_;
     }
@@ -313,7 +313,8 @@ private:
     const TxKey *end_key_{nullptr};
 
     uint32_t size_{0};
-    int32_t post_ckpt_size_{-1};
+    // Use UINT32_MAX to indicate invalid post checkpoint slice size
+    uint32_t post_ckpt_size_{UINT32_MAX};
 
     SliceStatus status_{SliceStatus::PartiallyCached};
 

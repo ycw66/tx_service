@@ -474,8 +474,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     // Split the slice based on post checkpoint item size, but do
     // not update the slice size with the post checkpoint yet since
     // the data is still not flushed into data store yet.
-    int32_t post_flush_size = slice->PostCkptSize();
-    assert(post_flush_size > 0);
+    uint32_t post_flush_size = slice->PostCkptSize();
+    assert(post_flush_size != UINT32_MAX);
     uint32_t subslice_cnt = post_flush_size / StoreSlice::slice_upper_bound + 1;
     uint32_t avg_subslice_size = post_flush_size / subslice_cnt;
     std::vector<SliceChangeInfo> split_keys;
@@ -642,7 +642,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                slice_idx < slices_.size();
              slice_idx++)
         {
-            if (slices_.at(slice_idx)->PostCkptSize() >= 0)
+            if (slices_.at(slice_idx)->PostCkptSize() != UINT32_MAX)
             {
                 curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
             }
@@ -656,8 +656,9 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
         // to avoid a single hot slice being very big and putting it
         // into the previous range will cause the range go way beyond
         // range max limit.
-        if (slices_.at(slice_idx - 1)->PostCkptSize() >
-            (int32_t) StoreSlice::slice_upper_bound)
+        if (slices_.at(slice_idx - 1)->PostCkptSize() != UINT32_MAX &&
+            slices_.at(slice_idx - 1)->PostCkptSize() >
+                StoreSlice::slice_upper_bound)
         {
             // New slice_it will be between last slice_end_it and
             // range_end_it.
@@ -694,7 +695,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                    slice_idx < slices_.size();
                  slice_idx++)
             {
-                if (slices_.at(slice_idx)->PostCkptSize() >= 0)
+                if (slices_.at(slice_idx)->PostCkptSize() != UINT32_MAX)
                 {
                     curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
                 }
@@ -913,7 +914,7 @@ size_t StoreRange::PostCkptSize()
     size_t size = 0;
     for (size_t idx = 0; idx < slices_.size(); idx++)
     {
-        if (slices_.at(idx)->post_ckpt_size_ >= 0)
+        if (slices_.at(idx)->post_ckpt_size_ != UINT32_MAX)
         {
             size += slices_.at(idx)->PostCkptSize();
         }

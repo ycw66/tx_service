@@ -707,15 +707,32 @@ public:
             old_range_cce = it.second;
         }
 
+        // Restore range end key
+        if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+        {
+            // We can safely use the end key of the old range ccentry,
+            // since we know for sure that the new range ccentries have
+            // not been inserted into ccmap yet.
+            old_end_key = old_range_cce->payload_->end_key_;
+        }
+        else if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit)
+        {
+            // Find the next cce of the last new range key, since we
+            // don't know if the new range cce has been created or not.
+            auto it = Floor(static_cast<const KeyT &>(*new_range_keys.back()));
+            CcEntry<KeyT, RangeRecord> *prev_cce = it->second;
+            old_end_key = prev_cce->payload_->end_key_;
+        }
+        else
+        {
+            assert(false);
+        }
+
         std::vector<const RangeInfo *> new_range_infos;
         if (shard_->core_id_ == 0)
         {
             if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
             {
-                // We can safely use the end key of the old range ccentry,
-                // since we know for sure that the new range ccentries have
-                // not been inserted into ccmap yet.
-                old_end_key = old_range_cce->payload_->end_key_;
                 if (!is_coordinator)
                 {
                     // Participants needs to be restored to state right before
@@ -757,13 +774,6 @@ public:
                         std::move(slice_key),
                         ds_split_range_op_msg.slice_sizes(idx + 1));
                 }
-
-                // Find the next cce of the last new range key, since we
-                // don't know if the new range cce has been created or not.
-                auto it =
-                    Floor(static_cast<const KeyT &>(*new_range_keys.back()));
-                CcEntry<KeyT, RangeRecord> *prev_cce = it->second;
-                old_end_key = prev_cce->payload_->end_key_;
 
                 if (!is_coordinator)
                 {

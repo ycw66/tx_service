@@ -27,8 +27,11 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
       catalog_factory_(catalog_factory),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
+      data_sync_worker_num_(core_cnt),
       data_sync_worker_status_(WorkerStatus::Active),
+      slice_worker_num_(core_cnt * 2),
       slice_thd_status_(WorkerStatus::Active),
+      flush_worker_num_(core_cnt),
       flush_worker_thd_status_(WorkerStatus::Active)
 {
     using namespace std::chrono_literals;
@@ -2578,7 +2581,7 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
             }
             else
             {
-                curr_slice->SetPostCkptSize(-1);
+                curr_slice->SetPostCkptSize(UINT32_MAX);
             }
 
             // The next entry falls into a new slice.

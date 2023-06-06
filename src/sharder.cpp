@@ -288,7 +288,7 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    tx_worker_pool_ = std::make_unique<TxWorkerPool>();
+    tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_.Count());
 
     return 0;
 }

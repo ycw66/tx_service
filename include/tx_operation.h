@@ -432,6 +432,7 @@ struct ScanNextOperation : TransactionOperation
     explicit ScanNextOperation(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
+    void ResetResult();
 
     ScanDirection Direction() const
     {

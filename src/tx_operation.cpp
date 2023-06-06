@@ -947,15 +947,21 @@ ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
 
 void ScanNextOperation::Reset()
 {
-    hd_result_.Reset();
     alias_ = 0;
     scan_state_ = nullptr;
+    op_start_ = metrics::TimePoint::max();
+    ResetResult();
+}
+
+void ScanNextOperation::ResetResult()
+{
 #ifdef RANGE_PARTITION_ENABLED
     slice_hd_result_.Reset();
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
+#else
+    hd_result_.Reset();
 #endif
-    op_start_ = metrics::TimePoint::max();
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
@@ -1121,7 +1127,11 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                     .append(std::to_string(txm->TxTerm()));
             });
 
+#ifdef RANGE_PARTITION_ENABLED
+        bool force_success = slice_hd_result_.ForceError();
+#else
         bool force_success = hd_result_.ForceError();
+#endif
         if (force_success)
         {
             txm->PostProcess(*this);
@@ -3116,18 +3126,23 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
              old_range = old_range,
-             &range_info = splitted_range_info,
+             range_info = std::move(splitted_range_info),
              tx_ts = txm->commit_ts_,
              table_schema = table_schema_,
              &hd_res = ds_upsert_range_op_.hd_result_]
         {
-            TxWorkerPool *tx_worker_pool =
-                Sharder::Instance().GetTxWorkerPool();
-            store::DataStoreHandler *const store_hd =
-                Sharder::Instance().GetLocalCcShards()->store_hd_;
-            tx_worker_pool->SubmitWork(
-                [table_name, range_info, tx_ts, table_schema, &hd_res, store_hd]
+            // Launch a new thread instead of sending it to workerpool to avoid
+            // being blocked during write lock is held.
+            std::thread worker = std::thread(
+                [table_name,
+                 old_range,
+                 range_info = std::move(range_info),
+                 tx_ts,
+                 table_schema,
+                 &hd_res]
                 {
+                    store::DataStoreHandler *const store_hd =
+                        Sharder::Instance().GetLocalCcShards()->store_hd_;
                     bool succ =
                         store_hd->UpsertRanges(table_name, range_info, tx_ts);
                     if (succ)
@@ -3139,6 +3154,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                     }
                 });
+            worker.detach();
         };
 
         LOG(INFO) << "Split Flush transaction upsert new range spec, range id "

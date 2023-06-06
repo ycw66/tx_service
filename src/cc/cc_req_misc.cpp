@@ -233,6 +233,10 @@ void FetchTableRangesCc::AppendTableRanges(std::vector<InitRangeEntry> &&ranges)
 void FetchTableRangesCc::SetFinish(int err)
 {
     error_code_ = err;
+    CODE_FAULT_INJECTOR("FetchTableRangesCc_SetFinish_Error", {
+        error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
+        ranges_vec_.clear();
+    });
     ccs_.Enqueue(this);
 }
 

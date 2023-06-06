@@ -2271,7 +2271,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         // we get something from the last slice scanned.
         if (!scan_finished)
         {
-            scan_next.Reset();
+            scan_next.ResetResult();
             PushOperation(&scan_next);
             Process(scan_next);
             return;
