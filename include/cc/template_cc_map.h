@@ -1534,7 +1534,7 @@ public:
                     auto meter = shard_->meter_.get();
                     if (cce != nullptr)
                     {
-                        meter->Collect("slice_cache_hits", 1);
+                        meter->Collect("cache_hit_or_miss_count", 1, "hits");
                     }
                 }
 

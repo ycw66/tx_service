@@ -582,8 +582,6 @@ public:
         return lock_holding_txs_;
     }
 
-    std::unique_ptr<metrics::Meter> meter_;
-
     void ResetCleanStart()
     {
         clean_start_ccp_ = nullptr;
@@ -593,6 +591,7 @@ public:
     {
         return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
     }
+    std::unique_ptr<metrics::Meter> meter_;
 
 private:
     void SetProcessorSleepFlag(std::atomic<bool> *processor_sleep,

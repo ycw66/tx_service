@@ -75,54 +75,40 @@ public:
           free_prod_token_(free_txs),
           free_consumer_token_(free_txs),
           txlog_hd_(txlog_hd),
-          meter_(std::make_unique<metrics::Meter>(
-              metrics_registry,
-              metrics::Labels{{"node_id", std::to_string(shards.NodeId())},
-                              {"core_id", std::to_string(thd_id)}}))
+          meter_(std::make_unique<metrics::Meter>(metrics_registry,
+                                                  std::to_string(thd_id)))
     {
         if (metrics::enable_busy_loop_metrics)
         {
             meter_->Register("run_one_round_duration",
                              metrics::Type::Histogram);
             meter_->Register("active_tx_count", metrics::Type::Gauge);
-            meter_->Register("cc_requests_count", metrics::Type::Gauge);
+            meter_->Register("cc_request_count", metrics::Type::Gauge);
         }
 
         if (metrics::enable_transactions)
         {
             meter_->Register("tx_duration", metrics::Type::Histogram);
             meter_->Register("tx_processed_total", metrics::Type::Counter);
-
-            meter_->Register("remote_read_duration", metrics::Type::Histogram);
-            meter_->Register("remote_read_on_fly_count", metrics::Type::Gauge);
-
-            meter_->Register("remote_acquire_write_duration",
-                             metrics::Type::Histogram);
-            meter_->Register("remote_acquire_write_on_fly_count",
-                             metrics::Type::Gauge);
-
-            meter_->Register("remote_validate_duration",
-                             metrics::Type::Histogram);
-            meter_->Register("remote_validate_on_fly_count",
-                             metrics::Type::Gauge);
-
-            meter_->Register("remote_post_process_duration",
-                             metrics::Type::Histogram);
-            meter_->Register("remote_post_process_on_fly_count",
-                             metrics::Type::Gauge);
-
-            meter_->Register("remote_scan_next_duration",
-                             metrics::Type::Histogram);
-            meter_->Register("remote_scan_next_on_fly_count",
-                             metrics::Type::Gauge);
+            meter_->Register("remote_request_duration",
+                             metrics::Type::Histogram,
+                             {{"type",
+                               {"read",
+                                "acquire_write",
+                                "validate",
+                                "post_process",
+                                "scan_next",
+                                "write_log"}}});
+            meter_->Register("remote_request_on_fly_count",
+                             metrics::Type::Gauge,
+                             {{"type",
+                               {"read",
+                                "acquire_write",
+                                "validate",
+                                "post_process",
+                                "scan_next",
+                                "write_log"}}});
         }
-
-        if (metrics::enable_log_metrics)
-        {
-            meter_->Register("write_log_duration", metrics::Type::Histogram);
-            meter_->Register("write_log_on_fly_count", metrics::Type::Gauge);
-        }
-
 #ifdef EXT_TX_PROC_ENABLED
         external_processor_func_ = [this]() { RunOneRound(); };
 #endif
@@ -308,10 +294,10 @@ public:
         if (ext_num > 0 && native_txm_cnt == 0)
         {
             // When there is one or more external tx processor threads, the
-            // native processor thread sleeps a period (e.g., 10us) before every
-            // run. If the external processor thread(s) are active and have
-            // advanced the the counter since last check, the native processor
-            // thread yields.
+            // native processor thread sleeps a period (e.g., 10us) before
+            // every run. If the external processor thread(s) are active and
+            // have advanced the the counter since last check, the native
+            // processor thread yields.
             size_t ext_counter =
                 external_process_counter_.load(std::memory_order_relaxed);
             if (internal_counter_ < ext_counter)
@@ -428,8 +414,7 @@ public:
                 meter_->CollectDuration("run_one_round_duration",
                                         run_one_round_start_);
                 meter_->Collect("active_tx_count", active_cnt);
-                meter_->Collect("cc_requests_count", req_cnt);
-
+                meter_->Collect("cc_request_count", req_cnt);
                 busy_loop_round_ = 1;
             }
             else
@@ -793,8 +778,8 @@ public:
     std::vector<std::thread> thd_pool_;
     LocalCcShards local_cc_shards_;
     Checkpointer ckpt_;
-    // tx runs shared by all the clients of tx_service. It is used to balance
-    // workloads between TxProcessors.
+    // tx runs shared by all the clients of tx_service. It is used to
+    // balance workloads between TxProcessors.
     std::atomic<uint32_t> tx_runs_{0};
     friend class txservice::fault::ReplayService;
 };
