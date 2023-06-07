@@ -3405,7 +3405,7 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
                            metrics::Value::IncDecValue::Decrement,
                            "post_process");
         }
-        meter->CollectDuration("tx_duration_start", tx_duration_start_);
+        meter->CollectDuration("tx_duration", tx_duration_start_);
         meter->Collect("tx_processed_total", 1);
     }
 
