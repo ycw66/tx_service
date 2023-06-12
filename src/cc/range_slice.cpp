@@ -152,7 +152,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         if (metrics::enable_cache_hit_rate)
         {
             auto meter = cc_shard->meter_.get();
-            meter->Collect("cache_hit_or_miss_count", 1, "hits");
+            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
         }
 
         ++slice->pins_;
@@ -164,7 +164,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         if (metrics::enable_cache_hit_rate)
         {
             auto meter = cc_shard->meter_.get();
-            meter->Collect("cache_hit_or_miss_count", 1, "miss");
+            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "miss");
         }
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
@@ -224,7 +224,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         if (metrics::enable_cache_hit_rate)
         {
             auto meter = cc_shard->meter_.get();
-            meter->Collect("cache_hit_or_miss_count", 1, "hits");
+            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
         }
 
         ++slice->pins_;
@@ -236,7 +236,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         if (metrics::enable_cache_hit_rate)
         {
             auto meter = cc_shard->meter_.get();
-            meter->Collect("cache_hit_or_miss_count", 1, "miss");
+            meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "miss");
         }
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,

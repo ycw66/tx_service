@@ -84,6 +84,11 @@ public:
         return cc_shards_[thd_id]->ProcessRequests();
     }
 
+    size_t QueueSize(size_t thd_id)
+    {
+        return cc_shards_[thd_id]->QueueSize();
+    };
+
     bool IsIdle(uint32_t thd_id) const
     {
         return cc_shards_[thd_id]->IsIdle();

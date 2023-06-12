@@ -1174,7 +1174,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 !read.hd_result_.Value().is_local_)
             {
                 auto meter = tx_processor_->meter_.get();
-                meter->Collect("remote_request_on_fly_count",
+                meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                                metrics::Value::IncDecValue::Increment,
                                "read");
                 read.op_start_ = metrics::Clock::now();
@@ -1215,9 +1215,10 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
-        meter->CollectDuration(
-            "remote_request_duration", read.op_start_, "read");
-        meter->Collect("remote_request_on_fly_count",
+        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+                               read.op_start_,
+                               "read");
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Decrement,
                        "read");
     }
@@ -1674,7 +1675,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 !scan_next.slice_hd_result_.Value().is_local_)
             {
                 auto meter = tx_processor_->meter_.get();
-                meter->Collect("remote_request_on_fly_count",
+                meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                                metrics::Value::IncDecValue::Increment,
                                "scan_next");
                 scan_next.op_start_ = metrics::Clock::now();
@@ -1726,9 +1727,10 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     !scan_next.slice_hd_result_.Value().is_local_)
                 {
                     auto meter = tx_processor_->meter_.get();
-                    meter->Collect("remote_request_on_fly_count",
-                                   metrics::Value::IncDecValue::Increment,
-                                   "scan_next");
+                    meter->Collect(
+                        tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
+                        metrics::Value::IncDecValue::Increment,
+                        "scan_next");
                     scan_next.op_start_ = metrics::Clock::now();
                 }
             }
@@ -1784,10 +1786,11 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
-        meter->CollectDuration(
-            "remote_request_duration", scan_next.op_start_, "scan_next");
+        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+                               scan_next.op_start_,
+                               "scan_next");
         meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Decrement,
                        "scan_next");
     }
@@ -2609,7 +2612,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
             std::memory_order_relaxed) > 0)
     {
         auto meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Increment,
                        "acquire_write");
         acquire_write.op_start_ = metrics::Clock::now();
@@ -2626,11 +2629,11 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
-        meter->CollectDuration("remote_request_duration",
+        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
                                acquire_write.op_start_,
                                "acquire_write");
         meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Decrement,
                        "acquire_write");
     }
@@ -2811,7 +2814,7 @@ void TransactionExecution::Process(ValidateOperation &validate)
     if (metrics::enable_transactions && !validate.hd_result_.Value().is_local_)
     {
         auto meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Increment,
                        "validate");
         validate.op_start_ = metrics::Clock::now();
@@ -2827,9 +2830,10 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
-        meter->CollectDuration(
-            "remote_request_duration", validate.op_start_, "validate");
-        meter->Collect("remote_request_on_fly_count",
+        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+                               validate.op_start_,
+                               "validate");
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Decrement,
                        "validate");
     }
@@ -3073,7 +3077,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     if (metrics::enable_log_metrics)
     {
         auto meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Increment,
                        "write_log");
         write_log.op_start_ = metrics::Clock::now();
@@ -3104,10 +3108,11 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
-        meter->CollectDuration(
-            "remote_request_duration", write_log.op_start_, "write_log");
+        meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
+                               write_log.op_start_,
+                               "write_log");
         meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Decrement,
                        "write_log");
     }
@@ -3380,7 +3385,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         !post_process.hd_result_.Value().is_local_)
     {
         auto meter = tx_processor_->meter_.get();
-        meter->Collect("remote_request_on_fly_count",
+        meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                        metrics::Value::IncDecValue::Increment,
                        "post_process");
         post_process.op_start_ = metrics::Clock::now();
@@ -3398,15 +3403,16 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
         auto meter = tx_processor_->meter_.get();
         if (!post_process.hd_result_.Value().is_local_)
         {
-            meter->CollectDuration("remote_request_duration",
+            meter->CollectDuration(tx_processor_->REMOTE_REQUEST_DURATION_NAME_,
                                    post_process.op_start_,
                                    "post_process");
-            meter->Collect("remote_request_on_fly_count",
+            meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
                            metrics::Value::IncDecValue::Decrement,
                            "post_process");
         }
-        meter->CollectDuration("tx_duration", tx_duration_start_);
-        meter->Collect("tx_processed_total", 1);
+        meter->CollectDuration(tx_processor_->TX_DURATION_NAME_,
+                               tx_duration_start_);
+        meter->Collect(tx_processor_->TX_PROCESSED_TOTAL_NAME_, 1);
     }
 
     TX_TRACE_ACTION_WITH_CONTEXT(

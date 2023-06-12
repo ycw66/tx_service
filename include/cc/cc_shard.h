@@ -143,7 +143,7 @@ public:
         {
             if (memory_usage_round_ == metrics::memory_usage_sample_round)
             {
-                meter_->Collect("memory_usage", mem_usage_);
+                meter_->Collect(MEMORY_USAGE_NAME_, mem_usage_);
                 memory_usage_round_ = 1;
             }
             else
@@ -591,7 +591,6 @@ public:
     {
         return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
     }
-    std::unique_ptr<metrics::Meter> meter_;
 
 private:
     void SetProcessorSleepFlag(std::atomic<bool> *processor_sleep,
@@ -689,5 +688,12 @@ private:
     friend class LocalCcHandler;
     friend class LocalCcShards;
     friend class Checkpointer;
+
+public:
+    std::unique_ptr<metrics::Meter> meter_;
+    const metrics::Name MEMORY_LIMIT_NAME_{"memory_limit"};
+    const metrics::Name CACHE_HIT_OR_MISS_TOTAL_NAME_{
+        "cache_hit_or_miss_total"};
+    const metrics::Name MEMORY_USAGE_NAME_{"memory_usage"};
 };
 }  // namespace txservice

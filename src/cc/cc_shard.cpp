@@ -83,25 +83,25 @@ CcShard::CcShard(uint16_t core_id,
 
     if (metrics::enable_collect_metrics)
     {
-        meter_->Register("memory_limit", metrics::Type::Gauge);
+        meter_->Register(MEMORY_LIMIT_NAME_, metrics::Type::Gauge);
     }
 
     if (metrics::enable_cache_hit_rate)
     {
-        meter_->Register("cache_hit_or_miss_count",
+        meter_->Register(CACHE_HIT_OR_MISS_TOTAL_NAME_,
                          metrics::Type::Counter,
                          {{"type", {"hits", "miss"}}});
     }
 
     if (metrics::enable_memory_usage)
     {
-        meter_->Register("memory_usage", metrics::Type::Gauge);
+        meter_->Register(MEMORY_USAGE_NAME_, metrics::Type::Gauge);
     }
 
     // collect metrics: memory limit
     if (metrics::enable_collect_metrics)
     {
-        meter_->Collect("memory_limit", memory_limit_);
+        meter_->Collect(MEMORY_LIMIT_NAME_, memory_limit_);
     }
 }
 
