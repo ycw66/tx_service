@@ -122,5 +122,8 @@ private:
 
     template <typename KT, typename VT>
     friend class TemplateCcScanner;
+
+    template <typename KT, typename VT>
+    friend class TemplateScanCache;
 };
 }  // namespace txservice

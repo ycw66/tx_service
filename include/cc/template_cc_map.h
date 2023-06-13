@@ -621,12 +621,23 @@ public:
                     }
                     else if (payload_str == nullptr)
                     {
-                        cce->payload_ = std::make_shared<ValueT>(*commit_val);
+                        if (cce->payload_.use_count() == 1)
+                        {
+                            *(cce->payload_) = *commit_val;
+                        }
+                        else
+                        {
+                            cce->payload_ =
+                                std::make_shared<ValueT>(*commit_val);
+                        }
                     }
                     else
                     {
                         size_t offset = 0;
-                        cce->payload_ = std::make_shared<ValueT>();
+                        if (cce->payload_.use_count() != 1)
+                        {
+                            cce->payload_ = std::make_shared<ValueT>();
+                        }
                         cce->payload_->Deserialize(payload_str->data(), offset);
                     }
                     shard_->mem_usage_ += cce->PayloadMemUsage();
@@ -4706,7 +4717,10 @@ public:
                 if (delete_flag == 0)
                 {
                     shard_->DecrementMemory(cce->PayloadMemUsage());
-                    cce->payload_ = std::make_shared<ValueT>();
+                    if (cce->payload_.use_count() != 1)
+                    {
+                        cce->payload_ = std::make_shared<ValueT>();
+                    }
                     cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
                     shard_->mem_usage_ += cce->PayloadMemUsage();

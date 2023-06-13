@@ -217,9 +217,11 @@ public:
             (rec_status == RecordStatus::Deleted && is_ckpt_delta))
         {
             size_t offset = 0;
-            std::shared_ptr<ValueT> tmp_ptr = std::make_shared<ValueT>();
-            tmp_ptr->Deserialize(record_str.data(), offset);
-            scan_tuple->SetRecord(tmp_ptr);
+            if (scan_tuple->rec_ptr_.use_count() != 1)
+            {
+                scan_tuple->rec_ptr_ = std::make_shared<ValueT>();
+            }
+            scan_tuple->rec_ptr_->Deserialize(record_str.data(), offset);
         }
 
         scan_tuple->gap_ts_ = gap_ts;
