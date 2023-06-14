@@ -101,12 +101,17 @@ void TransactionExecution::Reset(CcProtocol proto)
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
     detailed_error_msg_ = "";
-    tx_req_queue_.Reset();
     protocol_ = proto;
     schema_op_ = nullptr;
     split_flush_op_ = nullptr;
     drain_batch_.clear();
     scan_alias_cnt_ = 0;
+
+    // drain out tx_req_queue_ (if any request left)
+    TxRequest *req = nullptr;
+    while (tx_req_queue_.try_dequeue(req))
+    {
+    }
 }
 
 void TransactionExecution::Restart(CcHandler *handler,
@@ -121,16 +126,7 @@ void TransactionExecution::Restart(CcHandler *handler,
 
 bool TransactionExecution::IsIdle()
 {
-    if (!state_stack_.empty())
-    {
-        return false;
-    }
-
-    tx_req_lk_.Lock();
-    bool empty_tx_req = tx_req_queue_.Size() == 0;
-    tx_req_lk_.Unlock();
-
-    return empty_tx_req;
+    return state_stack_.empty() && tx_req_queue_.peek() == nullptr;
 }
 
 uint64_t TransactionExecution::TxNumber() const
@@ -411,15 +407,10 @@ TxmStatus TransactionExecution::Forward()
     if (state_stack_.empty())
     {
         TxRequest *req = nullptr;
-        tx_req_lk_.Lock();
-        size_t req_cnt = tx_req_queue_.Size();
-        if (req_cnt > 0)
-        {
-            req = tx_req_queue_.Peek();
-            tx_req_queue_.Dequeue();
-            has_more_req = req_cnt >= 2;
-        }
-        tx_req_lk_.Unlock();
+        bool success = tx_req_queue_.try_dequeue(req);
+        assert(success == (req != nullptr));
+
+        has_more_req = tx_req_queue_.peek() != nullptr;
 
         if (req != nullptr)
         {
@@ -467,9 +458,8 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 
     if (status == TxnStatus::Ongoing)
     {
-        tx_req_lk_.Lock();
-        tx_req_queue_.Enqueue(tx_req);
-        tx_req_lk_.Unlock();
+        bool success = tx_req_queue_.enqueue(tx_req);
+        assert(success);
 
         return 0;
     }
@@ -963,17 +953,11 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
         }
         else
         {
-            tx_req_lk_.Lock();
-
-            while (tx_req_queue_.Size() > 0)
+            TxRequest *req = nullptr;
+            while (tx_req_queue_.try_dequeue(req))
             {
-                TxRequest *req = tx_req_queue_.Peek();
-                tx_req_queue_.Dequeue();
-
                 req->SetError(TxErrorCode::TX_INIT_FAIL);
             }
-
-            tx_req_lk_.Unlock();
         }
         return;
     }

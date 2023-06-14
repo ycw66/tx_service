@@ -17,7 +17,7 @@
 #include "log_closure.h"
 #include "metrics.h"
 #include "read_write_set.h"
-#include "simple_spinlock.h"
+#include "readerwriterqueue.h"
 #include "tx_operation.h"
 #include "tx_req_result.h"
 #include "txlog.h"
@@ -464,9 +464,9 @@ private:
     // For example, during write log phase or validation phase.
     std::string detailed_error_msg_;
 
-    // next_req_ is used to exchange request between runtime and TxProcessor.
-    CircularQueue<TxRequest *> tx_req_queue_{8};
-    SimpleSpinlock tx_req_lk_;
+    // tx_req_queue_ is used to exchange request between runtime and
+    // TxProcessor.
+    moodycamel::ReaderWriterQueue<TxRequest *> tx_req_queue_{8};
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
