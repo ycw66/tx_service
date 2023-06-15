@@ -54,11 +54,11 @@ public:
 public:
     using SamplePool = RandomPairing<1024, KeyT, CopyKey>;
     using OnMassChange = std::function<void(
-        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
-        uint64_t schema_version)>;
+        const TableSchema *table_schema,
+        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool)>;
 
 public:
-    TemplateCcMapSamplePool(const TableName &table_or_index_name,
+    TemplateCcMapSamplePool(const TableName *table_or_index_name,
                             NodeGroupId ng_id)
         : table_or_index_name_(table_or_index_name),
           ng_id_(ng_id),
@@ -66,7 +66,7 @@ public:
     {
     }
 
-    TemplateCcMapSamplePool(const TableName &table_or_index_name,
+    TemplateCcMapSamplePool(const TableName *table_or_index_name,
                             NodeGroupId ng_id,
                             const SamplePoolParam<KeyT> &param)
         : table_or_index_name_(table_or_index_name),
@@ -79,14 +79,15 @@ public:
 
     void Reset(SamplePool &&sample_pool,
                uint64_t records,
-               uint64_t schema_version)
+               const TableSchema *table_schema)
     {
         units_ = Units(records);
 
         assert(sample_pool.Capacity() == sample_pool_.Capacity());
         sample_pool_ = std::move(sample_pool);
 
-        on_mass_change_(*this, schema_version);
+        on_mass_change_(table_schema, *this);
+        insert_delete_counter_ = 0;
     }
 
     void SetOnMassChange(OnMassChange on_mass_change)
@@ -94,7 +95,7 @@ public:
         on_mass_change_ = on_mass_change;
     }
 
-    void OnInsert(const KeyT &key, uint64_t schema_version)
+    void OnInsert(const KeyT &key, const TableSchema *table_schema)
     {
         assert(is_local_);
 
@@ -104,12 +105,12 @@ public:
 
         if (insert_delete_counter_ > units_ / 10)
         {
-            on_mass_change_(*this, schema_version);
+            on_mass_change_(table_schema, *this);
             insert_delete_counter_ = 0;
         }
     }
 
-    void OnDelete(const KeyT &key, uint64_t schema_version)
+    void OnDelete(const KeyT &key, const TableSchema *table_schema)
     {
         assert(is_local_);
 
@@ -121,7 +122,7 @@ public:
 
             if (insert_delete_counter_ > units_ / 10)
             {
-                on_mass_change_(*this, schema_version);
+                on_mass_change_(table_schema, *this);
                 insert_delete_counter_ = 0;
             }
         }
@@ -129,7 +130,7 @@ public:
 
     const TableName &GetTableOrIndexName() const
     {
-        return table_or_index_name_;
+        return *table_or_index_name_;
     }
 
     int64_t Records() const
@@ -181,7 +182,7 @@ public:
     {
         assert(cc_shard_ == nullptr || cc_shard_ == cc_shard);
         assert(cc_shard && cc_shard->core_id_ ==
-                               Statistics::CoreDoSample(table_or_index_name_));
+                               Statistics::CoreDoSample(*table_or_index_name_));
         assert(IsLocal(ng_id_));
 
         cc_shard_ = cc_shard;
@@ -229,14 +230,14 @@ private:
     }
 
 private:
-    TableName table_or_index_name_;
+    // Points to key of index_sample_pool_map_.
+    const TableName *table_or_index_name_;
 
     NodeGroupId ng_id_{0};
 
     bool is_local_{false};
 
     int64_t units_{0};
-    int64_t units_last_{0};
 
     // How many keys are inserted/deleted since last stats recalc.
     int64_t insert_delete_counter_{0};
@@ -256,14 +257,21 @@ template <typename KeyT>
 class IndexDistribution : public Distribution
 {
 public:
-    IndexDistribution() : records_(0), distribution_steps_()
+    explicit IndexDistribution(const KeySchema *key_schema)
+        : records_(0),
+          distribution_steps_(),
+          rec_per_key_(key_schema->ExtendKeyParts(), 0.0)
     {
     }
 
-    IndexDistribution(uint64_t records,
+    IndexDistribution(const KeySchema *key_schema,
+                      uint64_t records,
                       const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
-        : records_(records), distribution_steps_(keys)
+        : records_(records),
+          distribution_steps_(keys),
+          rec_per_key_(key_schema->ExtendKeyParts(), 0.0)
     {
+        CalRecordsPerKey(key_schema, keys);
     }
 
     uint64_t Records() const
@@ -290,9 +298,88 @@ public:
         return records;
     }
 
+    const std::vector<double> &RecordsPerKey() const
+    {
+        return rec_per_key_;
+    }
+
+private:
+    // The algorithm is modified from rocksdb/Rdb_tbl_card_coll::ProcessKey()
+    void CalRecordsPerKey(
+        const KeySchema *key_schema,
+        const std::set<const KeyT *, PtrLessThan<KeyT>> &sample_keys)
+    {
+        size_t key_parts = key_schema->ExtendKeyParts();
+        std::vector<size_t> distinct_keys_per_prefix(key_parts, 0);
+        const KeyT *last_key = nullptr;
+
+        for (const KeyT *key : sample_keys)
+        {
+            size_t start_column_diff = 0;
+            if (last_key == nullptr ||
+                key_schema->CompareKeys(*last_key, *key, &start_column_diff))
+            {
+                assert(start_column_diff < key_parts);
+                for (size_t i = start_column_diff; i < key_parts; i++)
+                {
+                    distinct_keys_per_prefix[i]++;
+                }
+                if (start_column_diff < key_parts)
+                {
+                    // Keep same with rocksdb's logic.
+                    //
+                    // This branch is a little confusing.
+                    // Tests show that key_parts include pk column and pk column
+                    // is always different. It seems that this branch would
+                    // always enter.
+                    last_key = key;
+                }
+            }
+        }
+
+        // Scale up count of distinct keys from sample set to total set
+        std::vector<size_t> distinct_keys_per_prefix_all(key_parts, 1.0);
+        size_t sample_keys_count = sample_keys.size();
+        if (sample_keys_count > 1)
+        {
+            // Define NDV: number of distinct values.
+            // 1) For unique keys, sample_pool's NDV == sample_pool's size(S).
+            // 2) For completely same keys, sample_pool's NDV == 1.
+            //
+            // To scale up to total set:
+            //   For 1) transformed NDV should be table size(T).
+            //   For 2) transformed NDV should be 1.
+            //
+            // Also, guarantee NDV >= 1 always.
+            //
+            // Thus:
+            //            T - 1
+            //   NDV' = --------- * (NDV - 1) + 1
+            //            S - 1
+            for (size_t i = 0; i < key_parts; i++)
+            {
+                assert(records_ >= sample_keys_count);
+                distinct_keys_per_prefix_all[i] =
+                    ((records_ - 1) * (distinct_keys_per_prefix[i] - 1) /
+                     static_cast<double>(sample_keys_count - 1)) +
+                    1;
+            }
+        }
+
+        for (size_t i = 0; i < key_parts; i++)
+        {
+            assert(distinct_keys_per_prefix_all[i] >= 1);
+            rec_per_key_[i] = records_ > 0 ? static_cast<double>(records_) /
+                                                 distinct_keys_per_prefix_all[i]
+                                           : 1;
+            assert(rec_per_key_[i] >= 1);
+        }
+    }
+
 private:
     uint64_t records_{0};
     DistributionSteps<KeyT> distribution_steps_;
+    std::vector<double> rec_per_key_;  // Guarantee records per key >= 1 always.
 };
 
 template <typename KeyT>
@@ -306,6 +393,7 @@ public:
 
     TableStatistics(
         const TableName &base_table_name,
+        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
@@ -317,17 +405,24 @@ public:
     {
         if (!sample_pool_map.empty())
         {
-            BuildSamplePoolMap(
-                *ccs, cc_ng_id, std::move(sample_pool_map), ng_weights_map);
-
+            BuildSamplePoolMap(*ccs,
+                               cc_ng_id,
+                               table_schema,
+                               std::move(sample_pool_map),
+                               ng_weights_map);
             for (const auto &[table_or_index_name, ng_sample_pool_map] :
                  index_sample_pool_map_)
             {
-                BuildDistribution(table_or_index_name);
+                const KeySchema *key_schema =
+                    table_or_index_name.IsBase()
+                        ? table_schema->KeySchema()
+                        : table_schema->IndexKeySchema(table_or_index_name);
+                BuildDistribution(table_or_index_name, key_schema);
             }
         }
     }
 
+    // Distribution maybe null
     std::shared_ptr<Distribution> GetDistribution(
         const TableName &table_or_index_name) const override
     {
@@ -352,23 +447,26 @@ public:
             index_sample_pool_map_.find(table_or_index_name);
         if (it == index_sample_pool_map_.end())
         {
-            index_sample_pool_map_[table_or_index_name].emplace(
+            auto [it, insert] = index_sample_pool_map_.emplace(
                 std::piecewise_construct,
-                std::forward_as_tuple(ng_id),
-                std::forward_as_tuple(table_or_index_name, ng_id));
+                std::forward_as_tuple(table_or_index_name),
+                std::forward_as_tuple());
+            assert(insert);
+
+            it->second.emplace(std::piecewise_construct,
+                               std::forward_as_tuple(ng_id),
+                               std::forward_as_tuple(&it->first, ng_id));
         }
         else
         {
             NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
-            typename NodeGroupSamplePoolMap::iterator iter =
-                ng_sample_pool_map.find(ng_id);
-            if (iter == ng_sample_pool_map.end())
+            if (ng_sample_pool_map.find(ng_id) == ng_sample_pool_map.end())
             {
                 ng_sample_pool_map.emplace(
                     std::piecewise_construct,
                     std::forward_as_tuple(ng_id),
-                    std::forward_as_tuple(table_or_index_name, ng_id));
+                    std::forward_as_tuple(&it->first, ng_id));
             }
         }
 
@@ -410,11 +508,10 @@ public:
             SamplePoolParam<KeyT> param;
             param.records_ = remote_sample_pool.records();
 
-            const Schema *key_schema =
+            const KeySchema *key_schema =
                 table_or_index_name.IsBase()
                     ? table_schema->KeySchema()
                     : table_schema->IndexKeySchema(table_or_index_name);
-
             for (const std::string &sample : remote_sample_pool.samples())
             {
                 KeyT key;
@@ -423,12 +520,15 @@ public:
                 param.sample_keys_.push_back(std::move(key));
             }
 
-            index_sample_pool_map_[table_or_index_name].insert_or_assign(
-                ng_id,
-                TemplateCcMapSamplePool<KeyT>(
-                    table_or_index_name, ng_id, param));
+            auto [it, insert] = index_sample_pool_map_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_or_index_name),
+                std::forward_as_tuple());
 
-            BuildDistribution(table_or_index_name);
+            it->second.insert_or_assign(
+                ng_id, TemplateCcMapSamplePool<KeyT>(&it->first, ng_id, param));
+
+            BuildDistribution(table_or_index_name, key_schema);
         };
         RunOnBindingCcShard(task);
 
@@ -437,15 +537,15 @@ public:
 
     // This method is called in checkpointer range split thread.
     void PriorSplitRange(const TableName &table_or_index_name,
-                         NodeGroupId ng_id,
-                         uint64_t schema_version) const override
+                         const TableSchema *table_schema,
+                         NodeGroupId ng_id) const override
     {
         Task task =
-            [this, &table_or_index_name, ng_id, schema_version](CcShard &ccs)
+            [this, &table_or_index_name, ng_id, table_schema](CcShard &ccs)
         {
             const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool =
                 index_sample_pool_map_.at(table_or_index_name).at(ng_id);
-            Broadcast(ccmap_sample_pool, schema_version);
+            Broadcast(table_schema, ccmap_sample_pool);
         };
         RunOnBindingCcShard(task);
     }
@@ -453,8 +553,8 @@ public:
     // This method is called in checkpointer thread.
     bool PostCheckpoint(store::DataStoreHandler *store_hd,
                         const TableName &table_or_index_name,
+                        const TableSchema *table_schema,
                         NodeGroupId ng_id,
-                        uint64_t schema_version,
                         uint64_t ckpt_ts,
                         bool ckpt_empty) const override
     {
@@ -470,7 +570,7 @@ public:
             Task task = [this,
                          &table_or_index_name,
                          ng_id,
-                         schema_version,
+                         table_schema,
                          ckpt_empty,
                          &sample_pool_map](CcShard &ccs)
             {
@@ -485,7 +585,7 @@ public:
                         iter->second;
                     if (!ckpt_empty)
                     {
-                        Broadcast(ccmap_sample_pool, schema_version);
+                        Broadcast(table_schema, ccmap_sample_pool);
                     }
                 }
             };
@@ -522,8 +622,9 @@ public:
 
         NodeGroupId old_ng_id = old_info->PartitionId() % ng_cnt;
 
-        NodeGroupSamplePoolMap &ng_sample_pool_map =
-            index_sample_pool_map_.at(table_or_index_name);
+        auto it = index_sample_pool_map_.find(table_or_index_name);
+        assert(it != index_sample_pool_map_.end());
+        NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
         auto iter = ng_sample_pool_map.find(old_ng_id);
         if (iter == ng_sample_pool_map.end())
@@ -550,8 +651,7 @@ public:
                 ng_sample_pool_map.emplace(
                     std::piecewise_construct,
                     std::forward_as_tuple(new_ng_id),
-                    std::forward_as_tuple(
-                        table_or_index_name, new_ng_id, param));
+                    std::forward_as_tuple(&it->first, new_ng_id, param));
                 old_sample_pool.Prune(param);
             }
         }
@@ -562,12 +662,18 @@ public:
 private:
     // This method is called in tx_processor thread.
     void OnLocalStatisticsMessage(
-        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
-        uint64_t schema_version)
+        const TableSchema *table_schema,
+        const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool)
     {
-        BuildDistribution(ccmap_sample_pool.GetTableOrIndexName());
+        const TableName &table_or_index_name =
+            ccmap_sample_pool.GetTableOrIndexName();
+        const KeySchema *key_schema =
+            table_or_index_name.IsBase()
+                ? table_schema->KeySchema()
+                : table_schema->IndexKeySchema(table_or_index_name);
+        BuildDistribution(ccmap_sample_pool.GetTableOrIndexName(), key_schema);
         CODE_FAULT_INJECTOR("broadcast_statistics_early",
-                            { Broadcast(ccmap_sample_pool, schema_version); });
+                            { Broadcast(table_schema, ccmap_sample_pool); });
 
         need_save_counter_.fetch_add(1, std::memory_order_release);
     }
@@ -575,6 +681,7 @@ private:
     void BuildSamplePoolMap(
         CcShard &ccs,
         NodeGroupId cc_ng_id,
+        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
@@ -584,11 +691,23 @@ private:
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
         for (auto &[table_or_index_name, index_sample_pool] : sample_pool_map)
         {
+            if (!(table_or_index_name == table_schema->GetBaseTableName()) &&
+                table_schema->IndexKeySchema(table_or_index_name) == nullptr)
+            {
+                continue;  // Skip dropped index
+            }
+
             uint64_t records = index_sample_pool.first;
             std::vector<TxKey::Uptr> &samplekeys = index_sample_pool.second;
 
-            NodeGroupSamplePoolMap &ng_sample_pool_map =
-                index_sample_pool_map_[table_or_index_name];
+            auto [it, insert] = index_sample_pool_map_.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(table_or_index_name),
+                std::forward_as_tuple());
+            assert(insert);
+
+            NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
+
             std::vector<SamplePoolParam<KeyT>> ng_param_vec(ng_cnt);
 
             std::vector<uint64_t> records_vec = DivideRecordsByNodeGroupWeight(
@@ -618,7 +737,7 @@ private:
                     std::piecewise_construct,
                     std::forward_as_tuple(ng_id),
                     std::forward_as_tuple(
-                        table_or_index_name, ng_id, ng_param_vec.at(ng_id)));
+                        &it->first, ng_id, ng_param_vec.at(ng_id)));
             }
         }
     }
@@ -627,7 +746,8 @@ private:
     //
     // It is safe to access index_sample_pool_map_ directly, because all sample
     // pool of a table are sampled on same one core.
-    void BuildDistribution(const TableName &table_or_index_name)
+    void BuildDistribution(const TableName &table_or_index_name,
+                           const KeySchema *key_schema)
     {
         std::unique_lock<std::shared_mutex> ulk_distribution(
             index_distribution_map_mutex_);
@@ -649,13 +769,13 @@ private:
 
         index_distribution_map_.insert_or_assign(
             table_or_index_name,
-            std::make_shared<IndexDistribution<KeyT>>(index_total_keys,
-                                                      index_sample_keys));
+            std::make_shared<IndexDistribution<KeyT>>(
+                key_schema, index_total_keys, index_sample_keys));
     }
 
     // This method must called in tx_processor thread.
-    void Broadcast(const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool,
-                   uint64_t schema_version) const
+    void Broadcast(const TableSchema *table_schema,
+                   const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool) const
     {
         remote::CcStreamSender *stream_sender =
             Sharder::Instance().GetCcStreamSender();
@@ -676,7 +796,7 @@ private:
                 ccmap_sample_pool.GetTableOrIndexName().Type()));
         broadcast_stat_req->set_table_name_str(
             ccmap_sample_pool.GetTableOrIndexName().String());
-        broadcast_stat_req->set_schema_version(schema_version);
+        broadcast_stat_req->set_schema_version(table_schema->Version());
         remote::NodeGroupSamplePool *remote_sample_pool =
             broadcast_stat_req->mutable_node_group_sample_pool();
         ccmap_sample_pool.To(remote_sample_pool);
@@ -697,9 +817,8 @@ private:
                 else
                 {
                     Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                        [this,
-                         table_name = ccmap_sample_pool.GetTableOrIndexName(),
-                         schema_version,
+                        [table_name = ccmap_sample_pool.GetTableOrIndexName(),
+                         schema_version = table_schema->Version(),
                          remote_sample_pool = *remote_sample_pool]() mutable
                         {
                             Sharder::Instance()
@@ -906,6 +1025,7 @@ private:
     // tx_processor thread may modify index_distribution_map_, and SQL thread
     // may read index_distribution_map_. Mutex protection is required.
     mutable std::shared_mutex index_distribution_map_mutex_;
+
     std::unordered_map<TableName, std::shared_ptr<IndexDistribution<KeyT>>>
         index_distribution_map_;
 

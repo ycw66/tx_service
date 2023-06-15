@@ -31,7 +31,7 @@ struct TableSchema
 
     virtual ~TableSchema() = default;
     virtual const TableName &GetBaseTableName() const = 0;
-    virtual const Schema *KeySchema() const = 0;
+    virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const Schema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
@@ -93,6 +93,7 @@ public:
 
     virtual std::unique_ptr<Statistics> CreateTableStatistics(
         const TableName &base_table_name,
+        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,

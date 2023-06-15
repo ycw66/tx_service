@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #include <memory>
 #include <string>
 
@@ -31,25 +33,34 @@ public:
     virtual Schema::Uptr Clone() const = 0;
 };
 
-struct SecondaryKeySchema : public Schema
+struct KeySchema : public Schema
+{
+    virtual bool CompareKeys(const TxKey &key1,
+                             const TxKey &key2,
+                             size_t *const column_index) const = 0;
+
+    virtual uint16_t ExtendKeyParts() const = 0;
+};
+
+struct SecondaryKeySchema : public KeySchema
 {
 public:
     SecondaryKeySchema() = delete;
 
     SecondaryKeySchema(const Schema *sk_sch, const Schema *pk_sch)
-        : sk_schema_(sk_sch->Clone()), pk_schema_(pk_sch->Clone())
+        : SecondaryKeySchema(sk_sch->Clone(), pk_sch->Clone())
     {
     }
 
     SecondaryKeySchema(std::unique_ptr<const Schema> sk_sch,
                        std::unique_ptr<const Schema> pk_sch)
-        : sk_schema_(std::move(sk_sch)), pk_schema_(std::move(pk_sch))
+        : sk_schema_(static_cast<const KeySchema *>(sk_sch.release())),
+          pk_schema_(static_cast<const KeySchema *>(pk_sch.release()))
     {
     }
 
     SecondaryKeySchema(const SecondaryKeySchema &sch)
-        : sk_schema_(sch.sk_schema_->Clone()),
-          pk_schema_(sch.pk_schema_->Clone())
+        : SecondaryKeySchema(sch.sk_schema_->Clone(), sch.pk_schema_->Clone())
     {
     }
 
@@ -58,7 +69,20 @@ public:
         return std::make_unique<SecondaryKeySchema>(*this);
     }
 
-    std::unique_ptr<const Schema> sk_schema_;
-    std::unique_ptr<const Schema> pk_schema_;
+    bool CompareKeys(const TxKey &key1,
+                     const TxKey &key2,
+                     size_t *const column_index) const override
+    {
+        return sk_schema_->CompareKeys(key1, key2, column_index);
+    }
+
+    // Number of key parts in the index (including "index extension")
+    uint16_t ExtendKeyParts() const override
+    {
+        return sk_schema_->ExtendKeyParts();
+    }
+
+    std::unique_ptr<const KeySchema> sk_schema_;
+    std::unique_ptr<const KeySchema> pk_schema_;
 };
 }  // namespace txservice

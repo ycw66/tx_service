@@ -512,6 +512,7 @@ public:
 
     std::pair<Statistics *, bool> InitTableStatistics(
         const TableName &table_name,
+        const TableSchema *table_schema,
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>

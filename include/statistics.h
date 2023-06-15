@@ -74,13 +74,13 @@ public:
         const remote::NodeGroupSamplePool &remote_sample_pool) = 0;
 
     virtual void PriorSplitRange(const TableName &table_or_index_name,
-                                 NodeGroupId ng_id,
-                                 uint64_t schema_version) const = 0;
+                                 const TableSchema *table_schema,
+                                 NodeGroupId ng_id) const = 0;
 
     virtual bool PostCheckpoint(store::DataStoreHandler *store_hd,
                                 const TableName &table_or_index_name,
+                                const TableSchema *table_schema,
                                 NodeGroupId ng_id,
-                                uint64_t schema_version,
                                 uint64_t ckpt_ts,
                                 bool ckpt_empty) const = 0;
 };

@@ -37,7 +37,7 @@ class TxProcessor;
 class TxService;
 class Checkpointer;
 class LocalCcShards;
-class StatisticsEntry;
+struct StatisticsEntry;
 struct CheckDeadLockResult;
 
 #define LOCK_VECTOR_SHRINK_THRESHOLD 4u
@@ -442,6 +442,7 @@ public:
 
     std::pair<Statistics *, bool> InitTableStatistics(
         const TableName &table_name,
+        const TableSchema *table_schema,
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>

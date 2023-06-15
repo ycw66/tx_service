@@ -1087,6 +1087,7 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
 
 std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     const TableName &table_name,
+    const TableSchema *table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
@@ -1101,8 +1102,13 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
-            table_name, std::move(sample_pool_map), ng_weights_map, ccs, ng_id);
+        statistics_entry.statistics_ =
+            catalog_factory_->CreateTableStatistics(table_name,
+                                                    table_schema,
+                                                    std::move(sample_pool_map),
+                                                    ng_weights_map,
+                                                    ccs,
+                                                    ng_id);
     }
 
     return {statistics_it.first->second.statistics_.get(),
@@ -1388,7 +1394,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     CatalogRecord catalog_rec;
 
     ReadTxRequest read_req;
-    read_req.Reset();
     read_req.Set(
         &catalog_ccm_name, &table_key, &catalog_rec, false, false, true, 0UL);
     data_sync_txm->Execute(&read_req);
@@ -1447,6 +1452,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            cc_shards_.size(),
                            std::move(resume_pos),
                            DATA_SYNC_SCAN_BATCH_SIZE);
+    auto begin = std::chrono::steady_clock::now();
+    LOG(INFO) << ">> Begin DataSyncScanCc for tablename: "
+              << table_name.StringView();
     while (!scan_data_drained)
     {
         for (size_t i = 0; i < cc_shards_.size(); i++)
@@ -1496,6 +1504,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             scan_cc.Reset(std::move(res));
         }
     }
+    auto end = std::chrono::steady_clock::now();
+    auto diff =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - begin);
+    LOG(INFO) << ">> End DataSyncScanCc for tablename: "
+              << table_name.StringView() << ", duration(us): " << diff.count();
 
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
         std::make_unique<std::vector<FlushRecord>>();
@@ -1659,8 +1672,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         bool ok = catalog_rec.Schema()->StatisticsObject()->PostCheckpoint(
             store_hd_,
             table_name,
+            table_schema,
             ng_id,
-            catalog_rec.SchemaTs(),
             target_data_sync_ts,
             true);
         if (!ok)
@@ -2123,7 +2136,7 @@ void LocalCcShards::SplitFlushRange(
     }
 
     catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
-        table_name, node_group, catalog_rec.SchemaTs());
+        table_name, catalog_rec.Schema(), node_group);
 
     // Start the SplitFlush tx. This would split the range, flush the data and
     // update slice metadata.
@@ -2362,12 +2375,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         if (succ)
         {
-            succ = schema->StatisticsObject()->PostCheckpoint(store_hd_,
-                                                              table_name,
-                                                              node_group,
-                                                              schema->Version(),
-                                                              data_sync_ts,
-                                                              false);
+            succ = schema->StatisticsObject()->PostCheckpoint(
+                store_hd_, table_name, schema, node_group, data_sync_ts, false);
         }
     }
 

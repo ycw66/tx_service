@@ -712,9 +712,9 @@ void TransactionExecution::ProcessTxRequest(ScanCloseTxRequest &scan_close_req)
               scan_close_req.alias_,
               *scan_close_req.table_name_);
 
-    scan_close_req.tx_result_.Finish(void_);
     scan_close_req.unlock_batch_.clear();
     scan_close_req.in_use_.store(false, std::memory_order_relaxed);
+    scan_close_req.tx_result_.Finish(void_);
 }
 
 void TransactionExecution::ProcessTxRequest(UpsertTxRequest &upsert_req)

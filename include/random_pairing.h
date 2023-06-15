@@ -21,8 +21,7 @@ class RandomPairing
 public:
     RandomPairing() = default;
 
-    template <template <typename K> class Collection>
-    explicit RandomPairing(const Collection<KeyT> &keys)
+    explicit RandomPairing(const std::vector<KeyT> &keys)
     {
         assert(keys.size() <= CapacityN);
         sample_pool_.reserve(CapacityN);

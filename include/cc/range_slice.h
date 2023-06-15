@@ -232,7 +232,7 @@ public:
 
     FillStoreSliceCc *FillCcRequest();
 
-    void SetLoadingError(StoreRange &range);
+    void SetLoadingError(StoreRange &range, CcErrorCode err_code);
 
     bool NeedSplitOrMerge() const
     {

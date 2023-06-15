@@ -599,13 +599,10 @@ public:
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
 
-            if (shard_->realtime_sampling_)
+            if (shard_->realtime_sampling_ &&
+                shard_->core_id_ == Statistics::CoreDoSample(this->table_name_))
             {
-                if (shard_->core_id_ ==
-                    Statistics::CoreDoSample(this->table_name_))
-                {
-                    SplitSamplePool(old_info);
-                }
+                SplitSamplePool(old_info);
             }
 
             // Now that every core has inserted new range entries into ccmap, we

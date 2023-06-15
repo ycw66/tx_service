@@ -804,13 +804,18 @@ std::pair<Statistics *, bool> CcShard::InitTableStatistics(
 
 std::pair<Statistics *, bool> CcShard::InitTableStatistics(
     const TableName &table_name,
+    const TableSchema *table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
     const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map)
 {
-    return local_shards_.InitTableStatistics(
-        table_name, ng_id, std::move(sample_pool_map), ng_weights_map, this);
+    return local_shards_.InitTableStatistics(table_name,
+                                             table_schema,
+                                             ng_id,
+                                             std::move(sample_pool_map),
+                                             ng_weights_map,
+                                             this);
 }
 
 StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,

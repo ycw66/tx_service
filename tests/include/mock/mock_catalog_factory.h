@@ -14,7 +14,7 @@
 namespace txservice
 {
 
-struct MockKeySchema : public txservice::Schema
+struct MockKeySchema : public txservice::KeySchema
 {
 public:
     using Uptr = std::unique_ptr<MockKeySchema>;
@@ -26,6 +26,18 @@ public:
     Schema::Uptr Clone() const override
     {
         return std::make_unique<MockKeySchema>();
+    }
+
+    bool CompareKeys(const TxKey &key1,
+                     const TxKey &key2,
+                     size_t *const column_index) const override
+    {
+        return false;
+    }
+
+    uint16_t ExtendKeyParts() const override
+    {
+        return UINT16_MAX;
     }
 };
 
@@ -66,7 +78,7 @@ public:
         return table_name_;
     }
 
-    const Schema *KeySchema() const override
+    const txservice::KeySchema *KeySchema() const override
     {
         return key_schema_.get();
     }
@@ -227,6 +239,7 @@ public:
 
     std::unique_ptr<Statistics> CreateTableStatistics(
         const TableName &base_table_name,
+        const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,

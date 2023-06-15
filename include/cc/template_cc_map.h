@@ -504,7 +504,7 @@ public:
 
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
-                    sample_pool_->OnInsert(*key_ptr, schema_ts_);
+                    sample_pool_->OnInsert(*key_ptr, table_schema_);
                 }
             }
 
@@ -643,6 +643,7 @@ public:
                     shard_->mem_usage_ += cce->PayloadMemUsage();
                 }
 
+                RecordStatus cce_old_status = cce->payload_status_;
                 cce->payload_status_ =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -654,12 +655,17 @@ public:
                     if (op_type == OperationType::Insert)
                     {
                         sample_pool_->OnInsert(
-                            static_cast<const KeyT &>(*cce->Key()), schema_ts_);
+                            static_cast<const KeyT &>(*cce->Key()),
+                            table_schema_);
                     }
                     else if (op_type == OperationType::Delete)
                     {
-                        sample_pool_->OnDelete(
-                            static_cast<const KeyT &>(*cce->Key()), schema_ts_);
+                        if (cce_old_status == RecordStatus::Normal)
+                        {
+                            sample_pool_->OnDelete(
+                                static_cast<const KeyT &>(*cce->Key()),
+                                table_schema_);
+                        }
                     }
                 }
             }
@@ -4592,7 +4598,7 @@ public:
 
             sample_pool_->Reset(std::move(key_sample_pool->random_pairing_),
                                 node_group_records,
-                                schema_ts_);
+                                table_schema_);
             hd_res->SetFinished();
             return true;
         }

@@ -64,7 +64,7 @@ FillStoreSliceCc *StoreSlice::FillCcRequest()
     return fetch_slice_cc_.get();
 }
 
-void StoreSlice::SetLoadingError(StoreRange &range)
+void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
 {
     std::lock_guard<std::mutex> lk(slice_mux_);
 
@@ -79,7 +79,7 @@ void StoreSlice::SetLoadingError(StoreRange &range)
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
-        cc_req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        cc_req->AbortCcRequest(err_code);
     }
 
     if (cc_queue_.size() > 8)

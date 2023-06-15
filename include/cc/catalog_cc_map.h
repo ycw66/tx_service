@@ -196,9 +196,35 @@ public:
 
                 if (catalog_entry->dirty_schema_)
                 {
-                    auto [statistics, inserted] = shard_->InitTableStatistics(
-                        table_key->Name(), req.NodeGroupId());
-                    catalog_entry->dirty_schema_->BindStatistics(statistics);
+                    if (catalog_entry->schema_)
+                    {
+                        const StatisticsEntry *statistics_entry =
+                            shard_->GetTableStatistics(table_key->Name(),
+                                                       cc_ng_id_);
+                        if (statistics_entry == nullptr ||
+                            statistics_entry->statistics_ == nullptr)
+                        {
+                            shard_->FetchTableStatistics(
+                                table_key->Name(), cc_ng_id_, &req);
+                            return false;
+                        }
+                        else
+                        {
+                            catalog_entry->dirty_schema_->BindStatistics(
+                                statistics_entry->statistics_.get());
+                        }
+                    }
+                    else
+                    {
+                        auto [statistics, inserted] =
+                            shard_->InitTableStatistics(table_key->Name(),
+                                                        cc_ng_id_);
+                        if (inserted)
+                        {
+                            catalog_entry->dirty_schema_->BindStatistics(
+                                statistics);
+                        }
+                    }
                 }
             }
             else
@@ -866,17 +892,6 @@ public:
                     return false;
                 }
                 catalog_entry = new_catalog_entry;
-            }
-
-            auto [statistics, inserted] =
-                shard_->InitTableStatistics(table_name, req.NodeGroupId());
-            if (catalog_entry->schema_)
-            {
-                catalog_entry->schema_->BindStatistics(statistics);
-            }
-            if (catalog_entry->dirty_schema_)
-            {
-                catalog_entry->dirty_schema_->BindStatistics(statistics);
             }
         }
         else

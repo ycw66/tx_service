@@ -142,12 +142,17 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 
             auto [statistics, inserted] =
                 ccs.InitTableStatistics(table_name_,
+                                        table_schema,
                                         cc_ng_id_,
                                         std::move(sample_pool_map_),
                                         ng_weights_map);
             if (inserted)
             {
                 table_schema->BindStatistics(statistics);
+                if (catalog_entry->dirty_schema_)
+                {
+                    catalog_entry->dirty_schema_->BindStatistics(statistics);
+                }
             }
         }
 
@@ -420,7 +425,7 @@ void FillStoreSliceCc::SetFinish()
         }
         else
         {
-            range_slice_.SetLoadingError(range_);
+            range_slice_.SetLoadingError(range_, err_code);
         }
     }
 }
@@ -441,7 +446,7 @@ void FillStoreSliceCc::SetError(CcErrorCode err_code)
 
     if (finish_all)
     {
-        range_slice_.SetLoadingError(range_);
+        range_slice_.SetLoadingError(range_, err_code_);
     }
 }
 
@@ -455,7 +460,7 @@ void FillStoreSliceCc::TerminateFilling()
     // The method is called when there is an error of reading the data store.
     // The slice has not been filled into memory. So, the out-of-memory flag is
     // false.
-    range_slice_.SetLoadingError(range_);
+    range_slice_.SetLoadingError(range_, CcErrorCode::DATA_STORE_ERR);
 }
 
 const TxKey *FillStoreSliceCc::SliceStart() const
