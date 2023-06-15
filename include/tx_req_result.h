@@ -202,6 +202,6 @@ private:
     const std::function<void()> *yield_func_;
     const std::function<void()> *resume_func_;
 
-    friend class TxRequest;
+    friend struct TxRequest;
 };
 }  // namespace txservice

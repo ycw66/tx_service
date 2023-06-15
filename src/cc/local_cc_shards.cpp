@@ -1452,9 +1452,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            cc_shards_.size(),
                            std::move(resume_pos),
                            DATA_SYNC_SCAN_BATCH_SIZE);
-    auto begin = std::chrono::steady_clock::now();
-    LOG(INFO) << ">> Begin DataSyncScanCc for tablename: "
-              << table_name.StringView();
     while (!scan_data_drained)
     {
         for (size_t i = 0; i < cc_shards_.size(); i++)
@@ -1504,11 +1501,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             scan_cc.Reset(std::move(res));
         }
     }
-    auto end = std::chrono::steady_clock::now();
-    auto diff =
-        std::chrono::duration_cast<std::chrono::microseconds>(end - begin);
-    LOG(INFO) << ">> End DataSyncScanCc for tablename: "
-              << table_name.StringView() << ", duration(us): " << diff.count();
 
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
         std::make_unique<std::vector<FlushRecord>>();

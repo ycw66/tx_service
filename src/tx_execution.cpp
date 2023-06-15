@@ -3850,7 +3850,7 @@ void TransactionExecution::PostProcess(AnalyzeTableAllOp &analyze_table_all_op)
     }
     else
     {
-        LOG(INFO) << "txm notifies analyze tx request ";
+        DLOG(INFO) << "txm notifies analyze tx request ";
         void_resp_->Finish(void_);
     }
 }
