@@ -691,7 +691,7 @@ private:
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
         for (auto &[table_or_index_name, index_sample_pool] : sample_pool_map)
         {
-            if (!(table_or_index_name == table_schema->GetBaseTableName()) &&
+            if (table_or_index_name != table_schema->GetBaseTableName() &&
                 table_schema->IndexKeySchema(table_or_index_name) == nullptr)
             {
                 continue;  // Skip dropped index
@@ -708,16 +708,7 @@ private:
 
             NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
-            std::vector<SamplePoolParam<KeyT>> ng_param_vec(ng_cnt);
-
-            std::vector<uint64_t> records_vec = DivideRecordsByNodeGroupWeight(
-                records, ng_weights_map.at(table_or_index_name));
-
-            for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
-            {
-                ng_param_vec[ng_id].records_ = records_vec.at(ng_id);
-            }
-
+            std::vector<std::vector<KeyT>> sample_pool_vec(ng_cnt);
             for (TxKey::Uptr &samplekey : samplekeys)
             {
                 KeyT &key = static_cast<KeyT &>(*samplekey);
@@ -727,17 +718,38 @@ private:
 #else
                 NodeGroupId key_ng_id = RouteKey(key);
 #endif
-                ng_param_vec[key_ng_id].sample_keys_.emplace_back(
-                    std::move(key));
+                sample_pool_vec[key_ng_id].emplace_back(std::move(key));
             }
+
+            const std::vector<uint64_t> &ng_weight_vec =
+                ng_weights_map.at(table_or_index_name);
+            assert(ng_weight_vec.size() == ng_cnt);
+
+            std::vector<uint64_t> sp_size_vec;
+            std::transform(sample_pool_vec.begin(),
+                           sample_pool_vec.end(),
+                           std::back_inserter(sp_size_vec),
+                           [](const std::vector<KeyT> &sample_pool)
+                           { return sample_pool.size(); });
+            assert(ng_weight_vec.size() == ng_cnt);
+
+            std::vector<uint64_t> records_vec =
+                DivideRecords(records, ng_weight_vec, sp_size_vec);
+            assert(records_vec.size() == ng_cnt);
 
             for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
             {
-                ng_sample_pool_map.emplace(
-                    std::piecewise_construct,
-                    std::forward_as_tuple(ng_id),
-                    std::forward_as_tuple(
-                        &it->first, ng_id, ng_param_vec.at(ng_id)));
+                std::vector<KeyT> &sample_pool = sample_pool_vec[ng_id];
+                uint64_t records = records_vec[ng_id];
+                if (records > 0)
+                {
+                    SamplePoolParam<KeyT> param{std::move(sample_pool),
+                                                records};
+                    ng_sample_pool_map.emplace(
+                        std::piecewise_construct,
+                        std::forward_as_tuple(ng_id),
+                        std::forward_as_tuple(&it->first, ng_id, param));
+                }
             }
         }
     }
@@ -863,24 +875,93 @@ private:
     }
 
 private:
-    static std::vector<uint64_t> DivideRecordsByNodeGroupWeight(
-        uint64_t records, const std::vector<uint64_t> &ng_weights_map)
+    // For a table or index, we merge its sample pools of node groups together
+    // when write them into kv storage. Because we need to scale up/down node
+    // groups.
+    //
+    // After merge sample pool, when rebuild sampel pool of every node from
+    // storage, we need to split that merged sample pool.
+    //
+    // For node group sample keys, it is easy to split them based on their route
+    // method.
+    //
+    // For node group records, information to split table/index records is
+    // incomplete. We split table/index records by node group weights in bytes
+    // first. If the output result is wrong, concretely, node group records is
+    // less than node group sample keys, then we split table/index records by
+    // node group sample keys.
+    static std::vector<uint64_t> DivideRecords(
+        uint64_t records,
+        const std::vector<uint64_t> &ng_weight_vec,
+        const std::vector<uint64_t> &sp_size_vec)
     {
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        assert(ng_cnt == ng_weights_map.size());
+        std::vector<uint32_t> ng_vec(ng_cnt);
+        std::iota(ng_vec.begin(), ng_vec.end(), 1);
 
-        std::vector<uint64_t> records_vec(ng_cnt, 0);
+        std::vector<uint64_t> records_vec =
+            DivideRecordsByNodeGroupWeight(records, ng_weight_vec);
+
+        bool no_conflict =
+            std::equal(records_vec.begin(),
+                       records_vec.end(),
+                       sp_size_vec.begin(),
+                       [](uint64_t a, uint64_t b) { return a >= b; });
+        if (no_conflict)
+        {
+            return records_vec;
+        }
+        else
+        {
+            return DivideRecordsBySamplePoolSize(records, sp_size_vec);
+        }
+    }
+
+    static std::vector<uint64_t> DivideRecordsByNodeGroupWeight(
+        uint64_t records, const std::vector<uint64_t> &ng_weight_vec)
+    {
+        assert(Sharder::Instance().NodeGroupCount() == ng_weight_vec.size());
+        return DivideRecordsByWeights(records, ng_weight_vec);
+    }
+
+    static std::vector<uint64_t> DivideRecordsBySamplePoolSize(
+        uint64_t records, const std::vector<uint64_t> &sp_size_vec)
+    {
+        std::vector<uint64_t> records_vec;
+
+        uint64_t sp_size_total =
+            std::accumulate(sp_size_vec.begin(), sp_size_vec.end(), 0);
+        assert(records >= sp_size_total);
+        if (records == sp_size_total)
+        {
+            records_vec = sp_size_vec;
+        }
+        else
+        {
+            records_vec = DivideRecordsByWeights(records, sp_size_vec);
+            assert(std::equal(records_vec.begin(),
+                              records_vec.end(),
+                              sp_size_vec.begin(),
+                              [](uint64_t a, uint64_t b) { return a >= b; }));
+        }
+
+        return records_vec;
+    }
+
+    static std::vector<uint64_t> DivideRecordsByWeights(
+        uint64_t records, const std::vector<uint64_t> &weights)
+    {
+        size_t sz = weights.size();
+        std::vector<uint64_t> records_vec(sz, 0UL);
 
         uint64_t total_weight =
-            std::accumulate(ng_weights_map.begin(), ng_weights_map.end(), 0UL);
-
+            std::accumulate(weights.begin(), weights.end(), 0UL);
         uint64_t c = 0;
-        for (NodeGroupId ng_id = 0; ng_id < ng_cnt - 1; ++ng_id)
+        for (size_t i = 0; i < sz - 1; ++i)
         {
-            records_vec[ng_id] =
-                records * (static_cast<double>(ng_weights_map[ng_id]) /
-                           static_cast<double>(total_weight));
-            c += records_vec[ng_id];
+            records_vec[i] = records * (static_cast<double>(weights[i]) /
+                                        static_cast<double>(total_weight));
+            c += records_vec[i];
         }
         records_vec.back() = records - c;
 

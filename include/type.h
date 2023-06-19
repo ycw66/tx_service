@@ -206,6 +206,11 @@ struct TableName
         return type_ == rhs.type_ && this->StringView() == rhs.StringView();
     }
 
+    bool operator!=(const TableName &rhs) const
+    {
+        return !this->operator==(rhs);
+    }
+
     bool operator<(const TableName &rhs) const
     {
         return type_ < rhs.type_ ||
