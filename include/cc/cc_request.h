@@ -6,6 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -13,6 +14,8 @@
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include "../../log_service/include/fault_inject.h"
@@ -32,6 +35,7 @@
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_command.h"
 #include "tx_operation_result.h"
 #include "type.h"
 #include "util.h"
@@ -112,6 +116,7 @@ public:
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
+#ifndef ON_KEY_OBJECT
                     {
                         // Initialize table statistics
 #ifdef RANGE_PARTITION_ENABLED
@@ -162,6 +167,7 @@ public:
                             return false;
                         }
                     }
+#endif
 
                     // The request is toward a special cc map that contains a
                     // table's range meta data.
@@ -194,9 +200,9 @@ public:
                 else
                 {
                     // Find base table name for index table.
-                    // Fecth/Get Catalog is based on base table name, but Get
+                    // Fetch/Get Catalog is based on base table name, but Get
                     // ccmap is based on the real table name, for example, index
-                    // should get the correspond sk_ccmap.
+                    // should get the corresponding sk_ccmap.
                     assert(table_name_->Type() == TableType::Primary ||
                            table_name_->Type() == TableType::Secondary);
                     const TableName base_table_name{
@@ -210,6 +216,7 @@ public:
                             catalog_entry->schema_.get();
                         if (curr_schema != nullptr)
                         {
+#ifndef ON_KEY_OBJECT
                             {
                                 // Initialize table statistics
 #ifdef RANGE_PARTITION_ENABLED
@@ -261,6 +268,7 @@ public:
                                     return false;
                                 }
                             }
+#endif
 
                             ccs.CreateOrUpdatePkCcMap(base_table_name,
                                                       curr_schema,
@@ -3388,5 +3396,217 @@ public:
     std::mutex mux_;
     std::condition_variable cv_;
     size_t pending_shard_;
+};
+
+/**
+ * Apply command to the object specified by key.
+ */
+struct ApplyCc : public TemplatedCcRequest<ApplyCc, ObjectCommandResult>
+{
+private:
+    struct LocalTuple
+    {
+        const TxKey *key_{};
+        const TxCommand *cmd_{};
+        TxCommandResult *cmd_result_{};
+    };
+
+    struct RemoteTuple
+    {
+        const std::string *key_str_{};
+        const std::string *cmd_str_{};
+        std::unique_ptr<TxCommand> cmd_uptr_;
+        std::unique_ptr<TxCommandResult> cmd_result_uptr_;
+    };
+
+public:
+    ApplyCc() : is_local_(true)
+    {
+        local_input_.key_ = nullptr;
+        local_input_.cmd_ = nullptr;
+        local_input_.cmd_result_ = nullptr;
+    }
+
+    ~ApplyCc() override
+    {
+        if (!is_local_)
+        {
+            remote_input_.cmd_result_uptr_ = nullptr;
+        }
+    };
+
+    void Reset(const TableName *table_name,
+               const TxKey *key,
+               const uint32_t key_shard_code,
+               const TxCommand *cmd,
+               TxCommandResult *cmd_result,
+               TxNumber txn,
+               int64_t tx_term,
+               uint64_t tx_ts,
+               CcHandlerResult<ObjectCommandResult> *res,
+               CcProtocol proto,
+               bool commit)
+    {
+        TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
+            table_name,
+            res,
+            Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
+            txn,
+            proto);
+
+        // TODO(zkl): release uptrs on ApplyCc finish, instead of reuse
+        if (!is_local_)
+        {
+            remote_input_.cmd_uptr_ = nullptr;
+            remote_input_.cmd_result_uptr_ = nullptr;
+        }
+
+        is_local_ = true;
+        local_input_.key_ = key;
+        local_input_.cmd_ = cmd;
+        local_input_.cmd_result_ = cmd_result;
+
+        key_shard_code_ = key_shard_code;
+        tx_term_ = tx_term;
+        tx_ts_ = tx_ts;
+        cce_ptr_ = nullptr;
+        apply_and_commit_ = commit;
+    }
+
+    void Reset(const TableName *table_name,
+               const std::string *key_str,
+               const uint32_t key_shard_code,
+               const std::string *cmd_str,
+               TxNumber txn,
+               int64_t tx_term,
+               uint64_t tx_ts,
+               CcHandlerResult<ObjectCommandResult> *res,
+               CcProtocol proto)
+    {
+        TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
+            table_name,
+            res,
+            Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
+            txn,
+            proto);
+
+        // TODO(zkl): release uptrs on ApplyCc finish, instead of reuse
+        if (!is_local_)
+        {
+            remote_input_.cmd_uptr_ = nullptr;
+            remote_input_.cmd_result_uptr_ = nullptr;
+        }
+
+        is_local_ = false;
+        remote_input_.key_str_ = key_str;
+        remote_input_.cmd_str_ = cmd_str;
+        remote_input_.cmd_result_uptr_ = nullptr;
+
+        key_shard_code_ = key_shard_code;
+        tx_term_ = tx_term;
+        tx_ts_ = tx_ts;
+        cce_ptr_ = nullptr;
+    }
+
+    bool IsLocal() const
+    {
+        return is_local_;
+    }
+
+    bool IsRemote() const
+    {
+        return !is_local_;
+    }
+
+    const TxKey *Key() const
+    {
+        return is_local_ ? local_input_.key_ : nullptr;
+    }
+
+    const std::string *KeyImage() const
+    {
+        return is_local_ ? nullptr : remote_input_.key_str_;
+    }
+
+    const TxCommand *CommandPtr() const
+    {
+        return is_local_ ? local_input_.cmd_ : nullptr;
+    }
+
+    const std::string *CommandImage() const
+    {
+        return is_local_ ? nullptr : remote_input_.cmd_str_;
+    }
+
+    TxCommandResult *CommandResultPtr() const
+    {
+        return is_local_ ? local_input_.cmd_result_ : nullptr;
+    }
+
+    bool OwnCommand() const
+    {
+        return !is_local_ && remote_input_.cmd_uptr_ != nullptr;
+    }
+
+    void SetCommand(std::unique_ptr<TxCommand> cmd)
+    {
+        assert(!is_local_);
+        remote_input_.cmd_uptr_ = std::move(cmd);
+    }
+
+    std::unique_ptr<TxCommand> ReleaseCommand()
+    {
+        assert(!is_local_);
+        return std::move(remote_input_.cmd_uptr_);
+    }
+
+    void SetCommandResult(std::unique_ptr<TxCommandResult> cmd_result)
+    {
+        assert(!is_local_);
+        remote_input_.cmd_result_uptr_ = std::move(cmd_result);
+    }
+
+    LruEntry *CcePtr() const
+    {
+        return cce_ptr_;
+    }
+
+    void SetCcePtr(LruEntry *cce)
+    {
+        cce_ptr_ = cce;
+    }
+
+    int64_t TxTerm() const
+    {
+        return tx_term_;
+    }
+
+    uint64_t TxTs() const
+    {
+        return tx_ts_;
+    }
+
+    union
+    {
+        LocalTuple local_input_;
+        RemoteTuple remote_input_;
+    };
+
+    bool is_local_{};
+    uint32_t key_shard_code_{};
+    int64_t tx_term_{-1};
+    uint64_t tx_ts_{1};
+
+    // The pointer of the cc entry to which this request is directed. The
+    // pointer is set, when the request locates the cc entry but is blocked due
+    // to conflicts in 2PL. After the request is unblocked and acquires the
+    // lock, the request's execution resumes without further lookup of the cc
+    // entry.
+    LruEntry *cce_ptr_{};
+
+    // Execute the command and directly commit it on the object, skipping
+    // acquiring lock and writing log. If false, just execute the command to
+    // get the result.
+    bool apply_and_commit_{};
 };
 }  // namespace txservice

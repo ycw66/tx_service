@@ -39,7 +39,7 @@ public:
     void Run() override
     {
         CODE_FAULT_INJECTOR("log_closure_result_unknown", {
-            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR);
+            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR);
             return;
         });
         // rpc fails including timeout indicates the status of log request is
@@ -47,7 +47,7 @@ public:
         if (cntl_.Failed() || response_.response_status() ==
                                   ::txlog::LogResponse_ResponseStatus_Unknown)
         {
-            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR);
+            hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR);
         }
         else if (response_.response_status() ==
                  ::txlog::LogResponse_ResponseStatus_Success)

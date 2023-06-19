@@ -13,6 +13,8 @@
 #include "tx_worker_pool.h"
 #include "type.h"
 
+DECLARE_bool(skip_wal);
+
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
     : thd_id_(thd_id),
@@ -1292,6 +1294,45 @@ void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
                                    tx_term,
                                    command_id,
                                    hres);
+    }
+}
+
+void txservice::LocalCcHandler::ObjectCommand(
+    const txservice::TableName &table_name,
+    const txservice::TxKey &key,
+    uint32_t key_shard_code,
+    const txservice::TxCommand &obj_cmd,
+    txservice::TxCommandResult &obj_cmd_result,
+    txservice::TxNumber txn,
+    int64_t tx_term,
+    uint64_t tx_ts,
+    txservice::CcHandlerResult<txservice::ObjectCommandResult> &hres,
+    const txservice::CcProtocol proto,
+    bool commit)
+{
+    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+    hres.Value().cce_addr_.SetCce(0, -1, ng_id, 0);
+
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        ApplyCc *req = apply_pool.NextRequest();
+        req->Reset(&table_name,
+                   &key,
+                   key_shard_code,
+                   &obj_cmd,
+                   &obj_cmd_result,
+                   txn,
+                   tx_term,
+                   tx_ts,
+                   &hres,
+                   proto,
+                   commit);
+        cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
+    }
+    else
+    {
+        // TODO(zkl): support remote requests.
     }
 }
 

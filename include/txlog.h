@@ -70,7 +70,7 @@ public:
 
     virtual uint32_t LogGroupReplicaNum() const = 0;
 
-    virtual uint32_t GetLogGroupId(uint64_t tx_number) = 0;
+    virtual uint32_t GetLogGroupId(uint64_t tx_number) const = 0;
 
     virtual void RefreshLeader(uint32_t log_group_id) = 0;
 

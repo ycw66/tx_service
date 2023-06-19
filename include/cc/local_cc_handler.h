@@ -295,6 +295,18 @@ public:
                          uint16_t command_id,
                          CcHandlerResult<Void> &hres) override;
 
+    void ObjectCommand(const TableName &table_name,
+                       const TxKey &key,
+                       uint32_t key_shard_code,
+                       const TxCommand &obj_cmd,
+                       TxCommandResult &obj_cmd_result,
+                       TxNumber txn,
+                       int64_t tx_term,
+                       uint64_t tx_ts,
+                       CcHandlerResult<ObjectCommandResult> &hres,
+                       const CcProtocol proto,
+                       bool commit) override;
+
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,
@@ -365,6 +377,7 @@ private:
     CcRequestPool<FaultInjectCC> fault_inject_pool;
     CcRequestPool<CleanCcEntryForTestCc> clean_cc_entry_pool;
     CcRequestPool<KickoutCcEntryCc> kickout_ccentry_pool_;
+    CcRequestPool<ApplyCc> apply_pool;
 
     CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};

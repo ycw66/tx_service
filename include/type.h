@@ -37,7 +37,10 @@ enum class OperationType
     CreateTable,
     DropTable,
     AddIndex,
-    DropIndex
+    DropIndex,
+
+    // redis object command operation
+    RedisCommand
 };
 
 /**
@@ -406,6 +409,7 @@ enum class PostWriteType
 
 inline static std::string_view empty_sv{"__empty"};
 inline static std::string_view catalog_ccm_name_sv{"__catalog"};
+inline static std::string_view redis_table_name_sv{"redis_table"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};

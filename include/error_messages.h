@@ -144,7 +144,7 @@ enum struct CcErrorCode
     DATA_STORE_ERR,
 
     // log service
-    LOG_CLOSURE_RESULT_UNKOWN_ERR,
+    LOG_CLOSURE_RESULT_UNKNOWN_ERR,
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,
@@ -201,8 +201,8 @@ static const std::map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::DATA_STORE_ERR, "DATA_STORE_ERR"},
 
     // log service
-    {CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR,
-     "LOG_CLOSURE_RESULT_UNKOWN_ERR"},
+    {CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR,
+     "LOG_CLOSURE_RESULT_UNKNOWN_ERR"},
 
     // detect dead lock
     {CcErrorCode::DEAD_LOCK_ABORT, "DEAD_LOCK_ABORT"},

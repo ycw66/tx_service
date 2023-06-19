@@ -70,6 +70,7 @@ public:
         pg_ps_inf_.prev_page_ = &pg_ng_inf_;
         pg_ps_inf_.next_page_ = nullptr;
 
+#ifndef ON_KEY_OBJECT
         if (table_schema && (table_name.Type() == TableType::Primary ||
                              table_name.Type() == TableType::Secondary))
         {
@@ -84,6 +85,7 @@ public:
                 assert(sample_pool_);
             }
         }
+#endif
 
         TX_TRACE_ASSOCIATE_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -1734,8 +1736,8 @@ public:
             {
                 req.SetIsWaitForPostWrite(true);
                 // Put the request to top of key lock's blocking queue with
-                // acquring readlock. And then should release the readlock
-                // before handling this requst when PostWriteCc finished.
+                // acquiring readlock. And then should release the readlock
+                // before handling this request when PostWriteCc finished.
                 cce->key_lock_ptr_->InsertBlockingQueue(&req,
                                                         LockType::ReadLock);
                 shard_->CheckRecoverTx(
@@ -4663,8 +4665,8 @@ public:
             uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
-                // Skips the the key in the log record that is not sharded
-                // to this core.
+                // Skips the key in the log record that is not sharded to this
+                // core.
                 if (delete_flag == 0)
                 {
                     rec.Deserialize(log_blob.data(), offset);

@@ -35,6 +35,7 @@ struct UpsertTxRequest;
 struct CommitTxRequest;
 struct AbortTxRequest;
 struct UpsertTableTxRequest;
+struct ObjectCommandTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
@@ -119,6 +120,7 @@ public:
     void ProcessTxRequest(CommitTxRequest &commit_req);
     void ProcessTxRequest(AbortTxRequest &abort_req);
     void ProcessTxRequest(UpsertTableTxRequest &req);
+    void ProcessTxRequest(ObjectCommandTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
@@ -335,6 +337,9 @@ private:
     void Process(ReleaseScanExtraLockOp &lock_op);
     void PostProcess(ReleaseScanExtraLockOp &lock_op);
 
+    void Process(ObjectCommandOp &obj_cmd_op);
+    void PostProcess(ObjectCommandOp &obj_cmd_op);
+
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
     void ScanClose(const std::vector<UnlockTuple> &unlock_batch,
@@ -357,6 +362,8 @@ private:
 
     void FillDataLogRequest(WriteToLogOp &write_log);
 
+    void FillCommandLogRequest(WriteToLogOp &write_log);
+
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
 
@@ -367,7 +374,7 @@ private:
     void ReleaseReadRangeLock(ReadOperation &read);
 #endif
 
-    TxErrorCode ConvertCcError(CcErrorCode error);
+    static TxErrorCode ConvertCcError(CcErrorCode error);
 
     ScanCloseTxRequest *NextScanCloseTxReq(size_t alias,
                                            const TableName *table_name);
@@ -489,6 +496,8 @@ private:
     std::unique_ptr<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>
         scan_close_req_pool_{nullptr};
 
+    ObjectCommandOp obj_cmd_;
+
     // Committing phase.
 #ifdef RANGE_PARTITION_ENABLED
     LockWriteRangesOp lock_write_ranges_;
@@ -550,6 +559,7 @@ private:
     template <typename ResultType>
     friend struct AsyncOp;
     friend struct PostReadOperation;
+    friend struct ObjectCommandOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

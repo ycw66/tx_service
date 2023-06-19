@@ -7,6 +7,7 @@
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "tx_command.h"
 #include "type.h"
 
 namespace txservice
@@ -349,5 +350,30 @@ struct PostProcessResult
     std::vector<TxNumber> conflicting_txs_;
     std::mutex mux_;
     bool is_local_{true};
+};
+
+struct ObjectCommandResult
+{
+    void Reset()
+    {
+        commit_ts_ = 0;
+        last_read_ts_ = 0;
+        cce_addr_ = CcEntryAddr{};
+        rec_status_ = RecordStatus{};
+        cmd_uptr_ = nullptr;
+    }
+
+    // cce commit_ts, for validation?
+    uint64_t commit_ts_{};
+    // currently not used
+    uint64_t last_read_ts_{};
+    // add read write set
+    CcEntryAddr cce_addr_{};
+
+    RecordStatus rec_status_;
+
+    // for read-modify-write commands, complete command copies (including the
+    // command arguments) to be stored in write set and referenced by objects
+    std::unique_ptr<TxCommand> cmd_uptr_{};
 };
 }  // namespace txservice

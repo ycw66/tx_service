@@ -147,4 +147,5 @@ template class CcHandlerResult<bool>;
 template class CcHandlerResult<uint64_t>;
 template class CcHandlerResult<int8_t>;
 template class CcHandlerResult<std::string>;
+template class CcHandlerResult<ObjectCommandResult>;
 }  // namespace txservice

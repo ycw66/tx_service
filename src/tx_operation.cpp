@@ -251,10 +251,12 @@ void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
     }
     else
     {
-        // The get-range request has not finished. The caller operation of this
-        // LockRangeOperation cannot proceed without knowing the input key's
-        // range. Since lock read range is always a local request, we don't need
-        // to check for timeout.
+        // TODO(zkl): wait some time and timeout, for async FetchTableRanges
+        //  from KV.
+        // The get-range request has not finished. The caller operation
+        // of this LockRangeOperation cannot proceed without knowing the input
+        // key's range. Since lock read range is always a local request, we
+        // don't need to check for timeout.
         return;
     }
 }
@@ -659,7 +661,7 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
         // locks on participants remain. The participants ccnodes will do
         // the PostProcess individually via orphan lock recovery mechanism.
         if (hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR &&
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR &&
             log_type_ == TxLogType::DATA &&
             Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) > 0)
         {
@@ -1019,7 +1021,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
     if (scanner.Type() == CcmScannerType::HashPartition &&
         hd_result_.IsFinished())
     {
-        // Error code -1 indicates send message failed or term changed.
+        // Error code REQUESTED_NODE_NOT_LEADER indicates send message failed or
+        // term changed.
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             if (retry_num_ == 0)
@@ -1634,7 +1637,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (prepare_log_op_.hd_result_.IsError())
         {
             if (prepare_log_op_.hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
             {
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the
@@ -3664,4 +3667,96 @@ void AnalyzeTableAllOp::Forward(TransactionExecution *txm)
     }
 }
 
+ObjectCommandOp::ObjectCommandOp(TransactionExecution *txm)
+    : hd_result_(txm)
+#ifdef RANGE_PARTITION_ENABLED
+      ,
+      lock_range_result_(txm)
+#endif
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void ObjectCommandOp::Reset(const TableName *table_name,
+                            const TxKey *key,
+                            const TxCommand *command,
+                            TxCommandResult *cmd_result,
+                            bool auto_commit)
+{
+    table_name_ = table_name;
+    key_ = key;
+    command_ = command;
+    cmd_result_ = cmd_result;
+    hd_result_.Reset();
+    hd_result_.Value().Reset();
+    auto_commit_ = auto_commit;
+}
+
+void ObjectCommandOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        // Just returned from LockReadRangeOp, check lock_range_result_.
+        assert(lock_range_result_.IsFinished());
+        if (lock_range_result_.IsError())
+        {
+            // There is an error when getting the input key's range. The
+            // read operation is set to be errored.
+            hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+
+            bool force_success = hd_result_.ForceError();
+            assert(force_success);
+
+            txm->PostProcess(*this);
+            return;
+        }
+#endif
+        txm->Process(*this);
+    }
+
+    const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
+    if (cce_addr.Term() < 0 && txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.Term<0.IsTimeout",
+            txm,
+            (
+                [txm]() -> std::string
+                {
+                    return std::string(",\"tx_number\":")
+                        .append(std::to_string(txm->TxNumber()))
+                        .append(",\"term\":")
+                        .append(std::to_string(txm->TxTerm()));
+                }));
+        // For non-blocking concurrency control protocols, the object command is
+        // expected to return instantly. For 2PL, if the request is blocked, the
+        // cc node will send an acknowledgement to update the key's term. In
+        // either case, if the object's term is not set, the tx has not received
+        // any response or acknowledgement from the key's cc node group. The
+        // request is forced to be errored upon timeout.
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+    }
+    else if (hd_result_.IsFinished())
+    {
+        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            // The request was directed to a non-leader node. Updates the
+            // leader cache. Sine UpdateLeader() is a sync call, we only do it
+            // when re-run the operation fails.
+            if (retry_num_ == 0)
+            {
+                Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+        txm->PostProcess(*this);
+    }
+}
 }  // namespace txservice

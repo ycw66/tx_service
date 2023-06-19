@@ -412,6 +412,34 @@ public:
 
     virtual uint32_t GetNodeId() const = 0;
 
+    /**
+     * Execute obj_cmd on the object specified by key to get the result.
+     *
+     * @param table_name
+     * @param key
+     * @param key_shard_code
+     * @param obj_cmd
+     * @param obj_cmd_result
+     * @param txn
+     * @param tx_term
+     * @param tx_ts
+     * @param hres
+     * @param proto
+     * @param commit if true, not just execute the command to get the result,
+     * but also commit it on the object
+     */
+    virtual void ObjectCommand(const TableName &table_name,
+                               const TxKey &key,
+                               uint32_t key_shard_code,
+                               const TxCommand &obj_cmd,
+                               TxCommandResult &obj_cmd_result,
+                               TxNumber txn,
+                               int64_t tx_term,
+                               uint64_t tx_ts,
+                               CcHandlerResult<ObjectCommandResult> &hres,
+                               const CcProtocol proto,
+                               bool commit) = 0;
+
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,
                                      bool only_archives,

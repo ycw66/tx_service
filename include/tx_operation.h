@@ -13,6 +13,7 @@
 #include "metrics.h"
 #include "range_record.h"
 #include "read_write_set.h"
+#include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
@@ -898,6 +899,30 @@ public:
 
     AnalyzeTableTxRequest *analyze_tx_req_{nullptr};
     CcHandlerResult<Void> hd_result_;
+};
+
+struct ObjectCommandOp : TransactionOperation
+{
+    explicit ObjectCommandOp(TransactionExecution *txm);
+    void Reset(const TableName *table_name,
+               const TxKey *key,
+               const TxCommand *command,
+               TxCommandResult *cmd_result,
+               bool auto_commit = false);
+    void Forward(TransactionExecution *txm) override;
+
+    const TableName *table_name_{};
+    const TxKey *key_{};
+    const TxCommand *command_{};
+    TxCommandResult *cmd_result_{};
+    CcHandlerResult<ObjectCommandResult> hd_result_;
+
+    bool auto_commit_{};
+
+#ifdef RANGE_PARTITION_ENABLED
+    RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> lock_range_result_;
+#endif
 };
 
 }  // namespace txservice

@@ -3,6 +3,7 @@
 #include <butil/logging.h>
 
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -32,7 +33,6 @@ public:
           data_rset_cnt_(0),
           wset_bytes_cnt_(0),
           forward_write_cnt_(0)
-    //, sset_(), sset_cnt_(0)
     {
     }
 
@@ -46,8 +46,10 @@ public:
         data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
 
-        // sset_cnt_ = 0;
-        // sset_.clear();
+#ifdef ON_KEY_OBJECT
+        cmd_set_.clear();
+        cmd_cnt_ = 0;
+#endif
     }
 
     /**
@@ -496,6 +498,52 @@ public:
         return read_cnt;
     }
 
+    void AddObjectCommand(const TableName &table_name,
+                          const CcEntryAddr &cce_addr,
+                          uint64_t cce_version,
+                          const TxKey *key,
+                          const TxCommand *cmd)
+    {
+#ifdef ON_KEY_OBJECT
+        auto [table_it, success] = cmd_set_.try_emplace(table_name);
+        auto &table_cmd_set = table_it->second;
+
+        std::string key_str;
+        key->Serialize(key_str);
+        std::string cmd_str;
+        cmd->Serialize(cmd_str);
+        auto [cce_it, inserted] = table_cmd_set.try_emplace(
+            cce_addr, cce_version, std::move(key_str), std::move(cmd_str));
+        if (!inserted)
+        {
+            CmdSetEntry &entry = cce_it->second;
+            entry.cmd_str_list_.emplace_back(std::move(cmd_str));
+        }
+
+        cmd_cnt_++;
+#endif
+    }
+
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        *ObjectCommandCce() const
+    {
+#ifdef ON_KEY_OBJECT
+        return &cmd_set_;
+#else
+        return nullptr;
+#endif
+    }
+
+    uint32_t ObjectCommandSize() const
+    {
+#ifdef ON_KEY_OBJECT
+        return cmd_cnt_;
+#else
+        return 0;
+#endif
+    }
+
 private:
     // rset_, wset_cnt_, read_cache_ are not string owner.
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
@@ -507,9 +555,15 @@ private:
         read_cache_;
     size_t wset_bytes_cnt_;
     size_t forward_write_cnt_;
-    /*std::unordered_map<TableName,
-        std::map<const TxKey *, ScanSetEntry, PtrLessThan<TxKey>>>
-        sset_;
-    size_t sset_cnt_;*/
+
+#ifdef ON_KEY_OBJECT
+    /**
+     * Collection of object keys and commands.
+     */
+    std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        cmd_set_;
+
+    uint32_t cmd_cnt_{};
+#endif
 };
 }  // namespace txservice

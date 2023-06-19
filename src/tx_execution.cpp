@@ -58,6 +58,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       read_(this),
       scan_open_(this),
       scan_next_(this),
+      obj_cmd_(this),
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(this),
 #endif
@@ -822,6 +823,18 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
 
     PushOperation(schema_op_.get());
     Forward();
+}
+
+void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
+{
+    rec_resp_ = &req.tx_result_;
+    obj_cmd_.Reset(req.table_name_,
+                   req.key_,
+                   req.command_,
+                   req.cmd_result_,
+                   req.auto_commit_);
+    PushOperation(&obj_cmd_);
+    Process(obj_cmd_);
 }
 
 void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
@@ -2409,6 +2422,7 @@ void TransactionExecution::Commit()
 
     tx_status_.store(TxnStatus::Committing, std::memory_order_release);
 
+#ifndef ON_KEY_OBJECT
     if (rw_set_.WriteSetSize() > 0)
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -2421,6 +2435,7 @@ void TransactionExecution::Commit()
 #endif
     }
     else
+#endif
     {
         PushOperation(&set_ts_);
         Process(set_ts_);
@@ -2736,10 +2751,20 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         }
         else
         {
-            if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0 &&
-                !txservice_skip_redo_log)
+#ifdef ON_KEY_OBJECT
+            bool needs_write_log =
+                !txservice_skip_redo_log && rw_set_.ObjectCommandSize() > 0;
+#else
+            bool needs_write_log =
+                !txservice_skip_redo_log && rw_set_.WriteSetSize() > 0;
+#endif
+            if (txlog_ != nullptr && needs_write_log)
             {
+#ifdef ON_KEY_OBJECT
+                FillCommandLogRequest(write_log_);
+#else
                 FillDataLogRequest(write_log_);
+#endif
                 PushOperation(&write_log_);
                 Process(write_log_);
             }
@@ -2851,29 +2876,58 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         DLOG(ERROR) << "ValidateOperation failed for cc error:"
                     << validate.hd_result_.ErrorMsg();
 
-        bool_resp_->SetErrorCode(
-            ConvertCcError(validate.hd_result_.ErrorCode()));
-        bool_resp_->Finish(false);
-        bool_resp_ = nullptr;
+        if (bool_resp_ != nullptr)
+        {
+            bool_resp_->SetErrorCode(
+                ConvertCcError(validate.hd_result_.ErrorCode()));
+            bool_resp_->Finish(false);
+            bool_resp_ = nullptr;
+        }
+#ifdef ON_KEY_OBJECT
+        else if (rec_resp_ != nullptr)
+        {
+            // auto committed ObjectCommandTxRequest
+            rec_resp_->FinishError(
+                ConvertCcError(validate.hd_result_.ErrorCode()));
+            rec_resp_ = nullptr;
+        }
+#endif
 
         Abort();
     }
-    else if (txlog_ != nullptr && rw_set_.WriteSetSize() > 0)
-    {
-        FillDataLogRequest(write_log_);
-        PushOperation(&write_log_);
-        Process(write_log_);
-    }
     else
     {
-        tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+#ifdef ON_KEY_OBJECT
+        bool needs_write_log =
+            !txservice_skip_redo_log && rw_set_.ObjectCommandSize() > 0;
+#else
+        bool needs_write_log =
+            !txservice_skip_redo_log && rw_set_.WriteSetSize() > 0;
+#endif
+        if (txlog_ != nullptr && needs_write_log)
+        {
+#ifdef ON_KEY_OBJECT
+            FillCommandLogRequest(write_log_);
+#else
+            FillDataLogRequest(write_log_);
+#endif
+            PushOperation(&write_log_);
+            Process(write_log_);
+        }
+        else
+        {
+            tx_status_.store(TxnStatus::Committed, std::memory_order_release);
 
-        // This is a read-only tx. Notifies early before post-processing.
-        bool_resp_->Finish(true);
-        bool_resp_ = nullptr;
+            // This is a read-only tx. Notifies early before post-processing.
+            if (bool_resp_ != nullptr)
+            {
+                bool_resp_->Finish(true);
+                bool_resp_ = nullptr;
+            }
 
-        PushOperation(&update_txn_);
-        Process(update_txn_);
+            PushOperation(&update_txn_);
+            Process(update_txn_);
+        }
     }
 }
 
@@ -3042,6 +3096,137 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
     }
 }
 
+void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
+{
+#ifdef ON_KEY_OBJECT
+    //    write_log.log_type_ = TxLogType::COMMAND;
+    write_log.log_type_ = TxLogType::DATA;
+
+    write_log.log_closure_.LogRequest().Clear();
+
+    ::txlog::LogRequest &log_req = write_log.log_closure_.LogRequest();
+    ::txlog::WriteLogRequest *log_rec = log_req.mutable_write_log_request();
+
+    log_rec->set_tx_term(tx_term_);
+    log_rec->set_txn_number(txid_.TxNumber());
+    log_rec->set_commit_timestamp(commit_ts_);
+    log_rec->set_retry(false);
+
+    auto shard_terms = log_rec->mutable_node_terms();
+    shard_terms->clear();
+
+    auto cmd_log_msg = log_rec->mutable_log_content()->mutable_data_log();
+    auto shard_logs = cmd_log_msg->mutable_node_txn_logs();
+    shard_logs->clear();
+
+    assert(log_rec->node_terms_size() == 0);
+
+    const std::unordered_map<TableName,
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        &tx_cmd_set = *rw_set_.ObjectCommandCce();
+
+    // organize by node group
+    std::unordered_map<NodeGroupId, std::vector<const CmdSetEntry *>>
+        ng_obj_cmds;
+    for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
+    {
+        for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
+        {
+            uint32_t ng_id = cce_addr.NodeGroupId();
+            auto shard_term_it = shard_terms->find(ng_id);
+            if (shard_term_it == shard_terms->end())
+            {
+                (*shard_terms)[ng_id] = cce_addr.Term();
+            }
+            else if (shard_term_it->second != cce_addr.Term())
+            {
+                // Two keys in the tx's write set refer to the same cc node
+                // group, but have different terms.
+                // TODO(zkl): remote data
+            }
+
+            auto &obj_cmds_vector =
+                ng_obj_cmds.try_emplace(ng_id).first->second;
+            // insert cce into cmd_set
+            obj_cmds_vector.emplace_back(&obj_cmd_entry);
+        }
+    }
+
+    // construct one log_ng_blob per ng_id
+    for (const auto &[ng_id, cmd_entry_vec] : ng_obj_cmds)
+    {
+        (*shard_logs)[ng_id] = std::string{};
+        std::string &log_ng_blob = shard_logs->at(ng_id);
+
+        for (auto cmd_entry : cmd_entry_vec)
+        {
+            const std::string &key_str = cmd_entry->obj_key_str_;
+            uint64_t obj_version = cmd_entry->object_version_;
+            const std::vector<std::string> cmd_str_list =
+                cmd_entry->cmd_str_list_;
+
+            // The start position of the 4-byte integer for the length of
+            // serialized key and object commands.
+            size_t key_cmd_len_start = log_ng_blob.size();
+            uint32_t key_cmd_len = 0;
+            const char *ptr = reinterpret_cast<const char *>(&key_cmd_len);
+            // Reserve 4 bytes in the blob for the length of serialized key and
+            // commands before it is known.
+            log_ng_blob.append(ptr, sizeof(uint32_t));
+
+            // write object key, object version, and commands to log blob
+            log_ng_blob.append(key_str);
+            log_ng_blob.append(reinterpret_cast<const char *>(&obj_version),
+                               sizeof(obj_version));
+            LOG(INFO) << "writing log, key str: " << key_str
+                      << ", object version: " << obj_version;
+
+            size_t cmds_len_start = log_ng_blob.size();
+            uint32_t cmds_len = 0;
+            log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
+                               sizeof(cmds_len));
+
+            // number of commands
+            uint16_t cmd_cnt = cmd_str_list.size();
+            log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),
+                               sizeof(cmd_cnt));
+
+            LOG(INFO) << "cmd cnt: " << cmd_cnt;
+
+            for (const auto &cmd_str : cmd_str_list)
+            {
+                uint32_t cmd_len = cmd_str.size();
+                LOG(INFO) << "cmd len: " << cmd_len;
+                log_ng_blob.append(reinterpret_cast<const char *>(&cmd_len),
+                                   sizeof(cmd_len));
+                log_ng_blob.append(cmd_str);
+            }
+
+            cmds_len = log_ng_blob.size() - cmds_len_start - sizeof(uint32_t);
+            log_ng_blob.replace(cmds_len_start,
+                                sizeof(cmds_len),
+                                reinterpret_cast<const char *>(&cmds_len),
+                                sizeof(cmds_len));
+            LOG(INFO) << "cmds len: " << cmds_len;
+
+            key_cmd_len =
+                log_ng_blob.size() - key_cmd_len_start - sizeof(uint32_t);
+            LOG(INFO) << "key cmd len: " << key_cmd_len;
+
+            // Refills the reserved 4 bytes after knowing the length of
+            // serialized key and commands.
+            log_ng_blob.replace(
+                key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
+            LOG(INFO) << "log ng blob length: " << log_ng_blob.size();
+            LOG(INFO) << "kv len stored in log blob: "
+                      << *(reinterpret_cast<const uint32_t *>(ptr));
+            const std::string &str = log_ng_blob;
+            LOG(INFO) << "log_ng_blob: " << str;
+        }
+    }
+#endif
+}
+
 void TransactionExecution::Process(WriteToLogOp &write_log)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -3118,24 +3303,49 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
         if (!log_op->hd_result_.IsError())
         {
             tx_status_.store(TxnStatus::Committed, std::memory_order_release);
+            // TODO(zkl): finish resp.
         }
         else
         {
             if (log_op->hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKOWN_ERR)
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
             {
-                bool_resp_->SetErrorCode(TxErrorCode::LOG_SERVICE_UNREACHABLE);
-                bool_resp_->Finish(false);
-                bool_resp_ = nullptr;
+                if (bool_resp_ != nullptr)
+                {
+                    bool_resp_->SetErrorCode(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
+                    bool_resp_->Finish(false);
+                    bool_resp_ = nullptr;
+                }
+#ifdef ON_KEY_OBJECT
+                else if (rec_resp_ != nullptr)
+                {
+                    // auto committed ObjectCommandTxRequest
+                    rec_resp_->FinishError(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
+                    rec_resp_ = nullptr;
+                }
+#endif
                 tx_status_.store(TxnStatus::Unknown, std::memory_order_release);
             }
             else
             {
                 DLOG(ERROR) << "WriteToLogOp failed for cc error:"
                             << log_op->hd_result_.ErrorMsg();
-                bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
-                bool_resp_->Finish(false);
-                bool_resp_ = nullptr;
+                if (bool_resp_ != nullptr)
+                {
+                    bool_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                    bool_resp_->Finish(false);
+                    bool_resp_ = nullptr;
+                }
+#ifdef ON_KEY_OBJECT
+                else if (rec_resp_ != nullptr)
+                {
+                    // auto committed ObjectCommandTxRequest
+                    rec_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                    rec_resp_ = nullptr;
+                }
+#endif
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
@@ -3207,7 +3417,8 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // The tx is committed. The tx must have finished validation.
         // Post-processing includes both primary keys that have locks and
         // secondary keys without locks.
-        post_process_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
+        post_process_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt() +
+                                rw_set_.ObjectCommandSize(),
                             0,
                             rw_set_.CatalogRangeSetSize());
     }
@@ -3249,6 +3460,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         // keys.
 
         size_t idx = 0;
+        uint64_t tx_number = TxNumber();
+        uint16_t command_id = command_id_.load(std::memory_order_relaxed);
         const std::unordered_map<TableName, TableWriteSet> &wset =
             rw_set_.WriteSet();
         for (const auto &[table_name, table_write_set] : wset)
@@ -3258,7 +3471,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 cc_handler_->PostWrite(
                     tx_number_.load(std::memory_order_relaxed),
                     tx_term_,
-                    command_id_.load(std::memory_order_relaxed),
+                    command_id,
                     commit_ts_,
                     write_entry.cce_addr_,
                     write_entry.rec_.get(),
@@ -3270,7 +3483,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     cc_handler_->ForwardPostWrite(
                         tx_number_.load(std::memory_order_relaxed),
                         tx_term_,
-                        command_id_.load(std::memory_order_relaxed),
+                        command_id,
                         commit_ts_,
                         table_name,
                         key,
@@ -3282,6 +3495,30 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 ++idx;
             }
         }
+
+#ifdef ON_KEY_OBJECT
+        const std::unordered_map<TableName,
+                                 std::unordered_map<CcEntryAddr, CmdSetEntry>>
+            *cmd_cce_set = rw_set_.ObjectCommandCce();
+        assert(cmd_cce_set != nullptr);
+
+        for (const auto &[table_name, cce_set] : *cmd_cce_set)
+        {
+            for (const auto &[cce, key] : cce_set)
+            {
+                cc_handler_->PostWrite(tx_number,
+                                       tx_term_,
+                                       command_id,
+                                       commit_ts_,
+                                       cce,
+                                       nullptr,
+                                       OperationType::RedisCommand,
+                                       0,
+                                       post_process.hd_result_);
+            }
+            ++idx;
+        }
+#endif
 
         if (idx == 0)
         {
@@ -3427,6 +3664,15 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
             bool_resp_->Finish(false);
         }
     }
+#ifdef ON_KEY_OBJECT
+    else if (rec_resp_ != nullptr)
+    {
+        // auto committed ObjectCommandTxRequest
+        LOG(INFO) << "finish auto committed ObjectCommandTxRequest";
+        rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
+        rec_resp_ = nullptr;
+    }
+#endif
 
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
@@ -3574,6 +3820,11 @@ void TransactionExecution::ReleaseCatalogRangeLock(
         }
         for (const auto &[cce_addr, read_entry] : tbl_set)
         {
+            if (tbl_name.Type() == TableType::RangePartition)
+            {
+                LOG(INFO) << "releasing Range entry lock, cce: "
+                          << reinterpret_cast<void *>(cce_addr.CcePtr());
+            }
             --ref_cnt;
             cc_handler_->PostRead(TxNumber(),
                                   TxTerm(),
@@ -4121,6 +4372,147 @@ ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
     scan_close_req_pool_->Enqueue(std::move(scan_close_req));
 
     return req;
+}
+
+void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
+{
+    obj_cmd_op.is_running_ = true;
+    const TableName &table_name = *obj_cmd_op.table_name_;
+    const TxKey &key = *obj_cmd_op.key_;
+    uint32_t key_shard_code = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+    if (obj_cmd_op.lock_range_result_.IsFinished())
+    {
+        // If there is an error when getting the key's range ID, the error would
+        // be caught when forwarding the operation, which forces the tx state
+        // machine to move to post-processing of the operation and returns an
+        // error to the ObjectCommandTxRequest.
+        assert(!obj_cmd_op.lock_range_result_.IsError());
+
+        // Uses the lower 10 bits of the key's hash code to shard the
+        // key across CPU cores in a cc node.
+        uint32_t residual = key.Hash() & 0x3FF;
+        key_shard_code = obj_cmd_op.range_rec_.GetRangeInfo()->PartitionId()
+                             << 10 |
+                         residual;
+    }
+    else
+    {
+        obj_cmd_op.is_running_ = false;
+        // First read and lock the range the key located in through
+        // lock_range_op_.
+        lock_range_op_.Reset();
+        obj_cmd_op.lock_range_result_.Reset();
+
+        lock_range_op_.key_ = &key;
+        lock_range_op_.range_table_name_ =
+            TableName(table_name.StringView(), TableType::RangePartition);
+        lock_range_op_.range_rec_ = &obj_cmd_op.range_rec_;
+        lock_range_op_.lock_range_result_ = &obj_cmd_op.lock_range_result_;
+
+        // Control flow jumps to lock_range_op_, do not execute further
+        // after `Process(lock_range_op_)` returns.
+        PushOperation(&lock_range_op_);
+        Process(lock_range_op_);
+        return;
+    }
+#else
+    key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+#endif
+
+    uint64_t current_ts =
+        dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
+
+    CcHandlerResult<ObjectCommandResult> &hd_res = obj_cmd_op.hd_result_;
+    hd_res.Reset();
+
+    // Directly commit the new value to the object if autocommit and skip_wal
+    // are both set, on contrary to acquiring lock and committing the command in
+    // postprocess.
+    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+
+    cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                               *obj_cmd_op.key_,
+                               key_shard_code,
+                               *obj_cmd_op.command_,
+                               *obj_cmd_op.cmd_result_,
+                               TxNumber(),
+                               tx_term_,
+                               current_ts,
+                               hd_res,
+                               protocol_,
+                               commit);
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &obj_cmd_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    const CcHandlerResult<ObjectCommandResult> &hd_result =
+        obj_cmd_op.hd_result_;
+    if (hd_result.IsError())
+    {
+        rec_resp_->FinishError(ConvertCcError(hd_result.ErrorCode()));
+        rec_resp_ = nullptr;
+    }
+    else
+    {
+        const ObjectCommandResult &cmd_result = hd_result.Value();
+        RecordStatus obj_status = cmd_result.rec_status_;
+        const TxCommand *cmd = obj_cmd_op.command_;
+
+        // The command is directly executed and committed on the object if
+        // autocommit and skip wal are both set. In such case, there is no need
+        // to write log and do post write, and no need to add command into write
+        // set.
+        bool directly_commit =
+            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+
+        if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
+        {
+            // Not autocommit, or autocommit and skip wal, or autocommit and
+            // this is a read only command. Notify the ObjectCommandTxRequest
+            // sender once the command finishes.
+            rec_resp_->Finish(obj_status);
+            rec_resp_ = nullptr;
+        }
+
+        // For autocommit read-modify-write commands, the ObjectCommandTxRequest
+        // sender will be notified after auto commit succeeds, i.e. after
+        // PostProcess or WritLog.
+
+        bool add_to_write_set = !directly_commit && !cmd->IsReadOnly() &&
+                                obj_status == RecordStatus::Normal;
+
+        if (add_to_write_set)
+        {
+            // The command modifies the object. Put it into the command set
+            // for writing log and post-processing.
+            rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
+                                     cmd_result.cce_addr_,
+                                     cmd_result.commit_ts_,
+                                     obj_cmd_op.key_,
+                                     obj_cmd_op.command_);
+        }
+
+        if (obj_cmd_op.auto_commit_)
+        {
+            Commit();
+        }
+    }
 }
 
 }  // namespace txservice

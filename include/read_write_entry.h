@@ -1,6 +1,9 @@
 #pragma once
 
-#include <stdint.h>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "scan.h"
 #include "tx_container.h"
@@ -50,7 +53,7 @@ struct WriteSetEntry
     TxRecord::Uptr rec_;
     OperationType op_;
     CcEntryAddr cce_addr_;
-    uint32_t key_shard_code_;
+    uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
     uint32_t forward_key_shard_code_{0};
 };
@@ -93,6 +96,23 @@ struct ScanSetEntry
     uint64_t key_ts_;
     uint64_t gap_ts_;
     CcEntryAddr cce_addr_;
+};
+
+struct CmdSetEntry
+{
+    CmdSetEntry(uint64_t object_version, std::string &&key, std::string &&cmd)
+        : object_version_(object_version), obj_key_str_(std::move(key))
+    {
+        cmd_str_list_.emplace_back(std::move(cmd));
+    }
+
+    // commit_ts of the object cce when the commands apply to it, commands on
+    // the same object must apply in commit_ts order
+    uint64_t object_version_{};
+    // serialized key, for writing log
+    std::string obj_key_str_{};
+    // serialized commands, for writing log
+    std::vector<std::string> cmd_str_list_{};
 };
 
 }  // namespace txservice

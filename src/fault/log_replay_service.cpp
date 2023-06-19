@@ -493,8 +493,20 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             // parse log_blob
             size_t blob_offset = 0;
+            LOG(INFO) << "txn commit ts: " << commit_ts
+                      << ", blob size: " << blob.size();
             while (blob_offset < blob.size())
             {
+#ifdef ON_KEY_OBJECT
+                std::string_view table_name_view(redis_table_name_sv);
+                TableType table_type = TableType::Primary;
+                // 4-byte integer for the length of the serialized object key
+                // and commands
+                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
+                    blob.data() + blob_offset);
+                blob_offset += sizeof(uint32_t);
+                LOG(INFO) << "kv len: " << kv_len;
+#else
                 // 1-byte integer for the length of the table name
                 uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(
                     blob.data() + blob_offset);
@@ -531,6 +543,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
+#endif
 
                 std::unique_ptr<ReplayLogCc> &cc_req =
                     cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(

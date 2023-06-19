@@ -6,6 +6,7 @@
 
 #include "catalog_key_record.h"
 #include "scan.h"
+#include "tx_command.h"
 #include "tx_execution.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -558,6 +559,30 @@ struct AnalyzeTableTxRequest
     }
 
     const TableName *table_name_{nullptr};
+};
+
+struct ObjectCommandTxRequest
+    : public TemplateTxRequest<ObjectCommandTxRequest, RecordStatus>
+{
+    ObjectCommandTxRequest(const TableName *table_name,
+                           const TxKey *key,
+                           const TxCommand *command,
+                           TxCommandResult *cmd_result,
+                           bool auto_commit = true)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(table_name),
+          key_(key),
+          command_(command),
+          cmd_result_(cmd_result),
+          auto_commit_(auto_commit)
+    {
+    }
+
+    const TableName *table_name_;
+    const TxKey *key_;
+    const TxCommand *command_;
+    TxCommandResult *cmd_result_;
+    bool auto_commit_{};
 };
 
 struct FaultInjectTxRequest

@@ -68,7 +68,10 @@ struct TxRecord
      * To estimate log length.
      * @return
      */
-    virtual size_t SerializedLength() const = 0;
+    virtual size_t SerializedLength() const
+    {
+        return 0;
+    };
 
     virtual size_t MemUsage() const
     {

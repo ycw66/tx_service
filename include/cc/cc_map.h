@@ -44,6 +44,7 @@ struct CleanCcEntryForTestCc;
 struct FillStoreSliceCc;
 struct GetPostCkptSlice;
 struct KickoutCcEntryCc;
+struct ApplyCc;
 
 enum struct ScanType
 {
@@ -101,6 +102,10 @@ public:
     virtual bool Execute(FillStoreSliceCc &req) = 0;
     virtual bool Execute(GetPostCkptSlice &req) = 0;
     virtual bool Execute(KickoutCcEntryCc &req) = 0;
+    virtual bool Execute(ApplyCc &req)
+    {
+        return true;
+    };
 
     virtual size_t size() const = 0;
 

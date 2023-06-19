@@ -21,6 +21,7 @@ const CatalogEntry *CcRequestBase::InitCcm(const TableName &tbl_name,
         const TableSchema *curr_schema = catalog_entry->schema_.get();
         if (curr_schema != nullptr && catalog_entry->Version() > 0)
         {
+#ifndef ON_KEY_OBJECT
             {
                 // Initialize table statistics
 #ifdef RANGE_PARTITION_ENABLED
@@ -64,6 +65,7 @@ const CatalogEntry *CcRequestBase::InitCcm(const TableName &tbl_name,
                     return nullptr;
                 }
             }
+#endif
 
             ccs.CreateOrUpdatePkCcMap(base_table_name,
                                       curr_schema,

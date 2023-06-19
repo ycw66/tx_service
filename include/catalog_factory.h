@@ -7,6 +7,7 @@
 
 #include "cc/cc_map.h"
 #include "schema.h"
+#include "tx_command.h"
 
 namespace txservice
 {
@@ -44,6 +45,20 @@ struct TableSchema
         const TableName &index_name) const = 0;
     virtual void BindStatistics(Statistics *statistics) = 0;
     virtual Statistics *StatisticsObject() const = 0;
+
+    /**
+     * Create TxCommand from serialized command image. Used when processing
+     * remote command request and replaying command log. This function is
+     * necessary as the command type and object type is unknown in tx_service
+     * layer.
+     * @param cmd_image
+     * @return
+     */
+    virtual std::unique_ptr<TxCommand> CreateTxCommand(
+        std::string_view cmd_image) const
+    {
+        return nullptr;
+    }
 };
 
 class CatalogFactory
