@@ -9,6 +9,8 @@ namespace txservice
 {
 struct TxObject;
 
+// TODO(zkl): remove TxCommandResult, store result within the command to save
+//  an extra allocation
 struct TxCommandResult
 {
 public:
@@ -26,7 +28,11 @@ public:
         const std::string *image) const = 0;
     virtual std::unique_ptr<TxCommandResult> CreateCommandResult() const = 0;
     virtual bool ProceedOnNonExistentObject() const = 0;
-    virtual void Apply(TxObject &object, TxCommandResult &cmd_result) const = 0;
+    /**
+     * Execute cmd on object to get the result.
+     * @param object
+     */
+    virtual void ExecuteOn(TxObject &object) = 0;
 
     // read only command need not commit
     virtual void CommitOn(TxObject &object)

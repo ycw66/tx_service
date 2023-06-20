@@ -49,7 +49,7 @@ public:
 
 #ifdef ON_KEY_OBJECT
         cmd_set_.clear();
-        cmd_cnt_ = 0;
+        cce_cnt_ = 0;
 #endif
     }
 
@@ -544,19 +544,25 @@ public:
         auto [table_it, success] = cmd_set_.try_emplace(table_name);
         auto &table_cmd_set = table_it->second;
 
-        std::string key_str;
-        key->Serialize(key_str);
         std::string cmd_str;
         cmd->Serialize(cmd_str);
-        auto [cce_it, inserted] = table_cmd_set.try_emplace(
-            cce_addr, cce_version, std::move(key_str), std::move(cmd_str));
-        if (!inserted)
+
+        auto cce_it = table_cmd_set.find(cce_addr);
+        if (cce_it != table_cmd_set.end())
         {
             CmdSetEntry &entry = cce_it->second;
             entry.cmd_str_list_.emplace_back(std::move(cmd_str));
         }
-
-        cmd_cnt_++;
+        else
+        {
+            std::string key_str;
+            key->Serialize(key_str);
+            bool inserted = false;
+            std::tie(cce_it, inserted) = table_cmd_set.try_emplace(
+                cce_addr, cce_version, std::move(key_str), std::move(cmd_str));
+            assert(inserted);
+            cce_cnt_++;
+        }
 #endif
     }
 
@@ -574,7 +580,7 @@ public:
     uint32_t ObjectCommandSize() const
     {
 #ifdef ON_KEY_OBJECT
-        return cmd_cnt_;
+        return cce_cnt_;
 #else
         return 0;
 #endif
@@ -604,7 +610,8 @@ private:
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
         cmd_set_;
 
-    uint32_t cmd_cnt_{};
+    // the count of different cc entries the command set contains
+    uint32_t cce_cnt_{};
 #endif
 };
 }  // namespace txservice

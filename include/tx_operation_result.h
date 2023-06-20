@@ -465,7 +465,7 @@ struct ObjectCommandResult
     void Reset()
     {
         commit_ts_ = 0;
-        last_read_ts_ = 0;
+        last_vali_ts_ = 0;
         cce_addr_ = CcEntryAddr{};
         rec_status_ = RecordStatus{};
         cmd_uptr_ = nullptr;
@@ -473,8 +473,8 @@ struct ObjectCommandResult
 
     // cce commit_ts, for validation?
     uint64_t commit_ts_{};
-    // currently not used
-    uint64_t last_read_ts_{};
+    // currently not used, used to set commit_ts_, only write cmd needs it?
+    uint64_t last_vali_ts_{};
     // add read write set
     CcEntryAddr cce_addr_{};
 

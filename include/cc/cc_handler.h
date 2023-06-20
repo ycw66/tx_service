@@ -433,7 +433,6 @@ public:
      * @param key
      * @param key_shard_code
      * @param obj_cmd
-     * @param obj_cmd_result
      * @param txn
      * @param tx_term
      * @param tx_ts
@@ -445,8 +444,7 @@ public:
     virtual void ObjectCommand(const TableName &table_name,
                                const TxKey &key,
                                uint32_t key_shard_code,
-                               const TxCommand &obj_cmd,
-                               TxCommandResult &obj_cmd_result,
+                               TxCommand &obj_cmd,
                                TxNumber txn,
                                int64_t tx_term,
                                uint64_t tx_ts,

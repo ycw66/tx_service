@@ -42,6 +42,9 @@ public:
                   << table_name.StringView();
     }
 
+    using CcMap::AcquireCceKeyLock;
+    using CcMap::LockHandleForResumedRequest;
+    using CcMap::MoveRequest;
     using CcMap::ReleaseCceKeyLock;
     using CcMap::schema_ts_;
     using CcMap::shard_;
@@ -74,6 +77,7 @@ public:
         KeyT decoded_key;
 
         uint32_t ng_id = req.NodeGroupId();
+        TxNumber txn = req.Txn();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_ApplyCc", {
             LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_ApplyCc";
@@ -82,7 +86,7 @@ public:
         if (ng_term < 0)
         {
             LOG(INFO) << "ApplyCc, node_group(#" << ng_id
-                      << ") term < 0, tx:" << req.Txn();
+                      << ") term < 0, tx:" << txn;
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
@@ -90,11 +94,30 @@ public:
         // TODO(zkl): Read and PinRangeSlice, load from kv; wait for replay to
         //  finish
 
+        LockType acquired_lock = LockType::NoLock;
+        CcErrorCode err_code = CcErrorCode::NO_ERROR;
+
+        CcOperation cc_op =
+            req.IsReadOnly() ? CcOperation::Read : CcOperation::Write;
+
         if (req.CcePtr() != nullptr)
         {
-            // the request was blocked and is now unblocked
+            // the request was blocked and is now unblocked and lock acquired
             resume = true;
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
+
+            std::tie(acquired_lock, err_code) =
+                LockHandleForResumedRequest(cce,
+                                            cce->payload_status_,
+                                            &req,
+                                            req.NodeGroupId(),
+                                            ng_term,
+                                            req.TxTerm(),
+                                            cc_op,
+                                            req.Isolation(),
+                                            req.Protocol(),
+                                            0,
+                                            false);
         }
         else if (cce_addr.CcePtr() == 0)
         {
@@ -125,25 +148,67 @@ public:
                 return false;
             }
 
+            req.SetCcePtr(cce);
+
             assert(cce != nullptr);
-            cce_addr.SetCce(reinterpret_cast<uint64_t>(cce), ng_term, ng_id);
+            cce_addr.SetCce(
+                reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
+
+            std::tie(acquired_lock, err_code) =
+                AcquireCceKeyLock(cce,
+                                  cce->payload_status_,
+                                  &req,
+                                  req.NodeGroupId(),
+                                  ng_term,
+                                  req.TxTerm(),
+                                  cc_op,
+                                  req.Isolation(),
+                                  req.Protocol(),
+                                  0,
+                                  false);
         }
         else
         {
-            // the request is re-executed due to memory exceed
             assert(ng_id == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
         }
 
+        // check locking result
+        switch (err_code)
+        {
+        case CcErrorCode::NO_ERROR:
+        {
+            // lock acquired
+            break;
+        }
+        case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+        {
+            // If the read request comes from a remote node, sends
+            // acknowledgement to the sender when the request is
+            // blocked.
+            if (!req.IsLocal())
+            {
+                //                req.Acknowledge();
+            }
+            // Acquire lock fail should stop the execution of current
+            // ApplyCc request since it's already in blocking queue.
+            return false;
+        }
+        default:
+        {
+            // lock confilct: back off and retry.
+            req.Result()->SetError(err_code);
+            return true;
+        }
+        }
+
+        // Lock acquired
         std::unique_ptr<TxCommand> cmd_uptr = nullptr;
-        const TxCommand *cmd = nullptr;
-        std::unique_ptr<TxCommandResult> cmd_result_uptr = nullptr;
-        TxCommandResult *cmd_result = nullptr;
+        TxCommand *cmd = nullptr;
 
         if (req.IsLocal())
         {
             cmd = req.CommandPtr();
-            cmd_result = req.CommandResultPtr();
         }
         else
         {
@@ -185,159 +250,42 @@ public:
             cce->payload_status_ = RecordStatus::Normal;
         }
 
-        if (req.apply_and_commit_ || cmd->IsReadOnly())
+        ValueT &object = *cce->payload_;
+
         {
-            // If this is a simple auto commit command and skip_wal is set,
-            // apply the command to get the result and commit it, skipping
-            // acquiring lock and writing log; if this is a read only command,
-            // apply the command on the object to get the result and return it.
-            if (req.IsRemote())
-            {
-                cmd_result_uptr = cmd->CreateCommandResult();
-                cmd_result = cmd_result_uptr.get();
-                req.SetCommandResult(std::move(cmd_result_uptr));
-            }
-
-            cmd->Apply(*cce->payload_, *cmd_result);
-            if (!cmd->IsReadOnly())
-            {
-                // skipping acquiring lock and write log, commit the command
-                cce->payload_->CommitCommands();
-            }
-
-            obj_result.commit_ts_ = cce->commit_ts_;
-            obj_result.last_read_ts_ = cce->last_read_ts_;
-            obj_result.rec_status_ = cce->payload_status_;
-
-            hd_res->SetFinished();
-            return true;
+            // TODO(zkl): make a temp object or use undo op
+            // Temporarily commit pending commands here so that txn can read its
+            // own write if it issues many commands against the same object.
+            object.CommitCommands();
         }
 
-        // This is a read-modify-write command. First acquire write lock on
-        // the object.
-        int64_t tx_term = req.TxTerm();
-        NonBlockingLock *cce_lock_ptr = &cce->GetKeyLock();
-        bool lock_success =
-            resume || cce_lock_ptr->AcquireWriteLock(&req, req.Protocol());
-        if (lock_success)
+        cmd->ExecuteOn(object);
+
+        // Updates last_vali_ts after successfully acquiring the write
+        // lock such that it is not smaller than the current time of
+        // the shard. The net effect is that the tx acquiring the write
+        // lock is forced not to commit at a time earlier than the
+        // clock of this cc node, even if the clock of the tx's
+        // coordinator node drifts and falls behind. Checkpointing
+        // relies on this property to avoid picking a checkpoint ts in
+        // this shard that may overlap with the ongoing tx.
+        if (!req.IsReadOnly())
         {
-            shard_->UpsertLockHoldingTx(req.Txn(), tx_term, cce, true, ng_id);
-            // for mvcc
-            uint64_t lock_ts = std::max(req.TxTs(), shard_->Now());
-            cce_lock_ptr->SetWLockTs(lock_ts);
-
-            // Updates last_vali_ts after successfully acquiring the write
-            // lock such that it is not smaller than the current time of
-            // the shard. The net effect is that the tx acquiring the write
-            // lock is forced not to commit at a time earlier than the
-            // clock of this cc node, even if the clock of the tx's
-            // coordinator node drifts and falls behind. Checkpointing
-            // relies on this property to avoid picking a checkpoint ts in
-            // this shard that may overlap with the ongoing tx.
-            obj_result.last_read_ts_ = std::max(cce->last_read_ts_, lock_ts);
-
-            if (req.IsRemote())
-            {
-                cmd_result_uptr = cmd->CreateCommandResult();
-                cmd_result = cmd_result_uptr.get();
-                req.SetCommandResult(std::move(cmd_result_uptr));
-            }
-
-            cmd->Apply(*cce->payload_, *cmd_result);
-
-            obj_result.commit_ts_ = cce->commit_ts_;
-            obj_result.last_read_ts_ = cce->last_read_ts_;
-            obj_result.rec_status_ = cce->payload_status_;
-
-            hd_res->SetFinished();
-            return true;
+            obj_result.last_vali_ts_ =
+                std::max(cce->last_read_ts_, shard_->Now());
         }
-        else
+        obj_result.commit_ts_ = cce->commit_ts_;
+        obj_result.rec_status_ = cce->payload_status_;
+
+        if (req.apply_and_commit_ && !cmd->IsReadOnly())
         {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                &req,
-                "AcquireWriteLock.Fail",
-                cce,
-                [&req]() -> std::string
-                {
-                    return std::string(",\"tx_number\":")
-                        .append(std::to_string(req.Txn()))
-                        .append(",\"term\":")
-                        .append(std::to_string(req.TxTerm()));
-                });
-
-            // When the request is blocked due to failing to acquire the write
-            // lock, transfers the ownership of the command to the cc request,
-            // so that later when the request is unblocked and re-executed, the
-            // command is re-used.
-            if (req.IsRemote())
-            {
-                req.SetCommand(std::move(cmd_uptr));
-            }
-
-            CcErrorCode error_code;
-            // If the request fails to acquire write lock because of read locks,
-            // check each read lock and recover it if needed.
-            const std::unordered_set<TxNumber> &read_locks =
-                cce_lock_ptr->ReadLocks();
-            if (read_locks.size() > 0)
-            {
-                TX_TRACE_DUMP_WITH_CONTEXT(
-                    &read_locks,
-                    [&cc_entry]() -> std::string
-                    {
-                        return std::string("\"CcEntry\":")
-                            .append(FMT_POINTER_TO_UINT64T(cce))
-                            .append(",\"associate\":\"key_lock_.read_locks\"");
-                    });
-                error_code =
-                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT;
-                for (const auto &read_tx : read_locks)
-                {
-                    shard_->CheckRecoverTx(read_tx, ng_id, ng_term);
-                }
-            }
-            else  // acquire lock fails due to write-write conflict
-            {
-                TX_TRACE_DUMP_WITH_CONTEXT(
-                    cce->key_lock_.WriteLockTx(),
-                    [cce]() -> std::string
-                    {
-                        return std::string("\"CcEntry\":")
-                            .append(FMT_POINTER_TO_UINT64T(cce))
-                            .append(",\"associate\":\"key_lock_.write_lock\"");
-                    });
-                assert(cce_lock_ptr->HasWriteLock());
-                error_code =
-                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT;
-                shard_->CheckRecoverTx(
-                    cce_lock_ptr->WriteLockTx(), ng_id, ng_term);
-            }
-
-            if (req.Protocol() == CcProtocol::OCC || shard_->EnableMvcc())
-            {
-                // For OCC/MVCC, a conflict causes the tx to abort immediately.
-                hd_res->SetError(error_code);
-            }
-            else
-            {
-                // For 2PL, a conflict blocks the tx by putting the request into
-                // the lock's blocking queue.
-                int32_t tx_node = (req.Txn() >> 32L) >> 10;
-                if (tx_node != req.NodeGroupId())
-                {
-                    // If the acquire request comes from a remote node,
-                    // sends acknowledgement to the sender when the request
-                    // is blocked.
-
-                    // remote::RemoteAcquire &remote_req =
-                    //     static_cast<remote::RemoteAcquire &>(req);
-                    // remote_req.Acknowledge();
-                }
-                return false;
-            }
+            assert(acquired_lock == LockType::WriteLock);
+            // skipping writing log, release the lock and commit the command
+            object.CommitCommands();
+            ReleaseCceKeyLock(cce, txn, ng_id);
         }
 
+        hd_res->SetFinished();
         return true;
     }
 
@@ -530,7 +478,7 @@ public:
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
             req.ResetCcm();
-            CcMap::MoveRequest(&req, shard_->core_id_ + 1);
+            MoveRequest(&req, shard_->core_id_ + 1);
         }
         else
         {

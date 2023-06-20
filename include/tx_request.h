@@ -636,23 +636,109 @@ struct ObjectCommandTxRequest
 {
     ObjectCommandTxRequest(const TableName *table_name,
                            const TxKey *key,
-                           const TxCommand *command,
-                           TxCommandResult *cmd_result,
+                           TxCommand *command,
                            bool auto_commit = true)
         : TemplateTxRequest(nullptr, nullptr),
           table_name_(table_name),
           key_(key),
           command_(command),
-          cmd_result_(cmd_result),
-          auto_commit_(auto_commit)
+          auto_commit_(auto_commit),
+          is_key_owner_(false),
+          is_cmd_owner_(false)
     {
     }
 
+    ObjectCommandTxRequest(const TableName *table_name,
+                           const TxKey *key,
+                           std::unique_ptr<TxCommand> command,
+                           bool auto_commit = true)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(table_name),
+          key_(key),
+          command_uptr_(std::move(command)),
+          auto_commit_(auto_commit),
+          is_key_owner_(false),
+          is_cmd_owner_(true)
+    {
+    }
+
+    ObjectCommandTxRequest(const TableName *table_name,
+                           std::unique_ptr<TxKey> key,
+                           std::unique_ptr<TxCommand> command,
+                           bool auto_commit = true)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(table_name),
+          key_uptr_(std::move(key)),
+          command_uptr_(std::move(command)),
+          auto_commit_(auto_commit),
+          is_key_owner_(true),
+          is_cmd_owner_(true)
+    {
+    }
+
+    ObjectCommandTxRequest(ObjectCommandTxRequest &&rhs)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(rhs.table_name_),
+          auto_commit_(rhs.auto_commit_),
+          is_key_owner_(rhs.is_key_owner_),
+          is_cmd_owner_(rhs.is_cmd_owner_)
+    {
+        if (rhs.is_key_owner_)
+        {
+            key_uptr_ = std::move(rhs.key_uptr_);
+        }
+        else
+        {
+            key_ = rhs.key_;
+        }
+        if (rhs.is_cmd_owner_)
+        {
+            command_uptr_ = std::move(rhs.command_uptr_);
+        }
+        else
+        {
+            command_ = rhs.command_;
+        }
+    }
+
+    ~ObjectCommandTxRequest()
+    {
+        if (is_key_owner_)
+        {
+            key_uptr_.reset();
+        }
+        if (is_cmd_owner_)
+        {
+            command_uptr_.reset();
+        }
+    }
+
+    const TxKey *Key() const
+    {
+        return is_key_owner_ ? key_uptr_.get() : key_;
+    }
+
+    TxCommand *Command() const
+    {
+        return is_cmd_owner_ ? command_uptr_.get() : command_;
+    }
+
     const TableName *table_name_;
-    const TxKey *key_;
-    const TxCommand *command_;
-    TxCommandResult *cmd_result_;
+    union
+    {
+        const TxKey *key_{};
+        std::unique_ptr<const TxKey> key_uptr_;
+    };
+    union
+    {
+        TxCommand *command_{};
+        std::unique_ptr<TxCommand> command_uptr_;
+    };
+
     bool auto_commit_{};
+    // whether this object is pointer owner
+    bool is_key_owner_{};
+    bool is_cmd_owner_{};
 };
 
 struct ClusterScaleTxRequest

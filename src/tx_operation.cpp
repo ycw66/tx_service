@@ -4943,14 +4943,12 @@ ObjectCommandOp::ObjectCommandOp(TransactionExecution *txm)
 
 void ObjectCommandOp::Reset(const TableName *table_name,
                             const TxKey *key,
-                            const TxCommand *command,
-                            TxCommandResult *cmd_result,
+                            TxCommand *command,
                             bool auto_commit)
 {
     table_name_ = table_name;
     key_ = key;
     command_ = command;
-    cmd_result_ = cmd_result;
     hd_result_.Reset();
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
@@ -5011,8 +5009,9 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         // either case, if the object's term is not set, the tx has not received
         // any response or acknowledgement from the key's cc node group. The
         // request is forced to be errored upon timeout.
-        hd_result_.ForceError();
-        txm->PostProcess(*this);
+        // TODO(zkl): ForceError, delete ccrequest
+        //        hd_result_.ForceError();
+        //        txm->PostProcess(*this);
     }
     else if (hd_result_.IsFinished())
     {

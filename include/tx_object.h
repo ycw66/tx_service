@@ -113,7 +113,7 @@ public:
      * @param cmd
      * @param cmd_res
      */
-    virtual void Apply(TxCommand &cmd, TxCommandResult &cmd_res)
+    virtual void Apply(TxCommand &cmd)
     {
     }
 

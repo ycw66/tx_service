@@ -3915,7 +3915,7 @@ private:
 };
 
 /**
- * Apply command to the object specified by key.
+ * Execute command to the object specified by key.
  */
 struct ApplyCc : public TemplatedCcRequest<ApplyCc, ObjectCommandResult>
 {
@@ -3923,7 +3923,7 @@ private:
     struct LocalTuple
     {
         const TxKey *key_{};
-        const TxCommand *cmd_{};
+        TxCommand *cmd_{};
         TxCommandResult *cmd_result_{};
     };
 
@@ -3954,7 +3954,7 @@ public:
     void Reset(const TableName *table_name,
                const TxKey *key,
                const uint32_t key_shard_code,
-               const TxCommand *cmd,
+               TxCommand *cmd,
                TxCommandResult *cmd_result,
                TxNumber txn,
                int64_t tx_term,
@@ -4034,6 +4034,17 @@ public:
         return !is_local_;
     }
 
+    bool IsReadOnly() const
+    {
+        if (is_local_)
+        {
+            return local_input_.cmd_ == nullptr ||
+                   local_input_.cmd_->IsReadOnly();
+        }
+        return remote_input_.cmd_uptr_ == nullptr ||
+               remote_input_.cmd_uptr_->IsReadOnly();
+    }
+
     const TxKey *Key() const
     {
         return is_local_ ? local_input_.key_ : nullptr;
@@ -4044,7 +4055,7 @@ public:
         return is_local_ ? nullptr : remote_input_.key_str_;
     }
 
-    const TxCommand *CommandPtr() const
+    TxCommand *CommandPtr() const
     {
         return is_local_ ? local_input_.cmd_ : nullptr;
     }

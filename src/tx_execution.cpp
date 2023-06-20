@@ -814,11 +814,10 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
 void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
 {
     rec_resp_ = &req.tx_result_;
-    obj_cmd_.Reset(req.table_name_,
-                   req.key_,
-                   req.command_,
-                   req.cmd_result_,
-                   req.auto_commit_);
+    TxCommand *command = req.Command();
+    const TxKey *key = req.Key();
+    obj_cmd_.Reset(req.table_name_, key, command, req.auto_commit_);
+
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
 }
@@ -2378,11 +2377,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #ifndef RANGE_PARTITION_ENABLED
                         if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                         {
-                            scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                    cc_scan_tuple->Record(),
-                                                    RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_);
+                            scan_batch.emplace_back(
+                                cc_scan_tuple->Key(),
+                                const_cast<TxRecord *>(cc_scan_tuple->Record()),
+                                RecordStatus::Normal,
+                                cc_scan_tuple->key_ts_,
+                                cc_scan_tuple->cce_addr_);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -2588,11 +2588,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 #ifndef RANGE_PARTITION_ENABLED
                         if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
                         {
-                            scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                    cc_scan_tuple->Record(),
-                                                    RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_);
+                            scan_batch.emplace_back(
+                                cc_scan_tuple->Key(),
+                                const_cast<TxRecord *>(cc_scan_tuple->Record()),
+                                RecordStatus::Normal,
+                                cc_scan_tuple->key_ts_,
+                                cc_scan_tuple->cce_addr_);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -2759,6 +2760,7 @@ void TransactionExecution::ScanClose(
         }
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     if (scan_it->second.slice_position_ == SlicePosition::Middle)
     {
         // Append last tuple of each ScanCache which has acquired ReadIntent to
@@ -2785,6 +2787,7 @@ void TransactionExecution::ScanClose(
             }
         }
     }
+#endif
 
     // Release trailing tuple locks acquired during scan. These tuples are
     // tuples scanned beyond scan end key and are not intended to be locked.
@@ -3219,6 +3222,9 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
         candidate = std::max(candidate, acquire_key.last_vali_ts_ + 1);
         candidate = std::max(candidate, acquire_key.commit_ts_ + 1);
     }
+
+    // TODO(zkl): update candidate with ObjectCommandOp's result's last_vali_ts_
+    //  and commit_ts_
 
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, ReadSetEntry>>
@@ -3736,8 +3742,6 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             log_ng_blob.append(key_str);
             log_ng_blob.append(reinterpret_cast<const char *>(&obj_version),
                                sizeof(obj_version));
-            LOG(INFO) << "writing log, key str: " << key_str
-                      << ", object version: " << obj_version;
 
             size_t cmds_len_start = log_ng_blob.size();
             uint32_t cmds_len = 0;
@@ -3749,12 +3753,9 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),
                                sizeof(cmd_cnt));
 
-            LOG(INFO) << "cmd cnt: " << cmd_cnt;
-
             for (const auto &cmd_str : cmd_str_list)
             {
                 uint32_t cmd_len = cmd_str.size();
-                LOG(INFO) << "cmd len: " << cmd_len;
                 log_ng_blob.append(reinterpret_cast<const char *>(&cmd_len),
                                    sizeof(cmd_len));
                 log_ng_blob.append(cmd_str);
@@ -3765,21 +3766,15 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
                                 sizeof(cmds_len),
                                 reinterpret_cast<const char *>(&cmds_len),
                                 sizeof(cmds_len));
-            LOG(INFO) << "cmds len: " << cmds_len;
 
             key_cmd_len =
                 log_ng_blob.size() - key_cmd_len_start - sizeof(uint32_t);
-            LOG(INFO) << "key cmd len: " << key_cmd_len;
 
             // Refills the reserved 4 bytes after knowing the length of
             // serialized key and commands.
             log_ng_blob.replace(
                 key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
-            LOG(INFO) << "log ng blob length: " << log_ng_blob.size();
-            LOG(INFO) << "kv len stored in log blob: "
-                      << *(reinterpret_cast<const uint32_t *>(ptr));
             const std::string &str = log_ng_blob;
-            LOG(INFO) << "log_ng_blob: " << str;
         }
     }
 #endif
@@ -4067,19 +4062,19 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
         for (const auto &[table_name, cce_set] : *cmd_cce_set)
         {
-            for (const auto &[cce, key] : cce_set)
+            for (const auto &[cce_addr, cmd_set_entry] : cce_set)
             {
                 cc_handler_->PostWrite(tx_number,
                                        tx_term_,
                                        command_id,
                                        commit_ts_,
-                                       cce,
+                                       cce_addr,
                                        nullptr,
                                        OperationType::RedisCommand,
                                        0,
                                        post_process.hd_result_);
+                ++idx;
             }
-            ++idx;
         }
 #endif
 
@@ -4248,7 +4243,6 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
     else if (rec_resp_ != nullptr)
     {
         // auto committed ObjectCommandTxRequest
-        LOG(INFO) << "finish auto committed ObjectCommandTxRequest";
         rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
         rec_resp_ = nullptr;
     }
@@ -5071,7 +5065,6 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                *obj_cmd_op.key_,
                                key_shard_code,
                                *obj_cmd_op.command_,
-                               *obj_cmd_op.cmd_result_,
                                TxNumber(),
                                tx_term_,
                                current_ts,
@@ -5102,6 +5095,10 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
     {
         rec_resp_->FinishError(ConvertCcError(hd_result.ErrorCode()));
         rec_resp_ = nullptr;
+        if (obj_cmd_op.auto_commit_)
+        {
+            Abort();
+        }
     }
     else
     {
@@ -5115,15 +5112,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // set.
         bool directly_commit =
             obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-
-        if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
-        {
-            // Not autocommit, or autocommit and skip wal, or autocommit and
-            // this is a read only command. Notify the ObjectCommandTxRequest
-            // sender once the command finishes.
-            rec_resp_->Finish(obj_status);
-            rec_resp_ = nullptr;
-        }
 
         // For autocommit read-modify-write commands, the ObjectCommandTxRequest
         // sender will be notified after auto commit succeeds, i.e. after
@@ -5141,6 +5129,15 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                      cmd_result.commit_ts_,
                                      obj_cmd_op.key_,
                                      obj_cmd_op.command_);
+        }
+
+        if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
+        {
+            // Not autocommit, or autocommit and skip wal, or autocommit and
+            // this is a read only command. Notify the ObjectCommandTxRequest
+            // sender once the command finishes.
+            rec_resp_->Finish(obj_status);
+            rec_resp_ = nullptr;
         }
 
         if (obj_cmd_op.auto_commit_)

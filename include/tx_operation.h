@@ -1001,15 +1001,13 @@ struct ObjectCommandOp : TransactionOperation
     explicit ObjectCommandOp(TransactionExecution *txm);
     void Reset(const TableName *table_name,
                const TxKey *key,
-               const TxCommand *command,
-               TxCommandResult *cmd_result,
+               TxCommand *command,
                bool auto_commit = false);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{};
     const TxKey *key_{};
-    const TxCommand *command_{};
-    TxCommandResult *cmd_result_{};
+    TxCommand *command_{};
     CcHandlerResult<ObjectCommandResult> hd_result_;
 
     bool auto_commit_{};
