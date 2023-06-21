@@ -2344,11 +2344,20 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             // Update the slice size in data store.
             if (data_sync_vec->size())
             {
-                UpdateStoreSlice(table_name,
-                                 schema->Version(),
-                                 node_group,
-                                 *data_sync_vec,
-                                 true);
+                while (!UpdateStoreSlice(table_name,
+                                         schema->Version(),
+                                         node_group,
+                                         *data_sync_vec,
+                                         true))
+                {
+                    // Keep retrying here since we've finished the flush
+                    // already, it's too expensive to start from the beginning
+                    // all over again.
+                    LOG(ERROR) << "Data sync failed to update store slice info "
+                                  "on table "
+                               << table_name.Trace() << ".";
+                    std::this_thread::sleep_for(1s);
+                }
             }
 #endif
         }
@@ -2356,11 +2365,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         {
 #ifdef RANGE_PARTITION_ENABLED
             // Reset the post ckpt size if flush failed
-            UpdateStoreSlice(table_name,
-                             schema->Version(),
-                             node_group,
-                             *data_sync_vec,
-                             false);
+            bool res = UpdateStoreSlice(table_name,
+                                        schema->Version(),
+                                        node_group,
+                                        *data_sync_vec,
+                                        false);
+            // We're only updating in memory status here, so
+            // this should always succeed.
+            assert(res);
 #endif
             succ = false;
         }
