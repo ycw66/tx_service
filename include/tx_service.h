@@ -86,6 +86,7 @@ public:
                              metrics::Type::Gauge);
             meter_->Register(BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT_NAME_,
                              metrics::Type::Gauge);
+            meter_->Register(EMPTY_ROUND_RATIO_NAME_, metrics::Type::Gauge);
         }
 
         if (metrics::enable_transactions)
@@ -418,10 +419,23 @@ public:
         active_cnt =
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
 
-        if (is_busy_round_)
+        if (metrics::enable_collect_metrics)
         {
-            busy_round_active_tx_count_ = active_cnt;
-            busy_round_processed_cc_req_count_ = req_cnt;
+            empty_round_count_ += req_cnt > 0 ? 1 : 0;
+            if (++total_round_count_ == empty_rount_threshold_)
+            {
+                meter_->Collect(EMPTY_ROUND_RATIO_NAME_,
+                                static_cast<double>(empty_round_count_) /
+                                    total_round_count_);
+                empty_round_count_ = 0;
+                total_round_count_ = 0;
+            }
+
+            if (is_busy_round_)
+            {
+                busy_round_active_tx_count_ = active_cnt;
+                busy_round_processed_cc_req_count_ = req_cnt;
+            }
         }
     }
 
@@ -570,20 +584,24 @@ private:
 
     TxLog *txlog_hd_;
 
-    size_t busy_round_round_{1};
     metrics::TimePoint busy_round_start_;
     bool is_busy_round_{false};
     size_t busy_round_processed_cc_req_count_{0};
     size_t busy_round_active_tx_count_{0};
     size_t busy_round_threshold_{10};
+    size_t empty_round_count_{0};
+    size_t total_round_count_{0};
+    size_t empty_rount_threshold_{1000};
 
-public:
-    std::unique_ptr<metrics::Meter> meter_;
     const metrics::Name BUSY_ROUND_DURATION_NAME_{"busy_round_duration"};
     const metrics::Name BUSY_ROUND_ACTIVE_TX_COUNT_NAME_{
         "busy_round_active_tx_count"};
     const metrics::Name BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT_NAME_{
         "busy_round_processed_cc_request_count"};
+    const metrics::Name EMPTY_ROUND_RATIO_NAME_{"empty_round_ratio"};
+
+public:
+    std::unique_ptr<metrics::Meter> meter_;
     const metrics::Name TX_DURATION_NAME_{"tx_duration"};
     const metrics::Name TX_PROCESSED_TOTAL_NAME_{"tx_processed_total"};
     const metrics::Name REMOTE_REQUEST_DURATION_NAME_{
