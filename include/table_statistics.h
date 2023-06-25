@@ -717,12 +717,19 @@ private:
             {
                 KeyT &key = static_cast<KeyT &>(*samplekey);
 #ifdef RANGE_PARTITION_ENABLED
-                NodeGroupId key_ng_id =
-                    RouteKey(ccs, table_or_index_name, cc_ng_id, key);
+                RouteEndpoint route_to =
+                    RouteKeyByRange(ccs, table_or_index_name, cc_ng_id, key);
 #else
-                NodeGroupId key_ng_id = RouteKey(key);
+                RouteEndpoint route_to = RouteKeyByHash(key);
 #endif
-                sample_pool_vec[key_ng_id].emplace_back(std::move(key));
+                if (route_to.core_id_ ==
+                    Statistics::CoreDoSample(table_or_index_name))
+                {
+                    // We do sampling on one core, but tx processor count are
+                    // allowed to change.
+                    sample_pool_vec[route_to.ng_id_].emplace_back(
+                        std::move(key));
+                }
             }
 
             const std::vector<uint64_t> &ng_weight_vec =
@@ -991,6 +998,12 @@ private:
 private:
     using Task = std::function<void(CcShard &ccs)>;
 
+    struct RouteEndpoint
+    {
+        NodeGroupId ng_id_;
+        uint16_t core_id_;
+    };
+
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
     {
@@ -1028,18 +1041,20 @@ private:
         }
     }
 
-    NodeGroupId RouteKey(const KeyT &key) const
+    RouteEndpoint RouteKeyByHash(const KeyT &key) const
     {
-        uint32_t key_shard_code = Sharder::Instance().ShardCode(key.Hash());
-        NodeGroupId key_ng_id =
-            Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-        return key_ng_id;
+        uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
+        NodeGroupId ng_id = Sharder::Instance().ShardToCcNodeGroup(shard_code);
+        uint32_t residual = shard_code & 0x3FF;
+        uint16_t core_id =
+            residual % Sharder::Instance().GetLocalCcShardsCount();
+        return {ng_id, core_id};
     }
 
-    NodeGroupId RouteKey(CcShard &ccs,
-                         const TableName &table_or_index_name,
-                         NodeGroupId cc_ng_id,
-                         const KeyT &key) const
+    RouteEndpoint RouteKeyByRange(CcShard &ccs,
+                                  const TableName &table_or_index_name,
+                                  NodeGroupId cc_ng_id,
+                                  const KeyT &key) const
     {
         // Safe to use TableRangeEntry *.
         const TableRangeEntry *range_entry = ccs.GetTableRangeEntryNonLocking(
@@ -1047,9 +1062,11 @@ private:
         assert(range_entry != nullptr);
 
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        NodeGroupId key_ng_id =
-            range_entry->GetRangeInfo()->PartitionId() % ng_cnt;
-        return key_ng_id;
+        NodeGroupId ng_id = range_entry->GetRangeInfo()->PartitionId() % ng_cnt;
+        uint32_t residual = key.Hash() & 0x3FF;
+        uint16_t core_id =
+            residual % Sharder::Instance().GetLocalCcShardsCount();
+        return {ng_id, core_id};
     }
 
     std::unordered_map<NodeGroupId, SamplePoolParam<KeyT>>
