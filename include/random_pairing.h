@@ -23,12 +23,16 @@ public:
 
     explicit RandomPairing(const std::vector<KeyT> &keys)
     {
-        assert(keys.size() <= CapacityN);
         sample_pool_.reserve(CapacityN);
 
-        for (const KeyT &key : keys)
+        for (size_t i = 0; i < keys.size(); ++i)
         {
-            Insert(key);
+            const KeyT &key = keys[i];
+
+            // keys.size() maybe larger than CapacityN, in case like shrink node
+            // groups. By calling Insert, re-sample from the original sample
+            // pool, and shrink sample pool size to CapacityN.
+            Insert(key, i + 1);
         }
     }
 
@@ -87,7 +91,6 @@ public:
             while (iter != sample_pool_.end() - 1)
             {
                 CopyKey()(*iter, *(iter + 1));
-                // iter->Copy(*(iter + 1));
                 iter++;
             }
 
@@ -147,11 +150,9 @@ private:
 
                 for (uint64_t j = sample_pool_.size() - 1; j > i; --j)
                 {
-                    // sample_pool_[j].Copy(sample_pool_[j - 1]);
                     CopyKey()(sample_pool_[j], sample_pool_[j - 1]);
                 }
 
-                // sample_pool_[i].Copy(key);
                 CopyKey()(sample_pool_[i], key);
             }
         }

@@ -75,6 +75,7 @@ public:
           units_(Units(param.records_)),
           sample_pool_(param.sample_keys_)
     {
+        assert(units_ >= sample_pool_.Size());
     }
 
     void Reset(SamplePool &&sample_pool,
@@ -154,6 +155,7 @@ public:
         }
         units_ += Units(param.records_);
         sample_pool_.ClearCounter();
+        assert(units_ >= sample_pool_.Size());
     }
 
     void Prune(const SamplePoolParam<KeyT> &param)
@@ -164,6 +166,7 @@ public:
         }
         units_ -= std::min(units_, static_cast<int64_t>(Units(param.records_)));
         sample_pool_.ClearCounter();
+        assert(units_ >= sample_pool_.Size());
     }
 
     void To(remote::NodeGroupSamplePool *remote_ccmap_sample_pool) const
@@ -242,6 +245,7 @@ private:
     // How many keys are inserted/deleted since last stats recalc.
     int64_t insert_delete_counter_{0};
 
+    // Always sample_pool_.Size() <= units_.
     SamplePool sample_pool_;
 
     // Is this ccmap sample pool local or remote. If it is local, cc_shard_
@@ -743,6 +747,7 @@ private:
                 uint64_t records = records_vec[ng_id];
                 if (records > 0)
                 {
+                    records = std::max(records, sample_pool.size());
                     SamplePoolParam<KeyT> param{std::move(sample_pool),
                                                 records};
                     ng_sample_pool_map.emplace(
@@ -895,13 +900,25 @@ private:
         const std::vector<uint64_t> &ng_weight_vec,
         const std::vector<uint64_t> &sp_size_vec)
     {
+        std::vector<uint64_t> records_vec;
+
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        std::vector<uint32_t> ng_vec(ng_cnt);
-        std::iota(ng_vec.begin(), ng_vec.end(), 1);
 
-        std::vector<uint64_t> records_vec =
-            DivideRecordsByNodeGroupWeight(records, ng_weight_vec);
+        if (records == 0)
+        {
+            records_vec = std::vector<uint64_t>(ng_cnt, 0UL);
+            return records_vec;
+        }
 
+        uint64_t total_ng_weight =
+            std::accumulate(ng_weight_vec.begin(), ng_weight_vec.end(), 0UL);
+        if (total_ng_weight == 0)
+        {
+            records_vec = std::vector<uint64_t>(ng_cnt, 0UL);
+            return records_vec;
+        }
+
+        records_vec = DivideRecordsByNodeGroupWeight(records, ng_weight_vec);
         bool no_conflict =
             std::equal(records_vec.begin(),
                        records_vec.end(),
@@ -911,10 +928,11 @@ private:
         {
             return records_vec;
         }
-        else
-        {
-            return DivideRecordsBySamplePoolSize(records, sp_size_vec);
-        }
+
+        assert(std::accumulate(sp_size_vec.begin(), sp_size_vec.end(), 0UL) >
+               0);
+        records_vec = DivideRecordsBySamplePoolSize(records, sp_size_vec);
+        return records_vec;
     }
 
     static std::vector<uint64_t> DivideRecordsByNodeGroupWeight(
@@ -956,6 +974,8 @@ private:
 
         uint64_t total_weight =
             std::accumulate(weights.begin(), weights.end(), 0UL);
+        assert(total_weight > 0);
+
         uint64_t c = 0;
         for (size_t i = 0; i < sz - 1; ++i)
         {
@@ -1067,6 +1087,12 @@ private:
             {
                 param_map[new_ng_id].records_ += avg_range_key_count;
             }
+        }
+
+        for (auto &[new_ng_id, param] : param_map)
+        {
+            param.records_ =
+                std::max(param.records_, param.sample_keys_.size());
         }
 
         return param_map;
