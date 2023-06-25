@@ -219,8 +219,8 @@ int Sharder::Init(const std::string &path)
 
     if (ips_.size() > 1)
     {
-        cc_stream_receiver_ =
-            std::make_unique<remote::CcStreamReceiver>(local_shards_);
+        cc_stream_receiver_ = std::make_unique<remote::CcStreamReceiver>(
+            local_shards_, msg_pool_);
         if (cc_stream_server_.AddService(cc_stream_receiver_.get(),
                                          brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
@@ -235,7 +235,7 @@ int Sharder::Init(const std::string &path)
             return -1;
         }
 
-        cc_stream_sender_ = std::make_unique<remote::CcStreamSender>();
+        cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
         for (uint32_t nid = 0; nid < ips_.size(); ++nid)
         {
             // Build a stream to every node even to ourselves because the

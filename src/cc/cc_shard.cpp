@@ -25,8 +25,6 @@ CcShard::CcShard(uint16_t core_id,
       core_cnt_(core_cnt),
       local_shards_(local_shards),
       realtime_sampling_(realtime_sampling),
-      meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
-                                              std::to_string(core_id))),
       native_ccms_(),
       failover_ccms_(),
       cc_queue_(256),
@@ -45,7 +43,9 @@ CcShard::CcShard(uint16_t core_id,
       processor_sleep_(nullptr),
       processor_mux_(nullptr),
       catalog_factory_(catalog_factory),
-      active_si_txs_()
+      active_si_txs_(),
+      meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
+                                              std::to_string(core_id)))
 
 {
     // memory_limit_ and log_limit_ are calculated at shard level.

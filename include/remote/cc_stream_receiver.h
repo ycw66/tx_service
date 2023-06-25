@@ -1,11 +1,10 @@
 #pragma once
 
 #include <brpc/stream.h>
-#include <google/protobuf/arena.h>
 
 #include <condition_variable>
 #include <memory>  // std::unique_ptr
-#include <mutex>
+#include <shared_mutex>
 #include <unordered_set>
 
 #include "cc_req_pool.h"
@@ -25,7 +24,9 @@ class CcStreamSender;
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:
-    explicit CcStreamReceiver(LocalCcShards &local_shards);
+    explicit CcStreamReceiver(
+        LocalCcShards &local_shards,
+        moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
     ~CcStreamReceiver() = default;
 
     void Shutdown();
@@ -45,16 +46,27 @@ public:
 
     void on_closed(brpc::StreamId stream) override;
 
-private:
-    std::unique_ptr<google::protobuf::Arena> GetArena();
-    void RecycleArena(std::unique_ptr<google::protobuf::Arena> arena);
-    void OnReceiveCcMsg(CcMessage *msg,
-                        std::unique_ptr<google::protobuf::Arena> arena);
+    std::unique_ptr<CcMessage> GetCcMsg();
 
-    std::mutex inbound_mux_;
-    std::condition_variable inbound_cv_;
+    std::unique_ptr<ScanSliceResponse> GetScanSliceResp();
+
+    void OnReceiveCcMsg(std::unique_ptr<CcMessage> msg);
+    void OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg);
+
+private:
+    std::shared_mutex inbound_mux_;
+    std::condition_variable_any inbound_cv_;
     std::unordered_set<brpc::StreamId> inbound_streams_;
+    std::unordered_set<brpc::StreamId> long_msg_inbound_streams_;
     LocalCcShards &local_shards_;
+
+    // A pool of protobuf messages for remote cc requests. The stream service
+    // receives a message, de-serializes it and dispatches it to local shards
+    // for processing. The message is put back into the pool after the cc
+    // request is processed.
+    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
+    moodycamel::ConcurrentQueue<std::unique_ptr<ScanSliceResponse>>
+        scan_resp_pool_;
 };
 }  // namespace remote
 }  // namespace txservice

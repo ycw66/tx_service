@@ -1190,7 +1190,7 @@ void LocalCcShards::Terminate()
     }
     task_worker_cv_.notify_all();
 
-    for (size_t idx = 0; idx < data_sync_worker_num_; ++idx)
+    for (int idx = 0; idx < data_sync_worker_num_; ++idx)
     {
         data_sync_worker_thds_.at(idx).join();
     }
@@ -1203,7 +1203,7 @@ void LocalCcShards::Terminate()
     }
     flush_worker_cv_.notify_all();
 
-    for (size_t idx = 0; idx < flush_worker_num_; ++idx)
+    for (int idx = 0; idx < flush_worker_num_; ++idx)
     {
         flush_worker_thds_.at(idx).join();
     }

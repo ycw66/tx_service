@@ -11,6 +11,7 @@
 #include "butil/logging.h"
 #include "cc_handler_result.h"
 #include "scan.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
@@ -106,8 +107,10 @@ public:
     }
 
     virtual ScanTuple *AddScanTuple(const std::string &key_str,
+                                    size_t &key_offset,
                                     uint64_t key_ts,
                                     const std::string &record_str,
+                                    size_t &rec_offset,
                                     RecordStatus rec_status,
                                     uint64_t gap_ts,
                                     uint64_t cce_ptr,
@@ -152,7 +155,8 @@ public:
 
     bool IsFull() const
     {
-        return mem_size_ >= 1024;
+        return mem_size_ >=
+               (1024 * 20 / Sharder::Instance().GetLocalCcShardsCount());
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
@@ -179,8 +183,10 @@ public:
     }
 
     ScanTuple *AddScanTuple(const std::string &key_str,
+                            size_t &key_offset,
                             uint64_t key_ts,
                             const std::string &record_str,
+                            size_t &rec_offset,
                             RecordStatus rec_status,
                             uint64_t gap_ts,
                             uint64_t cce_ptr,
@@ -207,21 +213,15 @@ public:
         {
             // When the key's timestamp is 0, the tuple's key is not included in
             // this scan. Only deserializes the key when the key is included.
-            size_t offset = 0;
             scan_tuple->KeyObj().Deserialize(
-                key_str.data(), offset, key_schema_);
+                key_str.data(), key_offset, key_schema_);
         }
 
         scan_tuple->rec_status_ = rec_status;
         if (rec_status == RecordStatus::Normal ||
             (rec_status == RecordStatus::Deleted && is_ckpt_delta))
         {
-            size_t offset = 0;
-            if (scan_tuple->rec_ptr_.use_count() != 1)
-            {
-                scan_tuple->rec_ptr_ = std::make_shared<ValueT>();
-            }
-            scan_tuple->rec_ptr_->Deserialize(record_str.data(), offset);
+            scan_tuple->SetRecord(record_str.data(), rec_offset);
         }
 
         scan_tuple->gap_ts_ = gap_ts;

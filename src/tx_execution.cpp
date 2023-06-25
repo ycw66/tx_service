@@ -3820,11 +3820,6 @@ void TransactionExecution::ReleaseCatalogRangeLock(
         }
         for (const auto &[cce_addr, read_entry] : tbl_set)
         {
-            if (tbl_name.Type() == TableType::RangePartition)
-            {
-                LOG(INFO) << "releasing Range entry lock, cce: "
-                          << reinterpret_cast<void *>(cce_addr.CcePtr());
-            }
             --ref_cnt;
             cc_handler_->PostRead(TxNumber(),
                                   TxTerm(),

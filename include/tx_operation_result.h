@@ -7,6 +7,7 @@
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 #include "tx_command.h"
 #include "type.h"
 
@@ -170,6 +171,47 @@ struct RemoteScanCache
     uint32_t cache_mem_size_;
 };
 
+struct RemoteScanSliceCache
+{
+    RemoteScanSliceCache(uint16_t shard_cnt)
+        : cache_mem_size_(0), shard_cnt_(shard_cnt)
+    {
+    }
+
+    size_t Size() const
+    {
+        return rec_status_.size();
+    }
+
+    bool IsFull() const
+    {
+        return cache_mem_size_ >= 1024 * 20 / shard_cnt_;
+    }
+
+    void Reset(uint16_t shard_cnt)
+    {
+        key_ts_.clear();
+        gap_ts_.clear();
+        cce_ptr_.clear();
+        term_.clear();
+        rec_status_.clear();
+        keys_.clear();
+        records_.clear();
+        cache_mem_size_ = 0;
+        shard_cnt_ = shard_cnt;
+    }
+
+    std::vector<uint64_t> key_ts_;
+    std::vector<uint64_t> gap_ts_;
+    std::vector<uint64_t> cce_ptr_;
+    std::vector<int64_t> term_;
+    std::vector<remote::RecordStatusType> rec_status_;
+    std::string keys_;
+    std::string records_;
+    uint32_t cache_mem_size_;
+    uint16_t shard_cnt_;
+};
+
 struct RangeScanSliceResult
 {
     RangeScanSliceResult()
@@ -253,7 +295,7 @@ struct RangeScanSliceResult
     union
     {
         CcScanner *ccm_scanner_;
-        std::vector<RemoteScanCache> *remote_scan_caches_;
+        std::vector<RemoteScanSliceCache> *remote_scan_caches_;
     };
     bool is_local_{true};
 

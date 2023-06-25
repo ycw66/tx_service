@@ -41,7 +41,9 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
     if (to_alter_)
     {
         std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        range.wait_cv_.notify_one();
+        // Wake up all waiting threads since there could be multiple slices
+        // waiting on the same range wait_cv_.
+        range.wait_cv_.notify_all();
     }
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
@@ -74,7 +76,9 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
     if (to_alter_)
     {
         std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        range.wait_cv_.notify_one();
+        // Wake up all waiting threads since there could be multiple slices
+        // waiting on the same range wait_cv_.
+        range.wait_cv_.notify_all();
     }
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
@@ -287,7 +291,9 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
         // checkpionter has marked the slice to be altered.
         slice_lk.unlock();
         std::unique_lock<std::shared_mutex> range_lk(mux_);
-        wait_cv_.notify_one();
+        // Wake up all waiting threads since there could be multiple slices
+        // waiting on the same range wait_cv_.
+        wait_cv_.notify_all();
     }
 }
 void StoreRange::UpdateRange(const TxKey *start_key,

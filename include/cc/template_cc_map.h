@@ -2755,6 +2755,54 @@ public:
         }
     }
 
+    void AddScanTupleMsg(const KeyT *key,
+                         CcEntry<KeyT, ValueT> *cce,
+                         RemoteScanSliceCache *remote_cache,
+                         ScanType scan_type,
+                         int64_t ng_term,
+                         uint64_t read_ts,
+                         bool is_read_snapshot,
+                         bool keep_deleted = true,
+                         bool is_ckpt_delta = false)
+    {
+        assert(scan_type != ScanType::ScanUnknow);
+
+        switch (scan_type)
+        {
+        case ScanType::ScanGap:
+            if (!is_ckpt_delta)
+            {
+                ScanGap(key, cce, remote_cache, ng_term);
+            }
+            break;
+        case ScanType::ScanBoth:
+            ScanKey(
+                key,
+                cce,
+                remote_cache,
+                true,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                keep_deleted,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+            break;
+        case ScanType::ScanKey:
+            ScanKey(
+                key,
+                cce,
+                remote_cache,
+                false,
+                ng_term,
+                read_ts,
+                is_read_snapshot,
+                (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
+            break;
+        default:
+            break;
+        }
+    }
+
     bool Execute(remote::RemoteScanOpen &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -3389,6 +3437,12 @@ public:
 
     bool Execute(ScanSliceCc &req) override
     {
+        if (req.SendResponseIfFinished())
+        {
+            RangeSliceId slice_id = req.SliceId();
+            slice_id.Unpin();
+            return true;
+        }
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0 ||
             req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term)
@@ -3460,7 +3514,7 @@ public:
 
         uint16_t core_id = shard_->LocalCoreId();
         TemplateScanCache<KeyT, ValueT> *scan_cache = nullptr;
-        RemoteScanCache *remote_scan_cache = nullptr;
+        RemoteScanSliceCache *remote_scan_cache = nullptr;
         if (req.IsLocal())
         {
             scan_cache = static_cast<TemplateScanCache<KeyT, ValueT> *>(
@@ -4190,8 +4244,32 @@ public:
         bool finish = req.SetFinish();
         if (finish)
         {
-            slice_id.Unpin();
-            return true;
+            // We only update result if req is local on SetFinish(). For
+            // remote request we assign a dedicated response sender for each
+            // req
+            if (req.Result()->Value().is_local_)
+            {
+                slice_id.Unpin();
+                return true;
+            }
+            else if (req.IsResponseSender(shard_->core_id_))
+            {
+                req.SendResponseIfFinished();
+                slice_id.Unpin();
+                return true;
+            }
+            else
+            {
+                // Renqueue the cc req to the sender req list.
+                // We assign a dedicated core to be the response sender instead
+                // of directly sending the response on the last finished core.
+                // This is to avoid serialization of response message causing
+                // one core to become significantly slower than others and would
+                // end up being the sender of all scan slice response.
+                shard_->local_shards_.EnqueueCcRequest(
+                    shard_->core_id_, req.Txn(), &req);
+                return false;
+            }
         }
         else
         {
@@ -6216,7 +6294,9 @@ protected:
                 if (v_rec.payload_ptr_ != nullptr)
                 {
                     tuple->SetRecord(v_rec.payload_ptr_);
-                    tuple_size += v_rec.payload_ptr_->Size();
+                    // We're only copying the shared_ptr here so use the sizeof
+                    // payload ptr instead of the actual payload size.
+                    tuple_size += sizeof(v_rec.payload_ptr_);
                 }
             }
             tuple->key_ts_ = v_rec.commit_ts_;
@@ -6247,7 +6327,9 @@ protected:
                 if (cce->payload_ != nullptr)
                 {
                     tuple->SetRecord(cce->payload_);
-                    tuple_size += cce->payload_->Size();
+                    // We're only copying the shared_ptr here so use the sizeof
+                    // payload ptr instead of the actual payload size.
+                    tuple_size += sizeof(cce->payload_);
                 }
             }
             tuple->rec_status_ = cce->payload_status_;
@@ -6261,6 +6343,95 @@ protected:
                                 shard_->LocalCoreId());
 
         typed_cache->AddScanTupleSize(tuple_size);
+    }
+
+    void ScanKey(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
+                 RemoteScanSliceCache *remote_cache,
+                 bool include_gap,
+                 int64_t ng_term,
+                 uint64_t read_ts,
+                 bool is_read_snapshot,
+                 bool keep_deleted,
+                 bool is_ckpt_delta = false) const
+    {
+        uint32_t tuple_size = 0;
+
+        if (is_read_snapshot)
+        {
+            VersionResultRecord<ValueT> v_rec;
+            cce->MvccGet(read_ts, Type(), v_rec);
+
+            // For snapshot reads, only if the visible version's record status
+            // is deleted and no lock has been put on it, should the record be
+            // skipped in the result set. Note that if the visible version is
+            // mising in memory, the key still needs to be returned. Runtime
+            // will use the key to retrieve the visible version from the data
+            // store.
+            if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
+            {
+                return;
+            }
+            key->Serialize(remote_cache->keys_);
+            tuple_size += key->Size();
+
+            if (v_rec.payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 v_rec.payload_status_ == RecordStatus::Deleted))
+            {
+                if (v_rec.payload_ptr_ != nullptr)
+                {
+                    v_rec.payload_ptr_->Serialize(remote_cache->records_);
+                    tuple_size += v_rec.payload_ptr_->SerializedLength();
+                }
+            }
+            remote_cache->rec_status_.push_back(
+                remote::ToRemoteType::ConvertRecordStatus(
+                    v_rec.payload_status_));
+            remote_cache->key_ts_.push_back(v_rec.commit_ts_);
+        }
+        else
+        {
+            if (!(cce->payload_status_ == RecordStatus::Normal ||
+                  cce->payload_status_ == RecordStatus::Deleted &&
+                      keep_deleted))
+            {
+                return;
+            }
+            key->Serialize(remote_cache->keys_);
+            tuple_size += key->SerializedLength();
+
+            if (cce->payload_status_ == RecordStatus::Normal ||
+                (is_ckpt_delta &&
+                 cce->payload_status_ == RecordStatus::Deleted))
+            {
+                if (cce->payload_ != nullptr)
+                {
+                    cce->payload_->Serialize(remote_cache->records_);
+                    tuple_size += cce->payload_->SerializedLength();
+                }
+            }
+            remote_cache->rec_status_.push_back(
+                remote::ToRemoteType::ConvertRecordStatus(
+                    cce->payload_status_));
+            remote_cache->key_ts_.push_back(cce->commit_ts_);
+        }
+
+        if (include_gap)
+        {
+            remote_cache->gap_ts_.push_back(cce->gap_commit_ts_);
+        }
+        else
+        {
+            remote_cache->gap_ts_.push_back(0);
+        }
+
+        remote_cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
+        remote_cache->term_.push_back(ng_term);
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
+
+        remote_cache->cache_mem_size_ += tuple_size;
     }
 
     void ScanKey(const KeyT *key,
@@ -6394,6 +6565,21 @@ protected:
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
         cce_addr->set_term(ng_term);
+
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
+    }
+
+    void ScanGap(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
+                 RemoteScanSliceCache *cache,
+                 int64_t ng_term) const
+    {
+        cache->key_ts_.push_back(0);
+        cache->gap_ts_.push_back(cce->gap_commit_ts_);
+
+        cache->cce_ptr_.push_back(reinterpret_cast<uint64_t>(cce));
+        cache->term_.push_back(ng_term);
 
         // For remote scans, the returned cc entries' node group ID is set
         // on the sender side when the sender receives the response.

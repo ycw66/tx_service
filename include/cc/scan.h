@@ -64,14 +64,21 @@ template <typename KeyT, typename ValueT>
 struct TemplateScanTuple : public ScanTuple
 {
 public:
-    TemplateScanTuple() : ScanTuple(), key_obj_(), rec_ptr_(nullptr)
+    TemplateScanTuple()
+        : ScanTuple(),
+          key_obj_(),
+          rec_ptr_(nullptr),
+          rec_obj_(nullptr),
+          is_ptr_(false)
     {
     }
 
     TemplateScanTuple(TemplateScanTuple<KeyT, ValueT> &&rhs)
         : ScanTuple(rhs.key_ts_, rhs.gap_ts_, rhs.rec_status_, rhs.cce_addr_),
           key_obj_(std::move(rhs.key_obj_)),
-          rec_ptr_(std::move(rhs.rec_ptr_))
+          rec_ptr_(std::move(rhs.rec_ptr_)),
+          rec_obj_(std::move(rhs.rec_obj_)),
+          is_ptr_(rhs.is_ptr_)
     {
     }
 
@@ -84,7 +91,7 @@ public:
 
     const TxRecord *Record() const override
     {
-        return rec_ptr_.get();
+        return is_ptr_ ? rec_ptr_.get() : rec_obj_.get();
     }
 
     KeyT &KeyObj()
@@ -99,15 +106,24 @@ public:
 
     const ValueT &RecordObj()
     {
-        assert(rec_ptr_.get() != nullptr);
-        return *rec_ptr_;
+        return is_ptr_ ? *rec_ptr_ : *rec_obj_;
     }
 
     void SetRecord(std::shared_ptr<ValueT> &ptr)
     {
+        is_ptr_ = true;
         rec_ptr_ = ptr;
     }
 
+    void SetRecord(const char *rec, size_t &offset)
+    {
+        is_ptr_ = false;
+        if (rec_obj_ == nullptr)
+        {
+            rec_obj_ = std::make_unique<ValueT>();
+        }
+        rec_obj_->Deserialize(rec, offset);
+    }
     friend bool operator<(const TemplateScanTuple<KeyT, ValueT> &lhs,
                           const TemplateScanTuple<KeyT, ValueT> &rhs)
     {
@@ -118,7 +134,12 @@ public:
 
 private:
     KeyT key_obj_;
+    // Used when rec is pointing to a local cc map cc entry.
     std::shared_ptr<ValueT> rec_ptr_;
+    // Used when rec is deserialized from a remote scan slice response,
+    // in which case ScanTuple is the record owner,
+    std::unique_ptr<ValueT> rec_obj_;
+    bool is_ptr_{false};
 
     template <typename KT, typename VT>
     friend class TemplateCcScanner;

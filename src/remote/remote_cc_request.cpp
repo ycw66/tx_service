@@ -13,6 +13,9 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AcquireResponse);
+
     cc_res_.post_lambda_ =
         [this](CcHandlerResult<std::vector<AcquireKeyResult>> *res)
     {
@@ -23,15 +26,13 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
             return;
         });
 
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_AcquireResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         const AcquireRequest &acquire_req = input_msg_->acquire_req();
-        AcquireResponse *resp = output_msg_->mutable_acquire_resp();
+        AcquireResponse *resp = output_msg_.mutable_acquire_resp();
         resp->set_is_ack(false);
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
@@ -60,14 +61,14 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 
         ACTION_FAULT_INJECTOR("remote_acquire_before_sendmessage");
         const AcquireRequest &req = input_msg_->acquire_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 
-        arena_ = nullptr;
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteAcquire::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_acquire_req());
 
@@ -75,11 +76,9 @@ void txservice::remote::RemoteAcquire::Reset(
     cc_res_.Value().resize(1);
     cc_res_.Value()[0].cce_addr_.SetCce(0, -1, 0);
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
 
     const AcquireRequest &req = input_msg->acquire_req();
 
@@ -100,8 +99,7 @@ void txservice::remote::RemoteAcquire::Reset(
                      ToLocalType::ConvertProtocol(req.protocol()),
                      ToLocalType::ConvertIsolation(req.iso_level()));
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -111,15 +109,13 @@ void txservice::remote::RemoteAcquire::Reset(
 
 void txservice::remote::RemoteAcquire::Acknowledge()
 {
-    output_msg_->set_type(
-        CcMessage::MessageType::CcMessage_MessageType_AcquireResponse);
-    output_msg_->set_tx_number(input_msg_->tx_number());
-    output_msg_->set_handler_addr(input_msg_->handler_addr());
-    output_msg_->set_tx_term(input_msg_->tx_term());
-    output_msg_->set_command_id(input_msg_->command_id());
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
     const AcquireRequest &acquire_req = input_msg_->acquire_req();
-    AcquireResponse *acquire_resp = output_msg_->mutable_acquire_resp();
+    AcquireResponse *acquire_resp = output_msg_.mutable_acquire_resp();
     acquire_resp->set_is_ack(true);
     acquire_resp->set_error_code(
         ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
@@ -140,24 +136,24 @@ void txservice::remote::RemoteAcquire::Acknowledge()
     resp_addr->set_core_id(addr.CoreId());
 
     const AcquireRequest &req = input_msg_->acquire_req();
-    hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AcquireAllResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<AcquireAllResult> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_AcquireAllResponse);
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-
-        AcquireAllResponse *resp = output_msg_->mutable_acquire_all_resp();
+        AcquireAllResponse *resp = output_msg_.mutable_acquire_all_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
         resp->set_is_ack(false);
@@ -172,23 +168,21 @@ txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
         }
 
         const AcquireAllRequest &req = input_msg_->acquire_all_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteAcquireAll::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_acquire_all_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_all_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_all_resp();
 
     const AcquireAllRequest &req = input_msg->acquire_all_req();
     std::string_view table_name_sv{req.table_name_str()};
@@ -220,8 +214,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
                         ToLocalType::ConvertProtocol(req.protocol()),
                         ToLocalType::ConvertCcOperation(req.cc_op()));
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -231,39 +224,37 @@ void txservice::remote::RemoteAcquireAll::Reset(
 
 void txservice::remote::RemoteAcquireAll::Acknowledge()
 {
-    output_msg_->set_type(
-        CcMessage::MessageType::CcMessage_MessageType_AcquireAllResponse);
-    output_msg_->set_tx_number(input_msg_->tx_number());
-    output_msg_->set_handler_addr(input_msg_->handler_addr());
-    output_msg_->set_tx_term(input_msg_->tx_term());
-    output_msg_->set_command_id(input_msg_->command_id());
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
     AcquireAllResponse *acquire_all_resp =
-        output_msg_->mutable_acquire_all_resp();
+        output_msg_.mutable_acquire_all_resp();
     acquire_all_resp->set_is_ack(true);
     acquire_all_resp->set_error_code(
         ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
     acquire_all_resp->set_node_term(cc_res_.Value().node_term_);
 
     const AcquireAllRequest &req = input_msg_->acquire_all_req();
-    hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemotePostRead::RemotePostRead()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ValidateResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_ValidateResponse);
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-
-        ValidateResponse *resp = output_msg_->mutable_validate_resp();
+        ValidateResponse *resp = output_msg_.mutable_validate_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
@@ -280,23 +271,21 @@ txservice::remote::RemotePostRead::RemotePostRead()
         }
 
         const ValidateRequest &req = input_msg_->validate_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemotePostRead::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_validate_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_validate_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_validate_resp();
 
     const ValidateRequest &req = input_msg->validate_req();
     const CceAddr_msg &cce_addr = req.cce_addr();
@@ -313,8 +302,7 @@ void txservice::remote::RemotePostRead::Reset(
                       req.gap_ts(),
                       &cc_res_);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -326,6 +314,9 @@ txservice::remote::RemoteRead::RemoteRead()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ReadResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
     {
         CODE_FAULT_INJECTOR("remote_read_msg_missed", {
@@ -335,16 +326,13 @@ txservice::remote::RemoteRead::RemoteRead()
             return;
         });
 
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_ReadResponse);
-
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
         const ReadKeyResult &read_result = res->Value();
-        ReadResponse *resp = output_msg_->mutable_read_resp();
+        ReadResponse *resp = output_msg_.mutable_read_resp();
         resp->set_is_ack(false);
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
@@ -364,24 +352,21 @@ txservice::remote::RemoteRead::RemoteRead()
         }
 
         const ReadRequest &req = input_msg_->read_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
-void txservice::remote::RemoteRead::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_read_req());
 
     cc_res_.Reset();
     cc_res_.Value().Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_read_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_read_resp();
 
     const ReadRequest &req = input_msg->read_req();
     std::string_view table_name_sv{req.table_name_str()};
@@ -406,7 +391,7 @@ void txservice::remote::RemoteRead::Reset(
 
     cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10, 0);
 
-    ReadResponse *resp = output_msg_->mutable_read_resp();
+    ReadResponse *resp = output_msg_.mutable_read_resp();
     resp->clear_record();
     if (read_type == ReadType::Inside)
     {
@@ -445,8 +430,7 @@ void txservice::remote::RemoteRead::Reset(
                       req.is_for_write());
     }
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -456,14 +440,12 @@ void txservice::remote::RemoteRead::Reset(
 
 void txservice::remote::RemoteRead::Acknowledge()
 {
-    output_msg_->set_type(
-        CcMessage::MessageType::CcMessage_MessageType_ReadResponse);
-    output_msg_->set_tx_number(input_msg_->tx_number());
-    output_msg_->set_handler_addr(input_msg_->handler_addr());
-    output_msg_->set_tx_term(input_msg_->tx_term());
-    output_msg_->set_command_id(input_msg_->command_id());
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
-    ReadResponse *read_resp = output_msg_->mutable_read_resp();
+    ReadResponse *read_resp = output_msg_.mutable_read_resp();
     read_resp->set_is_ack(true);
     read_resp->set_error_code(
         ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
@@ -483,56 +465,54 @@ void txservice::remote::RemoteRead::Acknowledge()
     resp_addr->set_core_id(addr.CoreId());
 
     const ReadRequest &req = input_msg_->read_req();
-    hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
 }
 
 txservice::remote::RemotePostWrite::RemotePostWrite()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-
-        PostprocessResponse *resp = output_msg_->mutable_post_resp();
+        PostprocessResponse *resp = output_msg_.mutable_post_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         if (input_msg_->has_postcommit_req())
         {
             const PostCommitRequest &req = input_msg_->postcommit_req();
-            hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+            hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         }
         else
         {
             assert(input_msg_->has_forward_post_commit_req());
             const ForwardPostCommitRequest &req =
                 input_msg_->forward_post_commit_req();
-            hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
+            hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         }
-        arena_ = nullptr;
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemotePostWrite::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_postcommit_req() ||
            input_msg->has_forward_post_commit_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_post_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
 
     if (input_msg->has_postcommit_req())
     {
@@ -588,8 +568,7 @@ void txservice::remote::RemotePostWrite::Reset(
             post_commit.key_shard_code(),
             &cc_res_);
     }
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -601,38 +580,36 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<PostProcessResult> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse);
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-
-        PostprocessResponse *resp = output_msg_->mutable_post_resp();
+        PostprocessResponse *resp = output_msg_.mutable_post_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const PostWriteAllRequest &req = input_msg_->post_write_all_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemotePostWriteAll::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_post_write_all_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_post_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_post_resp();
 
     const PostWriteAllRequest &post_write_all = input_msg->post_write_all_req();
 
@@ -678,8 +655,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
                           write_type,
                           tx_term);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -690,18 +666,18 @@ void txservice::remote::RemotePostWriteAll::Reset(
 txservice::remote::RemoteScanOpen::RemoteScanOpen()
 {
     parallel_req_ = true;
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse);
     res_ = &cc_res_;
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        ScanOpenResponse *scan_open = output_msg_->mutable_scan_open_resp();
+        ScanOpenResponse *scan_open = output_msg_.mutable_scan_open_resp();
 
         scan_open->set_error_code(
             ToRemoteType::ConvertCcErrorCode(cc_res_.ErrorCode()));
@@ -737,15 +713,13 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
 
         scan_open->set_node_group_id(node_group_id_);
         const ScanOpenRequest &req = input_msg_->scan_open_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteScanOpen::Reset(
-    CcMessage *input_msg,
-    std::unique_ptr<google::protobuf::Arena> arena,
-    uint32_t core_cnt)
+    std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
 {
     assert(input_msg->has_scan_open_req());
 
@@ -798,13 +772,11 @@ void txservice::remote::RemoteScanOpen::Reset(
 
     is_ckpt_delta_ = scan_open.ckpt();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_scan_open_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_scan_open_resp();
 
-    ScanOpenResponse *resp = output_msg_->mutable_scan_open_resp();
+    ScanOpenResponse *resp = output_msg_.mutable_scan_open_resp();
     resp->clear_scan_cache();
 
     scan_caches_.clear();
@@ -817,8 +789,7 @@ void txservice::remote::RemoteScanOpen::Reset(
 
     unfinish_cnt_.store(core_cnt);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -839,6 +810,8 @@ void txservice::remote::RemoteScanOpen::Free()
 
 txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 {
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse);
     is_ckpt_delta_ = false;
     res_ = &cc_res_;
     cce_ptr_ = nullptr;
@@ -853,15 +826,12 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
 
-        ScanNextResponse *scan_next_resp =
-            output_msg_->mutable_scan_next_resp();
+        ScanNextResponse *scan_next_resp = output_msg_.mutable_scan_next_resp();
         const ScanNextRequest &req = input_msg_->scan_next_req();
         scan_next_resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
@@ -887,13 +857,13 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
             // post-processing.
             if (lock_type == LockType::NoLock)
             {
-                scan_next_resp->mutable_scan_cache()->clear_scan_tuple();
+                scan_next_resp->mutable_scan_cache()->Clear();
             }
         }
         scan_next_resp->set_scan_cache_ptr(req.scan_cache_ptr());
 
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
@@ -912,7 +882,7 @@ bool txservice::remote::RemoteScanNextBatch::ValidTermCheck()
 }
 
 void txservice::remote::RemoteScanNextBatch::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_scan_next_req());
 
@@ -941,21 +911,18 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                            cce_addr.core_id());
     ccm_ = nullptr;
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_scan_next_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_scan_next_resp();
 
-    ScanNextResponse *resp = output_msg_->mutable_scan_next_resp();
+    ScanNextResponse *resp = output_msg_.mutable_scan_next_resp();
     resp->clear_scan_cache();
-    scan_cache_.cache_msg_ = resp->mutable_scan_cache();
+    // scan_cache_.cache_msg_ = resp->mutable_scan_cache();
     scan_cache_.cache_mem_size_ = 0;
 
     is_ckpt_delta_ = scan_next.ckpt();
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -972,12 +939,9 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<RangeScanSliceResult> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_ScanSliceResponse);
-        ScanSliceResponse *scan_slice_resp =
-            output_msg_->mutable_scan_slice_resp();
-        scan_slice_resp->set_error_code(
+        output_msg_.set_error_code(
             ToRemoteType::ConvertCcErrorCode(cc_res_.ErrorCode()));
+        bool send_cache = true;
 
         if (cc_res_.IsError())
         {
@@ -1006,34 +970,78 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
             // post-processing.
             if (lock_type == LockType::NoLock)
             {
-                scan_slice_resp->clear_scan_cache();
+                send_cache = false;
             }
         }
 
         const RangeScanSliceResult &slice_result = cc_res_.Value();
-        scan_slice_resp->clear_last_key();
+        output_msg_.clear_last_key();
         if (slice_result.last_key_ != nullptr)
         {
-            slice_result.last_key_->Serialize(
-                *scan_slice_resp->mutable_last_key());
+            slice_result.last_key_->Serialize(*output_msg_.mutable_last_key());
         }
-        scan_slice_resp->set_slice_position(
+        output_msg_.set_slice_position(
             ToRemoteType::ConvertSlicePosition(slice_result.slice_position_));
 
+        uint16_t core_cnt = GetShardCount();
+        // Add core cnt first
+        output_msg_.mutable_tuple_cnt()->append((const char *) &core_cnt,
+                                                sizeof(uint16_t));
+        // Add tuple count for each core
+        for (size_t idx = 0; idx < core_cnt; ++idx)
+        {
+            size_t tuple_cnt;
+            if (send_cache)
+            {
+                tuple_cnt = scan_cache_vec_[idx].rec_status_.size();
+            }
+            else
+            {
+                tuple_cnt = 0;
+            }
+            output_msg_.mutable_tuple_cnt()->append((const char *) &tuple_cnt,
+                                                    sizeof(size_t));
+        }
+
+        if (send_cache)
+        {
+            // Merge scan cache info into a single byte array to reduce
+            // deserialization time on the receiver side.
+            for (size_t idx = 0; idx < core_cnt; ++idx)
+            {
+                RemoteScanSliceCache &cache = scan_cache_vec_[idx];
+                output_msg_.mutable_keys()->append(cache.keys_);
+                output_msg_.mutable_records()->append(cache.records_);
+                output_msg_.mutable_key_ts()->append(
+                    (const char *) cache.key_ts_.data(),
+                    cache.key_ts_.size() * sizeof(uint64_t));
+                output_msg_.mutable_gap_ts()->append(
+                    (const char *) cache.gap_ts_.data(),
+                    cache.gap_ts_.size() * sizeof(uint64_t));
+                output_msg_.mutable_term()->append(
+                    (const char *) cache.term_.data(),
+                    cache.term_.size() * sizeof(uint64_t));
+                output_msg_.mutable_cce_ptr()->append(
+                    (const char *) cache.cce_ptr_.data(),
+                    cache.cce_ptr_.size() * sizeof(uint64_t));
+                output_msg_.mutable_rec_status()->append(
+                    (const char *) cache.rec_status_.data(),
+                    cache.rec_status_.size() * sizeof(RecordStatusType));
+            }
+        }
         const ScanSliceRequest &req = input_msg_->scan_slice_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendScanRespToNode(req.src_node_id(), output_msg_, nullptr, false);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteScanSlice::Reset(
-    CcMessage *input_msg,
-    std::unique_ptr<google::protobuf::Arena> arena,
-    uint16_t core_cnt)
+    std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt)
 {
     assert(input_msg->has_scan_slice_req());
 
     cc_res_.Reset();
+    output_msg_.Clear();
 
     const ScanSliceRequest &scan_slice_req = input_msg->scan_slice_req();
     std::string_view tbl_name_view(scan_slice_req.table_name_str());
@@ -1060,12 +1068,10 @@ void txservice::remote::RemoteScanSlice::Reset(
                      scan_slice_req.is_for_write(),
                      scan_slice_req.is_covering_keys());
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->set_tx_number(input_msg->tx_number());
-    output_msg_->set_handler_addr(input_msg->handler_addr());
-    output_msg_->set_tx_term(input_msg->tx_term());
-    output_msg_->set_command_id(input_msg->command_id());
+    output_msg_.set_tx_number(input_msg->tx_number());
+    output_msg_.set_handler_addr(input_msg->handler_addr());
+    output_msg_.set_tx_term(input_msg->tx_term());
+    output_msg_.set_command_id(input_msg->command_id());
 
     SetShardCount(core_cnt);
 
@@ -1079,20 +1085,21 @@ void txservice::remote::RemoteScanSlice::Reset(
     }
 
     RangeScanSliceResult &slice_result = cc_res_.Value();
-    ScanSliceResponse *scan_slice_resp = output_msg_->mutable_scan_slice_resp();
 
-    scan_slice_resp->set_error_code(0);
-
-    scan_slice_resp->clear_scan_cache();
-    scan_cache_vec_.clear();
     for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
     {
-        scan_cache_vec_.emplace_back(scan_slice_resp->add_scan_cache(), 0);
+        if (core_id == scan_cache_vec_.size())
+        {
+            scan_cache_vec_.emplace_back(core_cnt);
+        }
+        else
+        {
+            scan_cache_vec_[core_id].Reset(core_cnt);
+        }
     }
     slice_result.remote_scan_caches_ = &scan_cache_vec_;
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1101,7 +1108,7 @@ void txservice::remote::RemoteScanSlice::Reset(
 }
 
 void txservice::remote::RemoteReadOutside::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_read_outside_req());
 
@@ -1116,8 +1123,7 @@ void txservice::remote::RemoteReadOutside::Reset(
     commit_ts_ = req.commit_ts();
     rec_str_ = &req.record();
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1127,51 +1133,49 @@ void txservice::remote::RemoteReadOutside::Reset(
 
 void txservice::remote::RemoteReadOutside::Finish()
 {
-    arena_ = nullptr;
+    hd_->RecycleCcMsg(std::move(input_msg_));
 }
 
 txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_FaultInjectResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<bool> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::CcMessage_MessageType_FaultInjectResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
 
-        FaultInjectResponse *resp = output_msg_->mutable_fault_inject_resp();
+        FaultInjectResponse *resp = output_msg_.mutable_fault_inject_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const FaultInjectRequest &req = input_msg_->fault_inject_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteFaultInjectCC::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_fault_inject_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
 
     const FaultInjectRequest &req = input_msg->fault_inject_req();
 
     FaultInjectCC::Reset(&req.fault_name(), &req.fault_paras(), &cc_res_);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1184,39 +1188,36 @@ txservice::remote::RemoteAnalyzeTableAllCc::RemoteAnalyzeTableAllCc()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllResponse);
     cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::
-                CcMessage_MessageType_AnalyzeTableAllResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         AnalyzeTableAllResponse *resp =
-            output_msg_->mutable_analyze_table_all_resp();
+            output_msg_.mutable_analyze_table_all_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const AnalyzeTableAllRequest &req = input_msg_->analyze_table_all_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_analyze_table_all_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_analyze_table_all_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_analyze_table_all_resp();
 
     const AnalyzeTableAllRequest &req = input_msg->analyze_table_all_req();
     std::string_view table_name_sv(req.table_name_str());
@@ -1228,8 +1229,7 @@ void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
                              input_msg->tx_number(),
                              &cc_res_);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
     if (hd_ == nullptr)
     {
         hd_ = Sharder::Instance().GetCcStreamSender();
@@ -1241,40 +1241,38 @@ txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
 {
     res_ = &cc_res_;
 
+    output_msg_.set_type(CcMessage::MessageType::
+                             CcMessage_MessageType_CleanCcEntryForTestResponse);
+
     cc_res_.post_lambda_ = [this](CcHandlerResult<bool> *res)
     {
-        output_msg_->set_type(
-            CcMessage::MessageType::
-                CcMessage_MessageType_CleanCcEntryForTestResponse);
-        output_msg_->set_tx_number(input_msg_->tx_number());
-        output_msg_->set_tx_term(input_msg_->tx_term());
-        output_msg_->set_command_id(input_msg_->command_id());
-        output_msg_->set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
 
         CleanCcEntryForTestResponse *resp =
-            output_msg_->mutable_clean_cc_entry_resp();
+            output_msg_.mutable_clean_cc_entry_resp();
         resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
 
         const CleanCcEntryForTestRequest &req =
             input_msg_->clean_cc_entry_req();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_clean_cc_entry_req());
 
     cc_res_.Reset();
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
 
     const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
     std::string_view table_name_sv{req.table_name_str()};
@@ -1289,8 +1287,7 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
                                  input_msg->tx_number(),
                                  &cc_res_);
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1299,20 +1296,17 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
 }
 
 void txservice::remote::RemoteCheckDeadLockCc::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_dead_lock_request());
 
     CheckDeadLockCc::Reset();
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
     const DeadLockRequest &req = input_msg->dead_lock_request();
     DeadLockCheck::UpdateCheckNodeId(req.src_node_id());
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1328,14 +1322,14 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
         1, std::memory_order_acq_rel);
     if (ii == 1)
     {
-        output_msg_->set_type(
+        output_msg_.set_type(
             tr::CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse);
-        output_msg_->set_tx_number(0);
-        output_msg_->set_handler_addr(0);
-        output_msg_->set_tx_term(0);
-        output_msg_->set_command_id(0);
+        output_msg_.set_tx_number(0);
+        output_msg_.set_handler_addr(0);
+        output_msg_.set_tx_term(0);
+        output_msg_.set_command_id(0);
 
-        DeadLockResponse *resp = output_msg_->mutable_dead_lock_response();
+        DeadLockResponse *resp = output_msg_.mutable_dead_lock_response();
         resp->set_error_code(0);
         resp->set_node_id(Sharder::Instance().NodeId());
 
@@ -1378,22 +1372,20 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
         }
 
         const DeadLockRequest &req = input_msg_->dead_lock_request();
-        hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-        arena_ = nullptr;
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
     }
     return true;
 }
 
 void txservice::remote::RemoteAbortTransactionCc::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_abort_tran_req());
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
     const AbortTransactionRequest &req = input_msg->abort_tran_req();
 
     std::vector<TxNumber> vct;
@@ -1403,8 +1395,7 @@ void txservice::remote::RemoteAbortTransactionCc::Reset(
     }
 
     AbortTransactionCc::Reset(req.entry(), vct, req.wait_txid());
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1443,35 +1434,32 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
         break;
     }
 
-    output_msg_->set_type(tr::CcMessage::MessageType::
-                              CcMessage_MessageType_AbortTransactionResponse);
-    output_msg_->set_tx_number(0);
-    output_msg_->set_handler_addr(0);
-    output_msg_->set_tx_term(0);
-    output_msg_->set_command_id(0);
+    output_msg_.set_type(tr::CcMessage::MessageType::
+                             CcMessage_MessageType_AbortTransactionResponse);
+    output_msg_.set_tx_number(0);
+    output_msg_.set_handler_addr(0);
+    output_msg_.set_tx_term(0);
+    output_msg_.set_command_id(0);
 
-    AbortTransactionResponse *resp = output_msg_->mutable_abort_tran_resp();
+    AbortTransactionResponse *resp = output_msg_.mutable_abort_tran_resp();
     resp->set_error_code(err);
 
     const AbortTransactionRequest &req = input_msg_->abort_tran_req();
-    hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-    arena_ = nullptr;
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+    hd_->RecycleCcMsg(std::move(input_msg_));
     return true;
 }
 
 void txservice::remote::RemoteBlockReqCheckCc::Reset(
-    CcMessage *input_msg, std::unique_ptr<google::protobuf::Arena> arena)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_blocked_check_req());
 
-    output_msg_ =
-        google::protobuf::Arena::CreateMessage<CcMessage>(arena.get());
-    output_msg_->clear_tx_number();
-    output_msg_->clear_handler_addr();
-    output_msg_->clear_acquire_resp();
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_acquire_resp();
 
-    input_msg_ = input_msg;
-    arena_ = std::move(arena);
+    input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
     {
@@ -1512,20 +1500,20 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
         FaultInject::Instance().InjectFault("block_req_term_changed", "remove");
     });
 
-    output_msg_->set_type(tr::CcMessage::MessageType::
-                              CcMessage_MessageType_BlockedCcReqCheckResponse);
+    output_msg_.set_type(tr::CcMessage::MessageType::
+                             CcMessage_MessageType_BlockedCcReqCheckResponse);
 
-    output_msg_->set_tx_number(input_msg_->tx_number());
-    output_msg_->set_handler_addr(input_msg_->handler_addr());
-    output_msg_->set_tx_term(input_msg_->tx_term());
-    output_msg_->set_command_id(input_msg_->command_id());
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
 
-    BlockedCcReqCheckResponse *resp = output_msg_->mutable_blocked_check_resp();
+    BlockedCcReqCheckResponse *resp = output_msg_.mutable_blocked_check_resp();
     resp->set_req_status((int32_t) status);
     resp->set_result_temp_type(
         input_msg_->blocked_check_req().result_temp_type());
 
-    hd_->SendMessageToNode(req.src_node_id(), *output_msg_);
-    arena_ = nullptr;
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+    hd_->RecycleCcMsg(std::move(input_msg_));
     return true;
 }

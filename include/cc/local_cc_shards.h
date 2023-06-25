@@ -865,8 +865,8 @@ private:
     std::condition_variable slice_update_cv_;
     std::vector<UpdateSliceSpecWork> pending_slice_work_;
     std::vector<std::thread> update_slice_spec_thds_;
-    WorkerStatus slice_thd_status_;
     const int slice_worker_num_;
+    WorkerStatus slice_thd_status_;
 
     void UpdateSliceSpecWorker();
 
@@ -953,8 +953,8 @@ private:
     // Flush work from data sync, and split range
     std::vector<FlushDataWork> pending_flush_work_;
     std::vector<std::thread> flush_worker_thds_;
-    WorkerStatus flush_worker_thd_status_;
     const int flush_worker_num_;
+    WorkerStatus flush_worker_thd_status_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);

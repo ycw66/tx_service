@@ -32,6 +32,7 @@
 #include "proto/cc_request.pb.h"
 #include "random_pairing.h"
 #include "read_write_set.h"
+#include "remote/cc_stream_receiver.h"
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
@@ -1970,7 +1971,7 @@ public:
                          : nullptr;
     }
 
-    RemoteScanCache *GetRemoteScanCache(size_t shard_id)
+    RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
     {
         if (IsLocal())
         {
@@ -1995,6 +1996,11 @@ public:
         blocked_scan_types_.resize(shard_cnt);
         is_wait_for_post_write_.resize(shard_cnt, false);
         unfinished_core_cnt_.store(shard_cnt, std::memory_order_release);
+    }
+
+    uint64_t GetShardCount() const
+    {
+        return cce_ptr_vec_.size();
     }
 
     void SetPriorCceAddr(uint64_t addr, uint16_t shard_id)
@@ -2035,10 +2041,40 @@ public:
 
         if (remaining_cnt == 1)
         {
-            res_->SetFinished();
+            // Only update result if this is local request. Remote request
+            // result will be updated by dedicated core.
+            if (res_->Value().is_local_)
+            {
+                res_->SetFinished();
+            }
         }
 
         return remaining_cnt == 1;
+    }
+
+    /**
+     * @brief Send response to src node if all cores have finished.
+     * We use this method to send scan slice response if this request is
+     * a remote request.
+     * We assign a dedicated core to be the response sender instead of directly
+     * sending the response on the last finished core. This is to avoid
+     * serialization of response message causing one core to become
+     * significantly slower than others and would end up being the sender of all
+     * scan slice response.
+     */
+    bool SendResponseIfFinished()
+    {
+        if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
+        {
+            res_->SetFinished();
+            return true;
+        }
+        return false;
+    }
+
+    bool IsResponseSender(uint16_t core_id) const
+    {
+        return (tx_number_ & 0x3FF) % cce_addr_vec_.size() == core_id;
     }
 
     bool IsForWrite() const
@@ -2193,6 +2229,61 @@ private:
     size_t shard_cnt_;
     std::vector<uint64_t> memory_usage_kb_vec_;
     NodeGroupId cc_ng_id_;
+};
+
+struct ProcessRemoteScanRespCc : public CcRequestBase
+{
+public:
+    ProcessRemoteScanRespCc(brpc::StreamId stream_id,
+                            butil::IOBuf *const msg,
+                            std::atomic_uint32_t &total_msg,
+                            remote::CcStreamReceiver *receiver,
+                            std::mutex &mux,
+                            std::condition_variable &cv)
+        : stream_id_(stream_id),
+          msg_(msg),
+          unfinished_msg_(total_msg),
+          receiver_(receiver),
+          mux_(mux),
+          cv_(cv)
+
+    {
+    }
+
+    ProcessRemoteScanRespCc() = delete;
+
+    ProcessRemoteScanRespCc(ProcessRemoteScanRespCc &&other)
+        : stream_id_(other.stream_id_),
+          msg_(other.msg_),
+          unfinished_msg_(other.unfinished_msg_),
+          receiver_(other.receiver_),
+          mux_(other.mux_),
+          cv_(other.cv_)
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        std::unique_ptr<remote::ScanSliceResponse> resp_msg =
+            receiver_->GetScanSliceResp();
+        butil::IOBufAsZeroCopyInputStream wrapper(*msg_);
+        resp_msg->ParseFromZeroCopyStream(&wrapper);
+        receiver_->OnReceiveScanResp(std::move(resp_msg));
+        if (unfinished_msg_.fetch_sub(1) == 1)
+        {
+            std::unique_lock<std::mutex> lk(mux_);
+            cv_.notify_all();
+        }
+        return false;
+    }
+
+private:
+    brpc::StreamId stream_id_;
+    butil::IOBuf *const msg_;
+    std::atomic_uint32_t &unfinished_msg_;
+    remote::CcStreamReceiver *receiver_;
+    std::mutex &mux_;
+    std::condition_variable &cv_;
 };
 
 struct DataSyncScanCc : public CcRequestBase
