@@ -489,8 +489,6 @@ public:
                 std::unique_ptr<TxCommand> tx_cmd = CreateTxCommand(
                     std::string_view(log_blob.data() + offset, cmd_len));
                 offset += cmd_len;
-                //                LOG(INFO) << "create replaying command len: "
-                //                << cmd_len;
                 cmd_list.emplace_back(std::move(tx_cmd));
             }
 
@@ -527,9 +525,6 @@ public:
                 TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
                 ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
             }
-
-            // try to commit replay commands and update commit ts
-            object.TryCommitReplayCommands(cce->commit_ts_);
         }
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)

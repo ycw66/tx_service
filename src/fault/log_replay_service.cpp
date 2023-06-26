@@ -493,8 +493,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             // parse log_blob
             size_t blob_offset = 0;
-            LOG(INFO) << "txn commit ts: " << commit_ts
-                      << ", blob size: " << blob.size();
             while (blob_offset < blob.size())
             {
 #ifdef ON_KEY_OBJECT
