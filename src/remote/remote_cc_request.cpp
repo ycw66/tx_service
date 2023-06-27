@@ -917,7 +917,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
 
     ScanNextResponse *resp = output_msg_.mutable_scan_next_resp();
     resp->clear_scan_cache();
-    // scan_cache_.cache_msg_ = resp->mutable_scan_cache();
+    scan_cache_.cache_msg_ = resp->mutable_scan_cache();
     scan_cache_.cache_mem_size_ = 0;
 
     is_ckpt_delta_ = scan_next.ckpt();

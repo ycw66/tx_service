@@ -505,7 +505,7 @@ size_t TransactionExecution::OpenTxScan(ScanOpenTxRequest &scan_open_tx_req)
     return scan_open_tx_req.scan_alias_;
 }
 
-void TransactionExecution::CloseTxScan(size_t alias,
+void TransactionExecution::CloseTxScan(uint64_t alias,
                                        const TableName *table_name,
                                        std::vector<UnlockTuple> &unlock_vec)
 {
@@ -662,7 +662,7 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
                 .append(scan_open_req.tab_name_->String());
         });
 
-    if (scan_open_req.scan_alias_ == UINT16_MAX)
+    if (scan_open_req.scan_alias_ == UINT64_MAX)
     {
         scan_open_req.scan_alias_ = scan_alias_cnt_;
         ++scan_alias_cnt_;
@@ -1589,7 +1589,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    size_t alias = scan_next.tx_req_->alias_;
+    uint64_t alias = scan_next.tx_req_->alias_;
 
     if (scan_next.scan_state_ == nullptr)
     {
@@ -2300,7 +2300,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
 void TransactionExecution::ScanClose(
     const std::vector<UnlockTuple> &unlock_batch,
-    size_t alias,
+    uint64_t alias,
     const TableName &table_name)
 {
     CcScanner *scanner = nullptr;
@@ -4342,7 +4342,7 @@ void TransactionExecution::PostProcess(KickoutDataOp &kickout_data_all_op)
 }
 
 ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
-    size_t alias, const TableName *table_name)
+    uint64_t alias, const TableName *table_name)
 {
     size_t pool_size = scan_close_req_pool_->Size();
     for (size_t idx = 0; idx < pool_size; ++idx)

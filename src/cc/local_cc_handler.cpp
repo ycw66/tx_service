@@ -663,7 +663,7 @@ void txservice::LocalCcHandler::ScanOpen(
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
-    assert(open_result.scan_alias_ < UINT16_MAX);
+    assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
     scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
@@ -847,7 +847,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     open_result.scanner_ = std::move(ccm_scanner);
     CcScanner *scanner_ptr = open_result.scanner_.get();
-    assert(open_result.scan_alias_ < UINT16_MAX);
+    assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
     scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;

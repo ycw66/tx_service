@@ -276,7 +276,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_for_share_(is_for_share),
           is_covering_keys_(is_covering_keys),
           read_local_(is_read_local),
-          scan_alias_(UINT16_MAX)
+          scan_alias_(UINT64_MAX)
     {
     }
 
@@ -309,7 +309,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         is_for_share_ = is_for_share;
         is_covering_keys_ = is_covering_keys;
         read_local_ = is_read_local;
-        scan_alias_ = UINT16_MAX;
+        scan_alias_ = UINT64_MAX;
     }
 
     const TxKey *StartKey() const
@@ -334,7 +334,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     bool is_for_share_{false};
     bool is_covering_keys_{true};
     bool read_local_{false};
-    uint16_t scan_alias_{UINT16_MAX};
+    uint64_t scan_alias_{UINT64_MAX};
 };
 
 struct ScanBatchTuple
@@ -382,7 +382,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 {
     ScanBatchTxRequest() = delete;
 
-    ScanBatchTxRequest(size_t alias,
+    ScanBatchTxRequest(uint64_t alias,
                        const TableName &table_name,
                        std::vector<ScanBatchTuple> *batch_vec,
                        const std::function<void()> *yield_fptr = nullptr,
@@ -396,7 +396,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
         batch_->clear();
     }
 
-    size_t alias_;
+    uint64_t alias_;
     const TableName &table_name_;
     std::vector<ScanBatchTuple> *batch_;
 };
@@ -419,7 +419,7 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
     ScanCloseTxRequest() = delete;
 
-    ScanCloseTxRequest(size_t alias,
+    ScanCloseTxRequest(uint64_t alias,
                        const TableName *table_name,
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
@@ -433,7 +433,7 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 
     ScanCloseTxRequest(const std::vector<ScanBatchTuple> &scan_batch,
                        size_t scan_batch_idx,
-                       size_t alias,
+                       uint64_t alias,
                        const TableName *table_name,
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
@@ -451,7 +451,7 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
         }
     }
 
-    void Reset(size_t alias, const TableName *table_name)
+    void Reset(uint64_t alias, const TableName *table_name)
     {
         assert(!in_use_.load(std::memory_order_relaxed));
 
@@ -462,7 +462,7 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
     }
 
     std::vector<UnlockTuple> unlock_batch_;
-    size_t alias_{UINT64_MAX};
+    uint64_t alias_{UINT64_MAX};
     const TableName *table_name_{nullptr};
     std::atomic<bool> in_use_{false};
 };

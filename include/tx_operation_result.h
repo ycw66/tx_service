@@ -125,7 +125,7 @@ struct ScanOpenResult
     }
 
     std::unique_ptr<CcScanner> scanner_{nullptr};
-    size_t scan_alias_{0};
+    uint64_t scan_alias_{0};
     // The terms of all cc node groups. As cc node groups currently employ the
     // hash partition function, a scan is directed to all cc node groups. For
     // locking-based protocols, the scan request in a cc node group may be

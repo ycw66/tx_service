@@ -143,7 +143,7 @@ public:
     bool CommitTx(CommitTxRequest &commit_req);
     std::unique_ptr<CommitTxRequest> commit_tx_req_;
     size_t OpenTxScan(ScanOpenTxRequest &scan_open_tx_req);
-    void CloseTxScan(size_t alias,
+    void CloseTxScan(uint64_t alias,
                      const TableName *table_name,
                      std::vector<UnlockTuple> &unlock_vec);
 
@@ -437,22 +437,22 @@ private:
     std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
 
     std::unordered_map<
-        size_t,
+        uint64_t,
         std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>>
         wset_iters_;
-    std::unordered_map<size_t,
+    std::unordered_map<uint64_t,
                        std::pair<TableWriteSet::const_reverse_iterator,
                                  TableWriteSet::const_reverse_iterator>>
         wset_reverse_iters_;
 
     /**
      * @brief A collection of open primary/secondary index scans. Each scan is
-     * identified by a scan alias (of type size_t) generated when the scan is
+     * identified by a scan alias (of type uint64_t) generated when the scan is
      * opened.
      *
      */
-    std::unordered_map<size_t, ScanState> scans_;
-    uint16_t scan_alias_cnt_{0};
+    std::unordered_map<uint64_t, ScanState> scans_;
+    uint64_t scan_alias_cnt_{0};
 
     // Response whose returned result is void
     TxResult<Void> *void_resp_;
