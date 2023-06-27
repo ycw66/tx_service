@@ -421,7 +421,7 @@ public:
 
         if (metrics::enable_collect_metrics)
         {
-            empty_round_count_ += req_cnt > 0 ? 1 : 0;
+            empty_round_count_ += req_cnt == 0 ? 1 : 0;
             if (++total_round_count_ == empty_rount_threshold_)
             {
                 meter_->Collect(EMPTY_ROUND_RATIO_NAME_,
