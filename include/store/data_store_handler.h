@@ -1,5 +1,6 @@
 #pragma once
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>  // std::vector
@@ -104,11 +105,7 @@ public:
 
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
-                    bool &found) const
-    {
-        uint64_t version_ts;
-        return FetchTable(table_name, schema_image, found, version_ts);
-    }
+                    bool &found) const;
 
     virtual void FetchCurrentTableStatistics(const TableName &ccm_table_name,
                                              void *fetch_req) = 0;
@@ -166,6 +163,18 @@ public:
                                std::string &definition,
                                bool &found) const = 0;
     virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
+
+    void CleanDefunctKvTable() const;
+
+    virtual bool DropKvTable(const std::string &kv_table_name) const = 0;
+
+    virtual void DropKvTableAsync(const std::string &kv_table_name) const = 0;
+
+    virtual bool ListKvTableCTimeMore1d(
+        std::set<std::string> &kv_table_names) const = 0;
+
+    virtual bool ListVisibleKvTable(
+        std::set<std::string> &kv_table_names) const = 0;
 
     virtual std::unique_ptr<DataStoreScanner> ScanForward(
         const TableName &table_name,
@@ -252,7 +261,7 @@ public:
     virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
 
 protected:
-    TxService *tx_service_;
+    TxService *tx_service_{nullptr};
 };
 }  // namespace store
 }  // namespace txservice

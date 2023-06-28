@@ -153,6 +153,27 @@ public:
         return false;
     }
 
+    bool DropKvTable(const std::string &kv_table_name) const override
+    {
+        return true;
+    }
+
+    void DropKvTableAsync(const std::string &kv_table_name) const override
+    {
+    }
+
+    bool ListKvTableCTimeMore1d(
+        std::set<std::string> &kv_table_names) const override
+    {
+        return true;
+    }
+
+    bool ListVisibleKvTable(
+        std::set<std::string> &kv_table_names) const override
+    {
+        return true;
+    }
+
     std::unique_ptr<DataStoreScanner> ScanForward(
         const txservice::TableName &table_name,
         const txservice::TxKey &start_key,

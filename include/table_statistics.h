@@ -75,7 +75,7 @@ public:
           units_(Units(param.records_)),
           sample_pool_(param.sample_keys_)
     {
-        assert(units_ >= sample_pool_.Size());
+        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void Reset(SamplePool &&sample_pool,
@@ -155,7 +155,7 @@ public:
         }
         units_ += Units(param.records_);
         sample_pool_.ClearCounter();
-        assert(units_ >= sample_pool_.Size());
+        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void Prune(const SamplePoolParam<KeyT> &param)
@@ -166,7 +166,7 @@ public:
         }
         units_ -= std::min(units_, static_cast<int64_t>(Units(param.records_)));
         sample_pool_.ClearCounter();
-        assert(units_ >= sample_pool_.Size());
+        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void To(remote::NodeGroupSamplePool *remote_ccmap_sample_pool) const

@@ -1,5 +1,7 @@
 #include "tx_worker_pool.h"
 
+#include <cassert>
+
 namespace txservice
 {
 TxWorkerPool::TxWorkerPool(size_t max_workers_num)
@@ -10,7 +12,7 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
         std::thread worker = std::thread(
             [this]
             {
-                while (!shutdown_indicator_.load(std::memory_order_acquire))
+                while (true)
                 {
                     // Acquire work queue mutex
                     std::unique_lock<std::mutex> lk(work_queue_mutex_);
@@ -23,12 +25,6 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                                    shutdown_indicator_.load(
                                        std::memory_order_acquire);
                         });
-                    // Quit loop if shutdown
-                    if (shutdown_indicator_.load(std::memory_order_acquire))
-                    {
-                        lk.unlock();
-                        break;
-                    }
                     // Take work if work queue is not empty
                     if (!work_queue_.empty())
                     {
@@ -37,6 +33,14 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                         lk.unlock();
                         // Do work
                         work();
+                    }
+                    else
+                    {
+                        // Quit loop if shutdown
+                        assert(shutdown_indicator_.load(
+                            std::memory_order_acquire));
+                        lk.unlock();
+                        break;
                     }
                 }
             });
