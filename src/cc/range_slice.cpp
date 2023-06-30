@@ -490,13 +490,13 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     uint32_t post_ckpt_subslice_size = 0;
     uint32_t curr_subslice_size = 0;
     uint32_t subslice_start = 0;
+
     for (size_t pos = 0; pos < item_vec.size(); ++pos)
     {
-        post_ckpt_subslice_size += item_vec[pos].post_update_slice_size_;
-        curr_subslice_size += item_vec[pos].cur_slice_size_;
+        post_ckpt_subslice_size += item_vec[pos].post_update_size_;
+        curr_subslice_size += item_vec[pos].cur_size_;
 
-        if (post_ckpt_subslice_size >= avg_subslice_size ||
-            pos == item_vec.size() - 1)
+        if (post_ckpt_subslice_size >= avg_subslice_size)
         {
             if (split_keys.empty())
             {
@@ -523,12 +523,21 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                             post_ckpt_subslice_size);
                 }
             }
-            // current pos will be the start key for next slice.
-            post_ckpt_subslice_size = item_vec[pos].post_update_slice_size_;
-            curr_subslice_size = item_vec[pos].cur_slice_size_;
-            subslice_start = pos;
+            // next pos will be the start key for next slice.
+            post_ckpt_subslice_size = 0;
+            curr_subslice_size = 0;
+            subslice_start = pos + 1;
         }
     }
+
+    if (post_ckpt_subslice_size > 0)
+    {
+        assert(subslice_start < item_vec.size());
+        split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
+                                curr_subslice_size,
+                                post_ckpt_subslice_size);
+    }
+
     // Split StoreSlice in memory. Slice info in KV store
     // will be updated after checkpoint.
     if (split_keys.size() > 1)
@@ -566,8 +575,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             next_slice_start_key = split_keys[1].key_.ptr_->Clone();
         }
         slice->end_key_ = next_slice_start_key.get();
-        slice->size_ = split_keys[0].cur_slice_size_;
-        slice->post_ckpt_size_ = split_keys[0].post_update_slice_size_;
+        slice->size_ = split_keys[0].cur_size_;
+        slice->post_ckpt_size_ = split_keys[0].post_update_size_;
 
         for (size_t idx = 1; idx < split_keys.size(); ++idx)
         {
@@ -602,9 +611,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                 sub_slice->end_key_ = slice_end_key;
             }
 
-            sub_slice->size_ = split_keys[idx].cur_slice_size_;
-            sub_slice->post_ckpt_size_ =
-                split_keys[idx].post_update_slice_size_;
+            sub_slice->size_ = split_keys[idx].cur_size_;
+            sub_slice->post_ckpt_size_ = split_keys[idx].post_update_size_;
             // Sub-slices inherit the original slice's status, e.g., if the
             // original slice is fully cached, all sub-slices are too cached.
             sub_slice->status_ = slice->status_;

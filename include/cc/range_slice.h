@@ -93,20 +93,20 @@ struct SliceChangeInfo
     SliceChangeInfo(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo &operator=(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo(const TxKey *start_key,
-                    uint32_t cur_slice_size,
-                    uint32_t post_update_slice_size)
+                    uint32_t cur_size,
+                    uint32_t post_update_size)
         : is_key_owner_(false),
-          cur_slice_size_(cur_slice_size),
-          post_update_slice_size_(post_update_slice_size)
+          cur_size_(cur_size),
+          post_update_size_(post_update_size)
     {
         key_.ptr_ = std::move(start_key);
     }
     SliceChangeInfo(TxKey::Uptr start_key,
-                    uint32_t cur_slice_size,
-                    uint32_t post_update_slice_size)
+                    uint32_t cur_size,
+                    uint32_t post_update_size)
         : is_key_owner_(true),
-          cur_slice_size_(cur_slice_size),
-          post_update_slice_size_(post_update_slice_size)
+          cur_size_(cur_size),
+          post_update_size_(post_update_size)
     {
         key_.uptr_ = std::move(start_key);
     }
@@ -128,8 +128,8 @@ struct SliceChangeInfo
             SetKey(rhs.key_.ptr_);
         }
 
-        cur_slice_size_ = rhs.cur_slice_size_;
-        post_update_slice_size_ = rhs.post_update_slice_size_;
+        cur_size_ = rhs.cur_size_;
+        post_update_size_ = rhs.post_update_size_;
         return *this;
     }
 
@@ -144,8 +144,8 @@ struct SliceChangeInfo
         {
             SetKey(rhs.key_.ptr_);
         }
-        cur_slice_size_ = rhs.cur_slice_size_;
-        post_update_slice_size_ = rhs.post_update_slice_size_;
+        cur_size_ = rhs.cur_size_;
+        post_update_size_ = rhs.post_update_size_;
     }
 
     void SetKey(const TxKey *ptr)
@@ -199,8 +199,8 @@ struct SliceChangeInfo
     };
     KeyPtr key_{nullptr};
     bool is_key_owner_{false};
-    uint32_t cur_slice_size_{0};
-    uint32_t post_update_slice_size_{0};
+    uint32_t cur_size_{0};
+    uint32_t post_update_size_{0};
 };
 
 class StoreSlice
