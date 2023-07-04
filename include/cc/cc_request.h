@@ -205,7 +205,8 @@ public:
                     // ccmap is based on the real table name, for example, index
                     // should get the corresponding sk_ccmap.
                     assert(table_name_->Type() == TableType::Primary ||
-                           table_name_->Type() == TableType::Secondary);
+                           table_name_->Type() == TableType::Secondary ||
+                           table_name_->Type() == TableType::UniqueSecondary);
                     const TableName base_table_name{
                         table_name_->GetBaseTableNameSV(), TableType::Primary};
                     const CatalogEntry *catalog_entry =
@@ -1208,6 +1209,7 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                bool is_for_write = false,
+               bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
                bool is_in_recovering = false)
     {
@@ -1229,6 +1231,7 @@ public:
         is_local_ = true;
         is_wait_for_post_write_ = false;
         is_in_recovering_ = is_in_recovering;
+        is_covering_keys_ = is_covering_keys;
 
         ccm_ = nullptr;
         cce_addr_ = &res->Value().cce_addr_;
@@ -1254,6 +1257,7 @@ public:
                IsolationLevel iso_level,
                CcProtocol protocol,
                bool is_for_write = false,
+               bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
@@ -1274,6 +1278,7 @@ public:
         is_local_ = false;
         is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
+        is_covering_keys_ = is_covering_keys;
 
         ccm_ = nullptr;
         cce_addr_ = &res->Value().cce_addr_;

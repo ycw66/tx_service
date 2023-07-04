@@ -110,7 +110,8 @@ public:
               CcHandlerResult<ReadKeyResult> &hres,
               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
               CcProtocol proto = CcProtocol::OCC,
-              bool is_for_write = false);
+              bool is_for_write = false,
+              bool is_covering_keys = false);
 
     void ReadOutside(int64_t tx_term,
                      uint16_t command_id,

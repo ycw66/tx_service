@@ -92,24 +92,6 @@ static inline bool ReplaceAllInString(std::string &str,
     return found;
 }
 
-/** @brief
-  Replace all prefix of index, ranges in table name with a given replace
-  string
-
-  Output: is any prefix found in str
- */
-static inline bool ReplaceAllPrefixInTablename(std::string &table_name_str,
-                                               std::string replace)
-{
-    bool index_name_prefix_found =
-        ReplaceAllInString(table_name_str, INDEX_NAME_PREFIX, replace);
-    bool range_table_name_prefix_found =
-        ReplaceAllInString(table_name_str, RANGE_TABLE_NAME_PREFIX, replace);
-
-    return index_name_prefix_found || range_table_name_prefix_found;
-    return true;
-}
-
 /**
  * Merge multiple sorted ascending vectors into a single one.
  * Note that the passed in compare func need to be greater than.

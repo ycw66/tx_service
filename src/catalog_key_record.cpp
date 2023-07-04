@@ -137,9 +137,12 @@ void CatalogKey::Deserialize(const char *buf, size_t &offset, const Schema *)
         table_type = TableType::Secondary;
         break;
     case 2:
-        table_type = TableType::Catalog;
+        table_type = TableType::UniqueSecondary;
         break;
     case 3:
+        table_type = TableType::Catalog;
+        break;
+    case 4:
         table_type = TableType::RangePartition;
         break;
     }

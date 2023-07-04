@@ -151,10 +151,12 @@ public:
                   bool is_for_write = false,
                   bool is_for_share = false,
                   bool read_local = false,
+                  uint64_t corresponding_sk_commit_ts = 0,
+                  bool is_covering_keys = false,
+                  uint64_t *unique_sk_commit_ts = nullptr,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
-                  TransactionExecution *txm = nullptr,
-                  uint64_t corresponding_sk_commit_ts = 0)
+                  TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tab_name),
           key_(key),
@@ -162,7 +164,9 @@ public:
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           read_local_(read_local),
-          corresponding_sk_commit_ts_(corresponding_sk_commit_ts)
+          corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
+          is_covering_keys_(is_covering_keys),
+          unique_sk_commit_ts_(unique_sk_commit_ts)
     {
     }
 
@@ -172,7 +176,9 @@ public:
              bool is_for_write = false,
              bool is_for_share = false,
              bool read_local = false,
-             uint64_t corresponding_sk_commit_ts = 0)
+             uint64_t corresponding_sk_commit_ts = 0,
+             bool is_covering_keys = false,
+             uint64_t *unique_sk_commit_ts = nullptr)
     {
         tab_name_ = tab_name;
         key_ = key;
@@ -181,6 +187,8 @@ public:
         is_for_share_ = is_for_share;
         read_local_ = read_local;
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
+        is_covering_keys_ = is_covering_keys;
+        unique_sk_commit_ts_ = unique_sk_commit_ts;
     }
 
     const TableName *tab_name_;
@@ -188,10 +196,12 @@ public:
     TxRecord *rec_;
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
-    // TODO(ZX) unique_sk_read also needs is_covering_keys_
-    // bool is_covering_keys_;
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
+
+    // For unique_sk point query
+    bool is_covering_keys_;
+    uint64_t *unique_sk_commit_ts_;
 };
 
 struct ReadOutsideTxRequest

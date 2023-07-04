@@ -338,7 +338,8 @@ void txservice::remote::RemoteCcHandler::Read(
     CcHandlerResult<ReadKeyResult> &hres,
     IsolationLevel iso_level,
     CcProtocol proto,
-    bool is_for_write)
+    bool is_for_write,
+    bool is_covering_keys)
 {
     CcMessage send_msg;
 
@@ -359,6 +360,7 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
     read->set_protocol(ToRemoteType::ConvertProtocol(proto));
     read->set_is_for_write(is_for_write);
+    read->set_is_covering_keys(is_covering_keys);
 
     read->clear_record();
     switch (read_type)

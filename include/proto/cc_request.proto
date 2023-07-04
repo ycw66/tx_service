@@ -134,6 +134,7 @@ enum CcTableType {
     Secondary = 1;
     Catalog = 2;
     RangePartition = 3;
+	UniqueSecondary = 4;
 }
 
 enum RemoteKeyType {
@@ -240,6 +241,7 @@ message ReadRequest {
 	IsolationType iso_level = 9;
 	CcProtocolType protocol = 10;
 	bool is_for_write = 11;
+	bool is_covering_keys = 12;
 }
 
 message ReadResponse {

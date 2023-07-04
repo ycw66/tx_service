@@ -142,6 +142,8 @@ public:
             return CcTableType::Primary;
         case TableType::Secondary:
             return CcTableType::Secondary;
+        case TableType::UniqueSecondary:
+            return CcTableType::UniqueSecondary;
         case TableType::Catalog:
             return CcTableType::Catalog;
         case TableType::RangePartition:
@@ -304,6 +306,8 @@ public:
             return TableType::Primary;
         case CcTableType::Secondary:
             return TableType::Secondary;
+        case CcTableType::UniqueSecondary:
+            return TableType::UniqueSecondary;
         case CcTableType::Catalog:
             return TableType::Catalog;
         case CcTableType::RangePartition:

@@ -500,7 +500,6 @@ public:
         }
         else
         {
-            // For SkIndex, all versions' payload is not changed.
             archives_->emplace_front(nullptr, commit_ts_, payload_status_);
         }
         mem_usage += sizeof(VersionResultRecord<ValueT>);
@@ -836,7 +835,8 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-                                    ref.SetPayload(it->payload_);  // pk
+                                    ref.SetPayload(
+                                        it->payload_);  // pk, unique_sk
                                 }
                                 else
                                 {
@@ -877,7 +877,8 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
-                                    ref.SetPayload(it->payload_);  // pk
+                                    ref.SetPayload(
+                                        it->payload_);  // pk, unique_sk
                                 }
                                 else
                                 {

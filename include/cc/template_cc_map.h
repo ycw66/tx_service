@@ -72,7 +72,8 @@ public:
 
 #ifndef ON_KEY_OBJECT
         if (table_schema && (table_name.Type() == TableType::Primary ||
-                             table_name.Type() == TableType::Secondary))
+                             table_name.Type() == TableType::Secondary ||
+                             table_name.Type() == TableType::UniqueSecondary))
         {
             TableStatistics<KeyT> *statistics =
                 static_cast<TableStatistics<KeyT> *>(
@@ -261,7 +262,8 @@ public:
 
         if (cce_addr.CcePtr() == 0)
         {
-            if (table_name_.Type() == TableType::Secondary)
+            if (table_name_.Type() == TableType::Secondary ||
+                table_name_.Type() == TableType::UniqueSecondary)
             {
                 // TODO: Sk Insert branch needs rethinking, currently useless.
                 assert(false);
@@ -422,7 +424,8 @@ public:
         if (!is_forward && cce_addr->InsertPtr() != 0)
         {
             // DEAD BRANCH FOR NOW
-            if (table_name_.Type() == TableType::Secondary)
+            if (table_name_.Type() == TableType::Secondary ||
+                table_name_.Type() == TableType::UniqueSecondary)
             {
                 // TODO: Sk Insert branch needs rethinking, currently useless.
                 assert(false);
@@ -610,9 +613,9 @@ public:
                 // and should be fixed: the unpack info is part of the key,
                 // not the record.
                 //
-                // Now, all versions of SecondaryIndex key shared the unpack
-                // info in current version's payload, though the unpack info
-                // will not be used for deleted key, we must not change the
+                // Now, all versions of non-unique SecondaryIndex key shared the
+                // unpack info in current version's payload, though the unpack
+                // info will not be used for deleted key, we must not change the
                 // payload of secondary key ccentry if it is not null.
                 if (Type() != TableType::Secondary || cce->payload_ == nullptr)
                 {
@@ -693,7 +696,8 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             assert(false);
             return false;
@@ -999,7 +1003,8 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             assert(false);
             return false;
@@ -1475,6 +1480,13 @@ public:
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
         }
+        else if (table_name_.Type() == TableType::UniqueSecondary)
+        {
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::ReadSkIndex;
+            is_read_snapshot =
+                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
+        }
         else
         {
             cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
@@ -1560,7 +1572,8 @@ public:
 
                 if (cce == nullptr)
                 {
-                    if (Type() == TableType::Primary)
+                    if (Type() == TableType::Primary ||
+                        Type() == TableType::UniqueSecondary)
                     {
                         RangeSliceOpStatus pin_status;
                         uint32_t range_id = req.KeyShardCode() >> 10;
@@ -1662,6 +1675,7 @@ public:
                     }
                     else
                     {
+                        assert(Type() == TableType::Catalog);
                         Iterator it = FindEmplace(*look_key);
                         cce = it->second;
                         if (cce == nullptr)
@@ -1952,7 +1966,8 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             assert(false);
             return true;
@@ -2141,7 +2156,8 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -2455,7 +2471,8 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -2838,7 +2855,8 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -3194,7 +3212,8 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -3455,7 +3474,8 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
-        if (table_name_.Type() == TableType::Secondary)
+        if (table_name_.Type() == TableType::Secondary ||
+            table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
@@ -5409,7 +5429,8 @@ public:
     {
         if (table_schema_ != nullptr)
         {
-            if (table_name_.Type() == TableType::Secondary)
+            if (table_name_.Type() == TableType::Secondary ||
+                table_name_.Type() == TableType::UniqueSecondary)
             {
                 return table_schema_->IndexKeySchema(table_name_);
             }

@@ -406,7 +406,8 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       &cc_res_,
                       ToLocalType::ConvertIsolation(req.iso_level()),
                       ToLocalType::ConvertProtocol(req.protocol()),
-                      req.is_for_write());
+                      req.is_for_write(),
+                      req.is_covering_keys());
     }
     else
     {
@@ -427,7 +428,8 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       &cc_res_,
                       ToLocalType::ConvertIsolation(req.iso_level()),
                       ToLocalType::ConvertProtocol(req.protocol()),
-                      req.is_for_write());
+                      req.is_for_write(),
+                      req.is_covering_keys());
     }
 
     input_msg_ = std::move(input_msg);
@@ -684,11 +686,20 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
 
         if (cc_res_.IsError())
         {
-            CcOperation cc_op =
-                IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+            CcOperation cc_op;
             if (remote_table_name_.Type() == TableType::Secondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
+            }
+            else if (remote_table_name_.Type() == TableType::UniqueSecondary)
+            {
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::ReadSkIndex;
+            }
+            else
+            {
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
             }
             LockType lock_type = LockTypeUtil::DeduceLockType(
                 cc_op, Isolation(), Protocol(), IsCoveringKeys());
@@ -838,14 +849,24 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 
         if (res->IsError())
         {
-            CcOperation cc_op =
-                IsForWrite() ? CcOperation::ReadForWrite : CcOperation::Read;
+            CcOperation cc_op;
 
             const LruEntry *prior_lru_entry =
                 reinterpret_cast<const LruEntry *>(prior_cce_addr_.CcePtr());
             if (prior_lru_entry->parent_map_->Type() == TableType::Secondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
+            }
+            else if (prior_lru_entry->parent_map_->Type() ==
+                     TableType::UniqueSecondary)
+            {
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::ReadSkIndex;
+            }
+            else
+            {
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
             }
             LockType lock_type = LockTypeUtil::DeduceLockType(
                 cc_op, Isolation(), Protocol(), IsCoveringKeys());
@@ -951,13 +972,15 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
-            else if (IsForWrite())
+            else if (remote_tbl_name_.Type() == TableType::UniqueSecondary)
             {
-                cc_op = CcOperation::ReadForWrite;
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::ReadSkIndex;
             }
             else
             {
-                cc_op = CcOperation::Read;
+                cc_op = IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::Read;
             }
 
             LockType lock_type = LockTypeUtil::DeduceLockType(

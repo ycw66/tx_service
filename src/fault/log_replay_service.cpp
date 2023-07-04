@@ -426,6 +426,7 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                           IsolationLevel::RepeatableRead,
                           CcProtocol::Locking,
                           false,
+                          false,
                           nullptr,
                           true);
             local_shards_.EnqueueCcRequest(0, &read_cc);
@@ -528,9 +529,12 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                     table_type = TableType::Secondary;
                     break;
                 case 2:
-                    table_type = TableType::Catalog;
+                    table_type = TableType::UniqueSecondary;
                     break;
                 case 3:
+                    table_type = TableType::Catalog;
+                    break;
+                case 4:
                     table_type = TableType::RangePartition;
                     break;
                 }

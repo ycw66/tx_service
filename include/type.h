@@ -109,6 +109,7 @@ enum class TableType : uint8_t
 {
     Primary = 0,
     Secondary,
+    UniqueSecondary,
     Catalog,
     RangePartition
 };
@@ -307,10 +308,16 @@ struct TableName
         }
         else
         {
+            pos = base_name_view.find(UNIQUE_INDEX_NAME_PREFIX);
+            if (pos != std::string_view::npos)
+            {
+                return base_name_view.substr(0, pos);
+            }
             return base_name_view;
         }
     }
 
+    // Check whether it is range table for primary key
     bool IsBase() const
     {
         return TableName::IsBase(this->StringView());
@@ -319,7 +326,23 @@ struct TableName
     static bool IsBase(const std::string_view &table_name_sv)
     {
         size_t pos = table_name_sv.find(INDEX_NAME_PREFIX);
+        if (pos == std::string_view::npos)
+        {
+            pos = table_name_sv.find(UNIQUE_INDEX_NAME_PREFIX);
+        }
         return (pos == std::string_view::npos) ? true : false;
+    }
+
+    // Check whether it is range table for unique secondary key
+    bool IsUniqueSecondary() const
+    {
+        return TableName::IsUniqueSecondary(this->StringView());
+    }
+
+    static bool IsUniqueSecondary(const std::string_view &table_name_sv)
+    {
+        size_t pos = table_name_sv.find(UNIQUE_INDEX_NAME_PREFIX);
+        return (pos != std::string_view::npos) ? true : false;
     }
 
     bool IsStringOwner() const
@@ -336,8 +359,18 @@ struct TableName
     // Secondary
     static TableType Type(const std::string_view &table_name_sv)
     {
-        return TableName::IsBase(table_name_sv) ? TableType::Primary
-                                                : TableType::Secondary;
+        if (IsBase(table_name_sv))
+        {
+            return TableType::Primary;
+        }
+        else if (IsUniqueSecondary(table_name_sv))
+        {
+            return TableType::UniqueSecondary;
+        }
+        else
+        {
+            return TableType::Secondary;
+        }
     }
 
 private:
@@ -561,10 +594,12 @@ struct AlterTableInfo
             std::vector<std::string> tokens(begin, end);
             for (auto it = tokens.begin(); it != tokens.end(); ++it)
             {
+                bool is_unique_sk = std::next(it, 1)->front() == 'u';
                 txservice::TableName add_index_name(
-                    std::string_view(*it), txservice::TableType::Secondary);
+                    std::string_view(*it),
+                    is_unique_sk ? TableType::UniqueSecondary
+                                 : TableType::Secondary);
                 const std::string &add_index_kv_name = *(++it);
-
                 index_add_names_.emplace(add_index_name, add_index_kv_name);
             }
         }
@@ -590,10 +625,12 @@ struct AlterTableInfo
             std::vector<std::string> tokens(begin, end);
             for (auto it = tokens.begin(); it != tokens.end(); ++it)
             {
+                bool is_unique_sk = std::next(it, 1)->front() == 'u';
                 txservice::TableName drop_index_name(
-                    std::string_view(*it), txservice::TableType::Secondary);
+                    std::string_view(*it),
+                    is_unique_sk ? TableType::UniqueSecondary
+                                 : TableType::Secondary);
                 const std::string &drop_index_kv_name = *(++it);
-
                 index_drop_names_.emplace(drop_index_name, drop_index_kv_name);
             }
         }

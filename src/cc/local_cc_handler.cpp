@@ -375,7 +375,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      CcHandlerResult<ReadKeyResult> &hres,
                                      IsolationLevel iso_level,
                                      CcProtocol proto,
-                                     bool is_for_write)
+                                     bool is_for_write,
+                                     bool is_covering_keys)
 {
     hres.Value().rec_ = &record;
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
@@ -401,7 +402,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    &hres,
                    iso_level,
                    proto,
-                   is_for_write);
+                   is_for_write,
+                   is_covering_keys);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
@@ -424,7 +426,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         hres,
                         iso_level,
                         proto,
-                        is_for_write);
+                        is_for_write,
+                        is_covering_keys);
     }
 }
 
@@ -584,7 +587,8 @@ void txservice::LocalCcHandler::ScanOpen(
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
 
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
-    if (table_name.Type() == TableType::Secondary)
+    if (table_name.Type() == TableType::Secondary ||
+        table_name.Type() == TableType::UniqueSecondary)
     {
         const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                         TableType::Primary};
@@ -809,7 +813,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         ccm_scanner = local_shard.catalog_factory_->CreateRangeCcmScanner(
             direction, schema, table_name);
     }
-    else if (table_name.Type() == TableType::Secondary)
+    else if (table_name.Type() == TableType::Secondary ||
+             table_name.Type() == TableType::UniqueSecondary)
     {
         const TableName base_table_name{table_name.StringView(),
                                         TableType::Primary};

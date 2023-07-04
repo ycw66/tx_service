@@ -1017,6 +1017,7 @@ void TransactionExecution::Process(ReadOperation &read)
         TxRecord &rec = *read.read_tx_req_->rec_;
         const uint64_t corresponding_sk_commit_ts =
             read.read_tx_req_->corresponding_sk_commit_ts_;
+        bool is_covering_keys = read.read_tx_req_->is_covering_keys_;
 
         // Reads the specified key from the local cc map to which this tx is
         // bound. This API is used for reading cc maps replicated in all shards.
@@ -1165,7 +1166,8 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.hd_result_,
                               read.iso_level_,
                               read.protocol_,
-                              read.read_tx_req_->is_for_write_);
+                              read.read_tx_req_->is_for_write_,
+                              is_covering_keys);
 
             if (metrics::enable_transactions &&
                 !read.hd_result_.Value().is_local_)
@@ -1242,7 +1244,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     else
     {
         const ReadKeyResult &read_res = read_.hd_result_.Value();
-        const ReadTxRequest *read_req = read.read_tx_req_;
+        const ReadTxRequest *read_tx_req = read.read_tx_req_;
 
         // optimization for case that we read the same key continuously
         // especially speed up remote read. e.g. Read A, Write B, Read A.
@@ -1255,7 +1257,14 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
         if (read_.read_type_ == ReadType::Inside)
         {
-            const TableName *table_name = read_req->tab_name_;
+            const TableName *table_name = read_tx_req->tab_name_;
+            if (table_name->Type() == TableType::UniqueSecondary &&
+                read_tx_req->unique_sk_commit_ts_ != nullptr)
+            {
+                // We only need commit timestamp of unique secondary key entry
+                // in read_only scenario to trace back to primary key table.
+                *(read_tx_req->unique_sk_commit_ts_) = read_res.ts_;
+            }
             LockType lock_type = read_res.lock_type_;
 
             if (lock_type != LockType::NoLock)
