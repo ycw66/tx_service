@@ -2389,6 +2389,18 @@ public:
         }
     }
 
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = err_code;
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+    }
+
     bool IsError()
     {
         std::lock_guard<std::mutex> lk(mux_);
