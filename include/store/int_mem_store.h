@@ -72,6 +72,21 @@ public:
         return true;
     }
 
+    bool InitializeClusterConfig(std::vector<std::string> &ips,
+                                 std::vector<uint16_t> &ports) override
+    {
+        assert(false);
+        return false;
+    }
+
+    bool ReadClusterConfig(
+        std::map<uint32_t, std::vector<std::string>> &ng_ips,
+        std::map<uint32_t, std::vector<uint16_t>> &ng_ports) override
+    {
+        assert(false);
+        return false;
+    }
+
     void UpsertTable(
         const txservice::TableSchema *table_schema,
         OperationType op_type,

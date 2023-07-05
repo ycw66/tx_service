@@ -20,6 +20,8 @@ static std::unique_ptr<store::IntMemoryStore> store_hd =
 static MockCatalogFactory mock_catalog_factory{};
 static std::vector<std::string> ips{"127.0.0.1"};
 static std::vector<std::string> tx_ips{"127.0.0.1"};
+static std::map<uint32_t, std::vector<std::string>> ng_ips{{0, {"127.0.0.1"}}};
+static std::map<uint32_t, std::vector<uint16_t>> ng_ports{{0, {8600}}};
 static std::vector<uint16_t> ports{8600};
 static std::vector<uint16_t> tx_ports{8602};
 
@@ -72,8 +74,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
         &mock_catalog_factory,
         tx_service_conf,
         node_id,
-        &ips,
-        &ports,
+        &ng_ips,
+        &ng_ports,
         &tx_ips,
         &tx_ports,
         store_hd.get(),

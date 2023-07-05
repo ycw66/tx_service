@@ -58,6 +58,20 @@ public:
     virtual bool Connect() = 0;
 
     /**
+     * Initialize cluster config based on the based in ips and ports. This
+     * should only be called during bootstrap.
+     */
+    virtual bool InitializeClusterConfig(std::vector<std::string> &ips,
+                                         std::vector<uint16_t> &ports) = 0;
+
+    /**
+     * Read cluster config from kv store cluster config table.
+     */
+    virtual bool ReadClusterConfig(
+        std::map<uint32_t, std::vector<std::string>> &ng_ips,
+        std::map<uint32_t, std::vector<uint16_t>> &ng_ports) = 0;
+
+    /**
      * @brief flush entries in \@param batch to base table or skindex table in
      * data store, stop and return false if node_group is not longer leader.
      * @param batch

@@ -21,8 +21,8 @@ namespace GFLAGS_NAMESPACE = gflags;
 namespace txservice
 {
 Sharder::Sharder(uint32_t node_id,
-                 const std::vector<std::string> *ips,
-                 const std::vector<uint16_t> *ports,
+                 const std::map<uint32_t, std::vector<std::string>> *ng_ips,
+                 const std::map<uint32_t, std::vector<uint16_t>> *ng_ports,
                  const std::vector<std::string> *txlog_ips,
                  const std::vector<uint16_t> *txlog_ports,
                  LocalCcShards &local_shards,
@@ -38,16 +38,23 @@ Sharder::Sharder(uint32_t node_id,
       local_shards_(local_shards),
       log_agent_(std::move(log_agent))
 {
-    if (ips != nullptr)
+    if (ng_ips != nullptr)
     {
-        ips_.reserve(ips->size());
-        ports_.reserve(ips->size());
-
-        for (uint32_t ng_id = 0; ng_id < ips->size(); ++ng_id)
+        for (auto &pair : *ng_ips)
         {
-            ips_.emplace_back(ips->at(ng_id));
-            ports_.emplace_back(ports->at(ng_id));
-            ng_leader_cache_.try_emplace(ng_id, ng_id);
+            ng_leader_cache_.try_emplace(pair.first, pair.first);
+            std::vector<std::string> group_ips;
+            for (auto &ip : pair.second)
+            {
+                group_ips.push_back(ip);
+            }
+            ng_ips_.try_emplace(pair.first, std::move(group_ips));
+            std::vector<uint16_t> group_ports;
+            for (auto &port : ng_ports->at(pair.first))
+            {
+                group_ports.push_back(port);
+            }
+            ng_ports_.try_emplace(pair.first, std::move(group_ports));
         }
     }
     else
@@ -73,7 +80,7 @@ void Sharder::Shutdown()
 {
     LOG(INFO) << "Shutting down the sharder at node #" << node_id_;
 
-    if (ips_.size() > 1)
+    if (ng_ips_.size() > 1)
     {
         cc_stream_sender_ = nullptr;
 
@@ -129,10 +136,10 @@ void Sharder::CloseBraft()
 
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
-    assert(node_id < ips_.size());
+    assert(node_id < ng_ips_.size());
 
-    ip = ips_.at(node_id);
-    port = ports_.at(node_id);
+    ip = ng_ips_.at(node_id).front();
+    port = ng_ports_.at(node_id).front();
 }
 
 int Sharder::Init(const std::string &path)
@@ -141,8 +148,8 @@ int Sharder::Init(const std::string &path)
     log_replay_service_ = std::make_unique<fault::ReplayService>(
         local_shards_,
         GetLogAgent(),
-        ips_.at(node_id_),
-        GET_LOG_REPLAY_RPC_PORT(ports_.at(node_id_)));
+        ng_ips_.at(node_id_).front(),
+        GET_LOG_REPLAY_RPC_PORT(ng_ports_.at(node_id_).front()));
     if (log_replay_server_.AddService(log_replay_service_.get(),
                                       brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
@@ -151,73 +158,42 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    uint32_t rep_group_cnt = fault::CcNode::rep_group_cnt < ips_.size()
-                                 ? fault::CcNode::rep_group_cnt
-                                 : ips_.size();
-
-    cc_nodes_.reserve(rep_group_cnt);
-    uint32_t cc_group_id = node_id_;
-
-    // generate #rep_group_cnt number of cc_node
-    for (size_t offset = 0; offset < rep_group_cnt; ++offset)
+    for (uint32_t ng_id = 0; ng_id < ng_ips_.size(); ++ng_id)
     {
-        std::vector<std::string> group_ips;
-        group_ips.reserve(rep_group_cnt);
-        std::vector<uint16_t> group_ports;
-        group_ports.reserve(rep_group_cnt);
-
-        // determine the members in this ccnode's raft group.
-        // for example, suppose 3 nodes, the raft configuration is as
-        // follows: group1: 1(preferred leader),2,3 group2: 1,2(preferred
-        // leader),3 group3: 1,2,3(preferred leader)
-        for (uint32_t idx = 0; idx < rep_group_cnt; ++idx)
+        for (size_t idx = 0; idx < ng_ips_.at(ng_id).size(); ++idx)
         {
-            uint32_t gid = cc_group_id + idx;
-
-            if (gid >= ips_.size())
+            if (ng_ips_.at(ng_id).at(idx) == ng_ips_.at(node_id_).front() &&
+                ng_ports_.at(ng_id).at(idx) == ng_ports_.at(node_id_).front())
             {
-                gid -= ips_.size();
+                std::string store_path(path);
+                store_path.append("/cc_ng/");
+                store_path.append(std::to_string(ng_id));
+
+                // Use cc node port + 1 for cc node raft port
+                std::vector<uint16_t> group_ports;
+                for (auto &port : ng_ports_.at(ng_id))
+                {
+                    group_ports.emplace_back(port + 1);
+                }
+                cc_nodes_.try_emplace(ng_id,
+                                      std::make_unique<fault::CcNode>(
+                                          ng_id,
+                                          node_id_,
+                                          ng_ips_.at(node_id_).front(),
+                                          ng_ports_.at(node_id_).front() + 1,
+                                          ng_ips_.at(ng_id),
+                                          group_ports,
+                                          store_path,
+                                          local_shards_,
+                                          log_replay_service_.get(),
+                                          log_agent_->LogGroupCount()));
             }
-
-            group_ips.emplace_back(ips_.at(gid));
-            // TODO: use delta or a separate conf parameter
-            // mapcc port plus 1 as ccnode raft port.
-            group_ports.emplace_back(ports_.at(gid) + 1);
-        }
-
-        std::string store_path(path);
-        store_path.append("/cc_ng/");
-        store_path.append(std::to_string(cc_group_id));
-
-        cc_nodes_.try_emplace(
-            cc_group_id,
-            std::make_unique<fault::CcNode>(cc_group_id,
-                                            node_id_,
-                                            ips_.at(node_id_),
-                                            ports_.at(node_id_) + 1,
-                                            group_ips,
-                                            group_ports,
-                                            store_path,
-                                            local_shards_,
-                                            log_replay_service_.get(),
-                                            log_agent_->LogGroupCount()));
-
-        // cc_nodes contains all the raft groups in which the current
-        // node(node_id) exists. As a result, scan back to search the
-        // group where the current node is a follower. Each node can
-        // exist in #rep_group_cnt number of groups.
-        if (cc_group_id == 0)
-        {
-            cc_group_id = ips_.size() - 1;
-        }
-        else
-        {
-            --cc_group_id;
         }
     }
+
     cc_nodes_init_.store(true, std::memory_order_release);
 
-    if (ips_.size() > 1)
+    if (ng_ips_.size() > 1)
     {
         cc_stream_receiver_ = std::make_unique<remote::CcStreamReceiver>(
             local_shards_, msg_pool_);
@@ -229,26 +205,29 @@ int Sharder::Init(const std::string &path)
             return -1;
         }
 
-        if (cc_stream_server_.Start(ports_.at(node_id_), NULL) != 0)
+        if (cc_stream_server_.Start(ng_ports_.at(node_id_).front(), NULL) != 0)
         {
             LOG(FATAL) << "Fail to start the cc stream server.";
             return -1;
         }
 
         cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-        for (uint32_t nid = 0; nid < ips_.size(); ++nid)
+        for (auto &pair : ng_ips_)
         {
             // Build a stream to every node even to ourselves because the
             // current node can become leader of multiple node groups during
             // failover. In that case we might need to handle remote requests
             // sent from the same node but from different node group.
-            cc_stream_sender_->AddRemoteNode(nid, ips_.at(nid), ports_.at(nid));
+            cc_stream_sender_->AddRemoteNode(pair.first,
+                                             pair.second.front(),
+                                             ng_ports_.at(pair.first).front());
         }
     }
 
     // Initializes the Raft service that listens on the port of local_port + 1.
-    if (braft::add_service(&cc_node_server_,
-                           GET_CCNODE_RPC_PORT(ports_.at(node_id_))) != 0)
+    if (braft::add_service(
+            &cc_node_server_,
+            GET_CCNODE_RPC_PORT(ng_ports_.at(node_id_).front())) != 0)
     {
         LOG(ERROR) << "Fail to add the Raft service for cc nodes.";
         return -1;
@@ -264,8 +243,8 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    if (cc_node_server_.Start(GET_CCNODE_RPC_PORT(ports_.at(node_id_)), NULL) !=
-        0)
+    if (cc_node_server_.Start(
+            GET_CCNODE_RPC_PORT(ng_ports_.at(node_id_).front()), NULL) != 0)
     {
         LOG(FATAL) << "Fail to start the cc node server.";
         return -1;
@@ -281,8 +260,9 @@ int Sharder::Init(const std::string &path)
 
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
-    if (log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(ports_.at(node_id_)),
-                                 nullptr) != 0)
+    if (log_replay_server_.Start(
+            GET_LOG_REPLAY_RPC_PORT(ng_ports_.at(node_id_).front()), nullptr) !=
+        0)
     {
         LOG(FATAL) << "Fail to start the log replay server.";
         return -1;
@@ -377,31 +357,19 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
     uint16_t leader_port = leader.addr.port;
 
-    uint32_t rep_group_cnt = fault::CcNode::rep_group_cnt < ips_.size()
-                                 ? fault::CcNode::rep_group_cnt
-                                 : ips_.size();
-    uint32_t nid = ng_id;
-    for (size_t idx = 0; idx < rep_group_cnt; ++idx)
+    for (auto &pair : ng_ips_)
     {
-        if (ips_.at(nid) == leader_ip_str &&
-            GET_CCNODE_RPC_PORT(ports_.at(nid)) == leader_port)
+        if (pair.second.front() == leader_ip_str &&
+            GET_CCNODE_RPC_PORT(ng_ports_.at(pair.first).front()) ==
+                leader_port)
         {
-            ng_leader_cache_.at(ng_id).store(nid, std::memory_order_release);
+            ng_leader_cache_.at(ng_id).store(pair.first,
+                                             std::memory_order_release);
             break;
-        }
-
-        // scan forward since the members are [ng_id, ng_id+rep_group_cnt-1]
-        // for group ng_id.
-        if (nid == ips_.size() - 1)
-        {
-            nid = 0;
-        }
-        else
-        {
-            ++nid;
         }
     }
 }
+
 void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
 {
     DLOG(INFO) << "ccnode group ng" << ng_id
@@ -433,8 +401,9 @@ void Sharder::WaitClusterReady()
     while (true)
     {
         bool recovery_all_finished = true;
-        for (uint32_t ng_id = 0; ng_id < ips_.size(); ng_id++)
+        for (auto &pair : ng_ips_)
         {
+            uint32_t ng_id = pair.first;
             if (recovered_leader_set.find(ng_id) == recovered_leader_set.end())
             {
                 recovery_all_finished = false;
@@ -496,32 +465,23 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 
 void Sharder::ConfigRouteTable()
 {
-    uint32_t rep_group_cnt = fault::CcNode::rep_group_cnt < ips_.size()
-                                 ? fault::CcNode::rep_group_cnt
-                                 : ips_.size();
-
-    for (uint32_t ng_id = 0; ng_id < ips_.size(); ++ng_id)
+    for (auto &pair : ng_ips_)
     {
+        uint32_t ng_id = pair.first;
         std::string group_id("ng");
         group_id.append(std::to_string(ng_id));
 
         std::string group_conf;
-        for (uint32_t idx = 0; idx < rep_group_cnt; ++idx)
+        for (uint32_t idx = 0; idx < pair.second.size(); ++idx)
         {
             if (idx > 0)
             {
                 group_conf.append(",");
             }
 
-            uint32_t nidx = ng_id + idx;
-            if (nidx >= ips_.size())
-            {
-                nidx -= ips_.size();
-            }
-
-            group_conf.append(ips_.at(nidx));
+            group_conf.append(pair.second.at(idx));
             group_conf.append(":");
-            group_conf.append(std::to_string(ports_.at(nidx) + 1));
+            group_conf.append(std::to_string(ng_ports_.at(ng_id).at(idx) + 1));
             group_conf.append(":");
             group_conf.append(std::to_string(idx));
         }

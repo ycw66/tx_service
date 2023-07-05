@@ -52,16 +52,16 @@ class Sharder
 public:
     static Sharder &Instance(
         uint32_t node_id = 0,
-        const std::vector<std::string> *ips = nullptr,
-        const std::vector<uint16_t> *ports = nullptr,
+        const std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
+        const std::map<uint32_t, std::vector<uint16_t>> *ng_ports = nullptr,
         const std::vector<std::string> *txlog_ips = nullptr,
         const std::vector<uint16_t> *txlog_ports = nullptr,
         LocalCcShards *local_shards = nullptr,
         std::unique_ptr<TxLog> log_agent = nullptr)
     {
         static Sharder instance_(node_id,
-                                 ips,
-                                 ports,
+                                 ng_ips,
+                                 ng_ports,
                                  txlog_ips,
                                  txlog_ports,
                                  *local_shards,
@@ -256,7 +256,7 @@ public:
 
     uint32_t GetNodeCount()
     {
-        return ips_.size();
+        return ng_ips_.size();
     }
 
     uint32_t NodeId() const
@@ -312,8 +312,8 @@ public:
 
 private:
     Sharder(uint32_t node_id,
-            const std::vector<std::string> *ips,
-            const std::vector<uint16_t> *ports,
+            const std::map<uint32_t, std::vector<std::string>> *ng_ips,
+            const std::map<uint32_t, std::vector<uint16_t>> *ng_ports,
             const std::vector<std::string> *txlog_ips,
             const std::vector<uint16_t> *txlog_ports,
             LocalCcShards &local_shards,
@@ -331,8 +331,10 @@ private:
     void ConfigRouteTable();
 
     uint32_t node_id_;
-    std::vector<std::string> ips_;
-    std::vector<uint16_t> ports_;
+    // Map from node group id to member ip list and port list. The first item in
+    // vector is the preferred leader of the node group.
+    std::map<uint32_t, std::vector<std::string>> ng_ips_;
+    std::map<uint32_t, std::vector<uint16_t>> ng_ports_;
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
     // We have one raft group for each logical shard(specified by ip & port)

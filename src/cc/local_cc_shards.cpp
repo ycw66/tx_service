@@ -1244,6 +1244,7 @@ bool LocalCcShards::SetDataSyncOngoing(const TableName &base_table_name,
         data_sync_task_queue_.push_back(
             std::move(sync_status.pending_task_.back()));
         sync_status.pending_task_.pop_back();
+        task_worker_cv_.notify_one();
     }
     task_worker_lk.unlock();
     return true;
