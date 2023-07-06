@@ -422,7 +422,7 @@ public:
         if (metrics::enable_collect_metrics)
         {
             empty_round_count_ += req_cnt == 0 ? 1 : 0;
-            if (++total_round_count_ == empty_rount_threshold_)
+            if (++total_round_count_ == empty_round_threshold_)
             {
                 meter_->Collect(EMPTY_ROUND_RATIO_NAME_,
                                 static_cast<double>(empty_round_count_) /
@@ -591,7 +591,7 @@ private:
     size_t busy_round_threshold_{10};
     size_t empty_round_count_{0};
     size_t total_round_count_{0};
-    size_t empty_rount_threshold_{1000};
+    size_t empty_round_threshold_{1000};
 
     const metrics::Name BUSY_ROUND_DURATION_NAME_{"busy_round_duration"};
     const metrics::Name BUSY_ROUND_ACTIVE_TX_COUNT_NAME_{

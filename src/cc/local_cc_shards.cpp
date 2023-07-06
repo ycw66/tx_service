@@ -496,9 +496,9 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
 
-std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *
-LocalCcShards::GetTableRangesForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+    *LocalCcShards::GetTableRangesForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -512,17 +512,17 @@ LocalCcShards::GetTableRangesForATableInternal(
     return ngs_it == ranges_of_all_ngs.end() ? nullptr : &ngs_it->second;
 }
 
-std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *
-LocalCcShards::GetTableRangesForATable(const TableName &range_table_name,
-                                       const NodeGroupId ng_id)
+std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+    *LocalCcShards::GetTableRangesForATable(const TableName &range_table_name,
+                                            const NodeGroupId ng_id)
 {
     std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
     return GetTableRangesForATableInternal(range_table_name, ng_id);
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *> *
-LocalCcShards::GetTableRangeIdsForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *>
+    *LocalCcShards::GetTableRangeIdsForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
