@@ -962,6 +962,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     bool start_inclusive,
     const TxKey *end_key,
     bool end_inclusive,
+    uint8_t prefetch_size,
     uint64_t read_ts,
     uint64_t tx_number,
     int64_t tx_term,
@@ -994,7 +995,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  iso_level,
                  proto,
                  scanner.is_for_write_,
-                 scanner.is_covering_keys_);
+                 scanner.is_covering_keys_,
+                 prefetch_size);
 
         uint32_t core_cnt = cc_shards_.Count();
         req->SetShardCount(core_cnt);
@@ -1046,6 +1048,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             start_inclusive,
                             end_key,
                             end_inclusive,
+                            prefetch_size,
                             read_ts,
                             tx_number,
                             tx_term,

@@ -409,6 +409,10 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     uint64_t alias_;
     const TableName &table_name_;
     std::vector<ScanBatchTuple> *batch_;
+
+#ifdef RANGE_PARTITION_ENABLED
+    uint8_t prefetch_slice_cnt_{0};
+#endif
 };
 
 struct UnlockTuple

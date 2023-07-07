@@ -389,7 +389,8 @@ public:
                           CcShard *cc_shard,
                           store::DataStoreHandler *store_hd,
                           RangeSliceOpStatus &pin_status,
-                          bool force_load = false);
+                          bool force_load,
+                          uint8_t prefetch_size);
 
     RangeSliceOpStatus PinSlice(const TableName &tbl_name,
                                 StoreSlice *slice,

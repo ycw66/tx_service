@@ -130,7 +130,8 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   CcShard *cc_shard,
                                   store::DataStoreHandler *store_hd,
                                   RangeSliceOpStatus &pin_status,
-                                  bool force_load)
+                                  bool force_load,
+                                  uint8_t prefetch_size)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -194,6 +195,33 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         default:
             pin_status = RangeSliceOpStatus::Error;
             break;
+        }
+
+        slice_lk.unlock();
+
+        size_t sid = slice_idx + 1;
+        for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
+             ++fid, ++sid)
+        {
+            StoreSlice *prefetch_slice = slices_[sid].get();
+            std::unique_lock<std::mutex> prefetch_lk(
+                prefetch_slice->slice_mux_);
+
+            if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+            {
+                LoadSlice(tbl_name,
+                          *prefetch_slice,
+                          key_schema,
+                          rec_schema,
+                          schema_ts,
+                          snapshot_ts,
+                          kv_info,
+                          nullptr,
+                          cc_shard,
+                          store_hd,
+                          false,
+                          prefetch_lk);
+            }
         }
     }
 

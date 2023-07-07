@@ -562,6 +562,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     bool start_inclusive,
     const TxKey *end_key,
     bool end_inclusive,
+    uint8_t prefetch_size,
     uint64_t read_ts,
     uint64_t tx_number,
     int64_t tx_term,
@@ -644,6 +645,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_slice->set_is_for_write(scanner.is_for_write_);
     scan_slice->set_is_covering_keys(scanner.is_covering_keys_);
+    scan_slice->set_prefetch_size(prefetch_size);
 
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }

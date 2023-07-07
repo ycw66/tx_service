@@ -383,6 +383,7 @@ message ScanSliceRequest {
 	CcProtocolType protocol = 16;
 	bool is_for_write = 17;
 	bool is_covering_keys = 18;
+	uint32 prefetch_size = 19;
 }
 
 message ScanSliceResponse {

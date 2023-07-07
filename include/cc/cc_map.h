@@ -102,10 +102,7 @@ public:
     virtual bool Execute(FillStoreSliceCc &req) = 0;
     virtual bool Execute(GetPostCkptSlice &req) = 0;
     virtual bool Execute(KickoutCcEntryCc &req) = 0;
-    virtual bool Execute(ApplyCc &req)
-    {
-        return true;
-    };
+    virtual bool Execute(ApplyCc &req) = 0;
 
     virtual size_t size() const = 0;
 

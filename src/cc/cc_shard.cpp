@@ -1221,7 +1221,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     bool inclusive,
                                     CcRequestBase *cc_request,
                                     RangeSliceOpStatus &pin_status,
-                                    bool force_load)
+                                    bool force_load,
+                                    uint8_t prefetch_size)
 {
     return local_shards_.PinRangeSlice(table_name,
                                        ng_id,
@@ -1234,7 +1235,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        cc_request,
                                        this,
                                        pin_status,
-                                       force_load);
+                                       force_load,
+                                       prefetch_size);
 }
 
 RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
@@ -1248,7 +1250,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     bool inclusive,
                                     CcRequestBase *cc_request,
                                     RangeSliceOpStatus &pin_status,
-                                    bool force_load)
+                                    bool force_load,
+                                    uint8_t prefetch_size)
 {
     return local_shards_.PinRangeSlice(table_name,
                                        ng_id,
@@ -1262,7 +1265,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        cc_request,
                                        this,
                                        pin_status,
-                                       force_load);
+                                       force_load,
+                                       prefetch_size);
 }
 
 void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)

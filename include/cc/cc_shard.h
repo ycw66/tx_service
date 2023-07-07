@@ -528,7 +528,8 @@ public:
                                bool inclusive,
                                CcRequestBase *cc_request,
                                RangeSliceOpStatus &pin_status,
-                               bool force_load = false);
+                               bool force_load,
+                               uint8_t prefetch_size);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
@@ -541,7 +542,8 @@ public:
                                bool inclusive,
                                CcRequestBase *cc_request,
                                RangeSliceOpStatus &pin_status,
-                               bool force_load = false);
+                               bool force_load,
+                               uint8_t prefetch_size);
 
     /**
      * Used for unit test to verify the lru link is complete.

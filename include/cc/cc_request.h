@@ -1755,7 +1755,8 @@ public:
              IsolationLevel iso_level,
              CcProtocol protocol,
              bool read_for_write,
-             bool is_covering_keys)
+             bool is_covering_keys,
+             uint8_t prefetch_size)
     {
         assert(hd_res.Value().is_local_);
 
@@ -1788,6 +1789,7 @@ public:
         is_covering_keys_ = is_covering_keys;
 
         range_slice_id_.Reset();
+        prefetch_size_ = prefetch_size;
     }
 
     void Set(const TableName &tbl_name,
@@ -1806,7 +1808,8 @@ public:
              IsolationLevel iso_level,
              CcProtocol protocol,
              bool read_for_write,
-             bool is_covering_keys)
+             bool is_covering_keys,
+             uint8_t prefetch_size)
     {
         assert(!hd_res.Value().is_local_);
 
@@ -1837,6 +1840,7 @@ public:
         cc_ng_term_ = ng_term;
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
+        prefetch_size_ = prefetch_size;
 
         range_slice_id_.Reset();
     }
@@ -2122,6 +2126,17 @@ public:
         return is_covering_keys_;
     }
 
+    /**
+     * @brief Returns the number of slices to prefetch when loading a cache-miss
+     * slice.
+     *
+     * @return uint8_t Number of slices to prefetch
+     */
+    uint8_t PrefetchSize() const
+    {
+        return prefetch_size_;
+    }
+
 private:
     uint32_t range_id_{0};
 
@@ -2151,6 +2166,11 @@ private:
     bool end_inclusive_{false};
 
     ScanDirection direction_{ScanDirection::Forward};
+    /**
+     * @brief Number of slices to prefetch when a cache-miss slice is loaded.
+     *
+     */
+    uint8_t prefetch_size_{0};
     uint64_t ts_{0};
     int64_t tx_term_{-1};
     bool read_for_write_{false};

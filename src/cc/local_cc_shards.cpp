@@ -701,7 +701,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           CcRequestBase *cc_request,
                                           CcShard *cc_shard,
                                           RangeSliceOpStatus &pin_status,
-                                          bool force_load)
+                                          bool force_load,
+                                          uint8_t prefetch_size)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -736,7 +737,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           cc_shard,
                                           store_hd_,
                                           pin_status,
-                                          force_load);
+                                          force_load,
+                                          prefetch_size);
 }
 
 RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
@@ -751,7 +753,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           CcRequestBase *cc_request,
                                           CcShard *cc_shard,
                                           RangeSliceOpStatus &pin_status,
-                                          bool force_load)
+                                          bool force_load,
+                                          uint8_t prefetch_size)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -792,7 +795,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                           cc_shard,
                                           store_hd_,
                                           pin_status,
-                                          force_load);
+                                          force_load,
+                                          prefetch_size);
 }
 
 StoreRange *LocalCcShards::FindRange(const TableName &table_name,

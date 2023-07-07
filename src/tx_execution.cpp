@@ -1670,6 +1670,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 !scan_state.inclusive_,
                 scan_state.scan_end_key_,
                 scan_state.scan_end_inclusive_,
+                scan_next.tx_req_->prefetch_slice_cnt_,
                 start_ts_,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
@@ -1722,6 +1723,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     !scan_state.inclusive_,
                     scan_state.scan_end_key_,
                     scan_state.scan_end_inclusive_,
+                    scan_next.tx_req_->prefetch_slice_cnt_,
                     start_ts_,
                     tx_number_.load(std::memory_order_relaxed),
                     tx_term_,
@@ -3477,16 +3479,15 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : table_write_set)
             {
-                cc_handler_->PostWrite(
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    command_id,
-                    commit_ts_,
-                    write_entry.cce_addr_,
-                    write_entry.rec_.get(),
-                    write_entry.op_,
-                    write_entry.key_shard_code_,
-                    post_process.hd_result_);
+                cc_handler_->PostWrite(tx_number,
+                                       tx_term_,
+                                       command_id,
+                                       commit_ts_,
+                                       write_entry.cce_addr_,
+                                       write_entry.rec_.get(),
+                                       write_entry.op_,
+                                       write_entry.key_shard_code_,
+                                       post_process.hd_result_);
                 if (write_entry.forward_key_shard_code_ != 0)
                 {
                     cc_handler_->ForwardPostWrite(

@@ -1588,7 +1588,9 @@ public:
                             *look_key,
                             true,
                             &req,
-                            pin_status);
+                            pin_status,
+                            false,
+                            0);
 
                         if (pin_status == RangeSliceOpStatus::Successful)
                         {
@@ -3567,7 +3569,9 @@ public:
                                              *req_start_key,
                                              req.StartInclusive(),
                                              &req,
-                                             pin_status);
+                                             pin_status,
+                                             false,
+                                             req.PrefetchSize());
 
             if (pin_status == RangeSliceOpStatus::Retry)
             {
@@ -4412,7 +4416,8 @@ public:
                                               true,
                                               &req,
                                               pin_status,
-                                              true);
+                                              true,
+                                              UINT8_MAX);
                     if (pin_status == RangeSliceOpStatus::Successful)
                     {
                         if (cce->data_store_size_.load(
@@ -4640,7 +4645,9 @@ public:
                                       *slice_start_key,
                                       true,
                                       &req,
-                                      pin_status);
+                                      pin_status,
+                                      false,
+                                      UINT8_MAX);
             if (pin_status == RangeSliceOpStatus::Successful)
             {
                 slice_id.Unpin();
@@ -5199,6 +5206,11 @@ public:
             shard_->Enqueue(&req);
             return false;
         }
+    }
+
+    bool Execute(ApplyCc &req) override
+    {
+        return true;
     }
 
     size_t size() const override
@@ -6315,9 +6327,8 @@ protected:
                 if (v_rec.payload_ptr_ != nullptr)
                 {
                     tuple->SetRecord(v_rec.payload_ptr_);
-                    // We're only copying the shared_ptr here so use the sizeof
-                    // payload ptr instead of the actual payload size.
-                    tuple_size += sizeof(v_rec.payload_ptr_);
+                    // We're only copying the shared_ptr here so we exclude the
+                    // actual payload size.
                 }
             }
             tuple->key_ts_ = v_rec.commit_ts_;
@@ -6348,9 +6359,8 @@ protected:
                 if (cce->payload_ != nullptr)
                 {
                     tuple->SetRecord(cce->payload_);
-                    // We're only copying the shared_ptr here so use the sizeof
-                    // payload ptr instead of the actual payload size.
-                    tuple_size += sizeof(cce->payload_);
+                    // We're only copying the shared_ptr here so we exclude the
+                    // actual payload size.
                 }
             }
             tuple->rec_status_ = cce->payload_status_;

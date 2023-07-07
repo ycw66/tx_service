@@ -410,7 +410,8 @@ public:
                                CcRequestBase *cc_request,
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status,
-                               bool force_load = false);
+                               bool force_load,
+                               uint8_t prefetch_size);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
                                const NodeGroupId ng_id,
@@ -424,7 +425,8 @@ public:
                                CcRequestBase *cc_request,
                                CcShard *cc_shard,
                                RangeSliceOpStatus &pin_status,
-                               bool force_load = false);
+                               bool force_load,
+                               uint8_t prefetch_size);
 
     StoreRange *FindRange(const TableName &table_name,
                           const NodeGroupId ng_id,
