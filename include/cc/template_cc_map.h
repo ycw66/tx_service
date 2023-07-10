@@ -502,6 +502,10 @@ public:
                 new_cce->gap_commit_ts_ = commit_ts;
                 new_cce->commit_ts_ = commit_ts;
                 new_cce->gap_last_read_ts_ = prior_cce.gap_last_read_ts_;
+                if (ccm_has_full_entries_ || req.IsInitialInsert())
+                {
+                    new_cce->ckpt_ts_.store(1U);
+                }
 
                 prior_cce.gap_commit_ts_ = commit_ts;
                 prior_cce.insert_intention_set_.erase(
@@ -557,6 +561,13 @@ public:
                 }
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
+
+                if (cce->ckpt_ts_ == 0U &&
+                    (ccm_has_full_entries_ || req.IsInitialInsert()))
+                {
+                    uint64_t tmp_ts = 0U;
+                    cce->ckpt_ts_.compare_exchange_strong(tmp_ts, 1U);
+                }
             }
             else
             {

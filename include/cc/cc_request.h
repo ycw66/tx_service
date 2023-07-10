@@ -683,6 +683,7 @@ public:
         : cce_addr_(nullptr),
           commit_ts_(0),
           is_remote_(false),
+          is_initial_insert_(false),
           payload_(nullptr),
           key_(nullptr)
     {
@@ -754,6 +755,7 @@ public:
         key_ = nullptr;
         is_remote_ = false;
         ccm_ = nullptr;
+        is_initial_insert_ = false;
     }
 
     void Reset(const TxKey *key,
@@ -764,7 +766,8 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool initial_insertion = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             &table_name, res, ng_id, tx_number);
@@ -777,6 +780,7 @@ public:
         key_shard_code_ = key_shard_code;
         is_remote_ = false;
         ccm_ = nullptr;
+        is_initial_insert_ = initial_insertion;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -798,6 +802,7 @@ public:
         key_shard_code_ = key_shard_code;
         is_remote_ = true;
         ccm_ = nullptr;
+        is_initial_insert_ = false;
     }
 
     void Reset(const TableName *table_name,
@@ -808,7 +813,8 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool initial_insertion = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name, res, node_group_id, tx_number);
@@ -820,6 +826,7 @@ public:
         key_shard_code_ = key_shard_code;
         is_remote_ = true;
         ccm_ = nullptr;
+        is_initial_insert_ = initial_insertion;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -862,10 +869,16 @@ public:
         return is_remote_ ? key_str_ : nullptr;
     }
 
+    bool IsInitialInsert() const
+    {
+        return is_initial_insert_;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
     bool is_remote_;
+    bool is_initial_insert_;
     union
     {
         const TxRecord *payload_;
