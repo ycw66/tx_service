@@ -194,7 +194,10 @@ void Checkpointer::Run()
             [this]
             { return ckpt_thd_status_ != Status::Active || request_ckpt_; });
 
-        CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", { continue; });
+        CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
+            request_ckpt_ = false;
+            continue;
+        });
 
         if (ckpt_thd_status_ == Status::Active)
         {
