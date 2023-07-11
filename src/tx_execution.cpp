@@ -349,15 +349,36 @@ void TransactionExecution::RecoverSplitRangeTx(
         new_range_info.emplace_back(std::move(new_range_keys[i]),
                                     new_partition_ids[i]);
     }
-    std::unique_ptr<SplitFlushRangeOp> split_range_op =
-        std::make_unique<SplitFlushRangeOp>(table_name,
-                                            table_schema,
-                                            node_group,
-                                            range_start_key,
-                                            range_end_key,
-                                            range_info,
-                                            std::move(new_range_info),
-                                            this);
+
+    std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
+    if (cc_handler_->split_flush_range_op_pool_.empty())
+    {
+        split_range_op =
+            std::make_unique<SplitFlushRangeOp>(table_name,
+                                                table_schema,
+                                                node_group,
+                                                range_start_key,
+                                                range_end_key,
+                                                range_info,
+                                                std::move(new_range_info),
+                                                this);
+    }
+    else
+    {
+        split_range_op =
+            std::move(cc_handler_->split_flush_range_op_pool_.back());
+        cc_handler_->split_flush_range_op_pool_.pop_back();
+        assert(split_range_op != nullptr);
+        split_range_op->Reset(table_name,
+                              table_schema,
+                              node_group,
+                              range_start_key,
+                              range_end_key,
+                              range_info,
+                              std::move(new_range_info),
+                              this);
+    }
+    assert(split_range_op != nullptr);
 
     split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
     split_range_op->recover_split_started_ = split_tx_started;
@@ -872,15 +893,33 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
 
     bool_resp_ = &req.tx_result_;
 
-    split_flush_op_ =
-        std::make_unique<SplitFlushRangeOp>(*req.table_name_,
-                                            req.schema_,
-                                            req.node_group_,
-                                            req.old_start_key_,
-                                            req.old_end_key_,
-                                            req.old_range_info_,
-                                            std::move(req.new_range_id_),
-                                            this);
+    if (cc_handler_->split_flush_range_op_pool_.empty())
+    {
+        split_flush_op_ =
+            std::make_unique<SplitFlushRangeOp>(*req.table_name_,
+                                                req.schema_,
+                                                req.node_group_,
+                                                req.old_start_key_,
+                                                req.old_end_key_,
+                                                req.old_range_info_,
+                                                std::move(req.new_range_id_),
+                                                this);
+    }
+    else
+    {
+        split_flush_op_ =
+            std::move(cc_handler_->split_flush_range_op_pool_.back());
+        cc_handler_->split_flush_range_op_pool_.pop_back();
+        assert(split_flush_op_ != nullptr);
+        split_flush_op_->Reset(*req.table_name_,
+                               req.schema_,
+                               req.node_group_,
+                               req.old_start_key_,
+                               req.old_end_key_,
+                               req.old_range_info_,
+                               std::move(req.new_range_id_),
+                               this);
+    }
 
     PushOperation(split_flush_op_.get());
     Forward();
@@ -2432,7 +2471,6 @@ void TransactionExecution::Commit()
     }
 
     tx_status_.store(TxnStatus::Committing, std::memory_order_release);
-
 #ifndef ON_KEY_OBJECT
     if (rw_set_.WriteSetSize() > 0)
     {
@@ -2513,7 +2551,6 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
                            lock_write_ranges.lock_range_result_,
                            IsolationLevel::RepeatableRead,
                            CcProtocol::Locking);
-
     lock_write_ranges.Forward(this);
 }
 
@@ -3828,6 +3865,7 @@ void TransactionExecution::ReleaseCatalogRangeLock(
         {
             continue;
         }
+
         for (const auto &[cce_addr, read_entry] : tbl_set)
         {
             --ref_cnt;

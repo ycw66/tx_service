@@ -303,6 +303,7 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     else
     {
         hres.Value().is_local_ = false;
+        hres.IncrementRemoteRef();
         remote_hd_.ForwardPostWrite(cc_shards_.node_id_,
                                     tx_number,
                                     tx_term,

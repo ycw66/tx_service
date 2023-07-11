@@ -21,6 +21,7 @@
 namespace txservice
 {
 struct UpsertTableOp;
+struct SplitFlushRangeOp;
 
 class CcHandler
 {
@@ -489,6 +490,8 @@ public:
     // this is different from pointer stability, which is guaranteed by checking
     // the node term and whether this node is the leader of a node group).
     std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
+
+    std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
 };
 
 }  // namespace txservice

@@ -2135,13 +2135,6 @@ void LocalCcShards::SplitFlushRange(
     catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
         table_name, catalog_rec.Schema(), node_group);
 
-    // Start the SplitFlush tx. This would split the range, flush the data and
-    // update slice metadata.
-    TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
-    const TableRangeEntry *entry = GetTableRangeEntry(
-        range_table_name, node_group, split_info.first->RangeStartKey());
-    assert(entry != nullptr);
     const TxKey *old_start_key = split_info.first->RangeStartKey();
     if (old_start_key == nullptr)
     {
@@ -2152,6 +2145,17 @@ void LocalCcShards::SplitFlushRange(
     {
         old_end_key = catalog_factory_->PositiveInfKey();
     }
+
+    assert(old_start_key != nullptr);
+    assert(old_end_key != nullptr);
+
+    // Start the SplitFlush tx. This would split the range, flush the data and
+    // update slice metadata.
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    const TableRangeEntry *entry =
+        GetTableRangeEntry(range_table_name, node_group, old_start_key);
+    assert(entry != nullptr);
 
     log_output.append(" txn: " + std::to_string(split_txm->TxNumber()));
     LOG(INFO) << log_output;

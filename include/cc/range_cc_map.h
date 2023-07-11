@@ -237,7 +237,6 @@ public:
                             ng_term,
                             req.NodeGroupId(),
                             shard_->LocalCoreId());
-
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
             *range_rec = *(floor_cce->payload_);
             hd_result->Value().ts_ = floor_cce->commit_ts_;
@@ -350,6 +349,10 @@ public:
             // update the local shards' table range value on the first core.
             if (shard_->core_id_ == 0)
             {
+                assert(
+                    upload_range_rec->GetRangeInfo()->new_key_.size() ==
+                    upload_range_rec->GetRangeInfo()->new_partition_id_.size());
+
                 // upload the new range info to local cc shards,
                 // point the req range rec to the local cc shard table_ranges_
                 // entry. The req range rec will be used to update ccmap on each

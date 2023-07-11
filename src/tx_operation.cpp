@@ -6,6 +6,7 @@
 
 #include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
+#include "cc_handler.h"
 #include "checkpointer.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
@@ -291,6 +292,11 @@ void UnlockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
 PostReadOperation::PostReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
+}
+
+void PostReadOperation::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
 }
 
 void PostReadOperation::Reset(
@@ -993,7 +999,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the next range's lock and
                 // ID. The scan next operation is set to be errored.
-                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+                slice_hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
                 unlock_range_result_.SetFinished();
             }
             else
@@ -2345,6 +2351,12 @@ AsyncOp<ResultType>::AsyncOp(TransactionExecution *txm) : hd_result_(txm)
 }
 
 template <typename ResultType>
+void AsyncOp<ResultType>::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+template <typename ResultType>
 void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
@@ -2425,6 +2437,11 @@ bool CompositeTransactionOperation::CheckLeaderTerm(uint32_t ng_id,
 FlushDataOp::FlushDataOp(TransactionExecution *txm) : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void FlushDataOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
 }
 
 void FlushDataOp::Forward(TransactionExecution *txm)
@@ -2509,7 +2526,6 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       range_table_name_(table_name_.StringView(), TableType::RangePartition),
       node_group_(node_group),
       range_info_(*old_range_info),
-      range_record_(&range_info_, nullptr, old_end_key),
       old_end_key_(old_end_key),
       new_range_info_(std::move(new_range_info)),
       prepare_acquire_all_write_op_(txm),
@@ -2527,6 +2543,8 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       clean_log_op_(txm),
       release_catalog_read_lock_op_(txm)
 {
+    range_record_ =
+        std::make_unique<RangeRecord>(&range_info_, nullptr, old_end_key);
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
@@ -2574,6 +2592,149 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
 }
 
+void SplitFlushRangeOp::Reset(
+    const TableName &table_name,
+    const TableSchema *table_schema,
+    NodeGroupId node_group,
+    const TxKey *old_start_key,
+    const TxKey *old_end_key,
+    const RangeInfo *old_range_info,
+    std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+    TransactionExecution *txm)
+{
+    // Reset TransactionOperation
+    retry_num_ = RETRY_NUM;
+    is_running_ = false;
+    op_start_ = metrics::TimePoint::max();
+
+    // Reset CompositeTransactionOperation
+    op_ = nullptr;
+
+    // Reset SplitFlushRangeOp
+    table_name_ = TableName(table_name.String(), table_name.Type());
+    table_schema_ = table_schema;
+    range_table_name_ =
+        TableName(table_name_.StringView(), TableType::RangePartition);
+    node_group_ = node_group;
+
+    assert(old_range_info->new_partition_id_.size() ==
+           old_range_info->new_key_.size());
+
+    range_info_ = *old_range_info;
+    assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
+
+    range_record_ =
+        std::make_unique<RangeRecord>(&range_info_, nullptr, old_end_key);
+
+    old_end_key_ = old_end_key;
+
+    assert(slice_info_.empty());
+    assert(data_sync_vec_.empty());
+    assert(archive_vec_.empty());
+    assert(mv_base_vec_.empty());
+    assert(new_range_info_.empty());
+    assert(recover_split_started_ == nullptr);
+
+    new_range_info_ = std::move(new_range_info);
+
+    // Reset all sub-operations
+    auto node_group_count = Sharder::Instance().NodeGroupCount();
+
+    prepare_acquire_all_write_op_.Reset(node_group_count);
+    prepare_acquire_all_write_op_.ResetHandlerTxm(txm);
+
+    prepare_log_op_.Reset();
+    prepare_log_op_.ResetHandlerTxm(txm);
+
+    install_new_range_op_.Reset(node_group_count);
+    install_new_range_op_.ResetHandlerTxm(txm);
+
+    ds_migrate_old_partition_op_.Reset();
+    ds_migrate_old_partition_op_.ResetHandlerTxm(txm);
+
+    data_sync_scan_op_.Reset();
+    data_sync_scan_op_.ResetHandlerTxm(txm);
+
+    flush_op_.Reset();
+    flush_op_.ResetHandlerTxm(txm);
+
+    commit_acquire_all_write_op_.Reset(node_group_count);
+    commit_acquire_all_write_op_.ResetHandlerTxm(txm);
+
+    commit_log_op_.Reset();
+    commit_log_op_.ResetHandlerTxm(txm);
+
+    ds_upsert_range_op_.Reset();
+    ds_upsert_range_op_.ResetHandlerTxm(txm);
+
+    kickout_old_range_data_op_.Reset();
+    kickout_old_range_data_op_.ResetHandlerTxm(txm);
+
+    post_all_lock_op_.Reset(node_group_count);
+    post_all_lock_op_.ResetHandlerTxm(txm);
+
+    ds_clean_old_range_op_.Reset();
+    ds_clean_old_range_op_.ResetHandlerTxm(txm);
+
+    clean_log_op_.Reset();
+    clean_log_op_.ResetHandlerTxm(txm);
+
+    release_catalog_read_lock_op_.Reset({});
+    release_catalog_read_lock_op_.ResetHandlerTxm(txm);
+
+    old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
+                                                       : old_start_key;
+    prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
+    prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
+    prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
+    prepare_acquire_all_write_op_.key_ = old_start_key_;
+
+    install_new_range_op_.table_name_ = &range_table_name_;
+    install_new_range_op_.write_type_ = PostWriteType::PrepareCommit;
+    install_new_range_op_.op_type_ = OperationType::Update;
+    install_new_range_op_.key_ = old_start_key_;
+
+    flush_op_.tab_name_ = &table_name_;
+    flush_op_.data_sync_vec_ = &data_sync_vec_;
+    flush_op_.archive_vec_ = &archive_vec_;
+    flush_op_.mv_vec_ = &mv_base_vec_;
+    flush_op_.schema_ = table_schema_;
+    flush_op_.node_group_ = node_group_;
+
+    commit_acquire_all_write_op_.table_name_ = &range_table_name_;
+    commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
+    commit_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
+    commit_acquire_all_write_op_.key_ = old_start_key_;
+
+    kickout_old_range_data_op_.table_name_ = &table_name_;
+    kickout_old_range_data_op_.node_group_ = node_group;
+
+    post_all_lock_op_.table_name_ = &range_table_name_;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+    post_all_lock_op_.op_type_ = OperationType::Update;
+    post_all_lock_op_.key_ = old_start_key_;
+
+    kickout_data_it_ = {};
+
+    catalog_cc_entry_ = std::nullopt;
+    recover_split_started_ = nullptr;
+    pending_pin_data_ = false;
+
+    TX_TRACE_ASSOCIATE(
+        this, &prepare_acquire_all_write_op_, "prepare_acquire_all_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
+    TX_TRACE_ASSOCIATE(this, &install_new_range_op_, "install_new_range_op_");
+    TX_TRACE_ASSOCIATE(this, &data_sync_scan_op_, "data_sync_scan_op_");
+    TX_TRACE_ASSOCIATE(this, &flush_op_, "flush_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &commit_acquire_all_write_op_, "commit_acquire_all_op_");
+    TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
+    TX_TRACE_ASSOCIATE(this, &ds_upsert_range_op_, "ds_upsert_range_op_");
+    TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &ds_clean_old_range_op_, "ds_clean_old_range_op_");
+    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
+}
+
 void SplitFlushRangeOp::ClearDataSyncVec()
 {
     data_sync_vec_.clear();
@@ -2582,6 +2743,19 @@ void SplitFlushRangeOp::ClearDataSyncVec()
     archive_vec_.shrink_to_fit();
     mv_base_vec_.clear();
     mv_base_vec_.shrink_to_fit();
+}
+
+void SplitFlushRangeOp::ClearInfos()
+{
+    // release TxKey ownership to reduce memory usage
+    range_info_.Clear();
+    new_range_info_.clear();
+    slice_info_.clear();
+
+    new_range_info_.shrink_to_fit();
+    slice_info_.shrink_to_fit();
+
+    range_record_ = nullptr;
 }
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
@@ -2677,8 +2851,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         // Install dirty range info on all node groups and downgrade to
         // write intent lock in next subop.
-        install_new_range_op_.rec_ = &range_record_;
-        range_record_.SetRangeInfo(range_info_.Clone());
+        install_new_range_op_.rec_ = range_record_.get();
+        range_record_->SetRangeInfo(range_info_.Clone());
 
         LOG(INFO) << "Split Flush transaction install dirty range, range id "
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
@@ -2707,8 +2881,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Split Flush transaction failed to install dirty "
                           "range, tx number "
                        << txm->TxNumber();
-            install_new_range_op_.rec_ = &range_record_;
-            range_record_.SetRangeInfo(range_info_.Clone());
+            install_new_range_op_.rec_ = range_record_.get();
+            range_record_->SetRangeInfo(range_info_.Clone());
             RetrySubOperation(txm, &install_new_range_op_);
             return;
         }
@@ -3234,10 +3408,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // All of the new ranges falls on the same node, proceed to post
             // write all. Now broadcast slice info to all nodes through
             // PostWriteAll. New ranges might land on other nodes.
-            post_all_lock_op_.rec_ = &range_record_;
-            range_record_.range_slices_ = &slice_info_;
-            range_record_.end_key_ = old_end_key_;
-            range_record_.SetRangeInfo(range_info_.Clone());
+            post_all_lock_op_.rec_ = range_record_.get();
+            range_record_->range_slices_ = &slice_info_;
+            range_record_->end_key_ = old_end_key_;
+            range_record_->SetRangeInfo(range_info_.Clone());
 
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_.PartitionId()
@@ -3298,10 +3472,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             // Now broadcast slice info to all nodes through PostWriteAll. New
             // ranges might land on other nodes.
-            post_all_lock_op_.rec_ = &range_record_;
-            range_record_.range_slices_ = &slice_info_;
-            range_record_.end_key_ = old_end_key_;
-            range_record_.SetRangeInfo(range_info_.Clone());
+            post_all_lock_op_.rec_ = range_record_.get();
+            range_record_->range_slices_ = &slice_info_;
+            range_record_->end_key_ = old_end_key_;
+            range_record_->SetRangeInfo(range_info_.Clone());
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_.PartitionId()
                       << ", txn: " << txm->TxNumber();
@@ -3325,10 +3499,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Split Flush transaction failed at post all "
                           "lock, tx_number:"
                        << txm->TxNumber();
-            post_all_lock_op_.rec_ = &range_record_;
-            range_record_.range_slices_ = &slice_info_;
-            range_record_.end_key_ = old_end_key_;
-            range_record_.SetRangeInfo(range_info_.Clone());
+            post_all_lock_op_.rec_ = range_record_.get();
+            range_record_->range_slices_ = &slice_info_;
+            range_record_->end_key_ = old_end_key_;
+            range_record_->SetRangeInfo(range_info_.Clone());
             RetrySubOperation(txm, &post_all_lock_op_);
             return;
         }
@@ -3430,7 +3604,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             assert(txm->state_stack_.empty());
-            txm->split_flush_op_ = nullptr;
+
+            ClearInfos();
+
+            assert(this == txm->split_flush_op_.get());
+            assert(recover_split_started_ == nullptr);
+            txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
+                std::move(txm->split_flush_op_));
+            assert(txm->split_flush_op_ == nullptr);
         }
     }
     else if (op_ == &release_catalog_read_lock_op_)
@@ -3440,6 +3621,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
             RetrySubOperation(txm, &release_catalog_read_lock_op_);
+            return;
         }
         if (recover_split_started_->fetch_sub(1) == 1)
         {
@@ -3454,6 +3636,15 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
 
         Sharder::Instance().UnpinNodeGroupData(node_group_);
+
+        ClearInfos();
+        recover_split_started_ = nullptr;
+
+        assert(this == txm->split_flush_op_.get());
+
+        txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
+            std::move(txm->split_flush_op_));
+        assert(txm->split_flush_op_ == nullptr);
         txm->Reset();
         // Setting the tx's status to finished signals that this tx
         // state machine can be recycled for a new tx.

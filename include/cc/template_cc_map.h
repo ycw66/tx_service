@@ -1247,7 +1247,6 @@ public:
                     // For prepare commit, the post-write-all request installs
                     // the dirty value, and downgrades the write lock and to the
                     // write intent.
-
                     if (lk_type == LockType::WriteLock)
                     {
                         DowngradeCceKeyWriteLock(cce_ptr, txn);

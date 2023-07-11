@@ -491,6 +491,7 @@ public:
         std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
             removed_slices;
         size_t remove_offset = SearchSlice(*new_end, true);
+        assert(remove_offset > 0);
         auto boundary = boundary_keys_.begin() + remove_offset - 1;
         auto slice = slices_.begin() + remove_offset;
         while (slice != slices_.end())

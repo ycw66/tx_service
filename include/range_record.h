@@ -107,6 +107,47 @@ struct RangeInfo
         }
     }
 
+    void Clear()
+    {
+        start_key_ = nullptr;
+        partition_id_ = 0;
+        version_ts_ = 1;
+        new_key_.clear();
+        new_partition_id_.clear();
+        dirty_ts_ = 0;
+        is_dirty_ = false;
+    }
+
+    RangeInfo &operator=(const RangeInfo &other)
+    {
+        if (this != &other)
+        {
+            partition_id_ = other.partition_id_;
+            version_ts_ = other.version_ts_;
+            new_partition_id_ = other.new_partition_id_;
+            dirty_ts_ = other.dirty_ts_;
+            is_dirty_ = other.is_dirty_;
+
+            if (!other.start_key_)
+            {
+                start_key_ = nullptr;
+            }
+            else
+            {
+                start_key_ = other.start_key_->Clone();
+            }
+
+            new_key_.clear();
+            for (const auto &key : other.new_key_)
+            {
+                new_key_.push_back(key->Clone());
+            }
+
+            assert(new_partition_id_.size() == new_key_.size());
+        }
+        return *this;
+    }
+
     std::unique_ptr<RangeInfo> Clone() const
     {
         std::unique_ptr<TxKey> start_key_clone =
@@ -119,6 +160,7 @@ struct RangeInfo
         }
         that->new_partition_id_ = new_partition_id_;
         that->is_dirty_ = is_dirty_;
+        assert(that->new_partition_id_.size() == that->new_key_.size());
         return std::unique_ptr<RangeInfo>(that);
     }
 
@@ -134,6 +176,7 @@ struct RangeInfo
                 new_key_.push_back(key_uptr->Clone());
             }
             new_partition_id_ = new_partition_id;
+            assert(new_key_.size() == new_partition_id_.size());
             dirty_ts_ = dirty_ts;
             is_dirty_ = true;
         }
@@ -147,6 +190,7 @@ struct RangeInfo
         {
             new_key_ = std::move(new_key);
             new_partition_id_ = std::move(new_partition_id);
+            assert(new_key_.size() == new_partition_id_.size());
             dirty_ts_ = dirty_ts;
             is_dirty_ = true;
         }
@@ -361,12 +405,22 @@ public:
           end_key_(nullptr)
     {
     }
+
     RangeRecord(const RangeRecord &rhs)
-        : range_info_(rhs.GetRangeInfo()),
-          is_info_owner_(false),
+        : range_info_(nullptr),
+          is_info_owner_(rhs.is_info_owner_),
           range_slices_(rhs.range_slices_),
           end_key_(rhs.end_key_)
     {
+        if (rhs.is_info_owner_)
+        {
+            assert(range_info_uptr_ == nullptr);
+            range_info_uptr_ = rhs.range_info_uptr_->Clone();
+        }
+        else
+        {
+            range_info_ = rhs.range_info_;
+        }
     }
 
     RangeRecord(const RangeInfo *info,
@@ -505,11 +559,8 @@ public:
 
     void Copy(const TxRecord &rhs) override
     {
-        const RangeRecord &that = static_cast<const RangeRecord &>(rhs);
-        is_info_owner_ = false;
-        range_info_ = that.GetRangeInfo();
-        range_slices_ = that.range_slices_;
-        end_key_ = that.end_key_;
+        auto &rhs_range_record = static_cast<const RangeRecord &>(rhs);
+        *this = rhs_range_record;
     }
 
     std::string ToString() const override
@@ -523,7 +574,27 @@ public:
         {
             return *this;
         }
-        range_info_ = rhs.range_info_;
+
+        // Release RangeInfo ownership
+        if (is_info_owner_)
+        {
+            range_info_uptr_.reset();
+            is_info_owner_ = false;
+        }
+
+        assert(is_info_owner_ == false);
+
+        if (rhs.is_info_owner_)
+        {
+            range_info_uptr_ = rhs.range_info_uptr_->Clone();
+        }
+        else
+        {
+            range_info_ = rhs.range_info_;
+        }
+
+        is_info_owner_ = rhs.is_info_owner_;
+
         range_slices_ = rhs.range_slices_;
         end_key_ = rhs.end_key_;
         return *this;

@@ -1092,6 +1092,7 @@ public:
     bool ValidTermCheck() override
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        assert(cce_addr_ != nullptr);
         if (cce_addr_->Term() != cc_ng_term)
         {
             return false;

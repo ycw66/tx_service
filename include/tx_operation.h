@@ -146,6 +146,7 @@ struct PostReadOperation : TransactionOperation
 {
 public:
     explicit PostReadOperation(TransactionExecution *txm);
+    void ResetHandlerTxm(TransactionExecution *txm);
 
     void Reset(std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry);
 
@@ -687,6 +688,7 @@ struct AsyncOp : public TransactionOperation
 {
     AsyncOp() = delete;
     explicit AsyncOp(TransactionExecution *txm);
+    void ResetHandlerTxm(TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
     void Reset();
@@ -705,6 +707,7 @@ struct NoOp : public TransactionOperation
 struct FlushDataOp : public TransactionOperation
 {
     FlushDataOp(TransactionExecution *txm);
+    void ResetHandlerTxm(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
@@ -748,15 +751,24 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
         std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
         TransactionExecution *txm);
 
+    void Reset(const TableName &table_name,
+               const TableSchema *table_schema,
+               NodeGroupId node_group,
+               const TxKey *old_start_key,
+               const TxKey *old_end_key,
+               const RangeInfo *old_range_info,
+               std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+               TransactionExecution *txm);
+
     void Forward(TransactionExecution *txm) override;
 
     const TableSchema *table_schema_{nullptr};
-    const TableName table_name_;        // TableName owner.
-    const TableName range_table_name_;  // References table_name_.
+    TableName table_name_;        // TableName owner.
+    TableName range_table_name_;  // References table_name_.
     NodeGroupId node_group_;
 
     RangeInfo range_info_;
-    RangeRecord range_record_;
+    std::unique_ptr<RangeRecord> range_record_;
     // TODO{liunyl}: change these to Uptr after we update inf key instance.
     // Now we need to use raw pointers to accomadate with inf key instance.
     // Now we make them point to the Uptr in range_info_ if they are normal key,
@@ -875,6 +887,7 @@ private:
     void FillCleanLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
     void ClearDataSyncVec();
+    void ClearInfos();
 };
 
 // To remove remainder records' lock when scan close
