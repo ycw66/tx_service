@@ -243,8 +243,6 @@ public:
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
-        const std::unordered_map<TableName, std::vector<uint64_t>>
-            &ng_weights_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) override
     {

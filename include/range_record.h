@@ -55,16 +55,6 @@ struct InitRangeEntry
     {
     }
 
-    uint64_t Bytes() const
-    {
-        return std::accumulate(
-            slice_keys_.begin(),
-            slice_keys_.end(),
-            0UL,
-            [](uint64_t a, const std::pair<std::unique_ptr<TxKey>, uint32_t> &b)
-            { return a + b.second; });
-    }
-
     std::unique_ptr<TxKey> key_{nullptr};
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
@@ -324,22 +314,18 @@ public:
     TableRangeEntry(std::unique_ptr<TxKey> start_key,
                     uint64_t version_ts,
                     int64_t partition_id,
-                    uint64_t range_bytes = 0,
                     std::unique_ptr<StoreRange> slices = nullptr)
         : range_info_(std::make_unique<RangeInfo>(
               std::move(start_key), version_ts, partition_id)),
-          range_slices_(std::move(slices)),
-          range_bytes_at_fetch_(range_bytes)
+          range_slices_(std::move(slices))
     {
     }
 
     void UpdateRangeEntry(uint64_t version_ts,
-                          uint64_t range_bytes = 0,
                           std::unique_ptr<StoreRange> slices = nullptr)
     {
         range_info_->version_ts_ = version_ts;
         range_slices_ = std::move(slices);
-        range_bytes_at_fetch_ = range_bytes;
     }
 
     /**
@@ -379,17 +365,9 @@ public:
         return range_slices_.get();
     }
 
-    uint64_t RangeBytesAtFetch() const
-    {
-        return range_bytes_at_fetch_;
-    }
-
 private:
     std::unique_ptr<RangeInfo> range_info_{nullptr};
     std::unique_ptr<StoreRange> range_slices_;
-
-    // This is used to rebuild statistics from storage.
-    uint64_t range_bytes_at_fetch_{0};
 
     template <typename KeyT>
     friend class RangeCcMap;

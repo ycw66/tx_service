@@ -443,8 +443,6 @@ public:
     {
         using namespace std::chrono_literals;
 
-        auto t1000ms = std::chrono::milliseconds(1000);
-        auto t100ms = std::chrono::milliseconds(100);
         auto tstart = std::chrono::steady_clock::now();
 
         size_t idle_rnd = 0;
@@ -498,7 +496,7 @@ public:
                 // For every 1024 busy wait cycles, checks if the busy wait
                 // window exceeds 1000ms.
                 auto tnow = std::chrono::steady_clock::now();
-                if (tnow - tstart >= t1000ms && IsIdle())
+                if (tnow - tstart >= 1000ms && IsIdle())
                 {
                     idle_rnd = 0;
 

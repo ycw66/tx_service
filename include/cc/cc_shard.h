@@ -428,12 +428,13 @@ public:
                          const NodeGroupId ng_id,
                          const NodeGroupId key_ng_id);
 
+    uint64_t CountRangesLockless(const TableName &table_name,
+                                 const NodeGroupId ng_id,
+                                 const NodeGroupId key_ng_id);
+
     uint64_t CountSlices(const TableName &table_name,
                          const NodeGroupId ng_id,
                          const NodeGroupId local_ng_id) const;
-
-    std::vector<uint64_t> AllNodeGroupBytesAtFetchRange(
-        const TableName &table_name, const NodeGroupId ng_id) const;
 
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
@@ -446,9 +447,7 @@ public:
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map,
-        const std::unordered_map<TableName, std::vector<uint64_t>>
-            &ng_weights_map);
+            &&sample_pool_map);
 
     StatisticsEntry *GetTableStatistics(const TableName &table_name,
                                         NodeGroupId ng_id);

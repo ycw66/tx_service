@@ -4773,8 +4773,13 @@ public:
         while (offset < log_blob.size())
         {
             key.Deserialize(log_blob.data(), offset, KeySchema());
-            uint8_t delete_flag =
+            uint8_t op_val =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
+            OperationType op_type = static_cast<OperationType>(op_val);
+            assert(op_type == OperationType::Insert ||
+                   op_type == OperationType::Update ||
+                   op_type == OperationType::Delete);
+
             offset += sizeof(uint8_t);
 
             uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
@@ -4782,7 +4787,8 @@ public:
             {
                 // Skips the key in the log record that is not sharded to this
                 // core.
-                if (delete_flag == 0)
+                if (op_type == OperationType::Insert ||
+                    op_type == OperationType::Update)
                 {
                     rec.Deserialize(log_blob.data(), offset);
                 }
@@ -4815,7 +4821,8 @@ public:
                 {
                     auto rec_ptr = std::make_unique<ValueT>();
                     RecordStatus rec_status = RecordStatus::Normal;
-                    if (delete_flag == 0)
+                    if (op_type == OperationType::Insert ||
+                        op_type == OperationType::Update)
                     {
                         rec_ptr->Deserialize(log_blob.data(), offset);
                     }
@@ -4826,7 +4833,8 @@ public:
                     shard_->mem_usage_ += cce->AddArchiveRecord(
                         std::move(rec_ptr), rec_status, req.CommitTs());
                 }
-                else if (delete_flag == 0)
+                else if (op_type == OperationType::Insert ||
+                         op_type == OperationType::Update)
                 {
                     rec.Deserialize(log_blob.data(), offset);
                 }
@@ -4837,7 +4845,8 @@ public:
                 {
                     shard_->mem_usage_ += cce->ArchiveBeforeUpdate(Type());
                 }
-                if (delete_flag == 0)
+                if (op_type == OperationType::Insert ||
+                    op_type == OperationType::Update)
                 {
                     shard_->DecrementMemory(cce->PayloadMemUsage());
                     if (cce->payload_.use_count() != 1)
@@ -4857,6 +4866,15 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                 }
                 cce->commit_ts_ = req.CommitTs();
+
+                if (op_type == OperationType::Insert)
+                {
+                    sample_pool_->OnInsert(key, table_schema_);
+                }
+                else if (op_type == OperationType::Delete)
+                {
+                    sample_pool_->OnDelete(key, table_schema_);
+                }
 
                 if (cce->key_lock_ptr_ != nullptr &&
                     cce->key_lock_ptr_->HasWriteLock())

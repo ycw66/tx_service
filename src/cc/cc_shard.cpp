@@ -783,17 +783,18 @@ uint64_t CcShard::CountRanges(const TableName &table_name,
     return local_shards_.CountRanges(table_name, ng_id, key_ng_id);
 }
 
+uint64_t CcShard::CountRangesLockless(const TableName &table_name,
+                                      const NodeGroupId ng_id,
+                                      const NodeGroupId key_ng_id)
+{
+    return local_shards_.CountRangesLockless(table_name, ng_id, key_ng_id);
+}
+
 uint64_t CcShard::CountSlices(const TableName &table_name,
                               const NodeGroupId ng_id,
                               const NodeGroupId local_ng_id) const
 {
     return local_shards_.CountSlices(table_name, ng_id, local_ng_id);
-}
-
-std::vector<uint64_t> CcShard::AllNodeGroupBytesAtFetchRange(
-    const TableName &table_name, const NodeGroupId ng_id) const
-{
-    return local_shards_.AllNodeGroupBytesAtFetchRange(table_name, ng_id);
 }
 
 std::pair<Statistics *, bool> CcShard::InitTableStatistics(
@@ -807,15 +808,10 @@ std::pair<Statistics *, bool> CcShard::InitTableStatistics(
     const TableSchema *table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-        &&sample_pool_map,
-    const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map)
+        &&sample_pool_map)
 {
-    return local_shards_.InitTableStatistics(table_name,
-                                             table_schema,
-                                             ng_id,
-                                             std::move(sample_pool_map),
-                                             ng_weights_map,
-                                             this);
+    return local_shards_.InitTableStatistics(
+        table_name, table_schema, ng_id, std::move(sample_pool_map), this);
 }
 
 StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,

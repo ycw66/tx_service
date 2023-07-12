@@ -2802,47 +2802,35 @@ public:
 
             if (ccm_ == nullptr)
             {
+                // Try to load the base table catalog
+                const txservice::TableName base_table_name{
+                    table_name_->GetBaseTableNameSV(), TableType::Primary};
+
+                // Make sure base table catalog already exists.
+                const CatalogEntry *catalog_entry =
+                    ccs.GetCatalog(base_table_name, node_group_id_);
+                if (catalog_entry == nullptr)
+                {
+                    ccs.FetchCatalog(base_table_name, node_group_id_, this);
+                    return false;
+                }
+
+                // If FetchCatalogCc failure due to storage fault,
+                // FetchCatalogCc::Execute() abort the ReplayLogCc directly.
+                assert(catalog_entry->Version() > 0);
+
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // table has been dropped
+                    assert(catalog_entry->Version() == 1);
+                    SetFinish();
+                    return false;
+                }
+
+                table_schema_ = catalog_entry->schema_.get();
+
                 if (table_name_->Type() == TableType::RangePartition)
                 {
-                    // Try to load the base table/index ccm
-                    const txservice::TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
-                    CcMap *base_table_ccm =
-                        ccs.GetCcm(base_table_name, node_group_id_);
-
-                    const CatalogEntry *catalog_entry = nullptr;
-                    // Makse sure base table catalog and ccm already exists
-                    if (base_table_ccm == nullptr)
-                    {
-                        catalog_entry =
-                            InitCcm(*table_name_, node_group_id_, ccs);
-
-                        // Wait for FetchCatalogCc to finish
-                        if (catalog_entry == nullptr)
-                        {
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        catalog_entry =
-                            ccs.GetCatalog(base_table_name, node_group_id_);
-                    }
-
-                    if (catalog_entry == nullptr ||
-                        catalog_entry->schema_ == nullptr)
-                    {
-                        // table has been dropped
-                        SetFinish();
-                        return false;
-                    }
-
-                    // If FetchCatalogCc failure due to storage fault,
-                    // FetchCatalogCc::Execute() abort the ReplayLogCc
-                    assert(catalog_entry->Version() > 0);
-
-                    table_schema_ = catalog_entry->schema_.get();
-
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
                     auto ranges = ccs.GetTableRangesForATable(*table_name_,
@@ -2854,6 +2842,10 @@ public:
                                                      node_group_id_,
                                                      table_schema_->Version());
                         ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+#ifndef ON_KEY_OBJECT
+                        assert(ccs.GetTableStatistics(
+                                   base_table_name, node_group_id_) == nullptr);
+#endif
                     }
                     else
                     {
@@ -2872,6 +2864,63 @@ public:
                 }
                 else
                 {
+                    assert(table_name_->Type() == TableType::Primary ||
+                           table_name_->Type() == TableType::Secondary ||
+                           table_name_->Type() == TableType::UniqueSecondary);
+
+                    {
+#ifndef ON_KEY_OBJECT
+                        // Initialize table statistics
+#ifdef RANGE_PARTITION_ENABLED
+                        // Initialize table ranges before create table
+                        // statistics.
+                        TableName base_range_table_name{
+                            table_name_->GetBaseTableNameSV(),
+                            TableType::RangePartition};
+                        auto ranges = ccs.GetTableRangesForATable(
+                            base_range_table_name, node_group_id_);
+                        if (ranges == nullptr)
+                        {
+                            ccs.FetchTableRanges(
+                                base_range_table_name,
+                                table_schema_->GetKVCatalogInfo(),
+                                this,
+                                node_group_id_);
+                            return false;
+                        }
+                        for (const TableName &index_name :
+                             table_schema_->IndexNames())
+                        {
+                            TableName index_range_table_name{
+                                index_name.StringView(),
+                                TableType::RangePartition};
+                            auto ranges = ccs.GetTableRangesForATable(
+                                index_range_table_name, node_group_id_);
+                            if (ranges == nullptr)
+                            {
+                                ccs.FetchTableRanges(
+                                    index_range_table_name,
+                                    table_schema_->GetKVCatalogInfo(),
+                                    this,
+                                    node_group_id_);
+                                return false;
+                            }
+                        }
+#endif
+                        // Initialize table statistics before create ccmap.
+                        const StatisticsEntry *statistics_entry =
+                            ccs.GetTableStatistics(base_table_name,
+                                                   node_group_id_);
+                        if (statistics_entry == nullptr ||
+                            statistics_entry->statistics_ == nullptr)
+                        {
+                            ccs.FetchTableStatistics(
+                                base_table_name, node_group_id_, this);
+                            return false;
+                        }
+#endif
+                    }
+
                     const CatalogEntry *catalog_entry =
                         InitCcm(*table_name_, node_group_id_, ccs);
 

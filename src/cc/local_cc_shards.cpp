@@ -27,6 +27,7 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
       catalog_factory_(catalog_factory),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
+      realtime_sampling_(realtime_sampling),
       data_sync_worker_num_(core_cnt),
       data_sync_worker_status_(WorkerStatus::Active),
       slice_worker_num_(core_cnt * 2),
@@ -463,7 +464,6 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                       std::move(range_entry.key_),
                                       range_entry.version_ts_,
                                       range_entry.partition_id_,
-                                      range_entry.Bytes(),
                                       std::move(range_slices));
         ids.try_emplace(range_entry.partition_id_, &res.first->second);
     }
@@ -491,7 +491,6 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                   std::move(last_range_entry.key_),
                                   last_range_entry.version_ts_,
                                   last_range_entry.partition_id_,
-                                  last_range_entry.Bytes(),
                                   std::move(range_slices));
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
@@ -630,21 +629,10 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
         range_slices->InitSlices(*slice_keys);
     }
 
-    uint64_t range_bytes =
-        slice_keys == nullptr
-            ? 0
-            : std::accumulate(
-                  slice_keys->begin(),
-                  slice_keys->end(),
-                  0UL,
-                  [](uint64_t a,
-                     const std::tuple<TxKey::Uptr, uint32_t, SliceStatus> &b)
-                  { return a + std::get<1>(b); });
     auto new_range_entry_pair = ranges->try_emplace(start_key.get(),
                                                     std::move(start_key),
                                                     version,
                                                     partition_id,
-                                                    range_bytes,
                                                     std::move(range_slices));
 
     bool updated = false;
@@ -664,7 +652,7 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
                 range_slices->InitSlices(*slice_keys);
             }
             new_range_entry_pair.first->second.UpdateRangeEntry(
-                version, range_bytes, std::move(range_slices));
+                version, std::move(range_slices));
             updated = true;
         }
     }
@@ -824,6 +812,13 @@ uint64_t LocalCcShards::CountRanges(const TableName &table_name,
                                     const NodeGroupId key_ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    return CountRangesLockless(table_name, ng_id, key_ng_id);
+}
+
+uint64_t LocalCcShards::CountRangesLockless(const TableName &table_name,
+                                            const NodeGroupId ng_id,
+                                            const NodeGroupId key_ng_id) const
+{
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
@@ -876,28 +871,6 @@ uint64_t LocalCcShards::CountSlices(const TableName &table_name,
     }
 
     return slices;
-}
-
-std::vector<uint64_t> LocalCcShards::AllNodeGroupBytesAtFetchRange(
-    const TableName &table_name, const NodeGroupId ng_id) const
-{
-    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-    TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
-
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-    std::vector<uint64_t> ng_bytes_vec(ng_cnt, 0);
-
-    const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
-        table_ranges_.at(range_table_name).at(ng_id);
-
-    for (auto &[range_start_key, range_entry] : ranges)
-    {
-        NodeGroupId ng_id = range_entry.GetRangeInfo()->PartitionId() % ng_cnt;
-        ng_bytes_vec.at(ng_id) += range_entry.RangeBytesAtFetch();
-    }
-
-    return ng_bytes_vec;
 }
 
 void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
@@ -1095,7 +1068,6 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
-    const std::unordered_map<TableName, std::vector<uint64_t>> &ng_weights_map,
     CcShard *ccs)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1106,13 +1078,8 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ =
-            catalog_factory_->CreateTableStatistics(table_name,
-                                                    table_schema,
-                                                    std::move(sample_pool_map),
-                                                    ng_weights_map,
-                                                    ccs,
-                                                    ng_id);
+        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
+            table_name, table_schema, std::move(sample_pool_map), ccs, ng_id);
     }
 
     return {statistics_it.first->second.statistics_.get(),
@@ -1666,13 +1633,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
     else
     {
-        bool ok = catalog_rec.Schema()->StatisticsObject()->PostCheckpoint(
-            store_hd_,
-            table_name,
-            table_schema,
-            ng_id,
-            target_data_sync_ts,
-            true);
+        bool ok = !realtime_sampling_ ||
+                  catalog_rec.Schema()->StatisticsObject()->PostCheckpoint(
+                      store_hd_,
+                      table_name,
+                      table_schema,
+                      ng_id,
+                      target_data_sync_ts,
+                      true);
         if (!ok)
         {
             AbortTxRequest abort_req;
@@ -2132,8 +2100,11 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
-        table_name, catalog_rec.Schema(), node_group);
+    if (realtime_sampling_)
+    {
+        catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
+            table_name, catalog_rec.Schema(), node_group);
+    }
 
     const TxKey *old_start_key = split_info.first->RangeStartKey();
     if (old_start_key == nullptr)
@@ -2388,8 +2359,13 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         if (succ)
         {
-            succ = schema->StatisticsObject()->PostCheckpoint(
-                store_hd_, table_name, schema, node_group, data_sync_ts, false);
+            succ = !realtime_sampling_ ||
+                   schema->StatisticsObject()->PostCheckpoint(store_hd_,
+                                                              table_name,
+                                                              schema,
+                                                              node_group,
+                                                              data_sync_ts,
+                                                              false);
         }
     }
 

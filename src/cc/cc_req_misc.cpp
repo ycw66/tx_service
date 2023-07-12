@@ -118,34 +118,11 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 
             std::unordered_map<TableName, std::vector<uint64_t>> ng_weights_map;
 
-#ifdef RANGE_PARTITION_ENABLED
-            ng_weights_map.try_emplace(
-                table_name_,
-                ccs.AllNodeGroupBytesAtFetchRange(table_name_, cc_ng_id_));
-            for (const TableName &index_name : table_schema->IndexNames())
-            {
-                ng_weights_map.try_emplace(
-                    index_name,
-                    ccs.AllNodeGroupBytesAtFetchRange(index_name, cc_ng_id_));
-            }
-
-#else
-            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-            ng_weights_map.try_emplace(table_name_,
-                                       std::vector<uint64_t>(ng_cnt, 1UL));
-            for (const TableName &index_name : table_schema->IndexNames())
-            {
-                ng_weights_map.try_emplace(index_name,
-                                           std::vector(ng_cnt, 1UL));
-            }
-#endif
-
             auto [statistics, inserted] =
                 ccs.InitTableStatistics(table_name_,
                                         table_schema,
                                         cc_ng_id_,
-                                        std::move(sample_pool_map_),
-                                        ng_weights_map);
+                                        std::move(sample_pool_map_));
             if (inserted)
             {
                 table_schema->BindStatistics(statistics);

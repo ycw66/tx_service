@@ -167,6 +167,7 @@ public:
         units_ -= std::min(units_, static_cast<int64_t>(Units(param.records_)));
         sample_pool_.ClearCounter();
         assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
+        units_ = std::max(units_, static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void To(remote::NodeGroupSamplePool *remote_ccmap_sample_pool) const
@@ -401,19 +402,14 @@ public:
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
-        const std::unordered_map<TableName, std::vector<uint64_t>>
-            &ng_weights_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id)
         : base_table_name_(base_table_name)
     {
         if (!sample_pool_map.empty())
         {
-            BuildSamplePoolMap(*ccs,
-                               cc_ng_id,
-                               table_schema,
-                               std::move(sample_pool_map),
-                               ng_weights_map);
+            BuildSamplePoolMap(
+                *ccs, cc_ng_id, table_schema, std::move(sample_pool_map));
             for (const auto &[table_or_index_name, ng_sample_pool_map] :
                  index_sample_pool_map_)
             {
@@ -580,16 +576,22 @@ public:
             {
                 To(sample_pool_map);
 
-                const auto iter =
-                    index_sample_pool_map_.at(table_or_index_name).find(ng_id);
-                if (iter !=
-                    index_sample_pool_map_.at(table_or_index_name).end())
+                if (!ckpt_empty)
                 {
-                    const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool =
-                        iter->second;
-                    if (!ckpt_empty)
+                    const auto iter =
+                        index_sample_pool_map_.find(table_or_index_name);
+                    if (iter != index_sample_pool_map_.end())
                     {
-                        Broadcast(table_schema, ccmap_sample_pool);
+                        const std::unordered_map<NodeGroupId,
+                                                 TemplateCcMapSamplePool<KeyT>>
+                            ng_sample_pool_map = iter->second;
+                        const auto it = ng_sample_pool_map.find(ng_id);
+                        if (it != ng_sample_pool_map.end())
+                        {
+                            const TemplateCcMapSamplePool<KeyT>
+                                &ccmap_sample_pool = it->second;
+                            Broadcast(table_schema, ccmap_sample_pool);
+                        }
                     }
                 }
             };
@@ -627,7 +629,11 @@ public:
         NodeGroupId old_ng_id = old_info->PartitionId() % ng_cnt;
 
         auto it = index_sample_pool_map_.find(table_or_index_name);
-        assert(it != index_sample_pool_map_.end());
+        if (it == index_sample_pool_map_.end())
+        {
+            // In case store sample pool was failed, and recover range split.
+            return;
+        }
         NodeGroupSamplePoolMap &ng_sample_pool_map = it->second;
 
         auto iter = ng_sample_pool_map.find(old_ng_id);
@@ -637,9 +643,20 @@ public:
         }
 
         TemplateCcMapSamplePool<KeyT> &old_sample_pool = iter->second;
+        if (old_sample_pool.Records() <= 0)
+        {
+            // In case store sample pool was failed, and recover range split.
+            return;
+        }
 
         std::unordered_map<NodeGroupId, SamplePoolParam<KeyT>> param_map =
             SamplePoolParamsForSplit(ccs, cc_ng_id, old_sample_pool, old_info);
+        if (param_map.empty())
+        {
+            // Already splitted.
+            return;
+        }
+
         for (const auto &[new_ng_id, param] : param_map)
         {
             assert(new_ng_id != old_ng_id);
@@ -688,9 +705,7 @@ private:
         const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map,
-        const std::unordered_map<TableName, std::vector<uint64_t>>
-            &ng_weights_map)
+            &&sample_pool_map)
     {
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
         for (auto &[table_or_index_name, index_sample_pool] : sample_pool_map)
@@ -732,20 +747,14 @@ private:
                 }
             }
 
-            const std::vector<uint64_t> &ng_weight_vec =
-                ng_weights_map.at(table_or_index_name);
-            assert(ng_weight_vec.size() == ng_cnt);
-
             std::vector<uint64_t> sp_size_vec;
             std::transform(sample_pool_vec.begin(),
                            sample_pool_vec.end(),
                            std::back_inserter(sp_size_vec),
                            [](const std::vector<KeyT> &sample_pool)
                            { return sample_pool.size(); });
-            assert(ng_weight_vec.size() == ng_cnt);
-
-            std::vector<uint64_t> records_vec =
-                DivideRecords(records, ng_weight_vec, sp_size_vec);
+            std::vector<uint64_t> records_vec = DivideRecords(
+                ccs, cc_ng_id, table_or_index_name, records, sp_size_vec);
             assert(records_vec.size() == ng_cnt);
 
             for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
@@ -898,13 +907,15 @@ private:
     // method.
     //
     // For node group records, information to split table/index records is
-    // incomplete. We split table/index records by node group weights in bytes
-    // first. If the output result is wrong, concretely, node group records is
-    // less than node group sample keys, then we split table/index records by
-    // node group sample keys.
+    // incomplete. We split table/index records by using node group ranges count
+    // as the weight. If the output result is inappropriate, concretely, node
+    // group records is less than node group sample keys, then we split
+    // table/index records by node group sample keys.
     static std::vector<uint64_t> DivideRecords(
+        CcShard &ccs,
+        NodeGroupId cc_ng_id,
+        const TableName &table_or_index_name,
         uint64_t records,
-        const std::vector<uint64_t> &ng_weight_vec,
         const std::vector<uint64_t> &sp_size_vec)
     {
         std::vector<uint64_t> records_vec;
@@ -913,17 +924,22 @@ private:
 
         if (records == 0)
         {
-            records_vec = std::vector<uint64_t>(ng_cnt, 0UL);
+            records_vec.resize(ng_cnt, 0UL);
             return records_vec;
         }
 
-        uint64_t total_ng_weight =
-            std::accumulate(ng_weight_vec.begin(), ng_weight_vec.end(), 0UL);
-        if (total_ng_weight == 0)
+        std::vector<uint64_t> ng_weight_vec;
+#ifdef RANGE_PARTITION_ENABLED
+        for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
         {
-            records_vec = std::vector<uint64_t>(ng_cnt, 0UL);
-            return records_vec;
+            // Lock has been acquired in LocalCcShards::InitTableStatistic.
+            uint64_t range_cnt =
+                ccs.CountRangesLockless(table_or_index_name, cc_ng_id, ng_id);
+            ng_weight_vec.emplace_back(range_cnt);
         }
+#else
+        ng_weight_vec.resize(ng_cnt, 1);
+#endif
 
         records_vec = DivideRecordsByNodeGroupWeight(records, ng_weight_vec);
         bool no_conflict =
@@ -936,8 +952,6 @@ private:
             return records_vec;
         }
 
-        assert(std::accumulate(sp_size_vec.begin(), sp_size_vec.end(), 0UL) >
-               0);
         records_vec = DivideRecordsBySamplePoolSize(records, sp_size_vec);
         return records_vec;
     }
@@ -957,7 +971,7 @@ private:
         uint64_t sp_size_total =
             std::accumulate(sp_size_vec.begin(), sp_size_vec.end(), 0);
         assert(records >= sp_size_total);
-        if (records == sp_size_total)
+        if (records <= sp_size_total)
         {
             records_vec = sp_size_vec;
         }
@@ -1076,6 +1090,8 @@ private:
         const TemplateCcMapSamplePool<KeyT> &old_sample_pool,
         const RangeInfo *old_info) const
     {
+        assert(!old_sample_pool.SampleKeys().empty());
+
         std::unordered_map<NodeGroupId, SamplePoolParam<KeyT>> param_map;
 
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
@@ -1095,21 +1111,25 @@ private:
             }
         }
 
-        uint64_t avg_range_key_count = AvgRangeKeyCountBeforeRangeSplit(
-            ccs, old_sample_pool.GetTableOrIndexName(), cc_ng_id, old_info);
-        for (int32_t new_partition_id : old_info->NewPartitionIdUncheckDirty())
+        if (!param_map.empty())
         {
-            NodeGroupId new_ng_id = new_partition_id % ng_cnt;
-            if (new_ng_id != old_ng_id)
+            uint64_t avg_range_key_count = AvgRangeKeyCountBeforeRangeSplit(
+                ccs, old_sample_pool.GetTableOrIndexName(), cc_ng_id, old_info);
+            for (int32_t new_partition_id :
+                 old_info->NewPartitionIdUncheckDirty())
             {
-                param_map[new_ng_id].records_ += avg_range_key_count;
+                NodeGroupId new_ng_id = new_partition_id % ng_cnt;
+                if (new_ng_id != old_ng_id)
+                {
+                    param_map[new_ng_id].records_ += avg_range_key_count;
+                }
             }
-        }
 
-        for (auto &[new_ng_id, param] : param_map)
-        {
-            param.records_ =
-                std::max(param.records_, param.sample_keys_.size());
+            for (auto &[new_ng_id, param] : param_map)
+            {
+                param.records_ =
+                    std::max(param.records_, param.sample_keys_.size());
+            }
         }
 
         return param_map;

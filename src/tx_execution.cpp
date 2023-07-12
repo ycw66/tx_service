@@ -3122,10 +3122,9 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
             {
                 wset_entry->key_->Serialize(*log_ng_blob);
 
-                uint8_t delete_flag =
-                    wset_entry->op_ == OperationType::Delete ? 1 : 0;
-                log_ng_blob->append(
-                    reinterpret_cast<const char *>(&delete_flag), 1);
+                uint8_t operation = static_cast<uint8_t>(wset_entry->op_);
+                log_ng_blob->append(reinterpret_cast<const char *>(&operation),
+                                    1);
 
                 if (wset_entry->op_ != OperationType::Delete &&
                     wset_entry->rec_ != nullptr)

@@ -292,7 +292,25 @@ public:
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
         }
+
+#ifndef ON_KEY_OBJECT
+        // Initialize table statistics before split range.
+        // If it is in recover range stage, the table statistics hasn't been
+        // loaded yet.
+        TableName base_table_name(this->table_name_.GetBaseTableNameSV(),
+                                  TableType::Primary);
+        const StatisticsEntry *statistics_entry =
+            shard_->GetTableStatistics(base_table_name, this->cc_ng_id_);
+        if (statistics_entry == nullptr ||
+            statistics_entry->statistics_ == nullptr)
+        {
+            shard_->FetchTableStatistics(
+                base_table_name, this->cc_ng_id_, &req);
+            return false;
+        }
+#endif
 
         // When the commit ts is 0, the request commits nothing and only
         // removes the write intents/locks acquired earlier.

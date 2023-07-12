@@ -690,6 +690,7 @@ public:
                 if (catalog_entry->schema_ != nullptr)
                 {
                     {
+#ifndef ON_KEY_OBJECT
                         // Initialize table statistics
 #ifdef RANGE_PARTITION_ENABLED
                         // Initialize table ranges before create table
@@ -727,33 +728,27 @@ public:
                             }
                         }
 #endif
-                        // Initialize table statistics before create ccmap.
-                        const StatisticsEntry *statistics_entry =
-                            shard_->GetTableStatistics(table_key->Name(),
-                                                       req.NodeGroupId());
-                        if (statistics_entry == nullptr ||
-                            statistics_entry->statistics_ == nullptr)
+
+                        if (!req.IsInRecovering())
                         {
-                            shard_->FetchTableStatistics(
-                                table_key->Name(), req.NodeGroupId(), &req);
-                            return false;
+                            // Initialize table statistics before create ccmap.
+                            //
+                            // Loading table statistics from storage into
+                            // memory, depends on table range information.
+                            // Before recovering range split operation,
+                            // table range information is unusable.
+                            const StatisticsEntry *statistics_entry =
+                                shard_->GetTableStatistics(table_key->Name(),
+                                                           req.NodeGroupId());
+                            if (statistics_entry == nullptr ||
+                                statistics_entry->statistics_ == nullptr)
+                            {
+                                shard_->FetchTableStatistics(
+                                    table_key->Name(), req.NodeGroupId(), &req);
+                                return false;
+                            }
                         }
-                    }
-
-                    shard_->CreateOrUpdatePkCcMap(table_key->Name(),
-                                                  catalog_entry->schema_.get(),
-                                                  req.NodeGroupId(),
-                                                  catalog_entry->Version());
-
-                    std::vector<TableName> index_names =
-                        catalog_entry->schema_->IndexNames();
-                    for (const TableName &index_name : index_names)
-                    {
-                        shard_->CreateOrUpdateSkCcMap(
-                            index_name,
-                            catalog_entry->schema_.get(),
-                            req.NodeGroupId(),
-                            catalog_entry->Version());
+#endif
                     }
 
                     // upload catalog record

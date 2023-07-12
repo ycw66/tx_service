@@ -436,12 +436,13 @@ public:
                          const NodeGroupId ng_id,
                          const NodeGroupId key_ng_id) const;
 
+    uint64_t CountRangesLockless(const TableName &table_name,
+                                 const NodeGroupId ng_id,
+                                 const NodeGroupId key_ng_id) const;
+
     uint64_t CountSlices(const TableName &table_name,
                          const NodeGroupId ng_id,
                          const NodeGroupId local_ng_id) const;
-
-    std::vector<uint64_t> AllNodeGroupBytesAtFetchRange(
-        const TableName &table_name, const NodeGroupId ng_id) const;
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
@@ -519,8 +520,6 @@ public:
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
             &&sample_pool_map,
-        const std::unordered_map<TableName, std::vector<uint64_t>>
-            &ng_weights_map,
         CcShard *ccs);
 
     StatisticsEntry *GetTableStatistics(const TableName &table_name,
@@ -611,6 +610,8 @@ private:
     TxService *tx_service_;
 
     bool enable_mvcc_;
+
+    bool realtime_sampling_;
 
     /**
      * DataSync Operation Interface
