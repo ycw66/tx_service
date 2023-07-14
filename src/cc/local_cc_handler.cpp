@@ -294,7 +294,8 @@ void txservice::LocalCcHandler::ForwardPostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres);
+                   &hres,
+                   (operation_type == OperationType::Insert));
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);

@@ -559,16 +559,18 @@ void txservice::remote::RemotePostWrite::Reset(
         remote_table_name_ = TableName(
             table_name_sv,
             ToLocalType::ConvertCcTableType(post_commit.table_type()));
-        PostWriteCc::Reset(
-            &remote_table_name_,
-            &post_commit.key(),
-            post_commit.node_group_id(),
-            input_msg->tx_number(),
-            commit_ts,
-            rec_str,
-            static_cast<OperationType>(post_commit.operation_type()),
-            post_commit.key_shard_code(),
-            &cc_res_);
+        OperationType op_type =
+            static_cast<OperationType>(post_commit.operation_type());
+        PostWriteCc::Reset(&remote_table_name_,
+                           &post_commit.key(),
+                           post_commit.node_group_id(),
+                           input_msg->tx_number(),
+                           commit_ts,
+                           rec_str,
+                           op_type,
+                           post_commit.key_shard_code(),
+                           &cc_res_,
+                           op_type == OperationType::Insert);
     }
     input_msg_ = std::move(input_msg);
 
