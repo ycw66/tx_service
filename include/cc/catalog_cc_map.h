@@ -198,6 +198,7 @@ public:
                 {
                     if (catalog_entry->schema_)
                     {
+                        // ALTER TABLE statement
                         const StatisticsEntry *statistics_entry =
                             shard_->GetTableStatistics(table_key->Name(),
                                                        cc_ng_id_);
@@ -216,6 +217,7 @@ public:
                     }
                     else
                     {
+                        // CREATE TABLE statement
                         auto [statistics, inserted] =
                             shard_->InitTableStatistics(table_key->Name(),
                                                         cc_ng_id_);
@@ -250,9 +252,16 @@ public:
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
-                // Flush kv fails, need to clear dirty CatalogEntry and dirty
-                // CatalogRecord.
+                // Flush kv fails, need to clear dirty CatalogEntry, dirty
+                // CatalogRecord and TableStatistics.
                 catalog_entry->RejectDirtySchema();
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // If create table fails, also clean table statistics, which
+                    // is created in PrepareCommit phase; if add index fails, do
+                    // not clean table statistics.
+                    shard_->CleanTableStatistics(table_key->Name());
+                }
 
                 CcEntry<CatalogKey, CatalogRecord> *cce =
                     TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key)
@@ -837,9 +846,9 @@ public:
                 // right after commit log is flushed since the
                 // upsert_kv_table_op_ might need both old table schema and
                 // new table schema.
-                // If we are recovering from prepare log, we also need to
-                // restore to the state right before commit log is flushed, so
-                // both current and dirty schema are needed.
+                // If we are recovering from prepare log, we need to restore to
+                // the state right before commit log is flushed, so both current
+                // and dirty schema are needed.
                 auto [success, new_catalog_entry] = shard_->CreateReplayCatalog(
                     table_name,
                     req.NodeGroupId(),
@@ -861,18 +870,33 @@ public:
             }
             else
             {
-                // If we are recovering as participant from commit stage,
-                // we don't  need to do kv_upsert_table_op_ so we can directly
-                // recover to the state before commit log is cleaned, that is
-                // after dirty schema is commited as current schema and write
-                // lock has been released.
-                uint64_t commit_ts = req.CommitTs();
+                /*
+                If we are recovering as participant from commit stage,
+                we don't need to do kv_upsert_table_op_ so we can directly
+                recover to the state before commit log is cleaned, that is:
+
+                1. if dirty_schema_commit_ts>0, dirty schema is commited as
+                current schema and write lock has been released.
+
+                2. if dirty_schema_commit_ts=0, old schema is restored as
+                current schema and write lock has been released.
+
+                P.S. If it is create table statement and
+                dirty_schema_commit_ts=0, the restored CatalogEntry has schema_
+                set to nullptr and schema_version_ set to 1.
+                */
+
+                uint64_t dirty_schema_commit_ts = req.CommitTs();
+                uint64_t old_schema_commit_ts = schema_op_msg.catalog_ts();
+
                 auto [success, new_catalog_entry] = shard_->CreateCatalog(
                     table_name,
                     req.NodeGroupId(),
-                    commit_ts > 0 ? schema_op_msg.new_catalog_blob()
-                                  : schema_op_msg.old_catalog_blob(),
-                    commit_ts > 0 ? commit_ts : schema_op_msg.catalog_ts());
+                    dirty_schema_commit_ts > 0
+                        ? schema_op_msg.new_catalog_blob()
+                        : schema_op_msg.old_catalog_blob(),
+                    dirty_schema_commit_ts > 0 ? dirty_schema_commit_ts
+                                               : old_schema_commit_ts);
 
                 assert(new_catalog_entry != nullptr);
                 if (!success)

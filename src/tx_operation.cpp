@@ -693,7 +693,6 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        ACTION_FAULT_INJECTOR("write_log_finished");
         txm->PostProcess(*this);
     }
 }
@@ -1504,7 +1503,35 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        txm->PostProcess(*this);
+        if (hd_result_.IsError())
+        {
+            assert(hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR);
+            if (retry_num_ == 0)
+            {
+                DLOG(ERROR) << "flush schema error: can not create table "
+                               "in kv store";
+
+                if (txm->tx_status_ != TxnStatus::Recovering)
+                {
+                    txm->bool_resp_->SetErrorCode(
+                        TxErrorCode::DATA_STORE_ERROR);
+                }
+
+                // Set txm->commit_ts_ to 0 to indicate there is a flush
+                // error during upsert_kv_table_op_.
+                txm->commit_ts_ = tx_op_failed_ts_;
+                txm->PostProcess(*this);
+            }
+            else if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+        else
+        {
+            txm->PostProcess(*this);
+        }
     }
 }
 
@@ -1682,6 +1709,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     txm->bool_resp_->Finish(false);
                     txm->state_stack_.pop_back();
                     assert(txm->state_stack_.empty());
+                    std::unique_lock<std::mutex> lk(
+                        txm->cc_handler_->table_schema_op_pool_mux_);
                     txm->cc_handler_->table_schema_op_pool_.emplace_back(
                         std::move(txm->schema_op_));
                 }
@@ -1717,9 +1746,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_intent_op_)
     {
-        bool failed = post_all_intent_op_.hd_result_.IsError();
-
-        if (failed)
+        if (post_all_intent_op_.IsFailed())
         {
             // When a cc node leader begins recovery, the candidate term is
             // set to the Raft term. When recovery finishes, the candidate
@@ -1731,11 +1758,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
             // After the prepare log is flushed, the schema op is guaranteed
-            // to succeed and can only roll forward. Retry this step to
-            // install the dirty schema in the tx service, if the tx node is
-            // still the leader. The tx is also allowed to proceed if the tx
-            // is in the recovery mode and the tx node is a leader
-            // candidate.
+            // to proceed. Retry this step to install the dirty schema in the tx
+            // service, if the tx node is still the leader. The tx is also
+            // allowed to proceed if the tx is in the recovery mode and the tx
+            // node is a leader candidate.
 
             if (tx_node_term >= 0 ||
                 (txm->tx_status_ == TxnStatus::Recovering &&
@@ -1797,30 +1823,46 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
             {
-                // Retry 5 times before issue flush schema error.
-                if (retry_num_ > 0)
+                // Keep retrying if it is DropTable or DropIndex.
+                if (op_type_ == OperationType::DropTable ||
+                    op_type_ == OperationType::DropIndex)
                 {
                     txm->PushOperation(&upsert_kv_table_op_);
                     txm->Process(upsert_kv_table_op_);
-                    retry_num_--;
                 }
-                else if (retry_num_ == 0)
+                else
                 {
-                    DLOG(ERROR) << "flush schema error: can not create table "
-                                   "in kv store";
+                    /*
 
-                    if (txm->tx_status_ != TxnStatus::Recovering)
-                    {
-                        txm->bool_resp_->SetErrorCode(
-                            TxErrorCode::DATA_STORE_ERROR);
-                    }
+                    After upsert kv fails, we need to flush a commit log to
+                    indicate this error.
 
-                    // Set txm->commit_ts_ to 0 to indicate there is a flush
-                    // error during upsert_kv_table_op_.
-                    txm->commit_ts_ = tx_op_failed_ts_;
-                    op_ = &acquire_all_lock_op_;
-                    txm->PushOperation(&acquire_all_lock_op_);
-                    txm->Process(acquire_all_lock_op_);
+                    If we skip this commit log and jump to post_all_lock_op_
+                    directly, once the participant crashes at the point between
+                    it releases write intent and the coordinator flushes
+                    clean_log, then during recovery, the participant sees a
+                    prepare_log(whose commit_ts is not 0) and recovers write
+                    lock and dirty_catalog.
+
+                    Since the coordinator has finished its job, the write
+                    lock recovered by participant becomes orphan lock, and the
+                    dirty catalog can not be rejected either.
+
+                    Also, in the current design, post_all_intent_op_ does not
+                    release the write intent, which means the write intent is
+                    still being held after upsert_kv_table_op_(during
+                    CreateTable or AddIndex). If create table or add index in kv
+                    fails, the only thing we should do after writing commit_log
+                    is to reject dirty schema. So there is no need to upgrade
+                    write intent to write lock, and it is safe to skip
+                    acquire_all_lock_op_ and jump directly to commit_log_op_.
+
+                    */
+
+                    op_ = &commit_log_op_;
+                    FillCommitLogRequest(txm);
+                    txm->PushOperation(&commit_log_op_);
+                    txm->Process(commit_log_op_);
                 }
             }
             else
@@ -1949,66 +1991,82 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
-        bool failed = post_all_lock_op_.hd_result_.IsError();
+        // When a cc node leader begins recovery, the candidate term is
+        // set to the Raft term. When recovery finishes, the candidate
+        // term is set to -1 after the leader term. So, obtains the
+        // candidate term before the leader term.
+        int64_t tx_node_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+        int64_t tx_node_term =
+            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+        bool is_leader =
+            tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
+                                  tx_node_candid_term >= 0);
 
-        if (txm->commit_ts_ == tx_op_failed_ts_ &&
-            post_all_lock_op_.write_type_ == PostWriteType::PrepareCommit)
+        if (!is_leader)
         {
-            // The schema operation failed without flushing the prepare log.
-            // Do not retry post-processing (release write intents) even if
-            // it fails. Remaining write intents on the schema, if there are
-            // any, will be recovered by individual cc nodes separately.
+            // The tx node is no longer the leader or leader candidate(during
+            // recovery), ForceToFinish.
+            ForceToFinish(txm);
+        }
+        else if (acquire_all_intent_op_.fail_cnt_.load(
+                     std::memory_order_relaxed) > 0)
+        {
+            // The schema operation failed at acquire_all_intent_op_, without
+            // flushing the prepare log. Do not retry post-processing (release
+            // write intents) even if it fails. Remaining write intents on the
+            // schema, if there are any, will be recovered by individual cc
+            // nodes separately.
+
             txm->bool_resp_->Finish(false);
 
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
+
+            std::unique_lock<std::mutex> lk(
+                txm->cc_handler_->table_schema_op_pool_mux_);
             txm->cc_handler_->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
-        else if (failed)
+        else if (post_all_lock_op_.hd_result_.IsError())
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
-            // After the prepare log is flushed, if flush kv succeeds, the
-            // schema op is guaranteed to succeed and can only roll forward.
-            // Retry this step to install the committed schema and remove
-            // write locks, if the tx node is still the leader or the tx is
-            // in the recovery mode and the cc node is a leader candidate.
-            // However, if flush kv fails, this schema op has already been
-            // rolled back while processing this post_all_lock_op_, so here
-            // we only need to ForceToFinish.
-            if ((tx_node_term >= 0 ||
-                 (txm->tx_status_ == TxnStatus::Recovering &&
-                  tx_node_candid_term >= 0)) &&
-                txm->commit_ts_ != tx_op_failed_ts_)
-            {
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // post_all_lock_op_ returns an error:
+            // 1. if flush kv succeeds, the schema op is guaranteed to succeed
+            // and can only roll forward. Retry this step to install the
+            // committed schema and remove write locks;
+            // 2. if flush kx fails, the schema op has to roll backward. Retry
+            // this step to reject dirty schema and remove write locks.
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+            return;
         }
         else
         {
-            // The tx's modification of the schema has succeeded. If the tx
-            // has previously read the same schema and keeps a pointer in
-            // the read set to the cc entry of the schema, removes it from
-            // the read set. As a result, the tx will not try to release the
-            // read lock of the schema when committing.
-            const CcEntryAddr &schema_entry_addr =
-                acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
-                    .Value()
-                    .local_cce_addr_;
-            txm->rw_set_.DedupRead(schema_entry_addr);
+            // post_all_lock_op_ has finished without an error.
+            assert(!post_all_lock_op_.IsFailed());
+
+            if (txm->commit_ts_ != tx_op_failed_ts_)
+            {
+                // The tx's modification of the schema has succeeded. If the tx
+                // has previously read the same schema and keeps a pointer in
+                // the read set to the cc entry of the schema, removes it from
+                // the read set. As a result, the tx will not try to release the
+                // read lock of the schema when committing.
+                const CcEntryAddr &schema_entry_addr =
+                    acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
+                        .Value()
+                        .local_cce_addr_;
+                txm->rw_set_.DedupRead(schema_entry_addr);
+            }
+            else
+            {
+                // Flush kv failed, or it is recovering from a flush kv failure.
+                // This schema op has already been rolled back by now, only need
+                // to flush clean log here.
+                // Also, flush kv failure does not require lock upgrade(write
+                // intent to write lock). So the CcEntryAddr needs to be kept in
+                // rset in order to release the read lock when committing.
+            }
 
             op_ = &clean_log_op_;
             FillCleanLogRequest(txm);
@@ -2044,8 +2102,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // When the tx is in the recovery state, no external caller is
             // waiting for the response. So, txm->bool_resp_ is null.
 
-            txm->cc_handler_->table_schema_op_pool_.emplace_back(
-                std::move(txm->schema_op_));
+            {
+                std::unique_lock<std::mutex> lk(
+                    txm->cc_handler_->table_schema_op_pool_mux_);
+                txm->cc_handler_->table_schema_op_pool_.emplace_back(
+                    std::move(txm->schema_op_));
+            }
             txm->Reset();
             // Setting the tx's status to finished signals that this tx
             // state machine can be recycled for a new tx.
@@ -2054,21 +2116,22 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (txm->commit_ts_ == tx_op_failed_ts_ &&
-                post_all_lock_op_.write_type_ == PostWriteType::PostCommit)
+            if (txm->commit_ts_ == tx_op_failed_ts_)
             {
-                // Flush kv error.
+                // Flush kv error or fail to flush prepare_log.
                 txm->bool_resp_->Finish(false);
             }
             else
             {
-                assert(txm->commit_ts_ > 0 && post_all_lock_op_.write_type_ ==
-                                                  PostWriteType::PostCommit);
+                assert(txm->commit_ts_ > 0);
                 txm->bool_resp_->Finish(true);
             }
 
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
+
+            std::unique_lock<std::mutex> lk(
+                txm->cc_handler_->table_schema_op_pool_mux_);
             txm->cc_handler_->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
@@ -2201,7 +2264,7 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
     ::txlog::SchemaOpMessage *commit_schema_msg =
         commit_log_rec->mutable_log_content()->mutable_schema_log();
 
-    if (this->upsert_kv_table_op_.hd_result_.IsError())
+    if (upsert_kv_table_op_.hd_result_.IsError())
     {
         // Serve as new catalog_ts. Set to 0 if flush kv fails.
         commit_log_rec->set_commit_timestamp(tx_op_failed_ts_);
@@ -3609,6 +3672,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
             assert(this == txm->split_flush_op_.get());
             assert(recover_split_started_ == nullptr);
+            std::unique_lock<std::mutex> lk(
+                txm->cc_handler_->split_flush_range_op_pool_mux_);
             txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
                 std::move(txm->split_flush_op_));
             assert(txm->split_flush_op_ == nullptr);
@@ -3642,8 +3707,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         assert(this == txm->split_flush_op_.get());
 
-        txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
-            std::move(txm->split_flush_op_));
+        {
+            std::unique_lock<std::mutex> lk(
+                txm->cc_handler_->split_flush_range_op_pool_mux_);
+            txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
+                std::move(txm->split_flush_op_));
+        }
+
         assert(txm->split_flush_op_ == nullptr);
         txm->Reset();
         // Setting the tx's status to finished signals that this tx

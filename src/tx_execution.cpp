@@ -235,6 +235,7 @@ void TransactionExecution::RecoverSchemaTx(
     {
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
+        std::unique_lock<std::mutex> lk(cc_handler_->table_schema_op_pool_mux_);
         if (cc_handler_->table_schema_op_pool_.empty())
         {
             std::unique_ptr<UpsertTableOp> table_op = nullptr;
@@ -262,6 +263,7 @@ void TransactionExecution::RecoverSchemaTx(
                               this,
                               &(schema_op.alter_table_info_blob()));
         }
+        lk.unlock();
 
         if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
                                      SchemaOpMessage_Stage_PrepareSchema)
@@ -351,6 +353,8 @@ void TransactionExecution::RecoverSplitRangeTx(
     }
 
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
+    std::unique_lock<std::mutex> lk(
+        cc_handler_->split_flush_range_op_pool_mux_);
     if (cc_handler_->split_flush_range_op_pool_.empty())
     {
         split_range_op =
@@ -378,6 +382,7 @@ void TransactionExecution::RecoverSplitRangeTx(
                               std::move(new_range_info),
                               this);
     }
+    lk.unlock();
     assert(split_range_op != nullptr);
 
     split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
@@ -814,6 +819,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
+    std::unique_lock<std::mutex> lk(cc_handler_->table_schema_op_pool_mux_);
     if (cc_handler_->table_schema_op_pool_.empty())
     {
         std::unique_ptr<UpsertTableOp> table_op = nullptr;
@@ -841,6 +847,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                           this,
                           req.alter_table_info_image_);
     }
+    lk.unlock();
 
     PushOperation(schema_op_.get());
     Forward();
@@ -893,6 +900,8 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
 
     bool_resp_ = &req.tx_result_;
 
+    std::unique_lock<std::mutex> lk(
+        cc_handler_->split_flush_range_op_pool_mux_);
     if (cc_handler_->split_flush_range_op_pool_.empty())
     {
         split_flush_op_ =
@@ -920,6 +929,7 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                std::move(req.new_range_id_),
                                this);
     }
+    lk.unlock();
 
     PushOperation(split_flush_op_.get());
     Forward();

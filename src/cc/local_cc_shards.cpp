@@ -184,6 +184,11 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
                           table_name, catalog_image, commit_ts, cc_ng_id),
                 commit_ts);
         }
+        else if (catalog_entry.Version() == commit_ts)
+        {
+            // It is kv_store_failure and is restoring old schema, treat as
+            // create successfully.
+        }
         else
         {
             return {false, &catalog_entry};
@@ -218,6 +223,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
                       table_name, old_catalog_image, old_schema_ts, cc_ng_id),
             old_schema_ts);
     }
+
     if (catalog_entry.Version() < dirty_schema_ts &&
         catalog_entry.DirtyVersion() < dirty_schema_ts)
     {
@@ -229,6 +235,12 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
                 : catalog_factory_->CreateTableSchema(
                       table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
             dirty_schema_ts);
+        return {true, &catalog_entry};
+    }
+    else if (dirty_schema_ts == 0)
+    {
+        // It is kv_store_failure and is restoring old schema, treat as
+        // create successfully.
         return {true, &catalog_entry};
     }
     else

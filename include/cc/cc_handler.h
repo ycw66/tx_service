@@ -480,18 +480,20 @@ public:
                              const TxKey *start_key = nullptr,
                              const TxKey *end_key = nullptr) = 0;
 
-    // table_schema_op_pool_ is introduced to ensure the CcHandlerResult pointer
-    // validation: if failover didn't happen, the pointer receivied from remote
-    // PostWriteAll response CcMessage should always be valid(memory not freed).
-    // This is important in the case where network timeout happens and remote
-    // response arrives after UpsertTableOp has finished. To achieve this, the
-    // UpsertTableOp is moved to table_schema_op_pool_ once finished the last
-    // step of the schema op to maintain the validity of the pointer. (note:
-    // this is different from pointer stability, which is guaranteed by checking
-    // the node term and whether this node is the leader of a node group).
+    // table_schema_op_pool_ and split_flush_range_op_pool_ are introduced to
+    // ensure the CcHandlerResult pointer validation: if failover didn't happen,
+    // the pointer receivied from remote PostWriteAll response CcMessage should
+    // always be valid(memory not freed). This is important in the case where
+    // network timeout happens and remote response arrives after UpsertTableOp
+    // has finished. To achieve this, the UpsertTableOp is moved to
+    // table_schema_op_pool_ once finished the last step of the schema op to
+    // maintain the validity of the pointer. (note: this is different from
+    // pointer stability, which is guaranteed by checking the node term and
+    // whether this node is the leader of a node group).
     std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
-
+    std::mutex table_schema_op_pool_mux_;
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
+    std::mutex split_flush_range_op_pool_mux_;
 };
 
 }  // namespace txservice

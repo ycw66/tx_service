@@ -1238,15 +1238,14 @@ public:
 
                 if (req.CommitType() != PostWriteType::PrepareCommit)
                 {
-                    // For prepare commit, the request installs the value,
-                    // but does not release the write intent/lock.
+                    // For PostCommit or Commit, the post-write-all request
+                    // releases the write lock/intent.
                     ReleaseCceKeyLock(cce_ptr, txn, req.NodeGroupId());
                 }
                 else
                 {
-                    // For prepare commit, the post-write-all request installs
-                    // the dirty value, and downgrades the write lock and to the
-                    // write intent.
+                    // For PrepareCommit, the post-write-all request keeps write
+                    // intent or downgrades the write lock to the write intent.
                     if (lk_type == LockType::WriteLock)
                     {
                         DowngradeCceKeyWriteLock(cce_ptr, txn);
