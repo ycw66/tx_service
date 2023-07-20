@@ -4866,13 +4866,16 @@ public:
                 }
                 cce->commit_ts_ = req.CommitTs();
 
-                if (op_type == OperationType::Insert)
+                if (shard_->realtime_sampling_ && sample_pool_)
                 {
-                    sample_pool_->OnInsert(key, table_schema_);
-                }
-                else if (op_type == OperationType::Delete)
-                {
-                    sample_pool_->OnDelete(key, table_schema_);
+                    if (op_type == OperationType::Insert)
+                    {
+                        sample_pool_->OnInsert(key, table_schema_);
+                    }
+                    else if (op_type == OperationType::Delete)
+                    {
+                        sample_pool_->OnDelete(key, table_schema_);
+                    }
                 }
 
                 if (cce->key_lock_ptr_ != nullptr &&
