@@ -454,7 +454,14 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
         CODE_FAULT_INJECTOR("recover_local_txn", { txn_node_group = 12345; })
 
-        if (txn_node_group == Sharder::Instance().NodeId())
+        // A local transaction might leave orphan locks when log service is
+        // unreachable and write log result is unknown. This rarely happens as
+        // we retry write log until this node is not group leader anymore. If
+        // this node is not group leader, the data and locks are to be cleared;
+        // orphan locks left on data belonging to other node groups that failed
+        // over to this node still need be recovered.
+        if (txn_node_group == Sharder::Instance().NodeId() &&
+            cc_ng_id == txn_node_group)
         {
             LOG(WARNING)
                 << "orphan lock detected, lock holding txn: "

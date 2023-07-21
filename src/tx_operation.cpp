@@ -2884,12 +2884,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         // Write prepare log in next subop.
         FillPrepareLogRequest(txm);
-        LOG(INFO) << "Split Flush transaction writre prepare log, range id "
+        LOG(INFO) << "Split Flush transaction write prepare log, range id "
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
     {
+        assert(txm->rw_set_.WriteSetSize() == 0);
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
             ForceToFinish(txm);
@@ -2897,10 +2898,49 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         }
         if (prepare_log_op_.hd_result_.IsError())
         {
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &post_all_lock_op_);
+            if (prepare_log_op_.hd_result_.ErrorCode() ==
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+            {
+                // prepare log result unknown, keep retrying until getting a
+                // clear response, either success or failure, or the
+                // coordinator itself is no longer leader
+                int64_t tx_node_term =
+                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+                if (tx_node_term > 0)
+                {
+                    DLOG(WARNING)
+                        << "Upsert table write prepare log result unknown, "
+                           "tx_number:"
+                        << txm->TxNumber() << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    RetrySubOperation(txm, &prepare_log_op_);
+                }
+                else
+                {
+                    DLOG(ERROR) << "Split range write prepare log result "
+                                   "unknown, tx_number:"
+                                << txm->TxNumber()
+                                << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if
+                    // it does. Should not release the write intents. If
+                    // prepare log is not written, the write intents will be
+                    // released individually via orphan lock recovery
+                    // mechanism.
+                    ForceToFinish(txm);
+                }
+            }
+            else
+            {
+                // Set commit ts to 0 to indicate transaction failure.
+                // post_all_lock_op_ will release locks acquired.
+                txm->commit_ts_ = tx_op_failed_ts_;
+                ForwardToSubOperation(txm, &post_all_lock_op_);
+            }
             return;
         }
 
