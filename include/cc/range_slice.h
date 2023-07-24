@@ -371,6 +371,7 @@ public:
     StoreRange(const TxKey *start_key,
                const TxKey *end_key,
                uint32_t partition_id,
+               NodeGroupId range_owner,
                LocalCcShards &cc_shards);
 
     StoreRange(const StoreRange &) = delete;

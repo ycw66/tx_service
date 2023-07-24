@@ -6,6 +6,7 @@
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
+#include "cc/range_bucket_cc_map.h"
 #include "checkpointer.h"
 #include "sharder.h"  // Sharder
 #include "tx_start_ts_collector.h"
@@ -81,6 +82,11 @@ CcShard::CcShard(uint16_t core_id,
         catalog_ccm_name,
         std::make_unique<CatalogCcMap>(this, node_id_, catalog_ccm_name));
 
+    // cluster config map is replicated on every core
+    native_ccms_.try_emplace(range_bucket_ccm_name,
+                             std::make_unique<RangeBucketCcMap>(
+                                 this, node_id_, range_bucket_ccm_name));
+
     if (metrics::enable_collect_metrics)
     {
         meter_->Register(MEMORY_LIMIT_NAME_, metrics::Type::Gauge);
@@ -147,6 +153,24 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
                     ng_ccm.emplace(node_group,
                                    std::make_unique<CatalogCcMap>(
                                        this, node_group, catalog_ccm_name));
+                return insert_it.first->second.get();
+            }
+        }
+        else if (table_name == range_bucket_ccm_name)
+        {
+            // range bucket cc map is the same as catalog cc map. It is
+            // initialized lazily on failover.
+            auto bucket_it = ng_ccm.find(node_group);
+            if (bucket_it != ng_ccm.end())
+            {
+                return bucket_it->second.get();
+            }
+            else
+            {
+                auto insert_it = ng_ccm.emplace(
+                    node_group,
+                    std::make_unique<RangeBucketCcMap>(
+                        this, node_group, range_bucket_ccm_name));
                 return insert_it.first->second.get();
             }
         }
@@ -350,6 +374,15 @@ void CcShard::DetachLru(LruPage *page)
 
 void CcShard::UpdateLruList(LruPage *page)
 {
+    // We should not add meta cc map page into lru list since they
+    // should never be kicked out of memory.
+    TableType tbl_type = page->parent_map_->table_name_.Type();
+    if (tbl_type != TableType::Primary && tbl_type != TableType::Secondary &&
+        tbl_type != TableType::UniqueSecondary)
+    {
+        assert(page->lru_next_ == nullptr && page->lru_prev_ == nullptr);
+        return;
+    }
     // page already at the tail, do nothing
     if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
     {
@@ -777,10 +810,10 @@ const TableRangeEntry *CcShard::GetTableRangeEntry(const TableName &table_name,
     return local_shards_.GetTableRangeEntry(table_name, ng_id, range_id);
 }
 
-const TableRangeEntry *CcShard::GetTableRangeEntryNonLocking(
+const TableRangeEntry *CcShard::GetTableRangeEntryNoLocking(
     const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
 {
-    return local_shards_.GetTableRangeEntryNonLocking(table_name, ng_id, key);
+    return local_shards_.GetTableRangeEntryNoLocking(table_name, ng_id, key);
 }
 
 uint64_t CcShard::CountRanges(const TableName &table_name,
@@ -830,6 +863,29 @@ StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,
 void CcShard::CleanTableStatistics(const TableName &table_name)
 {
     return local_shards_.CleanTableStatistics(table_name);
+}
+
+const BucketInfo *CcShard::GetBucketInfo(uint16_t bucket_id,
+                                         NodeGroupId ng_id) const
+{
+    return local_shards_.GetBucketInfo(bucket_id, ng_id);
+}
+
+const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
+                                         NodeGroupId ng_id) const
+{
+    return local_shards_.GetRangeOwner(range_id, ng_id);
+}
+
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+{
+    return local_shards_.GetAllBucketInfos(ng_id);
+}
+
+void CcShard::DropBucketInfo(NodeGroupId ng_id)
+{
+    local_shards_.DropBucketInfo(ng_id);
 }
 
 void CcShard::RemoveFetchRequest(const TableName &table_name)
@@ -989,7 +1045,8 @@ void CcShard::DropCcms(NodeGroupId ng_id)
     {
         for (auto ccm_it = native_ccms_.begin(); ccm_it != native_ccms_.end();)
         {
-            if (ccm_it->first == catalog_ccm_name)
+            if (ccm_it->first == catalog_ccm_name ||
+                ccm_it->first == range_bucket_ccm_name)
             {
                 ccm_it->second->Clean();
                 ++ccm_it;

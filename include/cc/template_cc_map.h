@@ -1585,7 +1585,6 @@ public:
                         Type() == TableType::UniqueSecondary)
                     {
                         RangeSliceOpStatus pin_status;
-                        uint32_t range_id = req.KeyShardCode() >> 10;
                         RangeSliceId slice_id = shard_->PinRangeSlice(
                             table_name_,
                             cc_ng_id_,
@@ -1593,7 +1592,6 @@ public:
                             RecordSchema(),
                             schema_ts_,
                             table_schema_->GetKVCatalogInfo(),
-                            range_id,
                             *look_key,
                             true,
                             &req,
@@ -4583,7 +4581,6 @@ public:
         {
             TableName range_table_name(table_name_.StringView(),
                                        TableType::RangePartition);
-            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
 
             // All ranges has been added read lock. It is safe to access them.
             const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
@@ -4591,10 +4588,14 @@ public:
                                                              cc_ng_id_);
             for (const auto &[range_start_key, range_entry] : *range_map)
             {
-                uint32_t range_id = range_entry.GetRangeInfo()->PartitionId();
-                if (range_id % ng_cnt == cc_ng_id_)
+                if (shard_
+                        ->GetRangeOwner(
+                            range_entry.GetRangeInfo()->PartitionId(),
+                            cc_ng_id_)
+                        ->BucketOwner() == cc_ng_id_)
                 {
                     const StoreRange *store_range = range_entry.RangeSlices();
+                    assert(store_range != nullptr);
                     for (const std::unique_ptr<StoreSlice> &store_slice :
                          store_range->Slices())
                     {
@@ -5910,6 +5911,7 @@ protected:
             shard_->Clean();
             if (shard_->Full() && !(table_name_.Type() == TableType::Catalog) &&
                 !(table_name_.Type() == TableType::RangePartition) &&
+                !(table_name_.Type() == TableType::RangeBucket) &&
                 !force_emplace)
             {
                 return End();

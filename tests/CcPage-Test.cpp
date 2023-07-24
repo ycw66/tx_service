@@ -50,11 +50,24 @@ void PrepareCcMap(
 
 TEST_CASE("CcPage clean tests", "[cc-page]")
 {
-    LocalCcShards local_cc_shards(
-        0, 1, 10000, 10000, false, nullptr, nullptr, nullptr, nullptr, true);
+    std::map<uint32_t, std::vector<std::string>> ng_ips{{0, {"127.0.0.1"}}};
+    std::map<uint32_t, std::vector<uint16_t>> ng_ports{{0, {8600}}};
+    LocalCcShards local_cc_shards(0,
+                                  1,
+                                  10000,
+                                  10000,
+                                  false,
+                                  nullptr,
+                                  &ng_ips,
+                                  9001,
+                                  2,
+                                  nullptr,
+                                  nullptr,
+                                  nullptr,
+                                  true);
     CcShard shard(0, 1, 10000, 10000, false, 0, local_cc_shards, nullptr);
     Sharder::Instance(
-        0, nullptr, nullptr, nullptr, nullptr, &local_cc_shards, nullptr);
+        0, &ng_ips, &ng_ports, nullptr, nullptr, &local_cc_shards, nullptr);
 
     const size_t MAP_NUM = 20;
     const size_t MAP_SIZE = 10000;

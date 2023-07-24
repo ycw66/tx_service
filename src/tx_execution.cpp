@@ -911,7 +911,7 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                                 req.old_start_key_,
                                                 req.old_end_key_,
                                                 req.old_range_info_,
-                                                std::move(req.new_range_id_),
+                                                std::move(req.new_range_info_),
                                                 this);
     }
     else
@@ -926,7 +926,7 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                req.old_start_key_,
                                req.old_end_key_,
                                req.old_range_info_,
-                               std::move(req.new_range_id_),
+                               std::move(req.new_range_info_),
                                this);
     }
     lk.unlock();
@@ -1177,9 +1177,13 @@ void TransactionExecution::Process(ReadOperation &read)
                 // Uses the lower 10 bits of the key's hash code to shard the
                 // key across CPU cores in a cc node.
                 uint32_t residual = key.Hash() & 0x3FF;
-                key_shard_code = read.range_rec_.GetRangeInfo()->PartitionId()
-                                     << 10 |
-                                 residual;
+                NodeGroupId range_owner =
+                    static_cast<
+                        const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                        read.range_rec_.GetRangeOwnerRec())
+                        ->payload_->GetBucketInfo()
+                        ->BucketOwner();
+                key_shard_code = range_owner << 10 | residual;
             }
 #else
             key_shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -1603,6 +1607,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                            scan_open.tx_req_->EndKey(),
                            scan_open.tx_req_->end_inclusive_,
                            UINT32_MAX,
+                           UINT32_MAX,
                            scan_open.tx_req_->StartKey()->Clone(),
                            !scan_open.tx_req_->start_inclusive_,
                            scan_open.direction_ == ScanDirection::Forward
@@ -1615,6 +1620,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                            std::move(open_result.scanner_),
                            scan_open.tx_req_->EndKey(),
                            scan_open.tx_req_->end_inclusive_,
+                           UINT32_MAX,
                            UINT32_MAX,
                            scan_open.tx_req_->StartKey(),
                            !scan_open.tx_req_->start_inclusive_,
@@ -1714,6 +1720,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             cc_handler_->ScanNextBatch(
                 scan_next.tx_req_->table_name_,
                 scan_state.range_id_,
+                scan_state.range_owner_,
                 scan_next.RangeNgTerm(),
                 scan_state.SliceLastKey(),
                 !scan_state.inclusive_,
@@ -1767,6 +1774,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 cc_handler_->ScanNextBatch(
                     scan_next.tx_req_->table_name_,
                     scan_state.range_id_,
+                    scan_state.range_owner_,
                     -1,
                     scan_state.SliceLastKey(),
                     !scan_state.inclusive_,
@@ -3516,8 +3524,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         // Post-processing only clears the write locks of the write-set
         // keys.
 
-        size_t idx = 0;
         uint64_t tx_number = TxNumber();
+        size_t idx = 0;
         uint16_t command_id = command_id_.load(std::memory_order_relaxed);
         const std::unordered_map<TableName, TableWriteSet> &wset =
             rw_set_.WriteSet();

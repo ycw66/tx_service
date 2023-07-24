@@ -111,7 +111,8 @@ enum class TableType : uint8_t
     Secondary,
     UniqueSecondary,
     Catalog,
-    RangePartition
+    RangePartition,
+    RangeBucket
 };
 
 struct TableName
@@ -443,9 +444,15 @@ enum class PostWriteType
 inline static std::string_view empty_sv{"__empty"};
 inline static std::string_view catalog_ccm_name_sv{"__catalog"};
 inline static std::string_view redis_table_name_sv{"redis_table"};
+inline static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
+
+inline static TableName range_bucket_ccm_name{range_bucket_ccm_name_sv.data(),
+                                              range_bucket_ccm_name_sv.size(),
+                                              TableType::RangeBucket};
+inline static const uint16_t total_range_buckets = 4096;
 
 enum struct SlicePosition
 {

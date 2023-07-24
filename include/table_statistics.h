@@ -626,7 +626,9 @@ public:
             return;
         }
 
-        NodeGroupId old_ng_id = old_info->PartitionId() % ng_cnt;
+        NodeGroupId old_ng_id =
+            ccs->GetRangeOwner(old_info->PartitionId(), cc_ng_id)
+                ->BucketOwner();
 
         auto it = index_sample_pool_map_.find(table_or_index_name);
         if (it == index_sample_pool_map_.end())
@@ -1071,12 +1073,15 @@ private:
                                   const KeyT &key) const
     {
         // Safe to use TableRangeEntry *.
-        const TableRangeEntry *range_entry = ccs.GetTableRangeEntryNonLocking(
+        const TableRangeEntry *range_entry = ccs.GetTableRangeEntryNoLocking(
             table_or_index_name, cc_ng_id, &key);
         assert(range_entry != nullptr);
 
-        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        NodeGroupId ng_id = range_entry->GetRangeInfo()->PartitionId() % ng_cnt;
+        NodeGroupId ng_id =
+            ccs.local_shards_
+                .GetRangeOwnerNoLocking(
+                    range_entry->GetRangeInfo()->PartitionId(), cc_ng_id)
+                ->BucketOwner();
         uint32_t residual = key.Hash() & 0x3FF;
         uint16_t core_id =
             residual % Sharder::Instance().GetLocalCcShardsCount();
@@ -1094,17 +1099,18 @@ private:
 
         std::unordered_map<NodeGroupId, SamplePoolParam<KeyT>> param_map;
 
-        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        NodeGroupId old_ng_id = old_info->PartitionId() % ng_cnt;
+        NodeGroupId old_ng_id =
+            ccs->GetRangeOwner(old_info->PartitionId(), cc_ng_id)
+                ->BucketOwner();
 
         for (const KeyT &key : old_sample_pool.SampleKeys())
         {
             TableRangeEntry *range_entry = ccs->GetTableRangeEntry(
                 old_sample_pool.GetTableOrIndexName(), cc_ng_id, &key);
-            int32_t new_partition_id =
-                range_entry->GetRangeInfo()->PartitionId();
-            assert(new_partition_id >= 0);
-            NodeGroupId new_ng_id = new_partition_id % ng_cnt;
+            NodeGroupId new_ng_id =
+                ccs->GetRangeOwner(range_entry->GetRangeInfo()->PartitionId(),
+                                   cc_ng_id)
+                    ->BucketOwner();
             if (new_ng_id != old_ng_id)
             {
                 param_map[new_ng_id].sample_keys_.push_back(key);
@@ -1118,7 +1124,9 @@ private:
             for (int32_t new_partition_id :
                  old_info->NewPartitionIdUncheckDirty())
             {
-                NodeGroupId new_ng_id = new_partition_id % ng_cnt;
+                NodeGroupId new_ng_id =
+                    ccs->GetRangeOwner(new_partition_id, cc_ng_id)
+                        ->BucketOwner();
                 if (new_ng_id != old_ng_id)
                 {
                     param_map[new_ng_id].records_ += avg_range_key_count;
@@ -1141,13 +1149,15 @@ private:
         NodeGroupId cc_ng_id,
         const RangeInfo *old_info) const
     {
-        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-        NodeGroupId old_ng_id = old_info->PartitionId() % ng_cnt;
+        NodeGroupId old_ng_id =
+            ccs->GetRangeOwner(old_info->PartitionId(), cc_ng_id)
+                ->BucketOwner();
 
         int32_t split_out = 0;
         for (int32_t new_partition_id : old_info->NewPartitionIdUncheckDirty())
         {
-            NodeGroupId new_ng_id = new_partition_id % ng_cnt;
+            NodeGroupId new_ng_id =
+                ccs->GetRangeOwner(new_partition_id, cc_ng_id)->BucketOwner();
             if (new_ng_id != old_ng_id)
             {
                 split_out += 1;

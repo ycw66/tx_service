@@ -37,26 +37,34 @@ class LocalCcShards
 {
 public:
     static const size_t DATA_SYNC_SCAN_BATCH_SIZE = 3 * 1024;
-    LocalCcShards(uint32_t node_id = 0,
-                  uint16_t core_cnt = 1,
-                  uint32_t memory_limit_mb = 1000,
-                  uint32_t log_limit_mb = 1000,
-                  bool realtime_sampling = false,
-                  CatalogFactory *catalog_factory = nullptr,
-                  store::DataStoreHandler *store_hd = nullptr,
-                  metrics::MetricsRegistry *metrics_registry = nullptr,
-                  TxService *tx_service = nullptr,
-                  bool enable_mvcc = true);
+    LocalCcShards(
+        uint32_t node_id = 0,
+        uint16_t core_cnt = 1,
+        uint32_t memory_limit_mb = 1000,
+        uint32_t log_limit_mb = 1000,
+        bool realtime_sampling = false,
+        CatalogFactory *catalog_factory = nullptr,
+        std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
+        int32_t range_bucket_seed = -1,
+        uint64_t cluster_config_version = 0,
+        store::DataStoreHandler *store_hd = nullptr,
+        metrics::MetricsRegistry *metrics_registry = nullptr,
+        TxService *tx_service = nullptr,
+        bool enable_mvcc = true);
 
-    LocalCcShards(uint32_t node_id = 0,
-                  uint16_t core_cnt = 1,
-                  uint32_t memory_limit_mb = 1000,
-                  uint32_t log_limit_mb = 1000,
-                  bool realtime_sampling = false,
-                  CatalogFactory *catalog_factory = nullptr,
-                  store::DataStoreHandler *store_hd = nullptr,
-                  TxService *tx_service = nullptr,
-                  bool enable_mvcc = true);
+    LocalCcShards(
+        uint32_t node_id = 0,
+        uint16_t core_cnt = 1,
+        uint32_t memory_limit_mb = 1000,
+        uint32_t log_limit_mb = 1000,
+        bool realtime_sampling = false,
+        CatalogFactory *catalog_factory = nullptr,
+        std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
+        int32_t range_bucket_seed = -1,
+        uint64_t cluster_config_version = 0,
+        store::DataStoreHandler *store_hd = nullptr,
+        TxService *tx_service = nullptr,
+        bool enable_mvcc = true);
 
     ~LocalCcShards();
 
@@ -396,7 +404,7 @@ public:
                                               const NodeGroupId ng_id,
                                               int32_t range_id);
 
-    const TableRangeEntry *GetTableRangeEntryNonLocking(
+    const TableRangeEntry *GetTableRangeEntryNoLocking(
         const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
@@ -529,13 +537,34 @@ public:
 
     void DropTableStatistics(NodeGroupId ng_id);
 
+    const BucketInfo *GetBucketInfo(const uint16_t bucket_id,
+                                    const NodeGroupId ng_id) const;
+
+    const BucketInfo *GetRangeOwner(const int32_t range_id,
+                                    const NodeGroupId ng_id) const;
+
+    const BucketInfo *GetRangeOwnerNoLocking(const int32_t range_id,
+                                             const NodeGroupId ng_id) const;
+
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+        *GetAllBucketInfos(const NodeGroupId ng_id) const;
+
+    void DropBucketInfo(NodeGroupId ng_id);
+
+    void InitRangeBuckets(NodeGroupId ng_id,
+                          std::map<uint32_t, std::vector<std::string>> &ng_ips,
+                          uint64_t version,
+                          int32_t seed);
+
+    bool IsRangeBucketsInitialized(NodeGroupId ng_id);
+
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
 
 private:
     void TimerRun();
-    // Internal interface that exposes non const TableRangeEntry in
-    // table_ranges_
+    // Internal interface that exposes non const return type and does
+    // not acquire mutex lock.
     TableRangeEntry *GetTableRangeEntryInternal(
         const TableName &range_table_name,
         const NodeGroupId ng_id,
@@ -553,6 +582,13 @@ private:
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
         *GetTableRangesForATableInternal(const TableName &range_table_name,
                                          const NodeGroupId ng_id);
+
+    BucketInfo *GetBucketInfoInternal(const uint16_t bucket_id,
+                                      const NodeGroupId ng_id) const;
+
+    BucketInfo *GetRangeOwnerInternal(int32_t range_id,
+                                      const NodeGroupId ng_id) const;
+
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
@@ -603,6 +639,13 @@ private:
     std::unordered_map<TableName,
                        std::unordered_map<NodeGroupId, StatisticsEntry>>
         table_statistics_map_;
+
+    // map to store mapping relationship from bucket id to bucket info
+    // that stores the bucket owner of this bucket.
+    std::unordered_map<
+        NodeGroupId,
+        std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>>
+        bucket_infos_;
 
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;

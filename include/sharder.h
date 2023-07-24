@@ -11,6 +11,7 @@
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "txlog.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -94,7 +95,17 @@ public:
 
     uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
     {
+#ifdef RANGE_PARTITION_ENABLED
+        return sharding_code >> 10;
+#else
         return (sharding_code >> 10) % ng_leader_cache_.size();
+#endif
+    }
+
+    static inline uint16_t MapRangeIdToBucketId(int32_t range_id)
+    {
+        return std::hash<std::string>{}(std::to_string(range_id)) %
+               total_range_buckets;
     }
 
     uint32_t NodeGroupCount() const

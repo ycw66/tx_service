@@ -959,6 +959,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
 void txservice::LocalCcHandler::ScanNextBatch(
     const TableName &tbl_name,
     uint32_t range_id,
+    NodeGroupId range_owner,
     int64_t cc_ng_term,
     const TxKey *start_key,
     bool start_inclusive,
@@ -973,10 +974,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
     IsolationLevel iso_level,
     CcProtocol proto)
 {
-    uint32_t cc_ng_id = range_id % Sharder::Instance().NodeGroupCount();
-    hd_res.Value().cc_ng_id_ = cc_ng_id;
-
-    uint32_t node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
+    hd_res.Value().cc_ng_id_ = range_owner;
+    uint32_t node_id = Sharder::Instance().LeaderNodeId(range_owner);
     if (node_id == cc_shards_.node_id_)
     {
         hd_res.Value().is_local_ = true;
@@ -984,7 +983,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         ScanSliceCc *req = scan_slice_pool.NextRequest();
         req->Set(tbl_name,
                  range_id,
-                 cc_ng_id,
+                 range_owner,
                  cc_ng_term,
                  start_key,
                  start_inclusive,
@@ -1044,7 +1043,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             tbl_name,
                             range_id,
-                            cc_ng_id,
+                            range_owner,
                             cc_ng_term,
                             start_key,
                             start_inclusive,

@@ -105,11 +105,12 @@ bool StoreSlice::IsRecentLoad() const
 StoreRange::StoreRange(const TxKey *start_key,
                        const TxKey *end_key,
                        uint32_t partition_id,
+                       NodeGroupId range_owner,
                        LocalCcShards &cc_shards)
     : range_start_key_(start_key),
       range_end_key_(end_key),
       partition_id_(partition_id),
-      cc_ng_id_(partition_id_ % Sharder::Instance().GetNodeCount()),
+      cc_ng_id_(range_owner),
       local_cc_shards_(cc_shards)
 {
     std::unique_ptr<StoreSlice> slice = std::make_unique<StoreSlice>();

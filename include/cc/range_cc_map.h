@@ -9,6 +9,7 @@
 #include "cc_handler_result.h"
 #include "cc_request.h"
 #include "error_messages.h"  //CcErrorCode
+#include "range_bucket_cc_map.h"
 #include "range_record.h"
 #include "statistics.h"
 #include "template_cc_map.h"
@@ -39,12 +40,12 @@ class RangeCcMap : public TemplateCcMap<KeyT, RangeRecord>
 {
 public:
     RangeCcMap(const RangeCcMap &rhs) = delete;
-    ~RangeCcMap() = default;
 
     using TemplateCcMap<KeyT, RangeRecord>::Execute;
     using TemplateCcMap<KeyT, RangeRecord>::FindEmplace;
     using TemplateCcMap<KeyT, RangeRecord>::Emplace;
     using TemplateCcMap<KeyT, RangeRecord>::AcquireCceKeyLock;
+    using TemplateCcMap<KeyT, RangeRecord>::ReleaseCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
     using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
@@ -54,6 +55,8 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::table_schema_;
     using TemplateCcMap<KeyT, RangeRecord>::KeySchema;
     using TemplateCcMap<KeyT, RangeRecord>::Find;
+    using TemplateCcMap<KeyT, RangeRecord>::Begin;
+    using TemplateCcMap<KeyT, RangeRecord>::End;
 
     /**
      * @brief Construct a new range cc map object. The range cc map has no
@@ -75,6 +78,8 @@ public:
         assert(ranges != nullptr);
         neg_inf_.payload_ = std::make_shared<RangeRecord>();
         pos_inf_.payload_ = std::make_shared<RangeRecord>();
+        auto bucket_map = static_cast<RangeBucketCcMap *>(
+            shard->GetCcm(range_bucket_ccm_name, ng_id));
 
         for (auto &[key, table_range] : *ranges)
         {
@@ -85,6 +90,9 @@ public:
                 neg_inf_.payload_->range_info_ = range_info;
                 neg_inf_.commit_ts_ = range_info->version_ts_;
                 neg_inf_.payload_status_ = RecordStatus::Normal;
+                neg_inf_.payload_->range_owner_rec_ =
+                    bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
+                        range_info->PartitionId()));
             }
             else
             {
@@ -93,11 +101,37 @@ public:
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
                 cce->commit_ts_ = range_info->version_ts_;
                 cce->payload_ = std::make_shared<RangeRecord>();
-                cce->payload_.get()->range_info_ = range_info;
+                cce->payload_->range_info_ = range_info;
+                cce->payload_->range_owner_rec_ = bucket_map->GetBucketRecord(
+                    Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
                 it--;
                 it->second->payload_->end_key_ = range_info->start_key_.get();
+            }
+        }
+    }
+
+    ~RangeCcMap()
+    {
+        // Clean up bucket record locks if range record has read lock on it.
+        // This happens with drop table, in which case we remove all read entry
+        // related with the dropped table from readset and directly drop the
+        // range cc map. In this case we need to manually clear the bucket locks
+        // since postread will not be called.
+        for (auto it = Begin(); it != End(); it++)
+        {
+            auto range_cce = it->second;
+            if (range_cce->key_lock_ptr_ != nullptr &&
+                !range_cce->key_lock_ptr_->ReadLocks().empty())
+            {
+                for (TxNumber txn : range_cce->key_lock_ptr_->ReadLocks())
+                {
+                    auto bucket_cce = static_cast<
+                        CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                        range_cce->payload_->range_owner_rec_);
+                    ReleaseCceKeyLock(bucket_cce, txn, this->cc_ng_id_);
+                }
             }
         }
     }
@@ -125,7 +159,10 @@ public:
      * the input key, adds a read lock on the range and returns a pointer to the
      * table range entry in the returned record. The table range entry gives the
      * range's partition ID and the dirty range's partition ID, if the range is
-     * being split or merged.
+     * being split or merged. It will also put a read lock on the range owner
+     * bucket record, which will be released on range record post read. The
+     * range owner bucket record is used to check which node group is holding
+     * the data of this range.
      *
      * @param req The read request containing the input key and returned record.
      * @return true, if the request has been executed and is to be freed; false,
@@ -167,6 +204,44 @@ public:
 
         LockType acquired_lock;
         CcErrorCode err_code;
+        if (req.IsWaitForBucketRecordRead())
+        {
+            assert(req.CcePtr() != nullptr);
+            // If we're waiting for bucket record, that means we must've alrady
+            // acquired read lock on range record.
+            floor_cce = static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
+            CcEntry<RangeBucketKey, RangeBucketRecord> *bucket_cce =
+                static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                    floor_cce->payload_->range_owner_rec_);
+            std::tie(acquired_lock, err_code) =
+                LockHandleForResumedRequest(bucket_cce,
+                                            bucket_cce->payload_status_,
+                                            &req,
+                                            req.NodeGroupId(),
+                                            ng_term,
+                                            req.TxTerm(),
+                                            CcOperation::Read,
+                                            IsolationLevel::RepeatableRead,
+                                            CcProtocol::Locking,
+                                            req.ReadTimestamp(),
+                                            false);
+            // Lock handle should always succeed here. It will only fail if
+            // the entry is deleted, but bucket record will never be
+            // deleted.
+            assert(err_code == CcErrorCode::NO_ERROR);
+            CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
+            cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
+                            ng_term,
+                            req.NodeGroupId(),
+                            shard_->LocalCoreId());
+            RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
+            *range_rec = *(floor_cce->payload_);
+            hd_result->Value().ts_ = floor_cce->commit_ts_;
+            hd_result->Value().rec_status_ = RecordStatus::Normal;
+            hd_result->Value().lock_type_ = acquired_lock;
+            hd_result->SetFinished();
+            return true;
+        }
         // Rather than looking for an exact match, looks up the floor key
         // that represents the range containing the input key.
         const KeyT *look_key = static_cast<const KeyT *>(req.Key());
@@ -178,6 +253,7 @@ public:
             // The request was blocked before. This is execution resumption
             // after the request is unblocked. The read lock/intention must have
             // been acquired.
+
             // If the searching key is still in the same range, we don't
             // need to reacquire the key.
             CcOperation cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
@@ -205,7 +281,14 @@ public:
                     static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
                 prev_cce->key_lock_ptr_->ReleaseLock(
                     req.Txn(), shard_, LockType::ReadLock);
+                // If we're waiting for bucekt lock that means we've alraedy
+                // acquired read lock on range record, so the record cannot be
+                // updated during this time.
+                assert(!req.IsWaitForBucketRecordRead());
             }
+
+            // Set CcePtr to indicate this is a resumed req.
+            req.SetCcePtr(floor_cce);
             // try to acquire lock
             int64_t tx_term = req.TxTerm();
             uint32_t ng_id = req.NodeGroupId();
@@ -232,6 +315,27 @@ public:
         {
         case CcErrorCode::NO_ERROR:
         {
+            // Lock range owner bucket
+            auto bucket_cce =
+                static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                    floor_cce->payload_->range_owner_rec_);
+            std::tie(acquired_lock, err_code) =
+                AcquireCceKeyLock(bucket_cce,
+                                  bucket_cce->payload_status_,
+                                  &req,
+                                  req.NodeGroupId(),
+                                  ng_term,
+                                  req.TxTerm(),
+                                  CcOperation::Read,
+                                  IsolationLevel::RepeatableRead,
+                                  CcProtocol::Locking,
+                                  req.ReadTimestamp(),
+                                  true);
+            if (err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED)
+            {
+                req.SetIsWaitForBucketRecordRead(true);
+                return false;
+            }
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
             cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
                             ng_term,
@@ -249,8 +353,6 @@ public:
         {
             // You don't need a remote acknowledge here, since range read is
             // a local read anyway
-            // Set CcePtr to indicate this is a resumed req.
-            req.SetCcePtr(floor_cce);
             return false;
         }
         default:
@@ -260,6 +362,25 @@ public:
         }  //-- end: switch
 
         return true;
+    }
+
+    bool Execute(PostReadCc &req) override
+    {
+        const CcEntryAddr &cce_addr = *req.CceAddr();
+        CcEntry<KeyT, RangeRecord> &cc_entry =
+            *reinterpret_cast<CcEntry<KeyT, RangeRecord> *>(cce_addr.CcePtr());
+
+        // Release bucket record read lock. This lock was acquried in range
+        // cc map read cc, and is not put into readset. So we need to be
+        // releasing it here manually.
+        auto bucket_cce =
+            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                cc_entry.payload_->range_owner_rec_);
+        bucket_cce->last_read_ts_ =
+            std::max(bucket_cce->last_read_ts_, req.CommitTs());
+        ReleaseCceKeyLock(bucket_cce, req.Txn(), req.NodeGroupId());
+
+        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
     }
 
     bool Execute(AcquireAllCc &req) override
@@ -386,9 +507,13 @@ public:
                             req.CommitTs())
                         ->GetRangeInfo());
 
-                if (upload_range_rec->GetRangeInfo()->PartitionId() %
-                        Sharder::Instance().NodeGroupCount() ==
-                    this->cc_ng_id_)
+                NodeGroupId range_owner =
+                    shard_
+                        ->GetRangeOwner(
+                            upload_range_rec->GetRangeInfo()->PartitionId(),
+                            this->cc_ng_id_)
+                        ->BucketOwner();
+                if (range_owner == this->cc_ng_id_)
                 {
                     TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
                         this->table_name_, req.NodeGroupId(), target_key);
@@ -401,6 +526,27 @@ public:
                         "range_split_participant_prepare_post_all");
                 }
             }
+            // Register the range owner bucket for the new ranges
+            auto bucket_map = static_cast<RangeBucketCcMap *>(
+                shard_->GetCcm(range_bucket_ccm_name, this->cc_ng_id_));
+            auto target_cce =
+                Find(*static_cast<const KeyT *>(req.Key())).second;
+            auto new_range_owner_rec =
+                std::make_unique<std::vector<LruEntry *>>();
+            for (int32_t new_id :
+                 upload_range_rec->GetRangeInfo()->new_partition_id_)
+            {
+                // Link bucket owner record
+                new_range_owner_rec->push_back(bucket_map->GetBucketRecord(
+                    Sharder::MapRangeIdToBucketId(new_id)));
+            }
+            upload_range_rec->SetNewRangeOwnerRec(
+                std::move(new_range_owner_rec));
+            // Reuse range_owner_rec_ from old cce. range_owner_rec_ needs to be
+            // reset on each core since they point to bucket records on
+            // different cores.
+            upload_range_rec->range_owner_rec_ =
+                target_cce->payload_->range_owner_rec_;
         }
         else if (req.CommitType() == PostWriteType::PostCommit)
         {
@@ -450,9 +596,13 @@ public:
                 // as the slice keys in the new ranges.
                 std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                     new_slice_keys;
-                if (upload_range_rec->GetRangeInfo()->PartitionId() %
-                        Sharder::Instance().NodeGroupCount() !=
-                    this->cc_ng_id_)
+                NodeGroupId range_owner =
+                    shard_
+                        ->GetRangeOwner(
+                            upload_range_rec->GetRangeInfo()->PartitionId(),
+                            this->cc_ng_id_)
+                        ->BucketOwner();
+                if (range_owner != this->cc_ng_id_)
                 {
                     if (range_slices.empty())
                     {
@@ -471,6 +621,7 @@ public:
                             old_info->start_key_.get(),
                             old_end_key,
                             old_info->partition_id_,
+                            range_owner,
                             *Sharder::Instance().GetLocalCcShards());
                     store_range->InitSlices(range_slices);
                     new_slice_keys = store_range->SplitRange(
@@ -513,12 +664,6 @@ public:
                         cur_range_slices.push_back(std::move(*cur_slice));
                         cur_slice++;
                     }
-                    // Check which node group the new range falls on.
-                    uint32_t cc_ng_id = old_info->new_partition_id_.at(idx) %
-                                        Sharder::Instance().NodeGroupCount();
-
-                    // If the new range falls on this ng, keep the range slices
-                    // info, otherwise pass in nullptr
                     const TableRangeEntry *new_range = shard_->CreateTableRange(
                         this->table_name_,
                         this->cc_ng_id_,
@@ -528,8 +673,7 @@ public:
                             ? old_end_key
                             : std::get<0>(*cur_slice).get(),
                         old_info->dirty_ts_,
-                        cc_ng_id == this->cc_ng_id_ ? &cur_range_slices
-                                                    : nullptr);
+                        &cur_range_slices);
                     new_range_infos.push_back(new_range->GetRangeInfo());
                 }
 
@@ -541,10 +685,9 @@ public:
                 upload_range_rec->end_key_ =
                     new_range_infos.front()->StartKey();
                 upload_range_rec->SetRangeInfo(old_info);
+                upload_range_rec->SetNewRangeOwnerRec(nullptr);
 
-                if (upload_range_rec->GetRangeInfo()->PartitionId() %
-                        Sharder::Instance().NodeGroupCount() ==
-                    this->cc_ng_id_)
+                if (range_owner == this->cc_ng_id_)
                 {
                     ACTION_FAULT_INJECTOR("range_split_post_commit");
                     old_entry->RangeSlices()->SetRangeEndKey(
@@ -572,6 +715,10 @@ public:
             assert(new_range_infos.size());
 
             // add new range entry to range cc map
+            auto target_cce =
+                Find(*static_cast<const KeyT *>(req.Key())).second;
+            auto &new_range_owner_rec =
+                *target_cce->payload_->GetNewRangeOwnerRec();
             for (uint idx = 0; idx < new_range_infos.size(); idx++)
             {
                 auto new_range_info = new_range_infos.at(idx);
@@ -588,7 +735,8 @@ public:
                 }
                 cce->commit_ts_ = new_range_info->version_ts_;
                 cce->payload_ = std::make_shared<RangeRecord>();
-                cce->payload_.get()->range_info_ = new_range_info;
+                cce->payload_->range_info_ = new_range_info;
+                cce->payload_->range_owner_rec_ = new_range_owner_rec.at(idx);
 
                 // update previous cce's end key
                 it--;
@@ -619,6 +767,10 @@ public:
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
+            // range_owner_rec_ needs to be reset on each core since they point
+            // to bucket records on different cores.
+            upload_range_rec->range_owner_rec_ =
+                target_cce->payload_->range_owner_rec_;
 
             if (shard_->realtime_sampling_ &&
                 shard_->core_id_ == Statistics::CoreDoSample(this->table_name_))
@@ -810,6 +962,7 @@ public:
                             old_info->start_key_.get(),
                             old_end_key,
                             old_info->partition_id_,
+                            tx_node_id,
                             *Sharder::Instance().GetLocalCcShards());
                     store_range->InitSlices(range_slices);
                     std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
@@ -840,13 +993,7 @@ public:
                             cur_range_slices.push_back(std::move(*cur_slice));
                             cur_slice++;
                         }
-                        // Check which node group the new range falls on.
-                        uint32_t cc_ng_id =
-                            new_range_ids.at(idx) %
-                            Sharder::Instance().NodeGroupCount();
 
-                        // If the new range falls on this ng, keep the range
-                        // slices info, otherwise pass in nullptr
                         const TableRangeEntry *new_range =
                             shard_->CreateTableRange(
                                 this->table_name_,
@@ -857,8 +1004,7 @@ public:
                                     ? old_end_key
                                     : std::get<0>(*cur_slice).get(),
                                 req.CommitTs(),
-                                cc_ng_id == this->cc_ng_id_ ? &cur_range_slices
-                                                            : nullptr);
+                                &cur_range_slices);
                         new_range_infos.push_back(new_range->GetRangeInfo());
                     }
                     old_info->ClearDirty(req.CommitTs());
@@ -915,6 +1061,8 @@ public:
             !is_coordinator)
         {
             // add new range entry to range cc map
+            auto bucket_map = static_cast<RangeBucketCcMap *>(
+                shard_->GetCcm(range_bucket_ccm_name, this->cc_ng_id_));
             for (uint idx = 0; idx < new_range_infos.size(); idx++)
             {
                 auto new_range_info = new_range_infos.at(idx);
@@ -930,7 +1078,11 @@ public:
                 }
                 cce->commit_ts_ = new_range_info->version_ts_;
                 cce->payload_ = std::make_shared<RangeRecord>();
-                cce->payload_.get()->range_info_ = new_range_info;
+                cce->payload_->range_info_ = new_range_info;
+                // Link bucket owner record
+                cce->payload_->range_owner_rec_ =
+                    bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
+                        new_range_info->PartitionId()));
 
                 // update previous cce's end key
                 it--;
@@ -990,6 +1142,20 @@ public:
             // locks. So, the acquire operation should always succeed.
             assert(lock_pair.first == LockType::WriteLock &&
                    lock_pair.second == CcErrorCode::NO_ERROR);
+
+            // Register the range owner bucket for the new ranges
+            auto bucket_map = static_cast<RangeBucketCcMap *>(
+                shard_->GetCcm(range_bucket_ccm_name, this->cc_ng_id_));
+            auto new_range_owner_rec =
+                std::make_unique<std::vector<LruEntry *>>();
+            for (int32_t new_id : new_range_ids)
+            {
+                // Link bucket owner record
+                new_range_owner_rec->push_back(bucket_map->GetBucketRecord(
+                    Sharder::MapRangeIdToBucketId(new_id)));
+            }
+            old_range_cce->payload_->SetNewRangeOwnerRec(
+                std::move(new_range_owner_rec));
         }
 
         // Move to next core

@@ -24,6 +24,7 @@
 #include "meter.h"
 #include "metrics.h"
 #include "moodycamelqueue.h"
+#include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "range_slice.h"
 #include "sharder.h"
@@ -421,7 +422,7 @@ public:
                                               const NodeGroupId ng_id,
                                               int32_t range_id);
 
-    const TableRangeEntry *GetTableRangeEntryNonLocking(
+    const TableRangeEntry *GetTableRangeEntryNoLocking(
         const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
 
     uint64_t CountRanges(const TableName &table_name,
@@ -453,6 +454,16 @@ public:
                                         NodeGroupId ng_id);
 
     void CleanTableStatistics(const TableName &table_name);
+
+    void DropBucketInfo(NodeGroupId ng_id);
+
+    const BucketInfo *GetBucketInfo(uint16_t bucket_id,
+                                    NodeGroupId ng_id) const;
+
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+        *GetAllBucketInfos(NodeGroupId ng_id) const;
+
+    const BucketInfo *GetRangeOwner(int32_t range_id, NodeGroupId ng_id) const;
 
     /**
      * @brief Fetches the table's catalog from the data store and

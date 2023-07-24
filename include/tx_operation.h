@@ -361,6 +361,7 @@ struct ScanState
               const TxKey *end_key,
               bool end_inclusive,
               uint32_t range_id,
+              NodeGroupId range_owner,
               const TxKey *last_key,
               bool inclusive,
               SlicePosition position)
@@ -368,6 +369,7 @@ struct ScanState
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
+          range_owner_(range_owner),
           slice_last_key_ptr_(last_key),
           is_key_owner_(false),
           inclusive_(inclusive),
@@ -379,6 +381,7 @@ struct ScanState
               const TxKey *end_key,
               bool end_inclusive,
               uint32_t range_id,
+              NodeGroupId range_owner,
               std::unique_ptr<TxKey> last_key,
               bool inclusive,
               SlicePosition position)
@@ -386,6 +389,7 @@ struct ScanState
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
+          range_owner_(range_owner),
           slice_last_key_uptr_(std::move(last_key)),
           is_key_owner_(true),
           inclusive_(inclusive),
@@ -417,6 +421,7 @@ struct ScanState
     }
 
     uint32_t range_id_;
+    NodeGroupId range_owner_;
     union
     {
         const TxKey *slice_last_key_ptr_;

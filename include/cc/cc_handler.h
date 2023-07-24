@@ -314,6 +314,7 @@ public:
     virtual void ScanNextBatch(
         const TableName &tbl_name,
         uint32_t range_id,
+        NodeGroupId range_owner,
         int64_t cc_ng_term,
         const TxKey *start_key,
         bool start_inclusive,

@@ -500,17 +500,22 @@ void LockWriteRangesOp::Advance()
         next_range_start = table_write_set.lower_bound(range_end_key);
     }
 
-    uint32_t range_id = range_rec_.GetRangeInfo()->PartitionId();
+    NodeGroupId range_owner =
+        static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+            range_rec_.GetRangeOwnerRec())
+            ->payload_->GetBucketInfo()
+            ->BucketOwner();
     // Updates the sharding codes of the write-set keys belonging to this
     // range. The higher 22 bits represent the range ID.
-    int32_t new_range_id = -1;
+    NodeGroupId new_range_owner = UINT32_MAX;
     size_t new_range_idx = 0;
-    const RangeInfo *range_info = range_rec_.GetRangeInfo();
+
+    auto *range_info = range_rec_.GetRangeInfo();
     while (write_key_it_ != next_range_start)
     {
         WriteSetEntry &write_entry = write_key_it_->second;
         size_t hash = write_entry.key_->Hash();
-        write_entry.key_shard_code_ = (range_id << 10) | (hash & 0x3FF);
+        write_entry.key_shard_code_ = (range_owner << 10) | (hash & 0x3FF);
 
         // If range is splitting and the key will fall on a new range after
         // split is finished, register forward_key_shard_code_ to indicate
@@ -519,20 +524,17 @@ void LockWriteRangesOp::Advance()
                new_range_idx < range_info->NewKey()->size() &&
                !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
         {
-            new_range_id = range_info->NewPartitionId()->at(new_range_idx);
+            new_range_owner =
+                static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                    range_rec_.GetNewRangeOwnerRec()->at(new_range_idx))
+                    ->payload_->GetBucketInfo()
+                    ->BucketOwner();
             new_range_idx++;
         }
-        if (new_range_id > 0)
+        if (new_range_owner != UINT32_MAX && new_range_owner != range_owner)
         {
-            NodeGroupId orig_dest = Sharder::Instance().ShardToCcNodeGroup(
-                write_entry.key_shard_code_);
-            NodeGroupId forward_dest =
-                new_range_id % Sharder::Instance().NodeGroupCount();
-            if (orig_dest != forward_dest)
-            {
-                write_entry.forward_key_shard_code_ =
-                    (new_range_id << 10) | (hash & 0x3FF);
-            }
+            write_entry.forward_key_shard_code_ =
+                (new_range_owner << 10) | (hash & 0x3FF);
         }
         ++write_key_it_;
     }
@@ -1016,6 +1018,12 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 scan_state_->range_cce_addr_ = read_res.cce_addr_;
                 scan_state_->range_id_ =
                     range_rec_.GetRangeInfo()->PartitionId();
+                scan_state_->range_owner_ =
+                    static_cast<
+                        const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                        range_rec_.GetRangeOwnerRec())
+                        ->payload_->GetBucketInfo()
+                        ->BucketOwner();
                 txm->Process(*this);
                 return;
             }
@@ -2606,8 +2614,8 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       clean_log_op_(txm),
       release_catalog_read_lock_op_(txm)
 {
-    range_record_ =
-        std::make_unique<RangeRecord>(&range_info_, nullptr, old_end_key);
+    range_record_ = std::make_unique<RangeRecord>(
+        &range_info_, nullptr, old_end_key, nullptr);
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
@@ -2686,8 +2694,8 @@ void SplitFlushRangeOp::Reset(
     range_info_ = *old_range_info;
     assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
 
-    range_record_ =
-        std::make_unique<RangeRecord>(&range_info_, nullptr, old_end_key);
+    range_record_ = std::make_unique<RangeRecord>(
+        &range_info_, nullptr, old_end_key, nullptr);
 
     old_end_key_ = old_end_key;
 
@@ -2955,7 +2963,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Install dirty range info on all node groups and downgrade to
         // write intent lock in next subop.
         install_new_range_op_.rec_ = range_record_.get();
-        range_record_->SetRangeInfo(range_info_.Clone());
+        range_record_->SetRangeInfo(&range_info_);
 
         LOG(INFO) << "Split Flush transaction install dirty range, range id "
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
@@ -2985,7 +2993,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                           "range, tx number "
                        << txm->TxNumber();
             install_new_range_op_.rec_ = range_record_.get();
-            range_record_->SetRangeInfo(range_info_.Clone());
+            range_record_->SetRangeInfo(&range_info_);
             RetrySubOperation(txm, &install_new_range_op_);
             return;
         }
@@ -3474,13 +3482,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // fall into the migrated new ranges should be kicked out no matter
         // what.
         kickout_old_range_data_op_.commit_ts_ = UINT64_MAX;
+        auto local_shards = Sharder::Instance().GetLocalCcShards();
         for (kickout_data_it_ = new_range_info_.cbegin();
              kickout_data_it_ != new_range_info_.cend();
              kickout_data_it_++)
         {
-            NodeGroupId new_ng_id =
-                kickout_data_it_->second % Sharder::Instance().NodeGroupCount();
-            if (new_ng_id != node_group_)
+            NodeGroupId new_owner =
+                local_shards
+                    ->GetRangeOwner(kickout_data_it_->second, node_group_)
+                    ->BucketOwner();
+            if (new_owner != node_group_)
             {
                 // Note that even if the new node group falls on the same node,
                 // we still need to clean the cc entry from native ccmap since
@@ -3514,7 +3525,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
             range_record_->end_key_ = old_end_key_;
-            range_record_->SetRangeInfo(range_info_.Clone());
+            range_record_->SetRangeInfo(&range_info_);
 
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_.PartitionId()
@@ -3544,11 +3555,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
         kickout_data_it_++;
+        auto local_shards = Sharder::Instance().GetLocalCcShards();
         for (; kickout_data_it_ != new_range_info_.cend(); kickout_data_it_++)
         {
-            NodeGroupId new_ng_id =
-                kickout_data_it_->second % Sharder::Instance().NodeGroupCount();
-            if (new_ng_id != node_group_)
+            NodeGroupId new_owner =
+                local_shards
+                    ->GetRangeOwner(kickout_data_it_->second, node_group_)
+                    ->BucketOwner();
+            if (new_owner != node_group_)
             {
                 kickout_old_range_data_op_.start_key_ =
                     kickout_data_it_->first.get();
@@ -3578,7 +3592,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
             range_record_->end_key_ = old_end_key_;
-            range_record_->SetRangeInfo(range_info_.Clone());
+            range_record_->SetRangeInfo(&range_info_);
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_.PartitionId()
                       << ", txn: " << txm->TxNumber();
@@ -3605,7 +3619,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
             range_record_->end_key_ = old_end_key_;
-            range_record_->SetRangeInfo(range_info_.Clone());
+            range_record_->SetRangeInfo(&range_info_);
             RetrySubOperation(txm, &post_all_lock_op_);
             return;
         }
@@ -3613,7 +3627,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Delete stale data from old partition
         ds_clean_old_range_op_.op_func_ =
             [partition_id = range_info_.partition_id_,
-             start_key = new_range_info_.begin()->first.get(),
+             start_key = new_range_info_.front().first.get(),
              &table_name = table_name_,
              table_schema = table_schema_,
              &hd_res = ds_clean_old_range_op_.hd_result_]

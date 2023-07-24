@@ -339,6 +339,25 @@ void CcNode::on_leader_start(int64_t term)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
 
+    if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
+    {
+        // We need to initialize range bucket info for new ng
+        // before replaying.
+        std::map<uint32_t, std::vector<std::string>> ng_ips;
+        std::map<uint32_t, std::vector<uint16_t>> ng_ports;
+        uint64_t version;
+        int32_t seed;
+        bool uninitialized;
+        // read ng config from kv store
+        while (!local_cc_shards_.store_hd_->ReadClusterConfig(
+            ng_ips, ng_ports, version, seed, uninitialized))
+        {
+            ng_ips.clear();
+            ng_ports.clear();
+            assert(!uninitialized);
+        }
+        local_cc_shards_.InitRangeBuckets(ng_id_, ng_ips, version, seed);
+    }
     replay_service_->ReplayLog(ng_id_, term);
 
     NotifyNewLeaderStart(ng_id_, node_id_);

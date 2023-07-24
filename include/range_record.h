@@ -19,7 +19,7 @@ namespace txservice
 // KV storage during table range initialization.
 struct InitRangeEntry
 {
-    InitRangeEntry() : key_(nullptr), partition_id_(-1), version_ts_(-1)
+    InitRangeEntry() : key_(nullptr), partition_id_(-1), version_ts_(0)
     {
     }
 
@@ -372,7 +372,6 @@ private:
     template <typename KeyT>
     friend class RangeCcMap;
 };
-
 struct RangeRecord : public TxRecord
 {
 public:
@@ -380,7 +379,8 @@ public:
         : range_info_{nullptr},
           is_info_owner_(false),
           range_slices_(nullptr),
-          end_key_(nullptr)
+          end_key_(nullptr),
+          range_owner_rec_(nullptr)
     {
     }
 
@@ -388,7 +388,8 @@ public:
         : range_info_(nullptr),
           is_info_owner_(rhs.is_info_owner_),
           range_slices_(rhs.range_slices_),
-          end_key_(rhs.end_key_)
+          end_key_(rhs.end_key_),
+          range_owner_rec_(rhs.range_owner_rec_)
     {
         if (rhs.is_info_owner_)
         {
@@ -399,25 +400,42 @@ public:
         {
             range_info_ = rhs.range_info_;
         }
+        // Copy new_range_owner_rec_
+        if (rhs.new_range_owner_rec_)
+        {
+            new_range_owner_rec_ = std::make_unique<std::vector<LruEntry *>>();
+            for (auto &entry : *rhs.new_range_owner_rec_)
+            {
+                new_range_owner_rec_->push_back(entry);
+            }
+        }
+        else
+        {
+            new_range_owner_rec_ = nullptr;
+        }
     }
 
     RangeRecord(const RangeInfo *info,
                 const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                const TxKey *end_key)
+                const TxKey *end_key,
+                LruEntry *range_owner)
         : range_info_(info),
           is_info_owner_(false),
           range_slices_(slices),
-          end_key_(end_key)
+          end_key_(end_key),
+          range_owner_rec_(range_owner)
     {
     }
 
     RangeRecord(std::unique_ptr<RangeInfo> info,
                 const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                const TxKey *end_key)
+                const TxKey *end_key,
+                LruEntry *range_owner)
         : range_info_uptr_(std::move(info)),
           is_info_owner_(true),
           range_slices_(slices),
-          end_key_(end_key)
+          end_key_(end_key),
+          range_owner_rec_(range_owner)
     {
     }
 
@@ -575,6 +593,25 @@ public:
 
         range_slices_ = rhs.range_slices_;
         end_key_ = rhs.end_key_;
+        range_owner_rec_ = rhs.range_owner_rec_;
+
+        // Copy new_range_owner_rec_
+        if (new_range_owner_rec_)
+        {
+            new_range_owner_rec_.release();
+        }
+        if (rhs.new_range_owner_rec_)
+        {
+            new_range_owner_rec_ = std::make_unique<std::vector<LruEntry *>>();
+            for (auto &entry : *rhs.new_range_owner_rec_)
+            {
+                new_range_owner_rec_->push_back(entry);
+            }
+        }
+        else
+        {
+            new_range_owner_rec_ = nullptr;
+        }
         return *this;
     }
 
@@ -603,9 +640,29 @@ public:
         range_info_ = range_info;
     }
 
+    LruEntry *GetRangeOwnerRec() const
+    {
+        return range_owner_rec_;
+    }
+
+    std::vector<LruEntry *> *GetNewRangeOwnerRec()
+    {
+        return new_range_owner_rec_.get();
+    }
+
+    void SetNewRangeOwnerRec(
+        std::unique_ptr<std::vector<LruEntry *>> new_range_rec)
+    {
+        if (new_range_owner_rec_)
+        {
+            new_range_owner_rec_.release();
+        }
+        new_range_owner_rec_ = std::move(new_range_rec);
+    }
+
     size_t Size() const override
     {
-        return 8 + 8 + 8 + 1;
+        return 5 * 8 + 1;
     }
 
     size_t MemUsage() const override
@@ -638,5 +695,16 @@ public:
      *
      */
     const TxKey *end_key_{nullptr};
+
+    /**
+     * @brief The bucket record that owns this range.
+     */
+    LruEntry *range_owner_rec_{nullptr};
+
+    /**
+     * @brief The bucket record for new splitted ranges. This is only used
+     * during range split, and reset back to nullptr once range split is done.
+     */
+    std::unique_ptr<std::vector<LruEntry *>> new_range_owner_rec_{nullptr};
 };
 }  // namespace txservice

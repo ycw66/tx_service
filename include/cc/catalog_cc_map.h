@@ -551,7 +551,7 @@ public:
                 {
                     size_t tbl_name_hash =
                         std::hash<std::string_view>()(table_name_view);
-                    init_partition_id = tbl_name_hash & 0x3FF;
+                    init_partition_id = tbl_name_hash & 0xFFF;
                 }
 
                 // Use nullptr to represent negative infinity key here.
@@ -572,7 +572,7 @@ public:
 
                     size_t tbl_name_hash =
                         std::hash<std::string_view>()(index_name.StringView());
-                    init_partition_id = tbl_name_hash & 0x3FF;
+                    init_partition_id = tbl_name_hash & 0xFFF;
                     range_init_vec.clear();
                     range_init_vec.emplace_back(
                         nullptr, init_partition_id, req.CommitTs());

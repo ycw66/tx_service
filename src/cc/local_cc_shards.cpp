@@ -1,5 +1,6 @@
 #include "cc/local_cc_shards.h"
 
+#include "range_bucket_key_record.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_service.h"
@@ -9,16 +10,20 @@ namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 
-LocalCcShards::LocalCcShards(uint32_t node_id,
-                             uint16_t core_cnt,
-                             uint32_t memory_limit_mb,
-                             uint32_t log_limit_mb,
-                             bool realtime_sampling,
-                             CatalogFactory *catalog_factory,
-                             store::DataStoreHandler *store_hd,
-                             metrics::MetricsRegistry *metrics_registry,
-                             TxService *tx_service,
-                             bool enable_mvcc)
+LocalCcShards::LocalCcShards(
+    uint32_t node_id,
+    uint16_t core_cnt,
+    uint32_t memory_limit_mb,
+    uint32_t log_limit_mb,
+    bool realtime_sampling,
+    CatalogFactory *catalog_factory,
+    std::map<uint32_t, std::vector<std::string>> *ng_ips,
+    int32_t range_bucket_seed,
+    uint64_t cluster_config_version,
+    store::DataStoreHandler *store_hd,
+    metrics::MetricsRegistry *metrics_registry,
+    TxService *tx_service,
+    bool enable_mvcc)
     : store_hd_(store_hd),
       metrics_registry_(metrics_registry),
       node_id_(node_id),
@@ -42,6 +47,9 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
     ts_base_.store(ts_base);
     local_clock.store(ts_base);
     timer_thd_ = std::thread([this] { TimerRun(); });
+
+    InitRangeBuckets(
+        node_id, *ng_ips, cluster_config_version, range_bucket_seed);
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
@@ -76,21 +84,28 @@ LocalCcShards::LocalCcShards(uint32_t node_id,
     }
 }
 
-LocalCcShards::LocalCcShards(uint32_t node_id,
-                             uint16_t core_cnt,
-                             uint32_t memory_limit_mb,
-                             uint32_t log_limit_mb,
-                             bool realtime_sampling,
-                             CatalogFactory *catalog_factory,
-                             store::DataStoreHandler *store_hd,
-                             TxService *tx_service,
-                             bool enable_mvcc)
+LocalCcShards::LocalCcShards(
+    uint32_t node_id,
+    uint16_t core_cnt,
+    uint32_t memory_limit_mb,
+    uint32_t log_limit_mb,
+    bool realtime_sampling,
+    CatalogFactory *catalog_factory,
+    std::map<uint32_t, std::vector<std::string>> *ng_ips,
+    int32_t range_bucket_seed,
+    uint64_t cluster_config_version,
+    store::DataStoreHandler *store_hd,
+    TxService *tx_service,
+    bool enable_mvcc)
     : LocalCcShards(node_id,
                     core_cnt,
                     memory_limit_mb,
                     log_limit_mb,
                     realtime_sampling,
                     catalog_factory,
+                    ng_ips,
+                    range_bucket_seed,
+                    cluster_config_version,
                     store_hd,
                     nullptr,
                     tx_service,
@@ -461,14 +476,21 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         }
 
         std::unique_ptr<StoreRange> range_slices = nullptr;
-        if (ng_id ==
-            range_entry.partition_id_ % Sharder::Instance().NodeGroupCount())
+        // Record ranges loaded into memory in bucket info map. This way we
+        // don't need to scan all range cc maps when migrating buckets.
+        auto bucket_info =
+            GetRangeOwnerInternal(range_entry.partition_id_, ng_id);
+        auto res_pair =
+            bucket_info->RangesInBucket().try_emplace(range_table_name);
+        res_pair.first->second.emplace(range_entry.partition_id_);
+        if (ng_id == bucket_info->BucketOwner())
         {
             InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
             range_slices =
                 std::make_unique<StoreRange>(range_start_key,
                                              next_range_entry.key_.get(),
                                              range_entry.partition_id_,
+                                             bucket_info->BucketOwner(),
                                              *this);
             range_slices->InitSlices(range_entry.slice_keys_, fully_cached);
         }
@@ -491,11 +513,18 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         range_start_key = last_range_entry.key_.get();
     }
     std::unique_ptr<StoreRange> range_slices = nullptr;
-    if (ng_id ==
-        last_range_entry.partition_id_ % Sharder::Instance().NodeGroupCount())
+    auto bucket_info =
+        GetRangeOwnerInternal(last_range_entry.partition_id_, ng_id);
+    auto res_pair = bucket_info->RangesInBucket().try_emplace(range_table_name);
+    res_pair.first->second.emplace(last_range_entry.partition_id_);
+    if (ng_id == bucket_info->BucketOwner())
     {
-        range_slices = std::make_unique<StoreRange>(
-            range_start_key, nullptr, last_range_entry.partition_id_, *this);
+        range_slices =
+            std::make_unique<StoreRange>(range_start_key,
+                                         nullptr,
+                                         last_range_entry.partition_id_,
+                                         bucket_info->BucketOwner(),
+                                         *this);
         range_slices->InitSlices(last_range_entry.slice_keys_, fully_cached);
     }
 
@@ -559,6 +588,14 @@ void LocalCcShards::CleanTableRange(const TableName &table_name,
     {
         id_table_it->second.erase(ng_id);
     }
+    auto buckets_it = bucket_infos_.find(ng_id);
+    if (buckets_it != bucket_infos_.end())
+    {
+        for (auto &bucket : buckets_it->second)
+        {
+            bucket.second->RangesInBucket().erase(table_name);
+        }
+    }
 }
 
 void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
@@ -609,7 +646,7 @@ const TableRangeEntry *LocalCcShards::GetTableRangeEntry(
     return GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
 }
 
-const TableRangeEntry *LocalCcShards::GetTableRangeEntryNonLocking(
+const TableRangeEntry *LocalCcShards::GetTableRangeEntryNoLocking(
     const TableName &table_name, const NodeGroupId ng_id, const TxKey *key)
 {
     TableName range_table_name(table_name.StringView(),
@@ -634,10 +671,12 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     std::unordered_map<uint32_t, TableRangeEntry *> *range_ids =
         GetTableRangeIdsForATableInternal(table_name, ng_id);
     std::unique_ptr<StoreRange> range_slices = nullptr;
-    if (ng_id == partition_id % Sharder::Instance().NodeGroupCount())
+    NodeGroupId range_owner =
+        GetRangeOwnerInternal(partition_id, ng_id)->BucketOwner();
+    if (ng_id == range_owner)
     {
         range_slices = std::make_unique<StoreRange>(
-            start_key.get(), end_key, partition_id, *this);
+            start_key.get(), end_key, partition_id, range_owner, *this);
         range_slices->InitSlices(*slice_keys);
     }
 
@@ -653,13 +692,14 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     {
         if (new_range_entry_pair.first->second.Version() > version)
         {
-            if (ng_id == partition_id % Sharder::Instance().NodeGroupCount())
+            if (ng_id == range_owner)
             {
                 range_slices = std::make_unique<StoreRange>(
                     new_range_entry_pair.first->second.GetRangeInfo()
                         ->StartKey(),
                     end_key,
                     partition_id,
+                    range_owner,
                     *this);
                 range_slices->InitSlices(*slice_keys);
             }
@@ -686,6 +726,12 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
         range_ids->try_emplace(partition_id,
                                &new_range_entry_pair.first->second);
     }
+
+    // Add new range to bucket info
+    auto bucket_info = GetRangeOwnerInternal(partition_id, ng_id);
+    assert(bucket_info->BucketOwner() == range_owner);
+    auto res_pair = bucket_info->RangesInBucket().try_emplace(table_name);
+    res_pair.first->second.insert(partition_id);
 
     return &new_range_entry_pair.first->second;
 }
@@ -839,12 +885,14 @@ uint64_t LocalCcShards::CountRangesLockless(const TableName &table_name,
         ranges.begin(),
         ranges.end(),
         0UL,
-        [key_ng_id](uint64_t a,
-                    const std::pair<const TxKey *const, TableRangeEntry> &b)
+        [key_ng_id, ng_id, this](
+            uint64_t a, const std::pair<const TxKey *const, TableRangeEntry> &b)
         {
-            int32_t partition_id = b.second.GetRangeInfo()->PartitionId();
-            uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-            if (partition_id % ng_cnt == key_ng_id)
+            NodeGroupId range_owner =
+                GetRangeOwnerInternal(b.second.GetRangeInfo()->PartitionId(),
+                                      ng_id)
+                    ->BucketOwner();
+            if (range_owner == key_ng_id)
             {
                 return a + 1;
             }
@@ -867,14 +915,17 @@ uint64_t LocalCcShards::CountSlices(const TableName &table_name,
            Sharder::Instance().CandidateLeaderTerm(local_ng_id) >= 0);
 
     uint64_t slices = 0;
-    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
 
     const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
         table_ranges_.at(range_table_name).at(ng_id);
 
     for (auto &[range_start_key, range_entry] : ranges)
     {
-        if (range_entry.GetRangeInfo()->PartitionId() % ng_cnt == local_ng_id)
+        NodeGroupId range_owner =
+            GetRangeOwnerInternal(range_entry.GetRangeInfo()->PartitionId(),
+                                  ng_id)
+                ->BucketOwner();
+        if (range_owner == local_ng_id)
         {
             const StoreRange *store_range = range_entry.RangeSlices();
             assert(store_range != nullptr);
@@ -1135,6 +1186,121 @@ void LocalCcShards::DropTableStatistics(NodeGroupId ng_id)
     {
         ng_statistics_it->second.erase(ng_id);
     }
+}
+
+const BucketInfo *LocalCcShards::GetBucketInfo(const uint16_t bucket_id,
+                                               const NodeGroupId ng_id) const
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+
+    return GetBucketInfoInternal(bucket_id, ng_id);
+}
+
+BucketInfo *LocalCcShards::GetBucketInfoInternal(const uint16_t bucket_id,
+                                                 const NodeGroupId ng_id) const
+{
+    assert(bucket_id < total_range_buckets);
+    auto ng_bucket_it = bucket_infos_.find(ng_id);
+    if (ng_bucket_it == bucket_infos_.end())
+    {
+        return nullptr;
+    }
+
+    return ng_bucket_it->second.at(bucket_id).get();
+}
+
+const BucketInfo *LocalCcShards::GetRangeOwner(const int32_t range_id,
+                                               const NodeGroupId ng_id) const
+{
+    return GetBucketInfo(Sharder::MapRangeIdToBucketId(range_id), ng_id);
+}
+
+const BucketInfo *LocalCcShards::GetRangeOwnerNoLocking(
+    const int32_t range_id, const NodeGroupId ng_id) const
+{
+    return GetBucketInfoInternal(Sharder::MapRangeIdToBucketId(range_id),
+                                 ng_id);
+}
+
+BucketInfo *LocalCcShards::GetRangeOwnerInternal(const int32_t range_id,
+                                                 const NodeGroupId ng_id) const
+{
+    return GetBucketInfoInternal(Sharder::MapRangeIdToBucketId(range_id),
+                                 ng_id);
+}
+
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    auto ng_bucket_it = bucket_infos_.find(ng_id);
+    if (ng_bucket_it == bucket_infos_.end())
+    {
+        return nullptr;
+    }
+    return &ng_bucket_it->second;
+}
+
+void LocalCcShards::DropBucketInfo(NodeGroupId ng_id)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    bucket_infos_.erase(ng_id);
+}
+
+bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    auto bucket_info = bucket_infos_.find(ng_id);
+    return bucket_info != bucket_infos_.end() &&
+           bucket_info->second.size() == total_range_buckets;
+}
+
+void LocalCcShards::InitRangeBuckets(
+    NodeGroupId ng_id,
+    std::map<uint32_t, std::vector<std::string>> &ng_ips,
+    uint64_t version,
+    int32_t seed)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    // Construct bucket info map on startup
+    // Generate 5 random numbers for each node group as virtual nodes on hashing
+    // ring. Each bucket id belongs to the first virtual node that is larger
+    // than the bucket id.
+    std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
+    std::map<uint16_t, NodeGroupId> rand_num_to_ng;
+    srand(seed);
+    for (auto ng_id : ng_ips)
+    {
+        size_t generated = 0;
+        while (generated < 5)
+        {
+            uint16_t rand_num = rand() % total_range_buckets;
+            if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
+            {
+                generated++;
+                rand_num_to_ng.emplace(rand_num, ng_id.first);
+            }
+        }
+    }
+
+    // Insert bucket ids into the map.
+    auto it = rand_num_to_ng.begin();
+    for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
+    {
+        // The buckets larger than the last random number belongs to the
+        // first virtual node on the ring.
+        if (it != rand_num_to_ng.end() && bucket_id >= it->first)
+        {
+            it++;
+        }
+        NodeGroupId ng_id = it == rand_num_to_ng.end()
+                                ? rand_num_to_ng.begin()->second
+                                : it->second;
+        ng_bucket_infos.try_emplace(
+            bucket_id, std::make_unique<BucketInfo>(ng_id, version));
+    }
+    auto res_pair = bucket_infos_.try_emplace(ng_id);
+    res_pair.first->second = std::move(ng_bucket_infos);
 }
 
 void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,

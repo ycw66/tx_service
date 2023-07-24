@@ -8,6 +8,7 @@
 #include "catalog_factory.h"
 #include "cc/cc_entry.h"
 #include "metrics.h"
+#include "range_record.h"
 #include "range_slice.h"
 #include "store/data_store_scanner.h"
 #include "tx_key.h"
@@ -61,15 +62,22 @@ public:
      * Initialize cluster config based on the based in ips and ports. This
      * should only be called during bootstrap.
      */
-    virtual bool InitializeClusterConfig(std::vector<std::string> &ips,
-                                         std::vector<uint16_t> &ports) = 0;
+    virtual bool InitializeClusterConfig(
+        std::vector<std::string> &ips,
+        std::vector<uint16_t> &ports,
+        std::map<uint32_t, std::vector<std::string>> &ng_ips,
+        std::map<uint32_t, std::vector<uint16_t>> &ng_ports,
+        int32_t &seed) = 0;
 
     /**
      * Read cluster config from kv store cluster config table.
      */
     virtual bool ReadClusterConfig(
         std::map<uint32_t, std::vector<std::string>> &ng_ips,
-        std::map<uint32_t, std::vector<uint16_t>> &ng_ports) = 0;
+        std::map<uint32_t, std::vector<uint16_t>> &ng_ports,
+        uint64_t &version,
+        int32_t &seed,
+        bool &uninitialized) = 0;
 
     /**
      * @brief flush entries in \@param batch to base table or skindex table in
