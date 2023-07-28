@@ -1106,7 +1106,7 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(
     return range_it == ng_it->second.end() ? nullptr : range_it->second;
 }
 
-std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
+std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     const TableName &table_name, NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1121,11 +1121,10 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
             catalog_factory_->CreateTableStatistics(table_name);
     }
 
-    return {statistics_it.first->second.statistics_.get(),
-            statistics_it.second};
+    return {statistics_it.first->second.statistics_, statistics_it.second};
 }
 
-std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
+std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     const TableName &table_name,
     const TableSchema *table_schema,
     NodeGroupId ng_id,
@@ -1145,8 +1144,7 @@ std::pair<Statistics *, bool> LocalCcShards::InitTableStatistics(
             table_name, table_schema, std::move(sample_pool_map), ccs, ng_id);
     }
 
-    return {statistics_it.first->second.statistics_.get(),
-            statistics_it.second};
+    return {statistics_it.first->second.statistics_, statistics_it.second};
 }
 
 StatisticsEntry *LocalCcShards::GetTableStatistics(const TableName &table_name,

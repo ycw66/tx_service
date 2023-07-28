@@ -87,7 +87,17 @@ public:
 
 struct StatisticsEntry
 {
-    std::unique_ptr<Statistics> statistics_{nullptr};
+    // The CcNode::on_leader_stop() method free memory after pinning_threads
+    // down to zero.
+    //
+    // To use cross-threads pointer safely, one can:
+    // (1) Protect that pointer with Sharder::TryPinNodeGroupData(). Once
+    // pinned, row pointer can be used directly.
+    // (2) Use a shared_pointer version of that pointer.
+    //
+    // Currently, sql threads choose method (1), and other threads choose
+    // methods (2).
+    std::shared_ptr<Statistics> statistics_{nullptr};
 };
 
 }  // namespace txservice

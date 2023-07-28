@@ -1235,29 +1235,42 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         // And if it was sent from a invalid leader, the valid leader will
         // overwrite it with correct sample pool later.
 
-        TableType table_type = ToLocalType::ConvertCcTableType(
-            msg->broadcast_statistics_req().table_type());
-        std::string table_name_str =
-            msg->broadcast_statistics_req().table_name_str();
+        NodeGroupId dest_ng_id = static_cast<NodeGroupId>(
+            msg->broadcast_statistics_req().node_group_id());
+        if (Sharder::Instance().LeaderNodeId(dest_ng_id) ==
+            Sharder::Instance().NodeId())
+        {
+            TableType table_type = ToLocalType::ConvertCcTableType(
+                msg->broadcast_statistics_req().table_type());
+            std::string table_name_str =
+                msg->broadcast_statistics_req().table_name_str();
 
-        TableName table_name(std::move(table_name_str), table_type);
-        uint64_t schema_version =
-            msg->broadcast_statistics_req().schema_version();
+            TableName table_name(std::move(table_name_str), table_type);
+            uint64_t schema_version =
+                msg->broadcast_statistics_req().schema_version();
 
-        remote::NodeGroupSamplePool remote_sample_pool =
-            msg->broadcast_statistics_req().node_group_sample_pool();
+            remote::NodeGroupSamplePool remote_sample_pool =
+                msg->broadcast_statistics_req().node_group_sample_pool();
 
-        Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-            [this,
-             table_name = std::move(table_name),
-             schema_version,
-             remote_sample_pool = std::move(remote_sample_pool)]() mutable
-            {
-                local_shards_.CreateRemoteStatisticsTx(
-                    std::move(table_name),
-                    schema_version,
-                    std::move(remote_sample_pool));
-            });
+            Sharder::Instance().GetTxWorkerPool()->SubmitWork(
+                [this,
+                 dest_ng_id,
+                 table_name = std::move(table_name),
+                 schema_version,
+                 remote_sample_pool = std::move(remote_sample_pool)]() mutable
+                {
+                    int64_t leader_term =
+                        Sharder::Instance().TryPinNodeGroupData(dest_ng_id);
+                    if (leader_term >= 0)
+                    {
+                        local_shards_.CreateRemoteStatisticsTx(
+                            std::move(table_name),
+                            schema_version,
+                            std::move(remote_sample_pool));
+                        Sharder::Instance().UnpinNodeGroupData(dest_ng_id);
+                    }
+                });
+        }
 
         msg_pool_.enqueue(std::move(msg));
         break;

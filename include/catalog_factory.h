@@ -43,8 +43,8 @@ struct TableSchema
     virtual size_t IndexesSize() const = 0;
     virtual const SecondaryKeySchema *IndexKeySchema(
         const TableName &index_name) const = 0;
-    virtual void BindStatistics(Statistics *statistics) = 0;
-    virtual Statistics *StatisticsObject() const = 0;
+    virtual void BindStatistics(std::shared_ptr<Statistics> statistics) = 0;
+    virtual std::shared_ptr<Statistics> StatisticsObject() const = 0;
 
     /**
      * Create TxCommand from serialized command image. Used when processing

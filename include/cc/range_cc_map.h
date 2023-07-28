@@ -420,16 +420,19 @@ public:
         // Initialize table statistics before split range.
         // If it is in recover range stage, the table statistics hasn't been
         // loaded yet.
-        TableName base_table_name(this->table_name_.GetBaseTableNameSV(),
-                                  TableType::Primary);
-        const StatisticsEntry *statistics_entry =
-            shard_->GetTableStatistics(base_table_name, this->cc_ng_id_);
-        if (statistics_entry == nullptr ||
-            statistics_entry->statistics_ == nullptr)
+        if (shard_->core_id_ == 0)
         {
-            shard_->FetchTableStatistics(
-                base_table_name, this->cc_ng_id_, &req);
-            return false;
+            TableName base_table_name(this->table_name_.GetBaseTableNameSV(),
+                                      TableType::Primary);
+            const StatisticsEntry *statistics_entry =
+                shard_->GetTableStatistics(base_table_name, this->cc_ng_id_);
+            if (statistics_entry == nullptr ||
+                statistics_entry->statistics_ == nullptr)
+            {
+                shard_->FetchTableStatistics(
+                    base_table_name, this->cc_ng_id_, &req);
+                return false;
+            }
         }
 #endif
 
@@ -1292,7 +1295,7 @@ private:
                                           : TableType::Secondary);
         TableStatistics<KeyT> *statistics =
             static_cast<TableStatistics<KeyT> *>(
-                table_schema_->StatisticsObject());
+                table_schema_->StatisticsObject().get());
 
         statistics->OnSplitSamplePool(
             shard_, this->cc_ng_id_, table_or_index_name, old_info);

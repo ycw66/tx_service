@@ -212,7 +212,7 @@ public:
                         else
                         {
                             catalog_entry->dirty_schema_->BindStatistics(
-                                statistics_entry->statistics_.get());
+                                statistics_entry->statistics_);
                         }
                     }
                     else
@@ -347,6 +347,46 @@ public:
         if (req.CommitType() == PostWriteType::PostCommit &&
             catalog_entry->DirtyVersion() > 0)
         {
+#ifndef ON_KEY_OBJECT
+            // TODO: Move table statistics recovering to other place.
+            // Initialize table statistics before split range.
+            // If it is in recover range stage, the table statistics hasn't been
+            // loaded yet.
+            if (catalog_entry->dirty_schema_)
+            {
+                if (catalog_entry->schema_)
+                {
+                    // ALTER TABLE statement
+                    const StatisticsEntry *statistics_entry =
+                        shard_->GetTableStatistics(table_key->Name(),
+                                                   cc_ng_id_);
+                    if (statistics_entry == nullptr ||
+                        statistics_entry->statistics_ == nullptr)
+                    {
+                        shard_->FetchTableStatistics(
+                            table_key->Name(), cc_ng_id_, &req);
+                        return false;
+                    }
+                    else
+                    {
+                        catalog_entry->dirty_schema_->BindStatistics(
+                            statistics_entry->statistics_);
+                    }
+                }
+                else
+                {
+                    assert(req.OpType() == OperationType::CreateTable);
+                    auto [statistics, inserted] = shard_->InitTableStatistics(
+                        table_key->Name(), cc_ng_id_);
+                    if (inserted)
+                    {
+                        catalog_entry->dirty_schema_->BindStatistics(
+                            statistics);
+                    }
+                }
+            }
+#endif
+
             if (new_schema == nullptr)
             {
                 // A remote tx is allowed to acquire write intents/locks and
@@ -605,7 +645,7 @@ public:
                                                     req.NodeGroupId());
 
                             Statistics *statistics =
-                                old_schema->StatisticsObject();
+                                old_schema->StatisticsObject().get();
                             statistics->DropIndex(old_index_name);
                         }
                     }
@@ -630,7 +670,8 @@ public:
                                   new_index_names.end(),
                                   old_index_name) == new_index_names.end())
                     {
-                        Statistics *statistics = old_schema->StatisticsObject();
+                        Statistics *statistics =
+                            old_schema->StatisticsObject().get();
                         statistics->DropIndex(old_index_name);
                     }
                 }

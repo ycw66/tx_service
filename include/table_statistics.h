@@ -121,6 +121,9 @@ public:
             insert_delete_counter_ += 1;
             sample_pool_.Delete(key);
 
+            units_ =
+                std::max(static_cast<uint64_t>(units_), sample_pool_.Size());
+
             if (insert_delete_counter_ > units_ / 10)
             {
                 on_mass_change_(table_schema, *this);

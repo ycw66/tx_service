@@ -91,11 +91,12 @@ public:
         return schema_image_;
     }
 
-    void BindStatistics(txservice::Statistics *statistics) override
+    void BindStatistics(
+        std::shared_ptr<txservice::Statistics> statistics) override
     {
     }
 
-    Statistics *StatisticsObject() const override
+    std::shared_ptr<Statistics> StatisticsObject() const override
     {
         return nullptr;
     }

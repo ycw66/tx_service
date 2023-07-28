@@ -837,13 +837,13 @@ uint64_t CcShard::CountSlices(const TableName &table_name,
     return local_shards_.CountSlices(table_name, ng_id, local_ng_id);
 }
 
-std::pair<Statistics *, bool> CcShard::InitTableStatistics(
+std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
     const TableName &table_name, NodeGroupId ng_id)
 {
     return local_shards_.InitTableStatistics(table_name, ng_id);
 }
 
-std::pair<Statistics *, bool> CcShard::InitTableStatistics(
+std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
     const TableName &table_name,
     const TableSchema *table_schema,
     NodeGroupId ng_id,

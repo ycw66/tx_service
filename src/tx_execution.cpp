@@ -308,10 +308,13 @@ void TransactionExecution::RemoteStatisticsTx(
     TxErrorCode err = TxReadCatalog(this, read_req, exists);
     if (err == TxErrorCode::NO_ERROR && exists)
     {
+        // It is safe to use raw pointer to TableSchema and Statistics, because
+        // they have been protected by Sharder::TryPinNodeGroupData in
+        // CcStreamReceiver/BroadcastStatisticsRequest.
         const TableSchema *table_schema = catalog_rec.Schema();
         if (table_schema->Version() == schema_version)
         {
-            Statistics *statistics = table_schema->StatisticsObject();
+            Statistics *statistics = table_schema->StatisticsObject().get();
             statistics->OnRemoteStatisticsMessage(
                 table_or_index_name, table_schema, remote_sample_pool);
         }

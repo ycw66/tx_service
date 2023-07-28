@@ -77,7 +77,7 @@ public:
         {
             TableStatistics<KeyT> *statistics =
                 static_cast<TableStatistics<KeyT> *>(
-                    table_schema->StatisticsObject());
+                    table_schema->StatisticsObject().get());
             assert(statistics != nullptr);
             if (Statistics::CoreDoSample(table_name) == shard->core_id_)
             {
@@ -666,7 +666,7 @@ public:
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
 
-                if (shard_->realtime_sampling_ && sample_pool_ && !is_forward)
+                if (shard_->realtime_sampling_ && sample_pool_)
                 {
                     if (op_type == OperationType::Insert)
                     {

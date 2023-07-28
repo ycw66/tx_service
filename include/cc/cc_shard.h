@@ -439,10 +439,10 @@ public:
 
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
-    std::pair<Statistics *, bool> InitTableStatistics(
+    std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
         const TableName &table_name, NodeGroupId ng_id);
 
-    std::pair<Statistics *, bool> InitTableStatistics(
+    std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
         const TableName &table_name,
         const TableSchema *table_schema,
         NodeGroupId ng_id,
