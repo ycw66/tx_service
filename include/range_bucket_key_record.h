@@ -3,7 +3,6 @@
 #include <map>
 #include <unordered_set>
 
-#include "range_record.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"

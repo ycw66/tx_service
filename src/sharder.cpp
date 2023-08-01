@@ -21,8 +21,7 @@ namespace GFLAGS_NAMESPACE = gflags;
 namespace txservice
 {
 Sharder::Sharder(uint32_t node_id,
-                 const std::map<uint32_t, std::vector<std::string>> *ng_ips,
-                 const std::map<uint32_t, std::vector<uint16_t>> *ng_ports,
+                 const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
                  const std::vector<std::string> *txlog_ips,
                  const std::vector<uint16_t> *txlog_ports,
                  LocalCcShards &local_shards,
@@ -38,23 +37,17 @@ Sharder::Sharder(uint32_t node_id,
       local_shards_(local_shards),
       log_agent_(std::move(log_agent))
 {
-    if (ng_ips != nullptr)
+    if (ng_configs != nullptr)
     {
-        for (auto &pair : *ng_ips)
+        for (auto &pair : *ng_configs)
         {
             ng_leader_cache_.try_emplace(pair.first, pair.first);
-            std::vector<std::string> group_ips;
-            for (auto &ip : pair.second)
+            std::vector<NodeConfig> group_config;
+            for (auto &config : pair.second)
             {
-                group_ips.push_back(ip);
+                group_config.emplace_back(config);
             }
-            ng_ips_.try_emplace(pair.first, std::move(group_ips));
-            std::vector<uint16_t> group_ports;
-            for (auto &port : ng_ports->at(pair.first))
-            {
-                group_ports.push_back(port);
-            }
-            ng_ports_.try_emplace(pair.first, std::move(group_ports));
+            ng_configs_.try_emplace(pair.first, std::move(group_config));
         }
     }
     else
@@ -80,7 +73,7 @@ void Sharder::Shutdown()
 {
     LOG(INFO) << "Shutting down the sharder at node #" << node_id_;
 
-    if (ng_ips_.size() > 1)
+    if (ng_configs_.size() > 1)
     {
         cc_stream_sender_ = nullptr;
 
@@ -136,10 +129,10 @@ void Sharder::CloseBraft()
 
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
-    assert(node_id < ng_ips_.size());
+    assert(node_id < ng_configs_.size());
 
-    ip = ng_ips_.at(node_id).front();
-    port = ng_ports_.at(node_id).front();
+    ip = ng_configs_.at(node_id).front().host_name_;
+    port = ng_configs_.at(node_id).front().port_;
 }
 
 int Sharder::Init(const std::string &path)
@@ -148,8 +141,8 @@ int Sharder::Init(const std::string &path)
     log_replay_service_ = std::make_unique<fault::ReplayService>(
         local_shards_,
         GetLogAgent(),
-        ng_ips_.at(node_id_).front(),
-        GET_LOG_REPLAY_RPC_PORT(ng_ports_.at(node_id_).front()));
+        ng_configs_.at(node_id_).front().host_name_,
+        GET_LOG_REPLAY_RPC_PORT(ng_configs_.at(node_id_).front().port_));
     if (log_replay_server_.AddService(log_replay_service_.get(),
                                       brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
@@ -158,12 +151,11 @@ int Sharder::Init(const std::string &path)
         return -1;
     }
 
-    for (uint32_t ng_id = 0; ng_id < ng_ips_.size(); ++ng_id)
+    for (uint32_t ng_id = 0; ng_id < ng_configs_.size(); ++ng_id)
     {
-        for (size_t idx = 0; idx < ng_ips_.at(ng_id).size(); ++idx)
+        for (size_t idx = 0; idx < ng_configs_.at(ng_id).size(); ++idx)
         {
-            if (ng_ips_.at(ng_id).at(idx) == ng_ips_.at(node_id_).front() &&
-                ng_ports_.at(ng_id).at(idx) == ng_ports_.at(node_id_).front())
+            if (ng_configs_.at(ng_id).at(idx).node_id_ == node_id_)
             {
                 std::string store_path(path);
                 store_path.append("/cc_ng/");
@@ -171,29 +163,32 @@ int Sharder::Init(const std::string &path)
 
                 // Use cc node port + 1 for cc node raft port
                 std::vector<uint16_t> group_ports;
-                for (auto &port : ng_ports_.at(ng_id))
+                std::vector<std::string> group_ips;
+                for (auto &config : ng_configs_.at(ng_id))
                 {
-                    group_ports.emplace_back(port + 1);
+                    group_ports.emplace_back(config.port_ + 1);
+                    group_ips.emplace_back(config.host_name_);
                 }
-                cc_nodes_.try_emplace(ng_id,
-                                      std::make_unique<fault::CcNode>(
-                                          ng_id,
-                                          node_id_,
-                                          ng_ips_.at(node_id_).front(),
-                                          ng_ports_.at(node_id_).front() + 1,
-                                          ng_ips_.at(ng_id),
-                                          group_ports,
-                                          store_path,
-                                          local_shards_,
-                                          log_replay_service_.get(),
-                                          log_agent_->LogGroupCount()));
+                cc_nodes_.try_emplace(
+                    ng_id,
+                    std::make_unique<fault::CcNode>(
+                        ng_id,
+                        node_id_,
+                        ng_configs_.at(node_id_).front().host_name_,
+                        ng_configs_.at(node_id_).front().port_ + 1,
+                        group_ips,
+                        group_ports,
+                        store_path,
+                        local_shards_,
+                        log_replay_service_.get(),
+                        log_agent_->LogGroupCount()));
             }
         }
     }
 
     cc_nodes_init_.store(true, std::memory_order_release);
 
-    if (ng_ips_.size() > 1)
+    if (ng_configs_.size() > 1)
     {
         cc_stream_receiver_ = std::make_unique<remote::CcStreamReceiver>(
             local_shards_, msg_pool_);
@@ -205,29 +200,30 @@ int Sharder::Init(const std::string &path)
             return -1;
         }
 
-        if (cc_stream_server_.Start(ng_ports_.at(node_id_).front(), NULL) != 0)
+        if (cc_stream_server_.Start(ng_configs_.at(node_id_).front().port_,
+                                    NULL) != 0)
         {
             LOG(FATAL) << "Fail to start the cc stream server.";
             return -1;
         }
 
         cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
-        for (auto &pair : ng_ips_)
+        for (auto &pair : ng_configs_)
         {
             // Build a stream to every node even to ourselves because the
             // current node can become leader of multiple node groups during
             // failover. In that case we might need to handle remote requests
             // sent from the same node but from different node group.
             cc_stream_sender_->AddRemoteNode(pair.first,
-                                             pair.second.front(),
-                                             ng_ports_.at(pair.first).front());
+                                             pair.second.front().host_name_,
+                                             pair.second.front().port_);
         }
     }
 
     // Initializes the Raft service that listens on the port of local_port + 1.
     if (braft::add_service(
             &cc_node_server_,
-            GET_CCNODE_RPC_PORT(ng_ports_.at(node_id_).front())) != 0)
+            GET_CCNODE_RPC_PORT(ng_configs_.at(node_id_).front().port_)) != 0)
     {
         LOG(ERROR) << "Fail to add the Raft service for cc nodes.";
         return -1;
@@ -244,7 +240,8 @@ int Sharder::Init(const std::string &path)
     }
 
     if (cc_node_server_.Start(
-            GET_CCNODE_RPC_PORT(ng_ports_.at(node_id_).front()), NULL) != 0)
+            GET_CCNODE_RPC_PORT(ng_configs_.at(node_id_).front().port_),
+            NULL) != 0)
     {
         LOG(FATAL) << "Fail to start the cc node server.";
         return -1;
@@ -261,8 +258,8 @@ int Sharder::Init(const std::string &path)
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
     if (log_replay_server_.Start(
-            GET_LOG_REPLAY_RPC_PORT(ng_ports_.at(node_id_).front()), nullptr) !=
-        0)
+            GET_LOG_REPLAY_RPC_PORT(ng_configs_.at(node_id_).front().port_),
+            nullptr) != 0)
     {
         LOG(FATAL) << "Fail to start the log replay server.";
         return -1;
@@ -357,11 +354,10 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
     uint16_t leader_port = leader.addr.port;
 
-    for (auto &pair : ng_ips_)
+    for (auto &pair : ng_configs_)
     {
-        if (pair.second.front() == leader_ip_str &&
-            GET_CCNODE_RPC_PORT(ng_ports_.at(pair.first).front()) ==
-                leader_port)
+        if (pair.second.front().host_name_ == leader_ip_str &&
+            GET_CCNODE_RPC_PORT(pair.second.front().port_) == leader_port)
         {
             ng_leader_cache_.at(ng_id).store(pair.first,
                                              std::memory_order_release);
@@ -401,7 +397,7 @@ void Sharder::WaitClusterReady()
     while (true)
     {
         bool recovery_all_finished = true;
-        for (auto &pair : ng_ips_)
+        for (auto &pair : ng_configs_)
         {
             uint32_t ng_id = pair.first;
             if (recovered_leader_set.find(ng_id) == recovered_leader_set.end())
@@ -465,7 +461,7 @@ void Sharder::RecoverTx(uint64_t lock_tx_number,
 
 void Sharder::ConfigRouteTable()
 {
-    for (auto &pair : ng_ips_)
+    for (auto &pair : ng_configs_)
     {
         uint32_t ng_id = pair.first;
         std::string group_id("ng");
@@ -479,9 +475,9 @@ void Sharder::ConfigRouteTable()
                 group_conf.append(",");
             }
 
-            group_conf.append(pair.second.at(idx));
+            group_conf.append(pair.second.at(idx).host_name_);
             group_conf.append(":");
-            group_conf.append(std::to_string(ng_ports_.at(ng_id).at(idx) + 1));
+            group_conf.append(std::to_string(pair.second.at(idx).port_ + 1));
             group_conf.append(":");
             group_conf.append(std::to_string(idx));
         }
@@ -577,5 +573,190 @@ void Sharder::SetCommandLineOptions()
 size_t Sharder::GetLocalCcShardsCount()
 {
     return local_shards_.Count();
+}
+
+std::map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
+    std::vector<std::pair<std::string, uint16_t>> &new_nodes)
+{
+    // Make a copy of the current ng configs.
+    std::map<uint32_t, std::vector<NodeConfig>> new_ng_configs;
+    for (auto &pair : ng_configs_)
+    {
+        std::vector<NodeConfig> members;
+        for (auto &node : pair.second)
+        {
+            members.push_back(node);
+        }
+        new_ng_configs.try_emplace(pair.first, std::move(members));
+    }
+
+    uint32_t rep_group_cnt =
+        fault::CcNode::rep_group_cnt < new_nodes.size() + ng_configs_.size()
+            ? fault::CcNode::rep_group_cnt
+            : new_nodes.size() + ng_configs_.size();
+    // Add a new node group for each new added node, and assign the nodes
+    // that are in least number of node groups as the member of new node
+    // groups.
+    for (auto &node : new_nodes)
+    {
+        NodeGroupId new_ng_id = new_ng_configs.size();
+        // Add this node to the new node group as the preferred leader.
+        std::vector<NodeConfig> members{
+            NodeConfig(new_ng_id, node.first, node.second)};
+        new_ng_configs.try_emplace(new_ng_id, std::move(members));
+    }
+
+    // Loop over current ng configs, and build a map from node id
+    // to the number of node groups this node is in.
+    std::map<uint32_t, int> node_ng_count;
+    for (auto &pair : new_ng_configs)
+    {
+        for (auto &node : pair.second)
+        {
+            auto res_pair = node_ng_count.try_emplace(node.node_id_, 0);
+            res_pair.first->second++;
+        }
+    }
+
+    // Rebalance the members in each node groups.
+    // Make sure each ng has at least rep_group_cnt members.
+    for (auto &config_pair : new_ng_configs)
+    {
+        // Find members for this new node group.
+        std::vector<NodeConfig> &members = config_pair.second;
+        while (members.size() < rep_group_cnt)
+        {
+            int least_node_id = -1;
+            int least_node_ng_count = INT32_MAX;
+            // Find the node with the least number of node groups.
+            for (auto &[node_id, ng_count] : node_ng_count)
+            {
+                if (ng_count < least_node_ng_count)
+                {
+                    // check if this node is already in this node group.
+                    bool skip = false;
+                    for (auto &node : members)
+                    {
+                        if (node.node_id_ == node_id)
+                        {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    if (!skip)
+                    {
+                        least_node_id = node_id;
+                        least_node_ng_count = ng_count;
+                    }
+                }
+            }
+            assert(least_node_id != -1);
+            members.emplace_back(new_ng_configs[least_node_id].front());
+            node_ng_count[least_node_id]++;
+        }
+    }
+
+    return new_ng_configs;
+}
+
+std::map<uint32_t, std::vector<NodeConfig>> Sharder::RemoveNodeFromCluster(
+    uint16_t removed_node_count,
+    std::vector<std::pair<std::string, uint16_t>> &removed_nodes)
+{
+    // Make a copy of the current ng configs.
+    std::map<uint32_t, std::vector<NodeConfig>> new_ng_configs;
+    for (auto &pair : ng_configs_)
+    {
+        std::vector<NodeConfig> members;
+        for (auto &node : pair.second)
+        {
+            members.push_back(node);
+        }
+        new_ng_configs.try_emplace(pair.first, std::move(members));
+    }
+
+    uint32_t rep_group_cnt =
+        fault::CcNode::rep_group_cnt < ng_configs_.size() - removed_node_count
+            ? fault::CcNode::rep_group_cnt
+            : ng_configs_.size() - removed_node_count;
+    assert(rep_group_cnt > 0);
+    // Remove the nodes with greatest node id.
+    NodeGroupId largest_node_id = new_ng_configs.size() - 1;
+    for (int i = 0; i < removed_node_count; i++)
+    {
+        // Remove the node groups where these nodes are preferred leader.
+        removed_nodes.emplace_back(
+            new_ng_configs[largest_node_id].front().host_name_,
+            new_ng_configs[largest_node_id].front().port_);
+        new_ng_configs.erase(largest_node_id);
+        largest_node_id--;
+    }
+    for (auto &ng_config : new_ng_configs)
+    {
+        // Remove these nodes from other node groups where they are members.
+        for (auto member_it = std::next(ng_config.second.begin());
+             member_it != ng_config.second.end();)
+        {
+            if (member_it->node_id_ > largest_node_id)
+            {
+                member_it = ng_config.second.erase(member_it);
+            }
+            else
+            {
+                member_it++;
+            }
+        }
+    }
+    // Loop over current ng configs, and build a map from node id
+    // to the number of node groups this node is in.
+    std::map<uint32_t, int> node_ng_count;
+    for (auto &pair : new_ng_configs)
+    {
+        for (auto &node : pair.second)
+        {
+            auto res_pair = node_ng_count.try_emplace(node.node_id_, 0);
+            res_pair.first->second++;
+        }
+    }
+
+    // Rebalance the members in each node groups.
+    // Make sure each ng has at least rep_group_cnt members.
+    for (auto &config_pair : new_ng_configs)
+    {
+        // Find members for this new node group.
+        std::vector<NodeConfig> &members = config_pair.second;
+        while (members.size() < rep_group_cnt)
+        {
+            int least_node_id = -1;
+            int least_node_ng_count = INT32_MAX;
+            // Find the node with the least number of node groups.
+            for (auto &[node_id, ng_count] : node_ng_count)
+            {
+                if (ng_count < least_node_ng_count)
+                {
+                    // check if this node is already in this node group.
+                    bool skip = false;
+                    for (auto &node : members)
+                    {
+                        if (node.node_id_ == node_id)
+                        {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    if (!skip)
+                    {
+                        least_node_id = node_id;
+                        least_node_ng_count = ng_count;
+                    }
+                }
+            }
+            assert(least_node_id != -1);
+            members.emplace_back(new_ng_configs[least_node_id].front());
+            node_ng_count[least_node_id]++;
+        }
+    }
+
+    return new_ng_configs;
 }
 }  // namespace txservice

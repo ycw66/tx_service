@@ -235,7 +235,7 @@ public:
                             req.NodeGroupId(),
                             shard_->LocalCoreId());
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
-            *range_rec = *(floor_cce->payload_);
+            range_rec->CopyForReadResult(*(floor_cce->payload_));
             hd_result->Value().ts_ = floor_cce->commit_ts_;
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
@@ -319,6 +319,7 @@ public:
             auto bucket_cce =
                 static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                     floor_cce->payload_->range_owner_rec_);
+            assert(bucket_cce != nullptr);
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(bucket_cce,
                                   bucket_cce->payload_status_,
@@ -342,7 +343,7 @@ public:
                             req.NodeGroupId(),
                             shard_->LocalCoreId());
             RangeRecord *range_rec = static_cast<RangeRecord *>(req.Record());
-            *range_rec = *(floor_cce->payload_);
+            range_rec->CopyForReadResult(*(floor_cce->payload_));
             hd_result->Value().ts_ = floor_cce->commit_ts_;
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
@@ -721,7 +722,7 @@ public:
             auto target_cce =
                 Find(*static_cast<const KeyT *>(req.Key())).second;
             auto &new_range_owner_rec =
-                *target_cce->payload_->GetNewRangeOwnerRec();
+                *target_cce->payload_->new_range_owner_rec_;
             for (uint idx = 0; idx < new_range_infos.size(); idx++)
             {
                 auto new_range_info = new_range_infos.at(idx);

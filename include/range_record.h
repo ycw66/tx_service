@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "range_bucket_key_record.h"
 #include "range_slice.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -380,7 +381,9 @@ public:
           is_info_owner_(false),
           range_slices_(nullptr),
           end_key_(nullptr),
-          range_owner_rec_(nullptr)
+          range_owner_rec_(nullptr),
+          new_range_owner_rec_(nullptr),
+          is_read_result_(false)
     {
     }
 
@@ -389,7 +392,7 @@ public:
           is_info_owner_(rhs.is_info_owner_),
           range_slices_(rhs.range_slices_),
           end_key_(rhs.end_key_),
-          range_owner_rec_(rhs.range_owner_rec_)
+          is_read_result_(rhs.is_read_result_)
     {
         if (rhs.is_info_owner_)
         {
@@ -400,18 +403,40 @@ public:
         {
             range_info_ = rhs.range_info_;
         }
-        // Copy new_range_owner_rec_
-        if (rhs.new_range_owner_rec_)
+        if (rhs.is_read_result_)
         {
-            new_range_owner_rec_ = std::make_unique<std::vector<LruEntry *>>();
-            for (auto &entry : *rhs.new_range_owner_rec_)
+            range_owner_bucket_ = rhs.range_owner_bucket_;
+            if (rhs.new_range_owner_bucket_)
             {
-                new_range_owner_rec_->push_back(entry);
+                new_range_owner_bucket_ =
+                    std::make_unique<std::vector<const BucketInfo *>>();
+                for (auto &info : *rhs.new_range_owner_bucket_)
+                {
+                    new_range_owner_bucket_->push_back(info);
+                }
+            }
+            else
+            {
+                new_range_owner_bucket_ = nullptr;
             }
         }
         else
         {
-            new_range_owner_rec_ = nullptr;
+            // Copy new_range_owner_rec_
+            range_owner_rec_ = rhs.range_owner_rec_;
+            if (rhs.new_range_owner_rec_)
+            {
+                new_range_owner_rec_ =
+                    std::make_unique<std::vector<LruEntry *>>();
+                for (auto &entry : *rhs.new_range_owner_rec_)
+                {
+                    new_range_owner_rec_->push_back(entry);
+                }
+            }
+            else
+            {
+                new_range_owner_rec_ = nullptr;
+            }
         }
     }
 
@@ -423,7 +448,9 @@ public:
           is_info_owner_(false),
           range_slices_(slices),
           end_key_(end_key),
-          range_owner_rec_(range_owner)
+          range_owner_rec_(range_owner),
+          new_range_owner_rec_(nullptr),
+          is_read_result_(false)
     {
     }
 
@@ -435,7 +462,9 @@ public:
           is_info_owner_(true),
           range_slices_(slices),
           end_key_(end_key),
-          range_owner_rec_(range_owner)
+          range_owner_rec_(range_owner),
+          new_range_owner_rec_(nullptr),
+          is_read_result_(false)
     {
     }
 
@@ -444,6 +473,14 @@ public:
         if (is_info_owner_)
         {
             range_info_uptr_.reset();
+        }
+        if (is_read_result_ && new_range_owner_bucket_)
+        {
+            new_range_owner_bucket_.reset();
+        }
+        else if (!is_read_result_ && new_range_owner_rec_)
+        {
+            new_range_owner_rec_.reset();
         }
     }
 
@@ -454,6 +491,7 @@ public:
 
     void Serialize(std::string &str) const override
     {
+        assert(!is_read_result_);
         // handle neg inf key
         bool is_normal = range_info_->start_key_ != nullptr &&
                          range_info_->start_key_->Type() == KeyType::Normal;
@@ -521,6 +559,7 @@ public:
 
     size_t SerializedLength() const override
     {
+        assert(!is_read_result_);
         size_t size = 0;
         size += sizeof(bool);
         if (range_info_->start_key_ != nullptr &&
@@ -593,24 +632,51 @@ public:
 
         range_slices_ = rhs.range_slices_;
         end_key_ = rhs.end_key_;
-        range_owner_rec_ = rhs.range_owner_rec_;
 
-        // Copy new_range_owner_rec_
-        if (new_range_owner_rec_)
+        // Free own unique ptr.
+        if (!is_read_result_ && new_range_owner_rec_)
         {
-            new_range_owner_rec_.release();
+            new_range_owner_rec_.reset();
         }
-        if (rhs.new_range_owner_rec_)
+        else if (is_read_result_ && new_range_owner_bucket_)
         {
-            new_range_owner_rec_ = std::make_unique<std::vector<LruEntry *>>();
-            for (auto &entry : *rhs.new_range_owner_rec_)
+            new_range_owner_bucket_.reset();
+        }
+        is_read_result_ = rhs.is_read_result_;
+
+        if (rhs.is_read_result_)
+        {
+            range_owner_bucket_ = rhs.range_owner_bucket_;
+            if (rhs.new_range_owner_bucket_)
             {
-                new_range_owner_rec_->push_back(entry);
+                new_range_owner_bucket_ =
+                    std::make_unique<std::vector<const BucketInfo *>>();
+                for (auto &bucket : *rhs.new_range_owner_bucket_)
+                {
+                    new_range_owner_bucket_->push_back(bucket);
+                }
+            }
+            else
+            {
+                new_range_owner_bucket_ = nullptr;
             }
         }
         else
         {
-            new_range_owner_rec_ = nullptr;
+            range_owner_rec_ = rhs.range_owner_rec_;
+            if (rhs.new_range_owner_rec_)
+            {
+                new_range_owner_rec_ =
+                    std::make_unique<std::vector<LruEntry *>>();
+                for (auto &entry : *rhs.new_range_owner_rec_)
+                {
+                    new_range_owner_rec_->push_back(entry);
+                }
+            }
+            else
+            {
+                new_range_owner_rec_ = nullptr;
+            }
         }
         return *this;
     }
@@ -640,14 +706,74 @@ public:
         range_info_ = range_info;
     }
 
-    LruEntry *GetRangeOwnerRec() const
+    void CopyForReadResult(const RangeRecord &other)
     {
-        return range_owner_rec_;
+        // Release RangeInfo ownership
+        if (is_info_owner_)
+        {
+            range_info_uptr_.reset();
+            is_info_owner_ = false;
+        }
+
+        assert(!other.is_info_owner_);
+        range_info_ = other.range_info_;
+        is_info_owner_ = other.is_info_owner_;
+
+        range_slices_ = other.range_slices_;
+        end_key_ = other.end_key_;
+
+        // Free own unique ptr.
+        if (is_read_result_ && new_range_owner_bucket_)
+        {
+            new_range_owner_bucket_.reset();
+        }
+        else if (!is_read_result_ && new_range_owner_rec_)
+        {
+            new_range_owner_rec_.reset();
+        }
+        assert(!other.is_read_result_);
+        is_read_result_ = true;
+
+        range_owner_bucket_ =
+            static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                other.range_owner_rec_)
+                ->payload_->GetBucketInfo();
+        if (other.new_range_owner_rec_)
+        {
+            new_range_owner_bucket_ =
+                std::make_unique<std::vector<const BucketInfo *>>();
+            for (auto &entry : *other.new_range_owner_rec_)
+            {
+                new_range_owner_bucket_->push_back(
+                    static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord>
+                                    *>(entry)
+                        ->payload_->GetBucketInfo());
+            }
+        }
+        else
+        {
+            new_range_owner_bucket_ = nullptr;
+        }
     }
 
-    std::vector<LruEntry *> *GetNewRangeOwnerRec()
+    /**
+     * @brief Get range owner node group. Should only be called if
+     * this record is from ReadKeyResult returned by ReadCc.
+     */
+    const BucketInfo *GetRangeOwnerNg() const
     {
-        return new_range_owner_rec_.get();
+        assert(is_read_result_);
+        return range_owner_bucket_;
+    }
+
+    /**
+     * @brief Get splitting range owner node group. Should only be called if
+     * this record is from ReadKeyResult returned by ReadCc.
+     */
+    const std::vector<const BucketInfo *> *GetNewRangeOwnerNgs() const
+    {
+        assert(is_read_result_);
+        return new_range_owner_bucket_.get();
     }
 
     void SetNewRangeOwnerRec(
@@ -655,14 +781,14 @@ public:
     {
         if (new_range_owner_rec_)
         {
-            new_range_owner_rec_.release();
+            new_range_owner_rec_.reset();
         }
         new_range_owner_rec_ = std::move(new_range_rec);
     }
 
     size_t Size() const override
     {
-        return 5 * 8 + 1;
+        return 5 * 8 + 2;
     }
 
     size_t MemUsage() const override
@@ -699,12 +825,28 @@ public:
     /**
      * @brief The bucket record that owns this range.
      */
-    LruEntry *range_owner_rec_{nullptr};
+    union
+    {
+        // We use range_owner_rec_ to store pointer to range_bucket_ccm in
+        // range cc map cc entries. But the range bucket cc entry should not
+        // be exposed when we copy range record into ReadKeyResult. In that case
+        // we will only copy the BucketInfo pointer owned by local cc shards.
+        LruEntry *range_owner_rec_{nullptr};
+        const BucketInfo *range_owner_bucket_;
+    };
 
     /**
      * @brief The bucket record for new splitted ranges. This is only used
      * during range split, and reset back to nullptr once range split is done.
      */
-    std::unique_ptr<std::vector<LruEntry *>> new_range_owner_rec_{nullptr};
+    union
+    {
+        std::unique_ptr<std::vector<LruEntry *>> new_range_owner_rec_{nullptr};
+        std::unique_ptr<std::vector<const BucketInfo *>>
+            new_range_owner_bucket_;
+    };
+
+    // If this is record copied into ReadKeyResult during read result.
+    bool is_read_result_{false};
 };
 }  // namespace txservice

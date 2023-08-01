@@ -17,7 +17,7 @@ LocalCcShards::LocalCcShards(
     uint32_t log_limit_mb,
     bool realtime_sampling,
     CatalogFactory *catalog_factory,
-    std::map<uint32_t, std::vector<std::string>> *ng_ips,
+    std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     int32_t range_bucket_seed,
     uint64_t cluster_config_version,
     store::DataStoreHandler *store_hd,
@@ -49,7 +49,7 @@ LocalCcShards::LocalCcShards(
     timer_thd_ = std::thread([this] { TimerRun(); });
 
     InitRangeBuckets(
-        node_id, *ng_ips, cluster_config_version, range_bucket_seed);
+        node_id, *ng_configs, cluster_config_version, range_bucket_seed);
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
@@ -91,7 +91,7 @@ LocalCcShards::LocalCcShards(
     uint32_t log_limit_mb,
     bool realtime_sampling,
     CatalogFactory *catalog_factory,
-    std::map<uint32_t, std::vector<std::string>> *ng_ips,
+    std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     int32_t range_bucket_seed,
     uint64_t cluster_config_version,
     store::DataStoreHandler *store_hd,
@@ -103,7 +103,7 @@ LocalCcShards::LocalCcShards(
                     log_limit_mb,
                     realtime_sampling,
                     catalog_factory,
-                    ng_ips,
+                    ng_configs,
                     range_bucket_seed,
                     cluster_config_version,
                     store_hd,
@@ -1255,32 +1255,33 @@ bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
 
 void LocalCcShards::InitRangeBuckets(
     NodeGroupId ng_id,
-    std::map<uint32_t, std::vector<std::string>> &ng_ips,
+    std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
     uint64_t version,
     int32_t seed)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     // Construct bucket info map on startup
-    // Generate 5 random numbers for each node group as virtual nodes on hashing
-    // ring. Each bucket id belongs to the first virtual node that is larger
-    // than the bucket id.
+    // Generate 64 random numbers for each node group as virtual nodes on
+    // hashing ring. Each bucket id belongs to the first virtual node that is
+    // larger than the bucket id.
     std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
     srand(seed);
-    for (auto ng_id : ng_ips)
+    for (auto config : ng_configs)
     {
         size_t generated = 0;
-        while (generated < 5)
+        while (generated < 64)
         {
             uint16_t rand_num = rand() % total_range_buckets;
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
-                rand_num_to_ng.emplace(rand_num, ng_id.first);
+                rand_num_to_ng.emplace(rand_num, config.first);
             }
         }
     }
 
+    std::unordered_map<NodeGroupId, uint16_t> ng_buckets;
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     // Insert bucket ids into the map.
     auto it = rand_num_to_ng.begin();
     for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
@@ -1296,9 +1297,63 @@ void LocalCcShards::InitRangeBuckets(
                                 : it->second;
         ng_bucket_infos.try_emplace(
             bucket_id, std::make_unique<BucketInfo>(ng_id, version));
+        auto res_pair = ng_buckets.try_emplace(ng_id, 0);
+        res_pair.first->second++;
     }
-    auto res_pair = bucket_infos_.try_emplace(ng_id);
-    res_pair.first->second = std::move(ng_bucket_infos);
+    bucket_infos_.try_emplace(ng_id, std::move(ng_bucket_infos));
+}
+
+std::unordered_map<uint16_t, BucketMigrateInfo>
+LocalCcShards::GenerateBucketMigrationPlan(
+    std::map<NodeGroupId, std::vector<NodeConfig>> &new_ng_config, int32_t seed)
+{
+    // Construct bucket info map on startup
+    // Generate 5 random numbers for each node group as virtual nodes on hashing
+    // ring. Each bucket id belongs to the first virtual node that is larger
+    // than the bucket id.
+    std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
+    std::map<uint16_t, NodeGroupId> rand_num_to_ng;
+    srand(seed);
+    for (auto config : new_ng_config)
+    {
+        size_t generated = 0;
+        while (generated < 5)
+        {
+            uint16_t rand_num = rand() % total_range_buckets;
+            if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
+            {
+                generated++;
+                rand_num_to_ng.emplace(rand_num, config.first);
+            }
+        }
+    }
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    auto it = rand_num_to_ng.begin();
+    std::unordered_map<uint16_t, BucketMigrateInfo> migrate_plan;
+    for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
+    {
+        // The buckets larger than the last random number belongs to the
+        // first virtual node on the ring.
+        if (it != rand_num_to_ng.end() && bucket_id >= it->first)
+        {
+            it++;
+        }
+        NodeGroupId ng_id = it == rand_num_to_ng.end()
+                                ? rand_num_to_ng.begin()->second
+                                : it->second;
+        // This function should only be called as preferred leader of node
+        // group.
+        NodeGroupId cur_owner =
+            GetBucketInfoInternal(bucket_id, Sharder::Instance().NodeId())
+                ->BucketOwner();
+        if (cur_owner != ng_id)
+        {
+            migrate_plan.try_emplace(
+                bucket_id,
+                BucketMigrateInfo(bucket_id, cur_owner, ng_id, false));
+        }
+    }
+    return migrate_plan;
 }
 
 void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,

@@ -59,6 +59,30 @@ enum class DsOperation
     CleanOldRange
 };
 
+enum class ClusterScaleOpType
+{
+    AddNode = 1,
+    RemoveNode
+};
+
+struct NodeConfig
+{
+public:
+    NodeConfig() = default;
+    NodeConfig(uint32_t node_id, const std::string &host_name, uint16_t port)
+        : node_id_(node_id), host_name_(host_name), port_(port)
+    {
+    }
+
+    NodeConfig(const NodeConfig &rhs)
+        : node_id_(rhs.node_id_), host_name_(rhs.host_name_), port_(rhs.port_)
+    {
+    }
+    uint32_t node_id_{UINT32_MAX};
+    std::string host_name_{""};
+    uint16_t port_{0};
+};
+
 enum class TxnStatus
 {
     Ongoing = 0,

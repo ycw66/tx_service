@@ -3057,7 +3057,7 @@ public:
     bool RangeSplitting(const TableName &table_name) const
     {
         return range_splitting_ &&
-               range_splitting_->find(table_name) == range_splitting_->end();
+               range_splitting_->find(table_name) != range_splitting_->end();
     }
 
 private:

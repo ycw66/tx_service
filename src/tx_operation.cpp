@@ -500,11 +500,9 @@ void LockWriteRangesOp::Advance()
         next_range_start = table_write_set.lower_bound(range_end_key);
     }
 
-    NodeGroupId range_owner =
-        static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-            range_rec_.GetRangeOwnerRec())
-            ->payload_->GetBucketInfo()
-            ->BucketOwner();
+    NodeGroupId range_owner = range_rec_.GetRangeOwnerNg()->BucketOwner();
+    const std::vector<const BucketInfo *> *splitting_range_owners =
+        range_rec_.GetNewRangeOwnerNgs();
     // Updates the sharding codes of the write-set keys belonging to this
     // range. The higher 22 bits represent the range ID.
     NodeGroupId new_range_owner = UINT32_MAX;
@@ -525,11 +523,7 @@ void LockWriteRangesOp::Advance()
                !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
         {
             new_range_owner =
-                static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                    range_rec_.GetNewRangeOwnerRec()->at(new_range_idx))
-                    ->payload_->GetBucketInfo()
-                    ->BucketOwner();
-            new_range_idx++;
+                splitting_range_owners->at(new_range_idx++)->BucketOwner();
         }
         if (new_range_owner != UINT32_MAX && new_range_owner != range_owner)
         {
@@ -1019,11 +1013,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 scan_state_->range_id_ =
                     range_rec_.GetRangeInfo()->PartitionId();
                 scan_state_->range_owner_ =
-                    static_cast<
-                        const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                        range_rec_.GetRangeOwnerRec())
-                        ->payload_->GetBucketInfo()
-                        ->BucketOwner();
+                    range_rec_.GetRangeOwnerNg()->BucketOwner();
                 txm->Process(*this);
                 return;
             }
@@ -1717,9 +1707,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     txm->bool_resp_->Finish(false);
                     txm->state_stack_.pop_back();
                     assert(txm->state_stack_.empty());
+                    LocalCcShards *local_shards =
+                        Sharder::Instance().GetLocalCcShards();
                     std::unique_lock<std::mutex> lk(
-                        txm->cc_handler_->table_schema_op_pool_mux_);
-                    txm->cc_handler_->table_schema_op_pool_.emplace_back(
+                        local_shards->table_schema_op_pool_mux_);
+                    local_shards->table_schema_op_pool_.emplace_back(
                         std::move(txm->schema_op_));
                 }
             }
@@ -2031,9 +2023,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            std::unique_lock<std::mutex> lk(
-                txm->cc_handler_->table_schema_op_pool_mux_);
-            txm->cc_handler_->table_schema_op_pool_.emplace_back(
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
+            shards->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
         else if (post_all_lock_op_.hd_result_.IsError())
@@ -2093,6 +2085,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         int64_t tx_node_term =
             Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
 
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
         if (clean_log_op_.hd_result_.IsError() &&
             (tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
                                    tx_node_candid_term >= 0)))
@@ -2112,8 +2105,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             {
                 std::unique_lock<std::mutex> lk(
-                    txm->cc_handler_->table_schema_op_pool_mux_);
-                txm->cc_handler_->table_schema_op_pool_.emplace_back(
+                    shards->table_schema_op_pool_mux_);
+                shards->table_schema_op_pool_.emplace_back(
                     std::move(txm->schema_op_));
             }
             txm->Reset();
@@ -2138,9 +2131,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            std::unique_lock<std::mutex> lk(
-                txm->cc_handler_->table_schema_op_pool_mux_);
-            txm->cc_handler_->table_schema_op_pool_.emplace_back(
+            std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
+            shards->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));
         }
     }
@@ -2917,7 +2909,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 if (tx_node_term > 0)
                 {
                     DLOG(WARNING)
-                        << "Upsert table write prepare log result unknown, "
+                        << "Split range write prepare log result unknown, "
                            "tx_number:"
                         << txm->TxNumber() << ", keep retrying";
                     // set retry flag and retry prepare log
@@ -3726,9 +3718,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
             assert(this == txm->split_flush_op_.get());
             assert(recover_split_started_ == nullptr);
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> lk(
-                txm->cc_handler_->split_flush_range_op_pool_mux_);
-            txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
+                shards->split_flush_range_op_pool_mux_);
+            shards->split_flush_range_op_pool_.emplace_back(
                 std::move(txm->split_flush_op_));
             assert(txm->split_flush_op_ == nullptr);
         }
@@ -3762,9 +3755,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         assert(this == txm->split_flush_op_.get());
 
         {
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> lk(
-                txm->cc_handler_->split_flush_range_op_pool_mux_);
-            txm->cc_handler_->split_flush_range_op_pool_.emplace_back(
+                shards->split_flush_range_op_pool_mux_);
+            shards->split_flush_range_op_pool_.emplace_back(
                 std::move(txm->split_flush_op_));
         }
 
@@ -4072,6 +4066,280 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             }
         }
         txm->PostProcess(*this);
+    }
+}
+
+ClusterScaleOp::ClusterScaleOp(
+    ClusterScaleOpType event_type,
+    std::vector<std::pair<std::string, uint16_t>> *new_nodes,
+    std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
+    uint16_t *remove_node_count,
+    std::mutex &prepare_log_mux,
+    std::condition_variable &prepare_log_cv,
+    bool &prepare_log_finished,
+    CcErrorCode &err,
+    TransactionExecution *txm)
+    : CompositeTransactionOperation(),
+      event_type_(event_type),
+      prepare_log_mux_(&prepare_log_mux),
+      prepare_log_cv_(&prepare_log_cv),
+      prepare_log_finished_(&prepare_log_finished),
+      err_(&err),
+      prepare_log_op_(txm),
+      update_cluster_configs_(txm),
+      data_migration_op_(txm),
+      clean_log_op_(txm),
+      status_mux_(),
+      status_(remote::ClusterScaleStatus::NOT_IN_PROGRESS)
+{
+    if (event_type == ClusterScaleOpType::AddNode)
+    {
+        delta_nodes_ = *new_nodes;
+        new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
+    }
+    else if (event_type == ClusterScaleOpType::RemoveNode)
+    {
+        remove_node_count_ = *remove_node_count;
+        new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
+            remove_node_count_, delta_nodes_);
+        if (removed_nodes)
+        {
+            *removed_nodes = delta_nodes_;
+        }
+    }
+    bucket_migrate_infos_ =
+        Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
+            new_ng_config_, 9001);
+}
+
+void ClusterScaleOp::Reset(
+    ClusterScaleOpType event_type,
+    std::vector<std::pair<std::string, uint16_t>> *new_nodes,
+    std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
+    uint16_t *remove_node_count,
+    std::mutex &prepare_log_mux,
+    std::condition_variable &prepare_log_cv,
+    bool &prepare_log_finished,
+    CcErrorCode &err,
+    TransactionExecution *txm)
+{
+    op_ = nullptr;
+    event_type_ = event_type;
+    delta_nodes_.clear();
+    remove_node_count_ = 0;
+    if (event_type == ClusterScaleOpType::AddNode)
+    {
+        delta_nodes_ = *new_nodes;
+        new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
+    }
+    else if (event_type == ClusterScaleOpType::RemoveNode)
+    {
+        remove_node_count_ = *remove_node_count;
+        new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
+            remove_node_count_, delta_nodes_);
+        if (removed_nodes)
+        {
+            *removed_nodes = delta_nodes_;
+        }
+    }
+    prepare_log_mux_ = &prepare_log_mux;
+    prepare_log_cv_ = &prepare_log_cv;
+    prepare_log_finished_ = &prepare_log_finished;
+    err_ = &err;
+    status_ = remote::ClusterScaleStatus::NOT_IN_PROGRESS;
+    prepare_log_op_.ResetHandlerTxm(txm);
+    update_cluster_configs_.ResetHandlerTxm(txm);
+    data_migration_op_.ResetHandlerTxm(txm);
+
+    clean_log_op_.ResetHandlerTxm(txm);
+    new_ng_config_.clear();
+    bucket_migrate_infos_.clear();
+    bucket_migrate_infos_ =
+        Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
+            new_ng_config_, 9001);
+}
+
+void ClusterScaleOp::SetStatus(remote::ClusterScaleStatus status)
+{
+    std::unique_lock<std::mutex> lock(status_mux_);
+    status_ = status;
+}
+
+remote::ClusterScaleStatus ClusterScaleOp::GetStatus()
+{
+    std::unique_lock<std::mutex> lock(status_mux_);
+    return status_;
+}
+
+void ClusterScaleOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &prepare_log_op_;
+        FillPrepareLogRequest(txm);
+        LOG(INFO) << "Cluster Scale transaction write prepare log, txn: "
+                  << txm->TxNumber();
+        ForwardToSubOperation(txm, &prepare_log_op_);
+    }
+    else if (op_ == &prepare_log_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            // Failed before write log succeed due to leader transfer. Notify
+            // caller.
+            {
+                std::unique_lock<std::mutex> lock(*prepare_log_mux_);
+                *err_ = CcErrorCode::TX_NODE_NOT_LEADER;
+                *prepare_log_finished_ = true;
+                prepare_log_cv_->notify_all();
+            }
+            ForceToFinish(txm);
+            return;
+        }
+        if (prepare_log_op_.hd_result_.IsError())
+        {
+            if (prepare_log_op_.hd_result_.ErrorCode() ==
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+            {
+                // prepare log result unknown, keep retrying until getting a
+                // clear response, either success or failure, or the
+                // coordinator itself is no longer leader
+                int64_t tx_node_term =
+                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+                if (tx_node_term > 0)
+                {
+                    DLOG(WARNING)
+                        << "Cluster scale write prepare log result unknown, "
+                           "tx_number:"
+                        << txm->TxNumber() << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    RetrySubOperation(txm, &prepare_log_op_);
+                }
+                else
+                {
+                    DLOG(ERROR) << "Cluster scale write prepare log result "
+                                   "unknown, tx_number:"
+                                << txm->TxNumber()
+                                << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if
+                    // it does. Caller need to query new leader of node group
+                    // to know if write log has succeeded.
+                    {
+                        std::unique_lock<std::mutex> lock(*prepare_log_mux_);
+                        *err_ = CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR;
+                        *prepare_log_finished_ = true;
+                        prepare_log_cv_->notify_all();
+                    }
+                    ForceToFinish(txm);
+                }
+            }
+            else
+            {
+                // Notify called that the operation has failed
+                {
+                    std::unique_lock<std::mutex> lock(*prepare_log_mux_);
+                    *err_ = CcErrorCode::WRITE_LOG_FAILED;
+                    *prepare_log_finished_ = true;
+                    prepare_log_cv_->notify_all();
+                }
+                ForceToFinish(txm);
+            }
+            return;
+        }
+
+        // Notify caller that log has been written.
+        {
+            std::unique_lock<std::mutex> lock(*prepare_log_mux_);
+            *err_ = CcErrorCode::NO_ERROR;
+            *prepare_log_finished_ = true;
+            prepare_log_cv_->notify_all();
+        }
+
+        if (event_type_ == ClusterScaleOpType::AddNode)
+        {
+            // If we're adding new nodes, connect to new nodes first
+            // before starting migration.
+            ForwardToSubOperation(txm, &update_cluster_configs_);
+        }
+        else
+        {
+            // For remove nodes, just start migration right away. We will
+            // update cluster config and remove nodes when migration is done.
+            ForwardToSubOperation(txm, &data_migration_op_);
+        }
+    }
+}
+
+void ClusterScaleOp::ForceToFinish(TransactionExecution *txm)
+{
+    clean_log_op_.hd_result_.SetFinished();
+    op_ = &clean_log_op_;
+    Forward(txm);
+}
+
+void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
+{
+    prepare_log_op_.log_type_ = TxLogType::PREPARE;
+
+    prepare_log_op_.log_closure_.LogRequest().Clear();
+
+    ::txlog::WriteLogRequest *prepare_log_rec =
+        prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
+
+    prepare_log_rec->set_tx_term(txm->tx_term_);
+    prepare_log_rec->set_txn_number(txm->TxNumber());
+
+    // TODO{liunyl}: commit ts should not matter with cluster scale, need double
+    // check
+    prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
+    ::txlog::ClusterScaleOpMessage *cluster_scale_msg =
+        prepare_log_rec->mutable_log_content()->mutable_cluster_scale_log();
+    switch (event_type_)
+    {
+    case ClusterScaleOpType::AddNode:
+        cluster_scale_msg->set_event_type(
+            ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode);
+        break;
+    case ClusterScaleOpType::RemoveNode:
+        cluster_scale_msg->set_event_type(
+            ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode);
+        break;
+    default:
+        assert(false);
+    }
+    cluster_scale_msg->set_stage(
+        ::txlog::ClusterScaleOpMessage_Stage_PrepareScale);
+    for (auto conf_pair : new_ng_config_)
+    {
+        ::txlog::NodegroupConfig *ng_conf =
+            cluster_scale_msg->add_new_ng_configs();
+        ng_conf->set_ng_id(conf_pair.first);
+        for (auto &node : conf_pair.second)
+        {
+            ng_conf->add_member_nodes(node.node_id_);
+        }
+        ::txlog::NodeConfig *node_conf = cluster_scale_msg->add_node_configs();
+        node_conf->set_node_id(conf_pair.second[0].node_id_);
+        node_conf->set_host_name(conf_pair.second[0].host_name_);
+        node_conf->set_port(conf_pair.second[0].port_);
+    }
+
+    // Fill data migration plan
+    for (auto &bucket_plan : bucket_migrate_infos_)
+    {
+        auto migrate_process = cluster_scale_msg->add_migrate_process();
+        migrate_process->set_bucket_id(bucket_plan.first);
+        migrate_process->set_old_owner(bucket_plan.second.orig_owner_);
+        migrate_process->set_new_owner(bucket_plan.second.new_owner_);
+        migrate_process->set_stage(
+            txlog::BucketMigrateMessage_Stage_NotStarted);
+        // This will set when the real migrate starts.
+        migrate_process->set_migrate_ts(0);
     }
 }
 }  // namespace txservice

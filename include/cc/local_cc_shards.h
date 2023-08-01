@@ -44,7 +44,7 @@ public:
         uint32_t log_limit_mb = 1000,
         bool realtime_sampling = false,
         CatalogFactory *catalog_factory = nullptr,
-        std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
+        std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
         int32_t range_bucket_seed = -1,
         uint64_t cluster_config_version = 0,
         store::DataStoreHandler *store_hd = nullptr,
@@ -59,7 +59,7 @@ public:
         uint32_t log_limit_mb = 1000,
         bool realtime_sampling = false,
         CatalogFactory *catalog_factory = nullptr,
-        std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
+        std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
         int32_t range_bucket_seed = -1,
         uint64_t cluster_config_version = 0,
         store::DataStoreHandler *store_hd = nullptr,
@@ -114,6 +114,11 @@ public:
     size_t Count() const
     {
         return cc_shards_.size();
+    }
+
+    TxService *GetTxservice()
+    {
+        return tx_service_;
     }
 
     template <typename KeyT, typename ValueT>
@@ -551,15 +556,44 @@ public:
 
     void DropBucketInfo(NodeGroupId ng_id);
 
-    void InitRangeBuckets(NodeGroupId ng_id,
-                          std::map<uint32_t, std::vector<std::string>> &ng_ips,
-                          uint64_t version,
-                          int32_t seed);
+    void InitRangeBuckets(
+        NodeGroupId ng_id,
+        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
+        uint64_t version,
+        int32_t seed);
 
     bool IsRangeBucketsInitialized(NodeGroupId ng_id);
 
+    /**
+     * @brief Generate bucket migration plan based on the new node group config.
+     */
+    std::unordered_map<uint16_t, BucketMigrateInfo> GenerateBucketMigrationPlan(
+        std::map<NodeGroupId, std::vector<NodeConfig>> &new_ng_config,
+        int32_t seed);
+
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
+
+    // table_schema_op_pool_ and split_flush_range_op_pool_ are introduced to
+    // ensure the CcHandlerResult pointer validation: if failover didn't happen,
+    // the pointer receivied from remote PostWriteAll response CcMessage should
+    // always be valid(memory not freed). This is important in the case where
+    // network timeout happens and remote response arrives after UpsertTableOp
+    // has finished. To achieve this, the UpsertTableOp is moved to
+    // table_schema_op_pool_ once finished the last step of the schema op to
+    // maintain the validity of the pointer. (note: this is different from
+    // pointer stability, which is guaranteed by checking the node term and
+    // whether this node is the leader of a node group).
+    std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
+    std::mutex table_schema_op_pool_mux_;
+    std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
+    std::mutex split_flush_range_op_pool_mux_;
+
+    // Since there's only 1 cluster scale event at a time across the cluster,
+    // we don't need a pool for it. We just need to make sure that the op is not
+    // invalidated in case late remote cc response comes in.
+    std::unique_ptr<ClusterScaleOp> cluster_scale_op_{nullptr};
+    std::mutex cluster_scale_op_mux_;
 
 private:
     void TimerRun();

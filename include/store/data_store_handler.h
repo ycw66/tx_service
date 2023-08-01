@@ -65,16 +65,14 @@ public:
     virtual bool InitializeClusterConfig(
         std::vector<std::string> &ips,
         std::vector<uint16_t> &ports,
-        std::map<uint32_t, std::vector<std::string>> &ng_ips,
-        std::map<uint32_t, std::vector<uint16_t>> &ng_ports,
+        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) = 0;
 
     /**
      * Read cluster config from kv store cluster config table.
      */
     virtual bool ReadClusterConfig(
-        std::map<uint32_t, std::vector<std::string>> &ng_ips,
-        std::map<uint32_t, std::vector<uint16_t>> &ng_ports,
+        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         uint64_t &version,
         int32_t &seed,
         bool &uninitialized) = 0;

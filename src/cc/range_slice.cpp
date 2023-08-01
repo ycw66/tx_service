@@ -141,7 +141,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
     StoreSlice *slice = slices_[slice_idx].get();
     std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
 
-    if (slice->to_alter_ && slice->pins_ == 0)
+    if (slice->to_alter_)
     {
         // The checkpointer is waiting to alter this slice. The calling tx is
         // pushed back for re-execution, if the request is processed for the

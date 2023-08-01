@@ -943,4 +943,81 @@ struct ObjectCommandOp : TransactionOperation
 #endif
 };
 
+struct BucketMigrateInfo
+{
+    BucketMigrateInfo() = delete;
+    BucketMigrateInfo(uint16_t bucket_id,
+                      NodeGroupId orig_owner,
+                      NodeGroupId new_owner,
+                      bool is_migrated)
+        : bucket_id_(bucket_id),
+          orig_owner_(orig_owner),
+          new_owner_(new_owner),
+          is_migrated_(is_migrated)
+    {
+    }
+    uint16_t bucket_id_;
+    NodeGroupId orig_owner_;
+    NodeGroupId new_owner_;
+    bool is_migrated_;
+};
+
+struct ClusterScaleOp : public CompositeTransactionOperation
+{
+public:
+    ClusterScaleOp() = delete;
+    ClusterScaleOp(ClusterScaleOpType event_type,
+                   std::vector<std::pair<std::string, uint16_t>> *new_nodes,
+                   std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
+                   uint16_t *remove_node_count,
+                   std::mutex &prepare_log_mux,
+                   std::condition_variable &prepare_log_cv,
+                   bool &prepare_log_finished,
+                   CcErrorCode &err,
+                   TransactionExecution *txm);
+    void Reset(ClusterScaleOpType event_type,
+               std::vector<std::pair<std::string, uint16_t>> *new_nodes,
+               std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
+               uint16_t *remove_node_count,
+               std::mutex &prepare_log_mux,
+               std::condition_variable &prepare_log_cv,
+               bool &prepare_log_finished,
+               CcErrorCode &err,
+               TransactionExecution *txm);
+    void Forward(TransactionExecution *txm) override;
+
+    remote::ClusterScaleStatus GetStatus();
+
+    ClusterScaleOpType event_type_;
+    // New node info when adding nodes or deleted node info when removing nodes.
+    std::vector<std::pair<std::string, uint16_t>> delta_nodes_;
+    // Used when removing node, to indicate how many nodes to be removed
+    uint16_t remove_node_count_{0};
+    std::map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
+    // Passed in by caller, need to notify caller once log has been written.
+    std::mutex *prepare_log_mux_;
+    std::condition_variable *prepare_log_cv_;
+    bool *prepare_log_finished_;
+    CcErrorCode *err_;
+
+    WriteToLogOp prepare_log_op_;
+
+    AsyncOp<Void> update_cluster_configs_;
+
+    AsyncOp<Void> data_migration_op_;
+
+    WriteToLogOp clean_log_op_;
+
+private:
+    void FillPrepareLogRequest(TransactionExecution *txm);
+    void ForceToFinish(TransactionExecution *txm);
+    void SetStatus(remote::ClusterScaleStatus);
+
+    // used to protect status_. It will be updated by tx processor thread and
+    // visited by rpc thread that queries scale event status.
+    std::mutex status_mux_;
+    remote::ClusterScaleStatus status_;
+    std::unordered_map<uint16_t, BucketMigrateInfo> bucket_migrate_infos_;
+};
+
 }  // namespace txservice

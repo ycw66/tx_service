@@ -2,6 +2,7 @@
 
 #include "cc/local_cc_shards.h"
 #include "sharder.h"
+#include "tx_service.h"
 
 namespace txservice
 {
@@ -133,6 +134,157 @@ void CcNodeService::GetMinTxStartTs(
     else
     {
         response->set_error(true);
+    }
+}
+
+void CcNodeService::ClusterAddNode(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::ClusterAddNodeRequest *request,
+    ::txservice::remote::ClusterAddNodeResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    using namespace txservice;
+
+    if (Sharder::Instance().LeaderTerm(local_shards_.NodeId()) <= 0)
+    {
+        // Node is not preferred leader of node group.
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    std::vector<std::pair<std::string, uint16_t>> delta_nodes;
+    for (int i = 0; i < request->host_list_size(); i++)
+    {
+        delta_nodes.emplace_back(request->host_list(i), request->port_list(i));
+    }
+    // Start cluster scale tx and wait for the log is written before
+    // returning.
+    TxService *tx_service =
+        Sharder::Instance().GetLocalCcShards()->GetTxservice();
+    TransactionExecution *txm = tx_service->NewTx();
+    InitTxRequest init_req;
+    // Set isolation level to RepeatableRead to ensure the readlock
+    // will be set during the execution of the following
+    // ReadTxRequest.
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    init_req.Reset();
+    txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        LOG(ERROR) << "Failed to init tx for cluster scale event.";
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    ClusterScaleTxRequest scale_req(
+        ClusterScaleOpType::AddNode, &delta_nodes, nullptr, nullptr);
+    txm->Execute(&scale_req);
+    scale_req.WaitForWriteLog();
+
+    if (scale_req.GetErr() != CcErrorCode::NO_ERROR)
+    {
+        if (scale_req.GetErr() == CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+        {
+            // write log result unkown, need to query new leader later.
+
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to start cluster scale event, txn: "
+                       << txm->TxNumber();
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        }
+        return;
+    }
+    response->set_result(
+        ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+    response->set_tx_number(txm->TxNumber());
+}
+
+void CcNodeService::ClusterRemoveNode(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::ClusterRemoveNodeRequest *request,
+    ::txservice::remote::ClusterRemoveNodeResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    using namespace txservice;
+
+    if (Sharder::Instance().LeaderTerm(local_shards_.NodeId()) <= 0)
+    {
+        // Node is not preferred leader of node group.
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    std::vector<std::pair<std::string, uint16_t>> delta_nodes;
+    // Start cluster scale tx and wait for the log is written before
+    // returning.
+    TxService *tx_service =
+        Sharder::Instance().GetLocalCcShards()->GetTxservice();
+    TransactionExecution *txm = tx_service->NewTx();
+    InitTxRequest init_req;
+    // Set isolation level to RepeatableRead to ensure the readlock
+    // will be set during the execution of the following
+    // ReadTxRequest.
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    init_req.Reset();
+    txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        LOG(ERROR) << "Failed to init tx for cluster scale event.";
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    uint16_t remove_node_count = request->remove_node_count();
+    std::vector<std::pair<std::string, uint16_t>> removed_nodes;
+    ClusterScaleTxRequest scale_req(ClusterScaleOpType::RemoveNode,
+                                    nullptr,
+                                    &removed_nodes,
+                                    &remove_node_count);
+    txm->Execute(&scale_req);
+    scale_req.WaitForWriteLog();
+
+    if (scale_req.GetErr() != CcErrorCode::NO_ERROR)
+    {
+        if (scale_req.GetErr() == CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+        {
+            // write log result unkown, need to query new leader later.
+
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to start cluster scale event, txn: "
+                       << txm->TxNumber();
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        }
+        return;
+    }
+    response->set_result(
+        ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+    response->set_tx_number(txm->TxNumber());
+    for (auto &node : removed_nodes)
+    {
+        response->add_host_list(node.first);
+        response->add_port_list(node.second);
     }
 }
 

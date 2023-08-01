@@ -41,8 +41,8 @@ struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
 struct ScanBatchTuple;
 struct SplitFlushTxRequest;
-struct CkptScanTxRequest;
 struct AnalyzeTableTxRequest;
+struct ClusterScaleTxRequest;
 struct UnlockTuple;
 
 class TxProcessor;
@@ -125,8 +125,8 @@ public:
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
     void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
-    void ProcessTxRequest(CkptScanTxRequest &ckpt_scan_req);
     void ProcessTxRequest(AnalyzeTableTxRequest &analyze_req);
+    void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
 
     /**
      * Interface for storage engine runtime.
@@ -555,6 +555,7 @@ private:
     friend struct DsSplitOp;
     friend struct AnalyzeTableAllOp;
     friend struct KickoutDataOp;
+    friend struct ClusterScaleOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct AsyncOp;

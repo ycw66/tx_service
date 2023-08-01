@@ -343,20 +343,18 @@ void CcNode::on_leader_start(int64_t term)
     {
         // We need to initialize range bucket info for new ng
         // before replaying.
-        std::map<uint32_t, std::vector<std::string>> ng_ips;
-        std::map<uint32_t, std::vector<uint16_t>> ng_ports;
+        std::map<uint32_t, std::vector<NodeConfig>> ng_configs;
         uint64_t version;
         int32_t seed;
         bool uninitialized;
         // read ng config from kv store
         while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-            ng_ips, ng_ports, version, seed, uninitialized))
+            ng_configs, version, seed, uninitialized))
         {
-            ng_ips.clear();
-            ng_ports.clear();
+            ng_configs.clear();
             assert(!uninitialized);
         }
-        local_cc_shards_.InitRangeBuckets(ng_id_, ng_ips, version, seed);
+        local_cc_shards_.InitRangeBuckets(ng_id_, ng_configs, version, seed);
     }
     replay_service_->ReplayLog(ng_id_, term);
 

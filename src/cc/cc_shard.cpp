@@ -118,6 +118,15 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
         auto table_it = native_ccms_.find(table_name);
         if (table_it == native_ccms_.end())
         {
+            if (table_name == range_bucket_ccm_name)
+            {
+                // Initialize range bucket ccm.
+                auto insert_it = native_ccms_.emplace(
+                    range_bucket_ccm_name,
+                    std::make_unique<RangeBucketCcMap>(
+                        this, node_group, range_bucket_ccm_name));
+                return insert_it.first->second.get();
+            }
             return nullptr;
         }
         else
@@ -1045,22 +1054,34 @@ void CcShard::DropCcms(NodeGroupId ng_id)
     {
         for (auto ccm_it = native_ccms_.begin(); ccm_it != native_ccms_.end();)
         {
-            if (ccm_it->first == catalog_ccm_name ||
-                ccm_it->first == range_bucket_ccm_name)
+            if (ccm_it->first == catalog_ccm_name)
             {
                 ccm_it->second->Clean();
+                ++ccm_it;
+                continue;
+            }
+            if (ccm_it->first == range_bucket_ccm_name)
+            {
                 ++ccm_it;
                 continue;
             }
 
             ccm_it = native_ccms_.erase(ccm_it);
         }
+        // Drop range bucket ccm last. We might call release cce lock
+        // on cce in range bucket ccm in range ccmap desctructor.
+        native_ccms_.erase(range_bucket_ccm_name);
     }
     else
     {
         for (auto table_it = failover_ccms_.begin();
              table_it != failover_ccms_.end();)
         {
+            if (table_it->first == range_bucket_ccm_name)
+            {
+                ++table_it;
+                continue;
+            }
             std::unordered_map<NodeGroupId, CcMap::uptr> &ng_ccm =
                 table_it->second;
             ng_ccm.erase(ng_id);
@@ -1071,6 +1092,15 @@ void CcShard::DropCcms(NodeGroupId ng_id)
             else
             {
                 ++table_it;
+            }
+        }
+        auto range_bucket_it = failover_ccms_.find(range_bucket_ccm_name);
+        if (range_bucket_it != failover_ccms_.end())
+        {
+            range_bucket_it->second.erase(ng_id);
+            if (range_bucket_it->second.empty())
+            {
+                failover_ccms_.erase(range_bucket_it);
             }
         }
     }

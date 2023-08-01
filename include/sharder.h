@@ -53,16 +53,14 @@ class Sharder
 public:
     static Sharder &Instance(
         uint32_t node_id = 0,
-        const std::map<uint32_t, std::vector<std::string>> *ng_ips = nullptr,
-        const std::map<uint32_t, std::vector<uint16_t>> *ng_ports = nullptr,
+        const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
         const std::vector<std::string> *txlog_ips = nullptr,
         const std::vector<uint16_t> *txlog_ports = nullptr,
         LocalCcShards *local_shards = nullptr,
         std::unique_ptr<TxLog> log_agent = nullptr)
     {
         static Sharder instance_(node_id,
-                                 ng_ips,
-                                 ng_ports,
+                                 ng_configs,
                                  txlog_ips,
                                  txlog_ports,
                                  *local_shards,
@@ -267,7 +265,7 @@ public:
 
     uint32_t GetNodeCount()
     {
-        return ng_ips_.size();
+        return ng_configs_.size();
     }
 
     uint32_t NodeId() const
@@ -321,10 +319,28 @@ public:
 
     size_t GetLocalCcShardsCount();
 
+    /**
+     * @brief Calculate new node group config after adding new nodes to current
+     * cluster.
+     * @return New cluster node group configs.
+     */
+    std::map<uint32_t, std::vector<NodeConfig>> AddNodeToCluster(
+        std::vector<std::pair<std::string, uint16_t>> &new_nodes);
+
+    /**
+     * @brief Calculate new node group config after removing nodes from current
+     * cluster.
+     * @param removed_nodes The node info of the nodes removed. Filled in by
+     * this func.
+     * @return New cluster node group configs.
+     */
+    std::map<uint32_t, std::vector<NodeConfig>> RemoveNodeFromCluster(
+        uint16_t removed_node_count,
+        std::vector<std::pair<std::string, uint16_t>> &removed_nodes);
+
 private:
     Sharder(uint32_t node_id,
-            const std::map<uint32_t, std::vector<std::string>> *ng_ips,
-            const std::map<uint32_t, std::vector<uint16_t>> *ng_ports,
+            const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
             const std::vector<std::string> *txlog_ips,
             const std::vector<uint16_t> *txlog_ports,
             LocalCcShards &local_shards,
@@ -344,8 +360,7 @@ private:
     uint32_t node_id_;
     // Map from node group id to member ip list and port list. The first item in
     // vector is the preferred leader of the node group.
-    std::map<uint32_t, std::vector<std::string>> ng_ips_;
-    std::map<uint32_t, std::vector<uint16_t>> ng_ports_;
+    std::map<uint32_t, std::vector<NodeConfig>> ng_configs_;
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
     // We have one raft group for each logical shard(specified by ip & port)

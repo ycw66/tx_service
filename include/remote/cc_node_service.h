@@ -42,6 +42,18 @@ public:
         ::txservice::remote::GetMinTxStartTsResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void ClusterAddNode(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::ClusterAddNodeRequest *request,
+        ::txservice::remote::ClusterAddNodeResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void ClusterRemoveNode(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::ClusterRemoveNodeRequest *request,
+        ::txservice::remote::ClusterRemoveNodeResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

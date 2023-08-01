@@ -599,6 +599,49 @@ struct ObjectCommandTxRequest
     bool auto_commit_{};
 };
 
+struct ClusterScaleTxRequest
+    : public TemplateTxRequest<ClusterScaleTxRequest, bool>
+{
+    ClusterScaleTxRequest(
+        ClusterScaleOpType scale_type,
+        std::vector<std::pair<std::string, uint16_t>> *new_nodes,
+        std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
+        uint16_t *remove_node_count)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          scale_type_(scale_type),
+          new_nodes_(new_nodes),
+          removed_nodes_(removed_nodes),
+          remove_node_count_(remove_node_count)
+    {
+    }
+
+    void WaitForWriteLog()
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait(lock, [this] { return finished_; });
+    }
+
+    CcErrorCode GetErr() const
+    {
+        return err_;
+    }
+
+    ClusterScaleOpType scale_type_;
+    // Used when adding node, to indicate added node info
+    std::vector<std::pair<std::string, uint16_t>> *new_nodes_;
+
+    // Used when removing node, ClusterScaleOp will fill in the removed
+    // node info.
+    std::vector<std::pair<std::string, uint16_t>> *removed_nodes_;
+    // Used when removing node, to indicate how many nodes to be removed
+    uint16_t *remove_node_count_;
+    // Notify caller once log is written.
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    bool finished_{false};
+    std::mutex mtx_;
+    std::condition_variable cv_;
+};
+
 struct FaultInjectTxRequest
     : public TemplateTxRequest<FaultInjectTxRequest, bool>
 {

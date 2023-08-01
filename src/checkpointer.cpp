@@ -137,7 +137,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
             TableName &table_name = tables.at(idx);
             if (table_name.Type() == TableType::Catalog ||
-                table_name.Type() == TableType::RangePartition)
+                table_name.Type() == TableType::RangePartition ||
+                table_name.Type() == TableType::RangeBucket)
             {
                 continue;
             }

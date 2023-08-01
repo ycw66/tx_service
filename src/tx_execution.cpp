@@ -235,8 +235,12 @@ void TransactionExecution::RecoverSchemaTx(
     {
         const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
 
-        std::unique_lock<std::mutex> lk(cc_handler_->table_schema_op_pool_mux_);
-        if (cc_handler_->table_schema_op_pool_.empty())
+        LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+        std::unique_lock<std::mutex> lk(
+            local_shards->table_schema_op_pool_mux_);
+        if (Sharder::Instance()
+                .GetLocalCcShards()
+                ->table_schema_op_pool_.empty())
         {
             std::unique_ptr<UpsertTableOp> table_op = nullptr;
             table_op = std::make_unique<UpsertTableOp>(
@@ -251,9 +255,15 @@ void TransactionExecution::RecoverSchemaTx(
         }
         else
         {
-            assert(cc_handler_->table_schema_op_pool_.back() != nullptr);
-            schema_op_ = std::move(cc_handler_->table_schema_op_pool_.back());
-            cc_handler_->table_schema_op_pool_.pop_back();
+            assert(Sharder::Instance()
+                       .GetLocalCcShards()
+                       ->table_schema_op_pool_.back() != nullptr);
+            schema_op_ = std::move(Sharder::Instance()
+                                       .GetLocalCcShards()
+                                       ->table_schema_op_pool_.back());
+            Sharder::Instance()
+                .GetLocalCcShards()
+                ->table_schema_op_pool_.pop_back();
 
             schema_op_->Reset(schema_op.table_name_str(),
                               schema_op.old_catalog_blob(),
@@ -355,10 +365,11 @@ void TransactionExecution::RecoverSplitRangeTx(
                                     new_partition_ids[i]);
     }
 
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
     std::unique_lock<std::mutex> lk(
-        cc_handler_->split_flush_range_op_pool_mux_);
-    if (cc_handler_->split_flush_range_op_pool_.empty())
+        local_shards->split_flush_range_op_pool_mux_);
+    if (local_shards->split_flush_range_op_pool_.empty())
     {
         split_range_op =
             std::make_unique<SplitFlushRangeOp>(table_name,
@@ -373,8 +384,8 @@ void TransactionExecution::RecoverSplitRangeTx(
     else
     {
         split_range_op =
-            std::move(cc_handler_->split_flush_range_op_pool_.back());
-        cc_handler_->split_flush_range_op_pool_.pop_back();
+            std::move(local_shards->split_flush_range_op_pool_.back());
+        local_shards->split_flush_range_op_pool_.pop_back();
         assert(split_range_op != nullptr);
         split_range_op->Reset(table_name,
                               table_schema,
@@ -822,8 +833,9 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         });
     bool_resp_ = &req.tx_result_;
 
-    std::unique_lock<std::mutex> lk(cc_handler_->table_schema_op_pool_mux_);
-    if (cc_handler_->table_schema_op_pool_.empty())
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+    std::unique_lock<std::mutex> lk(local_shards->table_schema_op_pool_mux_);
+    if (local_shards->table_schema_op_pool_.empty())
     {
         std::unique_ptr<UpsertTableOp> table_op = nullptr;
         table_op =
@@ -838,9 +850,9 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
     }
     else
     {
-        assert(cc_handler_->table_schema_op_pool_.back() != nullptr);
-        schema_op_ = std::move(cc_handler_->table_schema_op_pool_.back());
-        cc_handler_->table_schema_op_pool_.pop_back();
+        assert(local_shards->table_schema_op_pool_.back() != nullptr);
+        schema_op_ = std::move(local_shards->table_schema_op_pool_.back());
+        local_shards->table_schema_op_pool_.pop_back();
 
         schema_op_->Reset(req.table_name_->StringView(),
                           *req.curr_image_,
@@ -903,9 +915,10 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
 
     bool_resp_ = &req.tx_result_;
 
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_lock<std::mutex> lk(
-        cc_handler_->split_flush_range_op_pool_mux_);
-    if (cc_handler_->split_flush_range_op_pool_.empty())
+        local_shards->split_flush_range_op_pool_mux_);
+    if (local_shards->split_flush_range_op_pool_.empty())
     {
         split_flush_op_ =
             std::make_unique<SplitFlushRangeOp>(*req.table_name_,
@@ -920,8 +933,8 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
     else
     {
         split_flush_op_ =
-            std::move(cc_handler_->split_flush_range_op_pool_.back());
-        cc_handler_->split_flush_range_op_pool_.pop_back();
+            std::move(local_shards->split_flush_range_op_pool_.back());
+        local_shards->split_flush_range_op_pool_.pop_back();
         assert(split_flush_op_ != nullptr);
         split_flush_op_->Reset(*req.table_name_,
                                req.schema_,
@@ -961,6 +974,52 @@ void TransactionExecution::ProcessTxRequest(AnalyzeTableTxRequest &analyze_req)
 
     PushOperation(&analyze_table_all_op_);
     Process(analyze_table_all_op_);
+}
+
+void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
+    if (local_shards->cluster_scale_op_)
+    {
+        local_shards->cluster_scale_op_->Reset(req.scale_type_,
+                                               req.new_nodes_,
+                                               req.removed_nodes_,
+                                               req.remove_node_count_,
+                                               req.mtx_,
+                                               req.cv_,
+                                               req.finished_,
+                                               req.err_,
+                                               this);
+    }
+    else
+    {
+        local_shards->cluster_scale_op_ =
+            std::make_unique<ClusterScaleOp>(req.scale_type_,
+                                             req.new_nodes_,
+                                             req.removed_nodes_,
+                                             req.remove_node_count_,
+                                             req.mtx_,
+                                             req.cv_,
+                                             req.finished_,
+                                             req.err_,
+                                             this);
+    }
+    lk.unlock();
+
+    PushOperation(local_shards->cluster_scale_op_.get());
+    Forward();
 }
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
@@ -1181,11 +1240,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 // key across CPU cores in a cc node.
                 uint32_t residual = key.Hash() & 0x3FF;
                 NodeGroupId range_owner =
-                    static_cast<
-                        const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                        read.range_rec_.GetRangeOwnerRec())
-                        ->payload_->GetBucketInfo()
-                        ->BucketOwner();
+                    read.range_rec_.GetRangeOwnerNg()->BucketOwner();
                 key_shard_code = range_owner << 10 | residual;
             }
 #else

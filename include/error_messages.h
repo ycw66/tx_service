@@ -145,6 +145,7 @@ enum struct CcErrorCode
 
     // log service
     LOG_CLOSURE_RESULT_UNKNOWN_ERR,
+    WRITE_LOG_FAILED,
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,
