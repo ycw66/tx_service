@@ -5171,6 +5171,7 @@ public:
         // Iterate the cc map using the original page list.
         const KeyT *start_key = static_cast<const KeyT *>(req.StartKey());
         const KeyT *end_key = static_cast<const KeyT *>(req.EndKey());
+        CleanType clean_type = req.CleanType();
         LruPage *lru_page;
         if (req.ResumeKey(shard_->core_id_) != nullptr)
         {
@@ -5211,13 +5212,13 @@ public:
                ccp != &pg_ps_inf_)
         {
             auto [freed_cnt, next_page] =
-                CleanPageAndReBalance(ccp, &req, &is_success);
+                CleanPageAndReBalance(ccp, clean_type, &req, &is_success);
             ++scan_page_cnt;
             if (!is_success)
             {
                 // Clean failed, retry in the next round.
-                DLOG(ERROR) << "Failed to clean all target ccentries on core: "
-                            << shard_->core_id_;
+                LOG(ERROR) << "Failed to clean all target ccentries on core: "
+                           << shard_->core_id_;
                 break;
             }
             // Move to next page
@@ -5227,8 +5228,7 @@ public:
         if (ccp == &pg_ps_inf_ ||
             (end_key != nullptr && !(ccp->FirstKey() < *end_key)))
         {
-            req.SetFinish(shard_->core_id_);
-            return true;
+            return req.SetFinish(shard_->core_id_);
         }
         else
         {
@@ -5299,6 +5299,7 @@ public:
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *lru_page,
+        CleanType clean_type = CleanType::CleanForFree,
         KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) override
     {
@@ -5323,7 +5324,7 @@ public:
             static_cast<CcPage<KeyT, ValueT> *>(lru_page);
         const KeyT old_page_key(page->FirstKey());
         auto [success, last_read_ts] =
-            CleanPage(page, mem_decreased, free_cnt, kickout_cc);
+            CleanPage(page, mem_decreased, free_cnt, clean_type, kickout_cc);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -6695,12 +6696,16 @@ protected:
      * @param page
      * @param mem_decreased
      * @param free_cnt
-     * @param ckpt_ts [optional]
-     * @return
+     * @param clean_type
+     * @return The bool value stand for the clean status, if return false, it
+     * mean that the target ccentry can not be clean, the caller should retry
+     * the kickout request. Currently, only when clean_type is
+     * CleanForSplitRange and CleanForAlterTable care this status.
      */
     std::pair<bool, uint64_t> CleanPage(CcPage<KeyT, ValueT> *page,
                                         size_t &mem_decreased,
                                         size_t &free_cnt,
+                                        CleanType clean_type,
                                         KickoutCcEntryCc *kickout_cc = nullptr)
     {
         uint64_t last_read_ts = 0;
@@ -6724,9 +6729,34 @@ protected:
         {
             CcEntry<KeyT, ValueT> *cce = entry_it->get();
             last_read_ts = std::max(last_read_ts, cce->last_read_ts_);
-            if ((!kickout_cc && cce->IsFree()) ||
-                (kickout_cc && KeyInRange(&(*key_it), start_key, end_key) &&
-                 cce->commit_ts_ < kickout_cc->CkptTs()))
+
+            bool can_be_clean = false;
+            switch (clean_type)
+            {
+            case CleanType::CleanForFree:
+                can_be_clean = cce->IsFree();
+                break;
+            case CleanType::CleanForSplitRange:
+            {
+                assert(kickout_cc);
+                can_be_clean = KeyInRange(&(*key_it), start_key, end_key);
+                break;
+            }
+            case CleanType::CleanForAlterTable:
+            {
+                assert(kickout_cc);
+                can_be_clean = cce->commit_ts_ <= kickout_cc->CkptTs() &&
+                               cce->commit_ts_ > 1 && cce->IsFree();
+                break;
+            }
+            default:
+            {
+                LOG(ERROR) << "Unknown clean type: " << (uint32_t) clean_type;
+                assert(false);
+            }
+            }
+
+            if (can_be_clean)
             {
 #ifdef RANGE_PARTITION_ENABLED
                 bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
@@ -6740,9 +6770,11 @@ protected:
                     key_insert_it++;
                     entry_insert_it++;
                     // The ccentry that expect to clean cannot be kick out.
-                    if (kickout_cc != nullptr &&
-                        KeyInRange(&(*key_it), start_key, end_key) &&
-                        cce->commit_ts_ < kickout_cc->CkptTs())
+                    // In this branch, only when clean_type is
+                    // CleanForSplitRange or CleanForAlterTable care this clean
+                    // status
+                    if (clean_type == CleanType::CleanForSplitRange ||
+                        clean_type == CleanType::CleanForAlterTable)
                     {
                         clean_success = false;
                     }
@@ -6764,10 +6796,15 @@ protected:
             else
             {
                 // The ccentry that expect to clean cannot be kick out.
-                if (kickout_cc != nullptr &&
-                    KeyInRange(&(*key_it), start_key, end_key) &&
-                    cce->commit_ts_ < kickout_cc->CkptTs())
+                // In this branch, only when clean_type is CleanForAlterTable
+                // care this clean status. For CleanForSplitRange, if
+                // can_be_clean is false, it mean that this ccentry is not the
+                // target one, so it do not care this clean status.
+                if (clean_type == CleanType::CleanForAlterTable &&
+                    cce->commit_ts_ <= kickout_cc->CkptTs() &&
+                    cce->commit_ts_ > 1)
                 {
+                    assert(!cce->IsFree());
                     clean_success = false;
                 }
                 // keep the entries that are not free

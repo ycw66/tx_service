@@ -3459,9 +3459,11 @@ public:
                      const uint64_t ckpt_ts,
                      uint16_t core_cnt,
                      CcHandlerResult<Void> *res,
+                     CleanType clean_type,
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr)
         : ckpt_ts_(ckpt_ts),
+          clean_type_(clean_type),
           start_key_(start_key),
           end_key_(end_key),
           unfinished_cnt_(core_cnt)
@@ -3483,6 +3485,7 @@ public:
                const uint64_t ckpt_ts,
                uint16_t core_cnt,
                CcHandlerResult<Void> *res,
+               CleanType clean_type,
                const TxKey *start_key = nullptr,
                const TxKey *end_key = nullptr)
     {
@@ -3494,6 +3497,7 @@ public:
         start_key_ = start_key;
         end_key_ = end_key;
         unfinished_cnt_ = core_cnt;
+        clean_type_ = clean_type;
         for (uint16_t i = 0; i < core_cnt; ++i)
         {
             resume_key_.emplace_back(nullptr);
@@ -3518,16 +3522,14 @@ public:
 
         if (ccm != nullptr)
         {
-            ccm->Execute(*this);
+            return ccm->Execute(*this);
         }
         else
         {
             // If no ccmap for this table, nothing to kickout, notify finish
             // directly.
-            SetFinish(ccs.core_id_);
+            return SetFinish(ccs.core_id_);
         }
-
-        return false;
     }
 
     uint64_t CkptTs() const
@@ -3555,7 +3557,7 @@ public:
         return end_key_;
     }
 
-    void SetFinish(size_t core_id)
+    bool SetFinish(size_t core_id)
     {
         if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
@@ -3563,11 +3565,19 @@ public:
             {
                 res_->SetFinished();
             }
+            return true;
         }
+        return false;
+    }
+
+    txservice::CleanType CleanType() const
+    {
+        return clean_type_;
     }
 
 private:
     uint64_t ckpt_ts_{0};
+    txservice::CleanType clean_type_{CleanType::CleanForSplitRange};
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     std::vector<TxKey::Uptr> resume_key_;

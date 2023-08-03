@@ -54,6 +54,36 @@ enum struct ScanType
     ScanUnknow
 };
 
+enum struct CleanType
+{
+    /**
+     * This used to free the memory when the ccshard is full. In this case, the
+     * `CleanPageAndReBalance()` is invoked during `CcShard::Clean()`, and the
+     * CcPage come from the LRU list. Then will clean cc entries that is free,
+     * that is to say, the ccentry has been checkpointed and have no lock on
+     * this ccentry.
+     */
+    CleanForFree = 0,
+    /**
+     * This used to kickout the ccentries that donot belong to this node anymore
+     * during split range operation. In this case, the `CleanPageAndReBalance()`
+     * is invoked during execute `KickoutCcEntryCc` request, and the CcPage come
+     * from the request's `start_key`. Then will clean cc entries that are in
+     * the specific range.
+     */
+    CleanForSplitRange,
+    /**
+     * This used to kickout the ccentries during alter table operation. In this
+     * case, the `CleanPageAndReBalance()` is invoked during execute
+     * `KickoutCcEntryCc` request, and the CcPage come from the request's
+     * `start_key`. Then will clean cc entries that match the below conditions:
+     * 1) `commit_ts` less than the the timestamp specified by the request, 2)
+     * large than 1, that is to say not the initial entry, 3) is free, that is
+     * to say, the ccentry has been checkpointed and have no lock on it.
+     */
+    CleanForAlterTable
+};
+
 class CcShard;
 struct TableSchema;
 
@@ -109,6 +139,7 @@ public:
     virtual void Clean(LruEntry *remove_entry) = 0;
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
+        CleanType clean_type = CleanType::CleanForFree,
         KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;

@@ -1394,6 +1394,7 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                             uint64_t command_id,
                                             uint64_t commit_ts,
                                             CcHandlerResult<Void> &hres,
+                                            CleanType clean_type,
                                             const TxKey *start_key,
                                             const TxKey *end_key)
 {
@@ -1406,6 +1407,7 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                    commit_ts,
                    Sharder::Instance().GetLocalCcShardsCount(),
                    &hres,
+                   clean_type,
                    start_key,
                    end_key);
 

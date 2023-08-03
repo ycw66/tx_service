@@ -478,6 +478,7 @@ public:
                              uint64_t command_id,
                              uint64_t commit_ts,
                              CcHandlerResult<Void> &hres,
+                             CleanType clean_type,
                              const TxKey *start_key = nullptr,
                              const TxKey *end_key = nullptr) = 0;
 };

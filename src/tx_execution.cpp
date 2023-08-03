@@ -4444,6 +4444,7 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
                              command_id_.load(std::memory_order_relaxed),
                              kickout_data_op.commit_ts_,
                              kickout_data_op.hd_result_,
+                             CleanType::CleanForSplitRange,
                              kickout_data_op.start_key_,
                              kickout_data_op.end_key_);
 }
