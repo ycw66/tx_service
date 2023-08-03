@@ -97,7 +97,8 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                                         tx_term,
                                         cce,
                                         lock_type == LockType::WriteLock,
-                                        ng_id);
+                                        ng_id,
+                                        table_name_.Type());
         }
 
         if (cce->key_lock_ptr_ != nullptr &&
@@ -245,7 +246,8 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
                                     tx_term,
                                     cce,
                                     acquired_lock == LockType::WriteLock,
-                                    ng_id);
+                                    ng_id,
+                                    table_name_.Type());
     }
 
     return std::pair<LockType, CcErrorCode>(acquired_lock, err_code);

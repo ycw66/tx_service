@@ -416,12 +416,14 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          int64_t tx_term,
                                          LruEntry *cce_ptr,
                                          bool is_key_write_lock,
-                                         NodeGroupId cc_ng_id)
+                                         NodeGroupId cc_ng_id,
+                                         TableType table_type)
 {
     auto ng_em_it = lock_holding_txs_.try_emplace(cc_ng_id);
     auto tx_em_it = ng_em_it.first->second.try_emplace(txn, tx_term);
     tx_em_it.first->second.cce_list_.emplace(cce_ptr);
     tx_em_it.first->second.last_recover_ts_ = Now();
+    tx_em_it.first->second.table_type_ = table_type;
 
     if (is_key_write_lock)
     {

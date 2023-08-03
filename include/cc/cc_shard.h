@@ -66,7 +66,8 @@ struct TxLockInfo
         : tx_coord_term_(tx_coord_term),
           wlock_ts_(0),
           last_recover_ts_(0),
-          cce_list_()
+          cce_list_(),
+          table_type_(TableType::Primary)
     {
     }
 
@@ -80,6 +81,9 @@ struct TxLockInfo
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     std::unordered_set<LruEntry *> cce_list_;
+    // This cc map type is used to skip the meta table(such as: catalog, range)
+    // during get ActiveTxMinTs()
+    TableType table_type_;
 };
 
 class CcShard
@@ -264,7 +268,8 @@ public:
                                     int64_t tx_term,
                                     LruEntry *cce_ptr,
                                     bool is_key_write_lock,
-                                    NodeGroupId cc_ng_id);
+                                    NodeGroupId cc_ng_id,
+                                    TableType table_type);
 
     void DeleteLockHoldingTx(TxNumber txn,
                              LruEntry *cce_ptr,
@@ -303,7 +308,12 @@ public:
         {
             for (auto &tx_pair : it->second)
             {
-                if (tx_pair.second.wlock_ts_ != 0)
+                // Skip meta table because there is no need to do
+                // checkpoint for these type table.
+                if (tx_pair.second.table_type_ != TableType::Catalog &&
+                    tx_pair.second.table_type_ != TableType::RangePartition &&
+                    tx_pair.second.table_type_ != TableType::RangeBucket &&
+                    tx_pair.second.wlock_ts_ != 0)
                 {
                     min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
                 }
