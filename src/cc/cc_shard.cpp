@@ -920,9 +920,8 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             this,
                                             ng_id));
         // update table schema for alter table command.
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
@@ -944,9 +943,8 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                             this,
                                             ng_id));
         // update table schema for alter table command.
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
@@ -968,9 +966,8 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
             catalog_factory_->CreateSkCcMap(
                 index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
@@ -987,9 +984,8 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
             catalog_factory_->CreateSkCcMap(
                 index_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current sk cc map
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
@@ -1121,9 +1117,8 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
             catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
@@ -1139,9 +1134,8 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
             catalog_factory_->CreateRangeMap(
                 range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
-        if (!is_create)
+        if (!is_create && !ccm_it.second)
         {
-            assert(!ccm_it.second);
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
             ccm->SetSchemaTs(schema_ts);
