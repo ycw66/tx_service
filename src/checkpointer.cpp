@@ -114,7 +114,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
-        std::vector<TableName> tables =
+        std::unordered_map<TableName, bool> tables =
             local_shards_.GetCatalogTableNamesForCkpt(node_group);
 
         std::mutex task_sender_mux;
@@ -128,14 +128,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
         // ckpt_vec.
-        for (uint16_t idx = 0; idx < tables.size(); idx++)
+        for (auto it = tables.begin(); it != tables.end(); ++it)
         {
             if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
             {
                 break;
             }
 
-            TableName &table_name = tables.at(idx);
+            const TableName &table_name = it->first;
+            bool is_dirty = it->second;
             // This should correspond to CcShard::ActiveTxMinTs.
             if (table_name.Type() == TableType::Catalog ||
                 table_name.Type() == TableType::RangePartition ||
@@ -151,7 +152,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                               &task_sender_mux,
                                               &task_sender_cv,
                                               &finished_task_cnt,
-                                              &tasks_failed);
+                                              &tasks_failed,
+                                              is_dirty);
             ++task_started;
         }
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)

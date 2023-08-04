@@ -331,10 +331,10 @@ CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
                                                      : &catalog_it->second;
 }
 
-std::vector<TableName> LocalCcShards::GetCatalogTableNamesForCkpt(
+std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNamesForCkpt(
     NodeGroupId cc_ng_id)
 {
-    std::vector<TableName> tables;
+    std::unordered_map<TableName, bool> tables;
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     for (const auto &[base_table_name, ng_catalog_map] : table_catalogs_)
     {
@@ -344,17 +344,49 @@ std::vector<TableName> LocalCcShards::GetCatalogTableNamesForCkpt(
             const CatalogEntry &catalog_entry = catalog_it->second;
             if (catalog_entry.schema_ != nullptr)
             {
-                tables.emplace_back(base_table_name.StringView().data(),
-                                    base_table_name.StringView().size(),
-                                    base_table_name.Type());
+                auto ins_it = tables.emplace(
+                    std::piecewise_construct,
+                    std::forward_as_tuple(base_table_name.StringView().data(),
+                                          base_table_name.StringView().size(),
+                                          base_table_name.Type()),
+                    std::forward_as_tuple(false));
+                assert(ins_it.second);
                 for (const txservice::TableName &index_table_name :
                      catalog_entry.schema_->IndexNames())
                 {
-                    tables.emplace_back(index_table_name.StringView().data(),
-                                        index_table_name.StringView().size(),
-                                        index_table_name.Type());
+                    auto ins_it =
+                        tables.emplace(std::piecewise_construct,
+                                       std::forward_as_tuple(
+                                           index_table_name.StringView().data(),
+                                           index_table_name.StringView().size(),
+                                           index_table_name.Type()),
+                                       std::forward_as_tuple(false));
+                    assert(ins_it.second);
                 }
-            }
+
+                // For alter table, should include new index tables.
+                if (catalog_entry.dirty_schema_ != nullptr)
+                {
+                    // Only search new index table name, because the base table
+                    // and the old index have been obtained via above.
+                    for (const txservice::TableName &index_table_name :
+                         catalog_entry.dirty_schema_->IndexNames())
+                    {
+                        auto iter = tables.find(index_table_name);
+                        if (iter == tables.end())
+                        {
+                            auto ins_it = tables.emplace(
+                                std::piecewise_construct,
+                                std::forward_as_tuple(
+                                    index_table_name.StringView().data(),
+                                    index_table_name.StringView().size(),
+                                    index_table_name.Type()),
+                                std::forward_as_tuple(true));
+                            assert(ins_it.second);
+                        }
+                    }
+                } /* End of dirty index table schema */
+            }     /* End of this base table */
         }
     }
     return tables;
@@ -1364,7 +1396,7 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                         std::condition_variable *task_sender_cv,
                                         uint16_t *finished_task_cnt,
                                         std::atomic_bool *tasks_failed,
-                                        bool is_forward,
+                                        bool is_dirty,
                                         CcHandlerResult<Void> *hres)
 {
     std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
@@ -1377,7 +1409,7 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                        task_sender_cv,
                                        finished_task_cnt,
                                        tasks_failed,
-                                       is_forward,
+                                       is_dirty,
                                        hres));
     task_worker_cv_.notify_one();
 }
@@ -1489,7 +1521,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
     uint64_t target_data_sync_ts = data_sync_task->data_sync_ts_;
-    bool is_forward = data_sync_task->is_forward_;
+    bool is_dirty = data_sync_task->is_dirty_;
 
     // Find or emplace item from table sync status for this table.
     auto tbl_statuses_it = tables_sync_status_.try_emplace(table_name).first;
@@ -1502,11 +1534,25 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         // Fast path in two cases to process this task as below:
         need_process = false;
-        if (sync_status.last_sync_ts_ >= target_data_sync_ts)
+        // NOTE: For table that is_dirty is true, if `target_data_sync_ts <=
+        // sync_status.last_sync_ts_`, can not return finished directly, because
+        // that new records with special commit ts which less than
+        // `sync_status.last_sync_ts_` may upload into ccmap after last
+        // data_sync, such as add index transaction.
+
+        if (target_data_sync_ts <= sync_status.last_sync_ts_ && !is_dirty)
         {
-            // 1) Have been synchronized by other task worker, return finish
-            // directly.
-            data_sync_task->SetFinish();
+            // 1) For table that is_dirty is false, can set finish directly.
+            if (data_sync_task->SetFinish())
+            {
+                // Handle the pending tasks for the same table
+                if (sync_status.pending_task_.size() > 0)
+                {
+                    data_sync_task_queue_.push_back(
+                        std::move(sync_status.pending_task_.back()));
+                    sync_status.pending_task_.pop_back();
+                }
+            }
         }
         else if (sync_status.is_ongoing_)
         {
@@ -1740,7 +1786,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // than the last launched flush data worker.
     data_sync_task->unfinished_worker_ = 1;
     const TableSchema *table_schema =
-        is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
+        is_dirty ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 #ifdef RANGE_PARTITION_ENABLED
     // 4.1 For range partition, execute range split if necessary using
     // seperate thread per range.
@@ -1800,12 +1846,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                  &table_name,
                  split_info = std::move(split_pair),
                  &ng_id,
-                 is_forward,
-                 data_sync_task]
-                {
+                 is_dirty,
+                 data_sync_task] {
                     SplitFlushRange(table_name,
                                     ng_id,
-                                    is_forward,
+                                    is_dirty,
                                     split_info,
                                     data_sync_task);
                 });
@@ -1890,6 +1935,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                     data_sync_task_queue_.push_back(
                         std::move(sync_status.pending_task_.back()));
                     sync_status.pending_task_.pop_back();
+                    // Notify the data sync workers.
+                    task_worker_cv_.notify_one();
                 }
             }
         }
@@ -2208,7 +2255,7 @@ void LocalCcShards::MoveNonSplittingRecords(
 void LocalCcShards::SplitFlushRange(
     const TableName &table_name,
     NodeGroupId node_group,
-    bool is_forward,
+    bool is_dirty,
     std::pair<const StoreRange *, std::vector<const TxKey *>> split_info,
     std::shared_ptr<DataSyncTask> data_sync_task)
 {
@@ -2362,7 +2409,7 @@ void LocalCcShards::SplitFlushRange(
     log_output.append(" txn: " + std::to_string(split_txm->TxNumber()));
     LOG(INFO) << log_output;
     const TableSchema *table_schema =
-        is_forward ? catalog_rec.DirtySchema() : catalog_rec.Schema();
+        is_dirty ? catalog_rec.DirtySchema() : catalog_rec.Schema();
 
     SplitFlushTxRequest split_req(table_name,
                                   table_schema,
@@ -2638,6 +2685,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 data_sync_task_queue_.push_back(
                     std::move(sync_status.pending_task_.back()));
                 sync_status.pending_task_.pop_back();
+                // Notify the data sync workers.
+                task_worker_cv_.notify_one();
             }
         }
     }

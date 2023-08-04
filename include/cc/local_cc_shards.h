@@ -311,7 +311,12 @@ public:
      */
     void DropCatalogs(NodeGroupId cc_ng_id);
 
-    std::vector<TableName> GetCatalogTableNamesForCkpt(NodeGroupId cc_ng_id);
+    /**
+     * @return Pair of TableName and bool, the bool value is used to sign
+     * whether this table is dirty table(such as dirty index table).
+     */
+    std::unordered_map<TableName, bool> GetCatalogTableNamesForCkpt(
+        NodeGroupId cc_ng_id);
 
     void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
                                 uint64_t txn,
@@ -477,7 +482,7 @@ public:
                              std::condition_variable *task_sender_cv,
                              uint16_t *finished_task_cnt,
                              std::atomic_bool *tasks_failed,
-                             bool is_forward = false,
+                             bool is_dirty = false,
                              CcHandlerResult<Void> *hres = nullptr);
 
     bool SetDataSyncOngoing(const TableName &table_name,
@@ -711,7 +716,7 @@ private:
                      std::condition_variable *task_sender_cv,
                      uint16_t *finished_task_cnt,
                      std::atomic_bool *tasks_failed,
-                     bool is_forward,
+                     bool is_dirty,
                      CcHandlerResult<Void> *hres = nullptr)
             : table_name_(table_name),
               node_group_id_(ng_id),
@@ -721,7 +726,7 @@ private:
               task_sender_cv_(task_sender_cv),
               finished_task_cnt_(finished_task_cnt),
               tasks_failed_(tasks_failed),
-              is_forward_(is_forward),
+              is_dirty_(is_dirty),
               task_res_(hres)
         {
         }
@@ -806,7 +811,7 @@ private:
         std::atomic_bool *tasks_failed_{nullptr};
         std::atomic_bool sync_task_failed_{false};
         // True if need to use the dirty schema..
-        bool is_forward_{false};
+        bool is_dirty_{false};
         // Indicate the single task result.
         CcHandlerResult<Void> *task_res_{nullptr};
         std::atomic_uint16_t unfinished_worker_{1};
@@ -866,7 +871,7 @@ private:
     void SplitFlushRange(
         const TableName &table_name,
         NodeGroupId node_group,
-        bool is_forward,
+        bool is_dirty,
         std::pair<const StoreRange *, std::vector<const TxKey *>> split_info,
         std::shared_ptr<DataSyncTask> data_sync_task);
 
