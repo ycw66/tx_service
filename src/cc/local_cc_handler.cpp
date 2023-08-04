@@ -268,7 +268,8 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    bool blocked)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -295,7 +296,8 @@ void txservice::LocalCcHandler::ForwardPostWrite(
                    operation_type,
                    key_shard_code,
                    &hres,
-                   (operation_type == OperationType::Insert));
+                   (operation_type == OperationType::Insert),
+                   blocked);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -315,7 +317,8 @@ void txservice::LocalCcHandler::ForwardPostWrite(
                                     record,
                                     operation_type,
                                     key_shard_code,
-                                    hres);
+                                    hres,
+                                    blocked);
     }
 }
 

@@ -71,7 +71,8 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres);
+                          CcHandlerResult<PostProcessResult> &hres,
+                          bool blocked = true);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,

@@ -141,6 +141,9 @@ public:
      * @param operation_type
      * @param key_shard_code
      * @param hres
+     * @param blocked Whether blocked or return error if OOM during PostWrite
+     * request. If return error, the caller should re-execute this request after
+     * the cc shard has enough memory.
      */
     virtual void ForwardPostWrite(TxNumber tx_number,
                                   int64_t tx_term,
@@ -151,7 +154,8 @@ public:
                                   const TxRecord *record,
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
-                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+                                  CcHandlerResult<PostProcessResult> &hres,
+                                  bool blocked = true) = 0;
 
     /**
      * @brief Post-processes a read/scan key. Post-processing clears the read

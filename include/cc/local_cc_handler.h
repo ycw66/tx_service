@@ -87,7 +87,8 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          bool blocked = true) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the

@@ -553,11 +553,30 @@ public:
 
                 if (cce == nullptr)
                 {
-                    // postwrite must succeed since log has already been
-                    // written. Renqueue the request and wait until we have
-                    // free space in memory.
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
+                    if (req.BeBlocked())
+                    {
+                        // postwrite must succeed since log has already been
+                        // written. Renqueue the request and wait until we have
+                        // free space in memory.
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                    else
+                    {
+                        LOG(WARNING) << "!!!WARNING!!! PostWriteCc have no"
+                                     << " enough memory. Txn: " << txn
+                                     << ", table name trace: "
+                                     << this->table_name_.Trace();
+                        // This cc shard has reached max memory limit. We didn't
+                        // write data log for this post write req, but we have
+                        // acquired range read lock for this key. If we do not
+                        // return error and release the range read lock, it
+                        // might block range split from finishing. We should
+                        // return error here so that coordinator can release
+                        // range read lock and retry later.
+                        req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
+                    }
                 }
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
