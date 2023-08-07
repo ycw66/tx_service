@@ -226,7 +226,7 @@ public:
      * write lock.
      *
      */
-    void Advance();
+    void Advance(TransactionExecution *txm);
 
     TableName range_table_name_{empty_sv, TableType::RangePartition};
     RangeRecord range_rec_;

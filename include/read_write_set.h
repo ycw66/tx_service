@@ -397,7 +397,7 @@ public:
                                        ? key_it.second.rec_->SerializedLength()
                                        : 0;
 
-                if (key_it.second.forward_key_shard_code_ != 0)
+                if (key_it.second.forward_key_shard_code_ != UINT32_MAX)
                 {
                     forward_write_cnt_--;
                 }

@@ -483,7 +483,7 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
     }
 }
 
-void LockWriteRangesOp::Advance()
+void LockWriteRangesOp::Advance(TransactionExecution *txm)
 {
     // Advances the write key iterator such that it points to the first key
     // belonging to the next range.
@@ -529,6 +529,9 @@ void LockWriteRangesOp::Advance()
         {
             write_entry.forward_key_shard_code_ =
                 (new_range_owner << 10) | (hash & 0x3FF);
+
+            assert(write_entry.forward_key_shard_code_ != UINT32_MAX);
+            txm->rw_set_.IncreaseFowardWriteCnt();
         }
         ++write_key_it_;
     }

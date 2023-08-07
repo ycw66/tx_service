@@ -55,7 +55,9 @@ struct WriteSetEntry
     CcEntryAddr cce_addr_;
     uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
-    uint32_t forward_key_shard_code_{0};
+    // Setting the default value is UINT32_MAX also suppose that
+    // new_range_owner, which is a node group id now, will not be 0xFFFF.
+    uint32_t forward_key_shard_code_{UINT32_MAX};
 };
 
 struct ReadSetEntry

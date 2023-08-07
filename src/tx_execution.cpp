@@ -2653,7 +2653,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     assert(range_start_key == nullptr || !(*write_key < *range_start_key));
     assert(range_end_key == nullptr || *write_key < *range_end_key);
 
-    lock_write_ranges.Advance();
+    lock_write_ranges.Advance(this);
 
     if (lock_write_ranges.table_it_ == lock_write_ranges.table_end_)
     {
@@ -2703,11 +2703,6 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 #ifndef RANGE_PARTITION_ENABLED
             size_t hash = write_entry.key_->Hash();
             write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
-#else
-            if (write_entry.forward_key_shard_code_ != 0)
-            {
-                rw_set_.IncreaseFowardWriteCnt();
-            }
 #endif
             acquire_write.acquire_write_entries_[idx] = &write_entry;
 
@@ -3126,7 +3121,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
             rec_vec_it.first->second.emplace_back(&wset_entry);
 
-            if (wset_entry.forward_key_shard_code_ != 0)
+            if (wset_entry.forward_key_shard_code_ != UINT32_MAX)
             {
                 // If the wset entry needs to be double written into different
                 // ngs, write log for both ngs.
@@ -3600,7 +3595,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                        write_entry.op_,
                                        write_entry.key_shard_code_,
                                        post_process.hd_result_);
-                if (write_entry.forward_key_shard_code_ != 0)
+                if (write_entry.forward_key_shard_code_ != UINT32_MAX)
                 {
                     cc_handler_->ForwardPostWrite(
                         tx_number_.load(std::memory_order_relaxed),
