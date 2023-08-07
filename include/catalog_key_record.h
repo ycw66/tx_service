@@ -192,7 +192,7 @@ public:
     std::string ToString() const override;
 
     void Set(const std::shared_ptr<TableSchema> &schema,
-             TableSchema *dirty_schema,
+             const std::shared_ptr<TableSchema> &dirty_schema,
              uint64_t schema_ts);
     const std::string &SchemaImage() const;
     void SetSchemaImage(std::string &&schema_image);
@@ -203,6 +203,7 @@ public:
     const TableSchema *Schema() const;
     std::shared_ptr<const TableSchema> CopySchema();
     const TableSchema *DirtySchema() const;
+    std::shared_ptr<const TableSchema> CopyDirtySchema();
     void ClearDirtySchema();
     uint64_t SchemaTs() const;
 
@@ -248,7 +249,7 @@ private:
      *
      */
     std::shared_ptr<const TableSchema> schema_{nullptr};
-    const TableSchema *dirty_schema_{nullptr};
+    std::shared_ptr<const TableSchema> dirty_schema_{nullptr};
     uint64_t schema_ts_{0};
     std::string schema_image_{""};
     std::string dirty_schema_image_{""};

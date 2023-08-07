@@ -191,7 +191,7 @@ public:
                                                req.CommitTs());
 
                 schema_rec->Set(catalog_entry->schema_,
-                                catalog_entry->dirty_schema_.get(),
+                                catalog_entry->dirty_schema_,
                                 catalog_entry->Version());
 
                 if (catalog_entry->dirty_schema_)
@@ -804,7 +804,7 @@ public:
                     // upload catalog record
                     cce->payload_ = std::make_unique<CatalogRecord>();
                     cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_.get(),
+                                       catalog_entry->dirty_schema_,
                                        catalog_entry->Version());
                     cce->payload_status_ = RecordStatus::Normal;
                     cce->commit_ts_ = catalog_entry->Version();
@@ -1061,7 +1061,7 @@ public:
             cce->payload_ = std::make_unique<CatalogRecord>();
         }
         cce->payload_->Set(catalog_entry->schema_,
-                           catalog_entry->dirty_schema_.get(),
+                           catalog_entry->dirty_schema_,
                            catalog_entry->Version());
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)

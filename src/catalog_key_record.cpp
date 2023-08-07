@@ -282,7 +282,7 @@ std::string CatalogRecord::ToString() const
 }
 
 void CatalogRecord::Set(const std::shared_ptr<TableSchema> &schema,
-                        TableSchema *dirty_schema,
+                        const std::shared_ptr<TableSchema> &dirty_schema,
                         uint64_t schema_ts)
 {
     schema_ = schema;
@@ -331,6 +331,11 @@ std::shared_ptr<const TableSchema> CatalogRecord::CopySchema()
 }
 
 const TableSchema *CatalogRecord::DirtySchema() const
+{
+    return dirty_schema_.get();
+}
+
+std::shared_ptr<const TableSchema> CatalogRecord::CopyDirtySchema()
 {
     return dirty_schema_;
 }
