@@ -59,6 +59,19 @@ struct TableSchema
     {
         return nullptr;
     }
+
+    virtual void PrepareGeneratePackedSk() = 0;
+    /**
+     * @brief Generate packed secondary key using TxKey and TxRecord.
+     *
+     * @param sk_idx Secondary key index of this table excluding the primary
+     * key.
+     */
+    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GeneratePackedSk(
+        const TxKey *pk,
+        const TxRecord *record,
+        const TableName &index_name) const = 0;
+    virtual void FinishGeneratePackedSk() = 0;
 };
 
 class CatalogFactory
