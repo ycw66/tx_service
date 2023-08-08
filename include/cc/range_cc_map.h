@@ -1151,12 +1151,15 @@ public:
         else
         {
             // Restore transaction and catalog read lock at last core if this
-            // recovering node group is the tx coordinator
+            // recovering node group is the tx coordinator. This will spawn
+            // a worker thread that will restore the transaction. It will call
+            // SetFinish() after acqruing all needed locks.
             if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
             {
                 const RangeInfo *old_range_info =
                     old_table_range_entry->GetRangeInfo();
                 shard_->local_shards_.CreateSplitRangeRecoveryTx(
+                    req,
                     ds_split_range_op_msg,
                     table_schema,
                     partition_id,
@@ -1169,14 +1172,12 @@ public:
                     std::move(new_range_keys),
                     std::move(new_range_ids),
                     tx_node_id,
-                    req.Txn(),
-                    tx_candidate_term,
-                    req.CommitTs(),
-                    std::move(req.GetCatalogCcEntry()),
-                    req.RangeSplitStarted());
+                    tx_candidate_term);
             }
-
-            req.SetFinish();
+            else
+            {
+                req.SetFinish();
+            }
         }
 
         return false;

@@ -43,6 +43,8 @@ struct ScanBatchTuple;
 struct SplitFlushTxRequest;
 struct AnalyzeTableTxRequest;
 struct ClusterScaleTxRequest;
+struct SchemaRecoveryTxRequest;
+struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
 
 class TxProcessor;
@@ -127,6 +129,8 @@ public:
     void ProcessTxRequest(SplitFlushTxRequest &split_flush_req);
     void ProcessTxRequest(AnalyzeTableTxRequest &analyze_req);
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
+    void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
+    void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
 
     /**
      * Interface for storage engine runtime.
@@ -175,31 +179,12 @@ public:
 
     TxnStatus TxStatus() const;
 
-    void RecoverSchemaTx(const ::txlog::SchemaOpMessage &schema_op,
-                         uint64_t txn,
-                         int64_t tx_term,
-                         uint64_t commit_ts);
+    void SetRecoverTxState(uint64_t txn, int64_t tx_term, uint64_t commit_ts);
 
     void RemoteStatisticsTx(
         const TableName &table_or_index_name,
         uint64_t schema_version,
         const remote::NodeGroupSamplePool &remote_sample_pool);
-
-    void RecoverSplitRangeTx(
-        const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
-        const TableSchema *table_schema,
-        int32_t partition_id,
-        const TxKey *start_key,
-        const TxKey *end_key,
-        const RangeInfo *range_info,
-        std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
-        std::vector<int32_t> &&new_partition_ids,
-        NodeGroupId node_group,
-        uint64_t txn,
-        int64_t tx_term,
-        uint64_t commit_ts,
-        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
-        std::shared_ptr<std::atomic_uint32_t> split_tx_started);
 
     std::string GetErrorMessage() const;
 
@@ -279,9 +264,9 @@ private:
     void PostProcess(InitTxnOperation &init_txn);
     void Process(ReadOperation &read);
     void PostProcess(ReadOperation &read);
+    void Process(ReadLocalOperation &lock_local);
+    void PostProcess(ReadLocalOperation &lock_local);
 #ifdef RANGE_PARTITION_ENABLED
-    void Process(LockReadRangeOperation &lock_range);
-    void PostProcess(LockReadRangeOperation &lock_range);
     void Process(UnlockReadRangeOperation &unlock_range);
     void PostProcess(UnlockReadRangeOperation &unlock_range);
 #endif
@@ -483,7 +468,7 @@ private:
 
     // Execution phase.
 #ifdef RANGE_PARTITION_ENABLED
-    LockReadRangeOperation lock_range_op_;
+    ReadLocalOperation lock_range_op_;
     UnlockReadRangeOperation unlock_range_op_;
 #endif
     ReadOperation read_;
@@ -526,8 +511,8 @@ private:
     friend struct TransactionOperation;
     friend struct CompositeTransactionOperation;
     friend struct ReadOperation;
+    friend struct ReadLocalOperation;
 #ifdef RANGE_PARTITION_ENABLED
-    friend struct LockReadRangeOperation;
     friend struct UnlockReadRangeOperation;
 #endif
     friend struct ReadOutsideOperation;

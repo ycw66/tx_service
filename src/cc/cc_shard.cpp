@@ -5,6 +5,7 @@
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/ccm_scanner.h"
+#include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
 #include "checkpointer.h"
@@ -82,10 +83,18 @@ CcShard::CcShard(uint16_t core_id,
         catalog_ccm_name,
         std::make_unique<CatalogCcMap>(this, node_id_, catalog_ccm_name));
 
-    // cluster config map is replicated on every core
+    // range bucket map is replicated on every core
     native_ccms_.try_emplace(range_bucket_ccm_name,
                              std::make_unique<RangeBucketCcMap>(
                                  this, node_id_, range_bucket_ccm_name));
+
+    // cluster config map is only created on core 0.
+    if (core_id_ == 0)
+    {
+        native_ccms_.try_emplace(cluster_config_ccm_name,
+                                 std::make_unique<ClusterConfigCcMap>(
+                                     this, node_id_, cluster_config_ccm_name));
+    }
 
     if (metrics::enable_collect_metrics)
     {
@@ -125,6 +134,16 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
                     range_bucket_ccm_name,
                     std::make_unique<RangeBucketCcMap>(
                         this, node_group, range_bucket_ccm_name));
+                return insert_it.first->second.get();
+            }
+            if (table_name == cluster_config_ccm_name)
+            {
+                // cluster config map should only be initialized on core 0.
+                assert(core_id_ == 0);
+                auto insert_it = native_ccms_.emplace(
+                    cluster_config_ccm_name,
+                    std::make_unique<ClusterConfigCcMap>(
+                        this, node_group, cluster_config_ccm_name));
                 return insert_it.first->second.get();
             }
             return nullptr;
@@ -180,6 +199,24 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
                     node_group,
                     std::make_unique<RangeBucketCcMap>(
                         this, node_group, range_bucket_ccm_name));
+                return insert_it.first->second.get();
+            }
+        }
+        else if (table_name == cluster_config_ccm_name)
+        {
+            // cluster config map should only be initialized on core 0.
+            assert(core_id_ == 0);
+            auto bucket_it = ng_ccm.find(node_group);
+            if (bucket_it != ng_ccm.end())
+            {
+                return bucket_it->second.get();
+            }
+            else
+            {
+                auto insert_it = ng_ccm.emplace(
+                    node_group,
+                    std::make_unique<ClusterConfigCcMap>(
+                        this, node_group, cluster_config_ccm_name));
                 return insert_it.first->second.get();
             }
         }

@@ -138,9 +138,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             const TableName &table_name = it->first;
             bool is_dirty = it->second;
             // This should correspond to CcShard::ActiveTxMinTs.
-            if (table_name.Type() == TableType::Catalog ||
-                table_name.Type() == TableType::RangePartition ||
-                table_name.Type() == TableType::RangeBucket)
+            if (table_name.IsMeta())
             {
                 continue;
             }

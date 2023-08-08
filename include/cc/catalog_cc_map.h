@@ -982,25 +982,22 @@ public:
         else
         {
             uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            int64_t tx_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id);
 
-            if (tx_node_id == req.NodeGroupId())
+            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
             {
-                int64_t tx_candidate_term =
-                    Sharder::Instance().CandidateLeaderTerm(tx_node_id);
-
-                if (tx_candidate_term >= 0)
-                {
-                    // If the coordinating tx is bound to the recoverying cc
-                    // node, resumes the tx.
-                    shard_->local_shards_.CreateSchemaRecoveryTx(
-                        schema_op_msg,
-                        req.Txn(),
-                        tx_candidate_term,
-                        req.CommitTs());
-                }
+                // If the coordinating tx is bound to the recoverying cc
+                // node, resumes the tx. This will spawn
+                // a worker thread that will restore the transaction. It will
+                // call SetFinish() after acqruing all needed locks.
+                shard_->local_shards_.CreateSchemaRecoveryTx(
+                    req, schema_op_msg, tx_candidate_term);
             }
-
-            req.SetFinish();
+            else
+            {
+                req.SetFinish();
+            }
         }
 
         return false;

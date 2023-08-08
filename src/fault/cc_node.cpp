@@ -339,6 +339,8 @@ void CcNode::on_leader_start(int64_t term)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " becomes the leader of ng#" << ng_id_ << ". Term: " << term;
 
+    // TODO{liunyl}: need to update ng config in sharder and connect to peers
+    // based on the new read cluster configs.
     if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
     {
         // We need to initialize range bucket info for new ng

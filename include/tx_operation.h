@@ -89,8 +89,7 @@ struct CompositeTransactionOperation : TransactionOperation
     TransactionOperation *op_{nullptr};
 };
 
-#ifdef RANGE_PARTITION_ENABLED
-struct LockReadRangeOperation : TransactionOperation
+struct ReadLocalOperation : TransactionOperation
 {
 public:
     void Reset();
@@ -98,13 +97,14 @@ public:
 
     // in-parameters
     const TxKey *key_{};
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
-    RangeRecord *range_rec_{};
+    TableName table_name_{empty_sv, TableType::RangePartition};
+    TxRecord *rec_{};
 
     // out-parameters, to pass result to caller operation
-    CcHandlerResult<ReadKeyResult> *lock_range_result_{};
+    CcHandlerResult<ReadKeyResult> *hd_result_{};
 };
 
+#ifdef RANGE_PARTITION_ENABLED
 struct UnlockReadRangeOperation : TransactionOperation
 {
 public:
@@ -588,6 +588,12 @@ struct UpsertTableOp : public SchemaOp
      */
     TransactionOperation *op_{nullptr};
     /**
+     * @brief Acquire read lock on local cluster config ccmap to block cluster
+     * config update during upsert table op. We cannot allow config update
+     * between acquire write all and post write all.
+     */
+    ReadLocalOperation lock_cluster_config_op_;
+    /**
      * @brief Acquires write intents on the table's catalog in all nodes to
      * prevent concurrent schema modifications.
      *
@@ -637,6 +643,8 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp clean_log_op_;
 
     txservice::AlterTableInfo alter_table_info_;
+    CcHandlerResult<ReadKeyResult> read_cluster_result_;
+    VoidRecord cluster_conf_rec_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
@@ -771,6 +779,8 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     TableName table_name_;        // TableName owner.
     TableName range_table_name_;  // References table_name_.
     NodeGroupId node_group_;
+    CcHandlerResult<ReadKeyResult> read_cluster_result_;
+    VoidRecord cluster_conf_rec_;
 
     RangeInfo range_info_;
     std::unique_ptr<RangeRecord> range_record_;
@@ -794,18 +804,18 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
         kickout_data_it_;
 
-    // Store the catalog read lock information, only effect for recovering
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
-        std::nullopt};
-    // Number of recovery range split tx started on this table. The last
-    // finished tx needs to set data sync ongoing flag to false.
-    std::shared_ptr<std::atomic_uint32_t> recover_split_started_{nullptr};
     // If still need to pin the ng in recovery mode. Normally we'll pin the ng
     // at the start of the op, but during recovery we're not the ng leader when
     // this op is created. We need to keep trying to pin data until replay
     // finishes and we become the leader of the ng.
     bool pending_pin_data_{false};
 
+    /**
+     * @brief Acquire read lock on local cluster config ccmap to block cluster
+     * config update during upsert table op. We cannot allow config update
+     * between acquire write all and post write all.
+     */
+    ReadLocalOperation lock_cluster_config_op_;
     /**
      * @brief Acquire write lock on all node groups. Since split-flush op is
      * the only operation that would try to acquire write lock on range
@@ -881,10 +891,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * @brief Remove split-flush log.
      */
     WriteToLogOp clean_log_op_;
-    /**
-     * @brief Release catalog read lock on recovery mode.
-     */
-    PostReadOperation release_catalog_read_lock_op_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
@@ -999,6 +1005,14 @@ public:
     std::condition_variable *prepare_log_cv_;
     bool *prepare_log_finished_;
     CcErrorCode *err_;
+    std::vector<std::pair<std::string, uint16_t>> *removed_nodes_;
+
+    CcHandlerResult<ReadKeyResult> read_cluster_result_;
+    VoidRecord cluster_conf_rec_;
+
+    ReadLocalOperation lock_cluster_config_op_;
+
+    AcquireAllOp prepare_acquire_cluster_config_op_;
 
     WriteToLogOp prepare_log_op_;
 
@@ -1007,6 +1021,8 @@ public:
     AsyncOp<Void> data_migration_op_;
 
     WriteToLogOp clean_log_op_;
+
+    PostWriteAllOp post_all_lock_op_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);

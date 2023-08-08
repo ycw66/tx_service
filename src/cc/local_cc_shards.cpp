@@ -393,13 +393,52 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNamesForCkpt(
 }
 
 void LocalCcShards::CreateSchemaRecoveryTx(
+    ReplayLogCc &replay_log_cc,
     const ::txlog::SchemaOpMessage &schema_op_msg,
-    uint64_t txn,
-    int64_t tx_term,
-    uint64_t commit_ts)
+    int64_t tx_term)
 {
-    TransactionExecution *txm = tx_service_->NewTx();
-    txm->RecoverSchemaTx(schema_op_msg, txn, tx_term, commit_ts);
+    auto schema_recover_thd = std::thread(
+        [this,
+         &replay_log_cc,
+         schema_op_msg,  // cannot pass in reference here since msg
+                         // will be freed once replay is done
+         txn = replay_log_cc.Txn(),
+         tx_term,
+         commit_ts = replay_log_cc.CommitTs()]
+        {
+            TransactionExecution *txm = tx_service_->NewTx();
+            VoidRecord rec;
+            txm->SetRecoverTxState(txn, tx_term, commit_ts);
+            ReadTxRequest read_req(&cluster_config_ccm_name,
+                                   NegativeInfinity<VoidKey>::Instance(),
+                                   &rec,
+                                   false,
+                                   false,
+                                   true,
+                                   0,
+                                   false,
+                                   nullptr,
+                                   true);
+            txm->Execute(&read_req);
+            read_req.Wait();
+            if (read_req.IsError())
+            {
+                // leadership transferred away before replay finish.
+                replay_log_cc.AbortCcRequest(CcErrorCode::TX_NODE_NOT_LEADER);
+                return;
+            }
+            replay_log_cc.SetFinish();
+            SchemaRecoveryTxRequest recover_req(schema_op_msg);
+            txm->Execute(&recover_req);
+            recover_req.Wait();
+
+            CommitTxRequest commit_req;
+            commit_req.Reset();
+            txm->Execute(&commit_req);
+            commit_req.Wait();
+        });
+
+    schema_recover_thd.detach();
 }
 
 void LocalCcShards::CreateRemoteStatisticsTx(
@@ -423,6 +462,7 @@ void LocalCcShards::CreateRemoteStatisticsTx(
 }
 
 void LocalCcShards::CreateSplitRangeRecoveryTx(
+    ReplayLogCc &replay_log_cc,
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
     const TableSchema *table_schema,
     int32_t partition_id,
@@ -432,38 +472,110 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
     std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
     std::vector<int32_t> &&new_partition_ids,
     uint32_t node_group_id,
-    uint64_t txn,
-    int64_t tx_term,
-    uint64_t commit_ts,
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
-    std::shared_ptr<std::atomic_uint32_t> split_tx_started)
+    int64_t tx_term)
 {
-    // Mark the table as sync in progress to avoid concurrent data sync before
-    // range split tx finishes if this is the first started range split.
-    if (split_tx_started->fetch_add(1) == 0)
-    {
-        const TableName range_table_name = TableName{
-            ds_split_range_op_msg.table_name(), TableType::RangePartition};
-        const TableName base_table_name = TableName{
-            range_table_name.GetBaseTableNameSV(), TableType::Primary};
-        SetDataSyncOngoing(base_table_name, node_group_id, true);
-    }
+    auto split_recover_thd = std::thread(
+        [this,
+         &replay_log_cc,
+         ds_split_range_op_msg,  // cannot pass in reference here since
+                                 // msg will be freed once replay is
+                                 // done
+         table_schema,
+         partition_id,
+         start_key,
+         end_key,
+         txn = replay_log_cc.Txn(),
+         tx_term,
+         commit_ts = replay_log_cc.CommitTs(),
+         range_info,
+         new_range_keys = std::move(new_range_keys),
+         new_partition_ids = std::move(new_partition_ids),
+         node_group_id,
+         split_tx_started = replay_log_cc.RangeSplitStarted()]() mutable
+        {
+            // Mark the table as sync in progress to avoid concurrent data sync
+            // before range split tx finishes if this is the first started range
+            // split.
+            const TableName range_table_name = TableName{
+                ds_split_range_op_msg.table_name(), TableType::RangePartition};
+            const TableName base_table_name = TableName{
+                range_table_name.GetBaseTableNameSV(), TableType::Primary};
+            if (split_tx_started->fetch_add(1) == 0)
+            {
+                SetDataSyncOngoing(base_table_name, node_group_id, true);
+            }
+            TransactionExecution *txm = tx_service_->NewTx();
+            VoidRecord rec;
+            txm->SetRecoverTxState(txn, tx_term, commit_ts);
+            ReadTxRequest read_req(&cluster_config_ccm_name,
+                                   NegativeInfinity<VoidKey>::Instance(),
+                                   &rec,
+                                   false,
+                                   false,
+                                   true,
+                                   0,
+                                   false,
+                                   nullptr,
+                                   true);
+            txm->Execute(&read_req);
+            read_req.Wait();
+            // Only case we fail here is that leader gone before replay
+            // finished.
+            bool lock_meta_failed = read_req.IsError();
 
-    TransactionExecution *txm = tx_service_->NewTx();
-    txm->RecoverSplitRangeTx(ds_split_range_op_msg,
-                             table_schema,
-                             partition_id,
-                             start_key,
-                             end_key,
-                             range_info,
-                             std::move(new_range_keys),
-                             std::move(new_partition_ids),
-                             node_group_id,
-                             txn,
-                             tx_term,
-                             commit_ts,
-                             std::move(catalog_cc_entry),
-                             split_tx_started);
+            if (!lock_meta_failed)
+            {
+                CatalogKey table_key(base_table_name);
+                CatalogRecord catalog_rec;
+
+                read_req.Reset();
+                read_req.Set(&catalog_ccm_name,
+                             &table_key,
+                             &catalog_rec,
+                             false,
+                             false,
+                             true,
+                             0,
+                             false,
+                             nullptr,
+                             true);
+                txm->Execute(&read_req);
+                read_req.Wait();
+                lock_meta_failed = read_req.IsError();
+            }
+            if (lock_meta_failed)
+            {
+                replay_log_cc.AbortCcRequest(CcErrorCode::TX_NODE_NOT_LEADER);
+                return;
+            }
+            replay_log_cc.SetFinish();
+
+            RangeSplitRecoveryTxRequest recover_req(
+                ds_split_range_op_msg,
+                table_schema,
+                partition_id,
+                start_key,
+                end_key,
+                range_info,
+                std::move(new_range_keys),
+                std::move(new_partition_ids),
+                node_group_id);
+            txm->Execute(&recover_req);
+            recover_req.Wait();
+
+            CommitTxRequest commit_req;
+            commit_req.Reset();
+            txm->Execute(&commit_req);
+            commit_req.Wait();
+            if (split_tx_started->fetch_sub(1) == 1)
+            {
+                // The last recovering range split op has now finished, set
+                // data sync flag to false to unblock checkpoint on this table.
+                SetDataSyncOngoing(base_table_name, node_group_id, false);
+            }
+        });
+
+    split_recover_thd.detach();
 }
 
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,

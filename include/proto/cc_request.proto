@@ -186,6 +186,8 @@ enum CcTableType {
     Catalog = 2;
     RangePartition = 3;
 	UniqueSecondary = 4;
+	RangeBucket = 5;
+	ClusterConfig = 6;
 }
 
 enum RemoteKeyType {

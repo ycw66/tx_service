@@ -87,7 +87,11 @@ public:
         // Uses the lower 10 bits to shard the key across CPU cores in a node.
         uint32_t residual = hash_code & 0x3FF;
         // Uses the higher bits to shard across nodes.
+#ifdef RANGE_PARTITION_ENABLED
+        uint32_t node_group_id = hash_code >> 10;
+#else
         uint32_t node_group_id = (hash_code >> 10) % ng_leader_cache_.size();
+#endif
         return (node_group_id << 10) | residual;
     }
 
@@ -106,9 +110,9 @@ public:
                total_range_buckets;
     }
 
-    uint32_t NodeGroupCount() const
+    uint32_t NodeGroupCount()
     {
-        return (uint32_t) ng_leader_cache_.size();
+        return ng_configs_.size();
     }
 
     void GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port);
@@ -360,7 +364,8 @@ private:
     uint32_t node_id_;
     // Map from node group id to member ip list and port list. The first item in
     // vector is the preferred leader of the node group.
-    std::map<uint32_t, std::vector<NodeConfig>> ng_configs_;
+    std::map<NodeGroupId, std::vector<NodeConfig>> ng_configs_;
+
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
     // We have one raft group for each logical shard(specified by ip & port)

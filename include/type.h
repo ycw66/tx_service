@@ -136,7 +136,8 @@ enum class TableType : uint8_t
     UniqueSecondary,
     Catalog,
     RangePartition,
-    RangeBucket
+    RangeBucket,
+    ClusterConfig
 };
 
 struct TableName
@@ -358,6 +359,20 @@ struct TableName
         return (pos == std::string_view::npos) ? true : false;
     }
 
+    bool IsMeta() const
+    {
+        return type_ == TableType::RangeBucket || type_ == TableType::Catalog ||
+               type_ == TableType::RangePartition ||
+               type_ == TableType::ClusterConfig;
+    }
+
+    static bool IsMeta(TableType type)
+    {
+        return type == TableType::RangeBucket || type == TableType::Catalog ||
+               type == TableType::RangePartition ||
+               type == TableType::ClusterConfig;
+    }
+
     // Check whether it is range table for unique secondary key
     bool IsUniqueSecondary() const
     {
@@ -469,6 +484,7 @@ inline static std::string_view empty_sv{"__empty"};
 inline static std::string_view catalog_ccm_name_sv{"__catalog"};
 inline static std::string_view redis_table_name_sv{"redis_table"};
 inline static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
+inline static std::string_view cluster_config_ccm_name_sv{"__cluster_config"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
@@ -476,6 +492,10 @@ inline static TableName catalog_ccm_name{
 inline static TableName range_bucket_ccm_name{range_bucket_ccm_name_sv.data(),
                                               range_bucket_ccm_name_sv.size(),
                                               TableType::RangeBucket};
+inline static TableName cluster_config_ccm_name{
+    cluster_config_ccm_name_sv.data(),
+    cluster_config_ccm_name_sv.size(),
+    TableType::ClusterConfig};
 inline static const uint16_t total_range_buckets = 4096;
 
 enum struct SlicePosition

@@ -233,18 +233,17 @@ void ReadOperation::Forward(TransactionExecution *txm)
     // tx to cancel if the remote node is unresponsive.
 }
 
-#ifdef RANGE_PARTITION_ENABLED
-void LockReadRangeOperation::Reset()
+void ReadLocalOperation::Reset()
 {
     key_ = nullptr;
-    range_table_name_ = TableName{empty_sv, TableType::RangePartition};
-    range_rec_ = nullptr;
-    lock_range_result_ = nullptr;
+    table_name_ = TableName{empty_sv, TableType::RangePartition};
+    rec_ = nullptr;
+    hd_result_ = nullptr;
 }
 
-void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
+void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
 {
-    if (lock_range_result_->IsFinished())
+    if (hd_result_->IsFinished())
     {
         // Pop out this LockRangeOperation from the stack and return control to
         // the caller operation by forwarding the transaction state machine.
@@ -262,6 +261,7 @@ void LockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
     }
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 UnlockReadRangeOperation::UnlockReadRangeOperation(
     txservice::TransactionExecution *txm)
     : unlock_range_result_(txm)
@@ -1567,6 +1567,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
                curr_schema_ts,
                alter_table_info_image),
       op_type_(op_type),
+      lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
       post_all_intent_op_(txm),
@@ -1574,8 +1575,15 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       post_all_lock_op_(txm),
-      clean_log_op_(txm)
+      clean_log_op_(txm),
+      read_cluster_result_(txm)
 {
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
     acquire_all_intent_op_.key_ = &table_key_;
     acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
@@ -1614,6 +1622,24 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
     {
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            DLOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
+                        << txm->TxNumber();
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+            return;
+        }
         op_ = &acquire_all_intent_op_;
         txm->PushOperation(&acquire_all_intent_op_);
         txm->Process(acquire_all_intent_op_);
@@ -2102,23 +2128,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
-        else if (txm->tx_status_ == TxnStatus::Recovering)
-        {
-            // When the tx is in the recovery state, no external caller is
-            // waiting for the response. So, txm->bool_resp_ is null.
-
-            {
-                std::unique_lock<std::mutex> lk(
-                    shards->table_schema_op_pool_mux_);
-                shards->table_schema_op_pool_.emplace_back(
-                    std::move(txm->schema_op_));
-            }
-            txm->Reset();
-            // Setting the tx's status to finished signals that this tx
-            // state machine can be recycled for a new tx.
-            txm->tx_status_.store(TxnStatus::Finished,
-                                  std::memory_order_release);
-        }
         else
         {
             if (txm->commit_ts_ == tx_op_failed_ts_)
@@ -2171,14 +2180,16 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     op_ = nullptr;
 
     // reset op
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    acquire_all_intent_op_.Reset(node_group_cnt);
+    read_cluster_result_.Reset();
+    lock_cluster_config_op_.Reset();
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
     prepare_log_op_.Reset();
-    post_all_intent_op_.Reset(node_group_cnt);
     upsert_kv_table_op_.Reset();
-    acquire_all_lock_op_.Reset(node_group_cnt);
     commit_log_op_.Reset();
-    post_all_lock_op_.Reset(node_group_cnt);
     clean_log_op_.Reset();
 
     acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
@@ -2208,6 +2219,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
 
     // reset cc_handler_res txm
+    read_cluster_result_.ResetTxm(txm);
     acquire_all_intent_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
     post_all_intent_op_.ResetHandlerTxm(txm);
@@ -2592,9 +2604,11 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       table_name_(table_name.String(), table_name.Type()),
       range_table_name_(table_name_.StringView(), TableType::RangePartition),
       node_group_(node_group),
+      read_cluster_result_(txm),
       range_info_(*old_range_info),
       old_end_key_(old_end_key),
       new_range_info_(std::move(new_range_info)),
+      lock_cluster_config_op_(),
       prepare_acquire_all_write_op_(txm),
       prepare_log_op_(txm),
       install_new_range_op_(txm),
@@ -2607,13 +2621,19 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       kickout_old_range_data_op_(txm),
       post_all_lock_op_(txm),
       ds_clean_old_range_op_(txm),
-      clean_log_op_(txm),
-      release_catalog_read_lock_op_(txm)
+      clean_log_op_(txm)
 {
     range_record_ = std::make_unique<RangeRecord>(
         &range_info_, nullptr, old_end_key, nullptr);
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
+
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
@@ -2700,20 +2720,18 @@ void SplitFlushRangeOp::Reset(
     assert(archive_vec_.empty());
     assert(mv_base_vec_.empty());
     assert(new_range_info_.empty());
-    assert(recover_split_started_ == nullptr);
 
     new_range_info_ = std::move(new_range_info);
 
     // Reset all sub-operations
-    auto node_group_count = Sharder::Instance().NodeGroupCount();
+    read_cluster_result_.Reset();
+    lock_cluster_config_op_.Reset();
 
-    prepare_acquire_all_write_op_.Reset(node_group_count);
     prepare_acquire_all_write_op_.ResetHandlerTxm(txm);
 
     prepare_log_op_.Reset();
     prepare_log_op_.ResetHandlerTxm(txm);
 
-    install_new_range_op_.Reset(node_group_count);
     install_new_range_op_.ResetHandlerTxm(txm);
 
     ds_migrate_old_partition_op_.Reset();
@@ -2725,7 +2743,6 @@ void SplitFlushRangeOp::Reset(
     flush_op_.Reset();
     flush_op_.ResetHandlerTxm(txm);
 
-    commit_acquire_all_write_op_.Reset(node_group_count);
     commit_acquire_all_write_op_.ResetHandlerTxm(txm);
 
     commit_log_op_.Reset();
@@ -2737,7 +2754,6 @@ void SplitFlushRangeOp::Reset(
     kickout_old_range_data_op_.Reset();
     kickout_old_range_data_op_.ResetHandlerTxm(txm);
 
-    post_all_lock_op_.Reset(node_group_count);
     post_all_lock_op_.ResetHandlerTxm(txm);
 
     ds_clean_old_range_op_.Reset();
@@ -2746,11 +2762,17 @@ void SplitFlushRangeOp::Reset(
     clean_log_op_.Reset();
     clean_log_op_.ResetHandlerTxm(txm);
 
-    release_catalog_read_lock_op_.Reset({});
-    release_catalog_read_lock_op_.ResetHandlerTxm(txm);
-
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
+
+    read_cluster_result_.Reset();
+    lock_cluster_config_op_.Reset();
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
     prepare_acquire_all_write_op_.table_name_ = &range_table_name_;
     prepare_acquire_all_write_op_.cc_op_ = CcOperation::Write;
     prepare_acquire_all_write_op_.protocol_ = CcProtocol::Locking;
@@ -2783,8 +2805,6 @@ void SplitFlushRangeOp::Reset(
 
     kickout_data_it_ = {};
 
-    catalog_cc_entry_ = std::nullopt;
-    recover_split_started_ = nullptr;
     pending_pin_data_ = false;
 
     TX_TRACE_ASSOCIATE(
@@ -2839,6 +2859,24 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             // No longer leader.
             ForceToFinish(txm);
+            return;
+        }
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            DLOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
+                        << txm->TxNumber();
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
             return;
         }
 
@@ -3620,6 +3658,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        if (txm->commit_ts_ == tx_op_failed_ts_)
+        {
+            // If tx failed before writing prepare log, skip delete out
+            // of range op.
+            ForwardToSubOperation(txm, &clean_log_op_);
+            return;
+        }
+
         // Delete stale data from old partition
         ds_clean_old_range_op_.op_func_ =
             [partition_id = range_info_.partition_id_,
@@ -3693,17 +3739,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &clean_log_op_);
             return;
         }
-        else if (txm->tx_status_ == TxnStatus::Recovering)
-        {
-            // When the tx is in the recovery state, we have to release
-            // the catalog read lock here in the op since there's no external
-            // caller that commits the tx for us.
-            assert(catalog_cc_entry_ != std::nullopt);
-            release_catalog_read_lock_op_.Reset(std::make_pair(
-                &catalog_cc_entry_->first, &catalog_cc_entry_->second));
-            ForwardToSubOperation(txm, &release_catalog_read_lock_op_);
-            return;
-        }
         else
         {
             if (txm->commit_ts_ == tx_op_failed_ts_)
@@ -3721,7 +3756,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ClearInfos();
 
             assert(this == txm->split_flush_op_.get());
-            assert(recover_split_started_ == nullptr);
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> lk(
                 shards->split_flush_range_op_pool_mux_);
@@ -3729,48 +3763,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 std::move(txm->split_flush_op_));
             assert(txm->split_flush_op_ == nullptr);
         }
-    }
-    else if (op_ == &release_catalog_read_lock_op_)
-    {
-        assert(txm->tx_status_ == TxnStatus::Recovering);
-        if (release_catalog_read_lock_op_.hd_result_.IsError() &&
-            CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            RetrySubOperation(txm, &release_catalog_read_lock_op_);
-            return;
-        }
-        if (recover_split_started_->fetch_sub(1) == 1)
-        {
-            // The last recovering range split op has now finished, set
-            // data sync flag to false to unblock checkpoint on this table.
-            Sharder::Instance().GetLocalCcShards()->SetDataSyncOngoing(
-                TableName{table_name_.GetBaseTableNameSV(), TableType::Primary},
-                node_group_,
-                false);
-        }
-        LOG(INFO) << "Recover range split tx succeeded on range "
-                  << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
-
-        Sharder::Instance().UnpinNodeGroupData(node_group_);
-
-        ClearInfos();
-        recover_split_started_ = nullptr;
-
-        assert(this == txm->split_flush_op_.get());
-
-        {
-            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
-            shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-        }
-
-        assert(txm->split_flush_op_ == nullptr);
-        txm->Reset();
-        // Setting the tx's status to finished signals that this tx
-        // state machine can be recycled for a new tx.
-        txm->tx_status_.store(TxnStatus::Finished, std::memory_order_release);
     }
 }
 
@@ -4089,31 +4081,38 @@ ClusterScaleOp::ClusterScaleOp(
       prepare_log_cv_(&prepare_log_cv),
       prepare_log_finished_(&prepare_log_finished),
       err_(&err),
+      removed_nodes_(removed_nodes),
+      read_cluster_result_(txm),
+      lock_cluster_config_op_(),
+      prepare_acquire_cluster_config_op_(txm),
       prepare_log_op_(txm),
       update_cluster_configs_(txm),
       data_migration_op_(txm),
       clean_log_op_(txm),
+      post_all_lock_op_(txm),
       status_mux_(),
       status_(remote::ClusterScaleStatus::NOT_IN_PROGRESS)
 {
     if (event_type == ClusterScaleOpType::AddNode)
     {
         delta_nodes_ = *new_nodes;
-        new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
     }
     else if (event_type == ClusterScaleOpType::RemoveNode)
     {
         remove_node_count_ = *remove_node_count;
-        new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
-            remove_node_count_, delta_nodes_);
-        if (removed_nodes)
-        {
-            *removed_nodes = delta_nodes_;
-        }
     }
-    bucket_migrate_infos_ =
-        Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
-            new_ng_config_, 9001);
+
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
+    prepare_acquire_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
+    prepare_acquire_cluster_config_op_.key_ =
+        NegativeInfinity<VoidKey>::Instance();
+    prepare_acquire_cluster_config_op_.cc_op_ = CcOperation::ReadForWrite;
+    prepare_acquire_cluster_config_op_.protocol_ = CcProtocol::OCC;
 }
 
 void ClusterScaleOp::Reset(
@@ -4131,36 +4130,44 @@ void ClusterScaleOp::Reset(
     event_type_ = event_type;
     delta_nodes_.clear();
     remove_node_count_ = 0;
+    removed_nodes_ = nullptr;
     if (event_type == ClusterScaleOpType::AddNode)
     {
         delta_nodes_ = *new_nodes;
-        new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
     }
     else if (event_type == ClusterScaleOpType::RemoveNode)
     {
         remove_node_count_ = *remove_node_count;
-        new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
-            remove_node_count_, delta_nodes_);
-        if (removed_nodes)
-        {
-            *removed_nodes = delta_nodes_;
-        }
+        removed_nodes_ = removed_nodes;
     }
     prepare_log_mux_ = &prepare_log_mux;
     prepare_log_cv_ = &prepare_log_cv;
     prepare_log_finished_ = &prepare_log_finished;
     err_ = &err;
     status_ = remote::ClusterScaleStatus::NOT_IN_PROGRESS;
+    read_cluster_result_.Reset();
+    lock_cluster_config_op_.Reset();
+    prepare_acquire_cluster_config_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
     update_cluster_configs_.ResetHandlerTxm(txm);
     data_migration_op_.ResetHandlerTxm(txm);
 
     clean_log_op_.ResetHandlerTxm(txm);
+    post_all_lock_op_.ResetHandlerTxm(txm);
     new_ng_config_.clear();
     bucket_migrate_infos_.clear();
-    bucket_migrate_infos_ =
-        Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
-            new_ng_config_, 9001);
+
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
+    prepare_acquire_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
+    prepare_acquire_cluster_config_op_.key_ =
+        NegativeInfinity<VoidKey>::Instance();
+    prepare_acquire_cluster_config_op_.cc_op_ = CcOperation::ReadForWrite;
+    prepare_acquire_cluster_config_op_.protocol_ = CcProtocol::OCC;
 }
 
 void ClusterScaleOp::SetStatus(remote::ClusterScaleStatus status)
@@ -4179,6 +4186,70 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
     {
+        op_ = &lock_cluster_config_op_;
+        ForwardToSubOperation(txm, &lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            DLOG(ERROR)
+                << "Cluster scale read cluster config failed, tx_number:"
+                << txm->TxNumber();
+            // Fails to acquire read lock on cluster config map. There must be
+            // an ongoing cluster scale transaction. Stop
+            // the current operation. Set the commit ts to 0 to signal that
+            // the following post write operation releases all write
+            // intents.
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
+        }
+        LOG(INFO) << "Cluster Scale transaction prepare acquire write all on "
+                     "cluster scale table, txn: "
+                  << txm->TxNumber();
+        op_ = &prepare_acquire_cluster_config_op_;
+        ForwardToSubOperation(txm, &prepare_acquire_cluster_config_op_);
+    }
+    else if (op_ == &prepare_acquire_cluster_config_op_)
+    {
+        if (prepare_acquire_cluster_config_op_.fail_cnt_.load(
+                std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Cluster scale transaction failed to obtain write "
+                          "intent on all node groups "
+                          ", tx_number:"
+                       << txm->TxNumber();
+
+            // Set commit ts to 0 to indicate transaction failure.
+            // post_all_lock_op_ will release locks acquired.
+            txm->commit_ts_ = tx_op_failed_ts_;
+            ForwardToSubOperation(txm, &post_all_lock_op_);
+            return;
+        }
+
+        // Now we have acquired lock on cluster config table, we must be the
+        // only ongoing cluster scale tx. Generate migrate plan and new cluster
+        // config.
+        if (event_type_ == ClusterScaleOpType::AddNode)
+        {
+            new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
+        }
+        else if (event_type_ == ClusterScaleOpType::RemoveNode)
+        {
+            new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
+                remove_node_count_, delta_nodes_);
+            if (removed_nodes_)
+            {
+                *removed_nodes_ = delta_nodes_;
+            }
+        }
+        bucket_migrate_infos_ =
+            Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
+                new_ng_config_, 9001);
+
         op_ = &prepare_log_op_;
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Cluster Scale transaction write prepare log, txn: "

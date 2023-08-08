@@ -5929,10 +5929,7 @@ protected:
             // entries that have been checkpointed but are not being
             // accessed by active tx's.
             shard_->Clean();
-            if (shard_->Full() && !(table_name_.Type() == TableType::Catalog) &&
-                !(table_name_.Type() == TableType::RangePartition) &&
-                !(table_name_.Type() == TableType::RangeBucket) &&
-                !force_emplace)
+            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
             {
                 return End();
             }

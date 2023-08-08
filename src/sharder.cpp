@@ -354,12 +354,15 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
     uint16_t leader_port = leader.addr.port;
 
-    for (auto &pair : ng_configs_)
+    // We only need shared_lock here to make sure ng_configs_ and
+    // ng_leader_cache_ are not adding or removing entries since
+    // ng_leader_cache_ is storing atomic values.
+    for (auto &node : ng_configs_[ng_id])
     {
-        if (pair.second.front().host_name_ == leader_ip_str &&
-            GET_CCNODE_RPC_PORT(pair.second.front().port_) == leader_port)
+        if (node.host_name_ == leader_ip_str &&
+            GET_CCNODE_RPC_PORT(node.port_) == leader_port)
         {
-            ng_leader_cache_.at(ng_id).store(pair.first,
+            ng_leader_cache_.at(ng_id).store(node.node_id_,
                                              std::memory_order_release);
             break;
         }

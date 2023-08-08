@@ -156,7 +156,8 @@ public:
                    CcHandlerResult<ReadKeyResult> &hres,
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
                    CcProtocol proto = CcProtocol::Locking,
-                   bool is_for_write = false) override;
+                   bool is_for_write = false,
+                   bool is_recovering = false) override;
 
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,

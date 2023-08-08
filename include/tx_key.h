@@ -465,6 +465,11 @@ struct VoidKey : public TxKey
         return false;
     }
 
+    bool operator!=(const TxKey &rhs) const
+    {
+        return !(*this == rhs);
+    }
+
     size_t Hash() const override
     {
         return 0;

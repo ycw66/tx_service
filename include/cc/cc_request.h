@@ -151,7 +151,8 @@ public:
                     // Find base table name for index table.
                     // Fetch/Get Catalog is based on base table name, but Get
                     // ccmap is based on the real table name, for example, index
-                    // should get the correspond sk_ccmap.
+                    // should get the corresponding sk_ccmap.
+                    assert(!table_name_->IsMeta());
                     const CatalogEntry *catalog_entry =
                         ccs.InitCcm(*table_name_, node_group_id_, this);
                     if (catalog_entry == nullptr)
@@ -2815,8 +2816,6 @@ public:
         ++finish_cnt_;
         recovery_error_ = true;
         external_cv_.notify_all();
-
-        Free();
     }
 
     const std::string_view &LogContentView() const
@@ -2844,27 +2843,6 @@ public:
         return table_schema_;
     }
 
-    void SetCatalogCcEntry(CcEntryAddr catalog_cc_entry_addr,
-                           ReadSetEntry read_set_entry)
-    {
-        catalog_cc_entry_ = std::optional<std::pair<CcEntryAddr, ReadSetEntry>>{
-            std::make_pair(catalog_cc_entry_addr, read_set_entry)};
-    }
-
-    const std::optional<std::pair<CcEntryAddr, ReadSetEntry>>
-    GetCatalogCcEntry()
-    {
-        if (catalog_cc_entry_ == std::nullopt)
-        {
-            return std::nullopt;
-        }
-        CcEntryAddr cce_addr = catalog_cc_entry_->first;
-        ReadSetEntry read_set_entry = catalog_cc_entry_->second;
-
-        return std::optional<std::pair<CcEntryAddr, ReadSetEntry>>{
-            std::make_pair(cce_addr, read_set_entry)};
-    }
-
     std::shared_ptr<std::atomic_uint32_t> RangeSplitStarted()
     {
         return range_split_started_;
@@ -2887,8 +2865,6 @@ private:
     bool &recovery_error_;
     const struct TableSchema *table_schema_{nullptr};
     // Reserved for range split log replay
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry_{
-        std::nullopt};
     std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
 
     // Reserved for schema op log replay

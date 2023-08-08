@@ -231,6 +231,10 @@ public:
     {
     }
 
+    VoidRecord(const VoidRecord &rhs)
+    {
+    }
+
     VoidRecord(VoidRecord &&rhs)
     {
     }

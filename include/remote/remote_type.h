@@ -148,6 +148,10 @@ public:
             return CcTableType::Catalog;
         case TableType::RangePartition:
             return CcTableType::RangePartition;
+        case TableType::ClusterConfig:
+            return CcTableType::ClusterConfig;
+        case TableType::RangeBucket:
+            return CcTableType::RangeBucket;
         default:
             assert(false);
             return CcTableType::Primary;
@@ -312,6 +316,10 @@ public:
             return TableType::Catalog;
         case CcTableType::RangePartition:
             return TableType::RangePartition;
+        case CcTableType::RangeBucket:
+            return TableType::RangeBucket;
+        case CcTableType::ClusterConfig:
+            return TableType::ClusterConfig;
         default:
             assert(false);
             return TableType::Primary;

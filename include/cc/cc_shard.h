@@ -310,9 +310,7 @@ public:
             {
                 // Skip meta table because there is no need to do
                 // checkpoint for these type table.
-                if (tx_pair.second.table_type_ != TableType::Catalog &&
-                    tx_pair.second.table_type_ != TableType::RangePartition &&
-                    tx_pair.second.table_type_ != TableType::RangeBucket &&
+                if (!TableName::IsMeta(tx_pair.second.table_type_) &&
                     tx_pair.second.wlock_ts_ != 0)
                 {
                     min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);

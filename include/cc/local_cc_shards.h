@@ -318,10 +318,9 @@ public:
     std::unordered_map<TableName, bool> GetCatalogTableNamesForCkpt(
         NodeGroupId cc_ng_id);
 
-    void CreateSchemaRecoveryTx(const ::txlog::SchemaOpMessage &schema_op_msg,
-                                uint64_t txn,
-                                int64_t tx_term,
-                                uint64_t commit_ts);
+    void CreateSchemaRecoveryTx(ReplayLogCc &replay_log_cc,
+                                const ::txlog::SchemaOpMessage &schema_op_msg,
+                                int64_t tx_term);
 
     void CreateRemoteStatisticsTx(
         TableName &&table_or_index_name,
@@ -336,6 +335,7 @@ public:
      * ---------------------------------
      */
     void CreateSplitRangeRecoveryTx(
+        ReplayLogCc &replay_log_cc,
         const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
         const TableSchema *table_schema,
         int32_t partition_id,
@@ -345,11 +345,7 @@ public:
         std::vector<std::unique_ptr<TxKey>> &&new_range_key,
         std::vector<int32_t> &&new_partition_ids,
         uint32_t node_group_id,
-        uint64_t txn,
-        int64_t tx_term,
-        uint64_t commit_ts,
-        std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
-        std::shared_ptr<std::atomic_uint32_t> split_tx_started);
+        int64_t tx_term);
 
     /**
      * @brief Create a new table range entry and fill current range info with

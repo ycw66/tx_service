@@ -514,7 +514,8 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           CcHandlerResult<ReadKeyResult> &hres,
                                           IsolationLevel iso_level,
                                           CcProtocol proto,
-                                          bool is_for_write)
+                                          bool is_for_write,
+                                          bool is_recovering)
 {
     ReadKeyResult &read_result = hres.Value();
     read_result.rec_ = &record;
@@ -523,8 +524,27 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     read_result.is_local_ = true;
     CcEntryAddr &cce_addr = read_result.cce_addr_;
 
-    CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
-    int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+    CcShard *ccs;
+    if (table_name == cluster_config_ccm_name)
+    {
+        // cluster config map is only initialized on core 0. If we're
+        // visiting cluster config ccm, we need to send a regular read
+        // req to another core.
+        ccs = cc_shards_.cc_shards_[0].get();
+    }
+    else
+    {
+        ccs = cc_shards_.cc_shards_[thd_id_].get();
+    }
+    int64_t term;
+    if (is_recovering)
+    {
+        term = Sharder::Instance().CandidateLeaderTerm(ccs->node_id_);
+    }
+    else
+    {
+        term = Sharder::Instance().LeaderTerm(ccs->node_id_);
+    }
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
     cce_addr.SetNodeGroupId(cc_ng_id);
@@ -552,13 +572,16 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                     &hres,
                     iso_level,
                     proto,
-                    is_for_write);
+                    is_for_write,
+                    false,
+                    nullptr,
+                    is_recovering);
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
-    CcMap *ccm = ccs.GetCcm(table_name, cc_ng_id);
+    CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
 
-    if (ccm != nullptr)
+    if (ccm != nullptr && thd_id_ == ccs->core_id_)
     {  //__catalog table will be preloaded when ccshard constructed
         bool finished = ccm->Execute(*read_req);
         if (finished)
@@ -568,7 +591,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     }
     else
     {  // otherwise, let the TemplateCcRequest load in the data
-        ccs.Enqueue(read_req);
+        ccs->Enqueue(read_req);
     }
 }
 

@@ -154,6 +154,7 @@ public:
                   uint64_t corresponding_sk_commit_ts = 0,
                   bool is_covering_keys = false,
                   uint64_t *unique_sk_commit_ts = nullptr,
+                  bool is_recovering = false,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
                   TransactionExecution *txm = nullptr)
@@ -166,7 +167,8 @@ public:
           read_local_(read_local),
           corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
           is_covering_keys_(is_covering_keys),
-          unique_sk_commit_ts_(unique_sk_commit_ts)
+          unique_sk_commit_ts_(unique_sk_commit_ts),
+          is_recovering_(is_recovering)
     {
     }
 
@@ -178,7 +180,8 @@ public:
              bool read_local = false,
              uint64_t corresponding_sk_commit_ts = 0,
              bool is_covering_keys = false,
-             uint64_t *unique_sk_commit_ts = nullptr)
+             uint64_t *unique_sk_commit_ts = nullptr,
+             bool is_recovering = false)
     {
         tab_name_ = tab_name;
         key_ = key;
@@ -189,6 +192,7 @@ public:
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
         is_covering_keys_ = is_covering_keys;
         unique_sk_commit_ts_ = unique_sk_commit_ts;
+        is_recovering_ = is_recovering;
     }
 
     const TableName *tab_name_;
@@ -202,6 +206,11 @@ public:
     // For unique_sk point query
     bool is_covering_keys_;
     uint64_t *unique_sk_commit_ts_;
+
+    // If this is a read request for recovering. If true we should
+    // rely on candidate leader term instead of current term to decide
+    // if node is valid leader.
+    bool is_recovering_;
 };
 
 struct ReadOutsideTxRequest
@@ -640,6 +649,55 @@ struct ClusterScaleTxRequest
     bool finished_{false};
     std::mutex mtx_;
     std::condition_variable cv_;
+};
+
+struct SchemaRecoveryTxRequest
+    : public TemplateTxRequest<SchemaRecoveryTxRequest, bool>
+{
+    SchemaRecoveryTxRequest(const ::txlog::SchemaOpMessage &schema_op_msg)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          schema_op_msg_(schema_op_msg)
+    {
+    }
+
+    const ::txlog::SchemaOpMessage &schema_op_msg_;
+};
+
+struct RangeSplitRecoveryTxRequest
+    : public TemplateTxRequest<RangeSplitRecoveryTxRequest, bool>
+{
+    RangeSplitRecoveryTxRequest(
+        const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
+        const TableSchema *table_schema,
+        int32_t partition_id,
+        const TxKey *start_key,
+        const TxKey *end_key,
+        const RangeInfo *range_info,
+        std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
+        std::vector<int32_t> &&new_partition_ids,
+        uint32_t node_group_id)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          ds_split_range_op_msg_(ds_split_range_op_msg),
+          table_schema_(table_schema),
+          partition_id_(partition_id),
+          start_key_(start_key),
+          end_key_(end_key),
+          range_info_(range_info),
+          new_range_keys_(std::move(new_range_keys)),
+          new_partition_ids_(std::move(new_partition_ids)),
+          node_group_id_(node_group_id)
+    {
+    }
+
+    const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg_;
+    const TableSchema *table_schema_;
+    int32_t partition_id_;
+    const TxKey *start_key_;
+    const TxKey *end_key_;
+    const RangeInfo *range_info_;
+    std::vector<std::unique_ptr<TxKey>> new_range_keys_;
+    std::vector<int32_t> new_partition_ids_;
+    uint32_t node_group_id_;
 };
 
 struct FaultInjectTxRequest

@@ -164,6 +164,15 @@ TxnStatus TransactionExecution::TxStatus() const
     return tx_status_.load(std::memory_order_relaxed);
 }
 
+void TransactionExecution::SetRecoverTxState(uint64_t txn,
+                                             int64_t tx_term,
+                                             uint64_t commit_ts)
+{
+    tx_number_.store(txn, std::memory_order_relaxed);
+    tx_term_ = tx_term;
+    commit_ts_ = commit_ts;
+}
+
 TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 {
     switch (error)
@@ -215,86 +224,6 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::UNDEFINED_ERR:
     default:
         return TxErrorCode::UNDEFINED_ERR;
-    }
-}
-
-void TransactionExecution::RecoverSchemaTx(
-    const ::txlog::SchemaOpMessage &schema_op,
-    uint64_t txn,
-    int64_t tx_term,
-    uint64_t commit_ts)
-{
-    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
-    tx_number_.store(txn, std::memory_order_relaxed);
-    tx_term_ = tx_term;
-    commit_ts_ = commit_ts;
-
-    switch (schema_op.schema_op_case())
-    {
-    case ::txlog::SchemaOpMessage::kTableOp:
-    {
-        const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
-
-        LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
-        std::unique_lock<std::mutex> lk(
-            local_shards->table_schema_op_pool_mux_);
-        if (Sharder::Instance()
-                .GetLocalCcShards()
-                ->table_schema_op_pool_.empty())
-        {
-            std::unique_ptr<UpsertTableOp> table_op = nullptr;
-            table_op = std::make_unique<UpsertTableOp>(
-                schema_op.table_name_str(),
-                schema_op.old_catalog_blob(),
-                schema_op.catalog_ts(),
-                schema_op.new_catalog_blob(),
-                static_cast<OperationType>(table_msg.op_type()),
-                this,
-                &(schema_op.alter_table_info_blob()));
-            schema_op_ = std::move(table_op);
-        }
-        else
-        {
-            assert(Sharder::Instance()
-                       .GetLocalCcShards()
-                       ->table_schema_op_pool_.back() != nullptr);
-            schema_op_ = std::move(Sharder::Instance()
-                                       .GetLocalCcShards()
-                                       ->table_schema_op_pool_.back());
-            Sharder::Instance()
-                .GetLocalCcShards()
-                ->table_schema_op_pool_.pop_back();
-
-            schema_op_->Reset(schema_op.table_name_str(),
-                              schema_op.old_catalog_blob(),
-                              schema_op.catalog_ts(),
-                              schema_op.new_catalog_blob(),
-                              static_cast<OperationType>(table_msg.op_type()),
-                              this,
-                              &(schema_op.alter_table_info_blob()));
-        }
-        lk.unlock();
-
-        if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
-                                     SchemaOpMessage_Stage_PrepareSchema)
-        {
-            schema_op_->prepare_log_op_.hd_result_.SetFinished();
-            schema_op_->op_ = &schema_op_->prepare_log_op_;
-        }
-        else
-        {
-            assert(schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
-                                            SchemaOpMessage_Stage_CommitSchema);
-            schema_op_->commit_log_op_.hd_result_.SetFinished();
-            schema_op_->op_ = &schema_op_->commit_log_op_;
-        }
-
-        state_stack_.push_back(schema_op_.get());
-        break;
-    }
-    default:
-        tx_status_.store(TxnStatus::Finished);
-        break;
     }
 }
 
@@ -352,117 +281,6 @@ void TransactionExecution::RemoteStatisticsTx(
     }
 }
 
-void TransactionExecution::RecoverSplitRangeTx(
-    const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
-    const TableSchema *table_schema,
-    int32_t partition_id,
-    const TxKey *range_start_key,
-    const TxKey *range_end_key,
-    const RangeInfo *range_info,
-    std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
-    std::vector<int32_t> &&new_partition_ids,
-    NodeGroupId node_group,
-    uint64_t txn,
-    int64_t tx_term,
-    uint64_t commit_ts,
-    std::optional<std::pair<CcEntryAddr, ReadSetEntry>> catalog_cc_entry,
-    std::shared_ptr<std::atomic_uint32_t> split_tx_started)
-{
-    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
-    tx_number_.store(txn, std::memory_order_relaxed);
-    tx_term_ = tx_term;
-    commit_ts_ = commit_ts;
-
-    const TableName range_table_name = TableName{
-        ds_split_range_op_msg.table_name(), TableType::RangePartition};
-    const TableName table_name =
-        TableName{range_table_name.StringView(),
-                  TableName::Type(range_table_name.StringView())};
-
-    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info;
-    for (size_t i = 0; i < new_range_keys.size(); i++)
-    {
-        new_range_info.emplace_back(std::move(new_range_keys[i]),
-                                    new_partition_ids[i]);
-    }
-
-    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
-    std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
-    std::unique_lock<std::mutex> lk(
-        local_shards->split_flush_range_op_pool_mux_);
-    if (local_shards->split_flush_range_op_pool_.empty())
-    {
-        split_range_op =
-            std::make_unique<SplitFlushRangeOp>(table_name,
-                                                table_schema,
-                                                node_group,
-                                                range_start_key,
-                                                range_end_key,
-                                                range_info,
-                                                std::move(new_range_info),
-                                                this);
-    }
-    else
-    {
-        split_range_op =
-            std::move(local_shards->split_flush_range_op_pool_.back());
-        local_shards->split_flush_range_op_pool_.pop_back();
-        assert(split_range_op != nullptr);
-        split_range_op->Reset(table_name,
-                              table_schema,
-                              node_group,
-                              range_start_key,
-                              range_end_key,
-                              range_info,
-                              std::move(new_range_info),
-                              this);
-    }
-    lk.unlock();
-    assert(split_range_op != nullptr);
-
-    split_range_op->catalog_cc_entry_ = std::move(catalog_cc_entry);
-    split_range_op->recover_split_started_ = split_tx_started;
-    split_range_op->pending_pin_data_ = true;
-
-    const ::txlog::SplitRangeOpMessage::Stage stage =
-        ds_split_range_op_msg.stage();
-
-    if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
-    {
-        split_range_op->prepare_log_op_.hd_result_.SetFinished();
-        split_range_op->op_ = &split_range_op->prepare_log_op_;
-    }
-    else
-    {
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        const StoreRange *range =
-            shards->FindRange(table_name, node_group, *range_start_key);
-        const auto &slices = range->Slices();
-        for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
-             ++slice_it)
-        {
-            if (slice_it == slices.cbegin())
-            {
-                split_range_op->slice_info_.emplace_back(nullptr,
-                                                         (*slice_it)->Size());
-            }
-            else
-            {
-                split_range_op->slice_info_.emplace_back(
-                    (*slice_it)->StartKey()->Clone(), (*slice_it)->Size());
-            }
-        }
-        split_range_op->commit_log_op_.hd_result_.SetFinished();
-        split_range_op->op_ = &split_range_op->commit_log_op_;
-    }
-
-    LOG(INFO) << "Recovering split flush tx " << TxNumber() << " on table "
-              << table_name.StringView() << ", range id "
-              << range_info->PartitionId();
-    split_flush_op_ = std::move(split_range_op);
-    state_stack_.push_back(split_flush_op_.get());
-}
-
 TxmStatus TransactionExecution::Forward()
 {
     bool has_more_req = false;
@@ -518,7 +336,7 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 {
     TxnStatus status = tx_status_.load(std::memory_order_acquire);
 
-    if (status == TxnStatus::Ongoing)
+    if (status == TxnStatus::Ongoing || status == TxnStatus::Recovering)
     {
         bool success = tx_req_queue_.enqueue(tx_req);
         assert(success);
@@ -1043,6 +861,177 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
     Forward();
 }
 
+void TransactionExecution::ProcessTxRequest(
+    SchemaRecoveryTxRequest &recover_req)
+{
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    bool_resp_ = &recover_req.tx_result_;
+    auto &schema_op = recover_req.schema_op_msg_;
+    switch (schema_op.schema_op_case())
+    {
+    case ::txlog::SchemaOpMessage::kTableOp:
+    {
+        const ::txlog::UpsertTableMessage &table_msg = schema_op.table_op();
+
+        LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+        std::unique_lock<std::mutex> lk(
+            local_shards->table_schema_op_pool_mux_);
+        if (Sharder::Instance()
+                .GetLocalCcShards()
+                ->table_schema_op_pool_.empty())
+        {
+            std::unique_ptr<UpsertTableOp> table_op = nullptr;
+            table_op = std::make_unique<UpsertTableOp>(
+                schema_op.table_name_str(),
+                schema_op.old_catalog_blob(),
+                schema_op.catalog_ts(),
+                schema_op.new_catalog_blob(),
+                static_cast<OperationType>(table_msg.op_type()),
+                this,
+                &(schema_op.alter_table_info_blob()));
+            schema_op_ = std::move(table_op);
+        }
+        else
+        {
+            assert(Sharder::Instance()
+                       .GetLocalCcShards()
+                       ->table_schema_op_pool_.back() != nullptr);
+            schema_op_ = std::move(Sharder::Instance()
+                                       .GetLocalCcShards()
+                                       ->table_schema_op_pool_.back());
+            Sharder::Instance()
+                .GetLocalCcShards()
+                ->table_schema_op_pool_.pop_back();
+
+            schema_op_->Reset(schema_op.table_name_str(),
+                              schema_op.old_catalog_blob(),
+                              schema_op.catalog_ts(),
+                              schema_op.new_catalog_blob(),
+                              static_cast<OperationType>(table_msg.op_type()),
+                              this,
+                              &(schema_op.alter_table_info_blob()));
+        }
+        lk.unlock();
+
+        if (schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
+                                     SchemaOpMessage_Stage_PrepareSchema)
+        {
+            schema_op_->prepare_log_op_.hd_result_.SetFinished();
+            schema_op_->op_ = &schema_op_->prepare_log_op_;
+        }
+        else
+        {
+            assert(schema_op.stage() == ::txlog::SchemaOpMessage::Stage::
+                                            SchemaOpMessage_Stage_CommitSchema);
+            schema_op_->commit_log_op_.hd_result_.SetFinished();
+            schema_op_->op_ = &schema_op_->commit_log_op_;
+        }
+
+        PushOperation(schema_op_.get());
+        Forward();
+        break;
+    }
+    default:
+        tx_status_.store(TxnStatus::Finished);
+        break;
+    }
+}
+
+void TransactionExecution::ProcessTxRequest(
+    RangeSplitRecoveryTxRequest &recover_req)
+{
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
+    bool_resp_ = &recover_req.tx_result_;
+
+    const TableName range_table_name =
+        TableName{recover_req.ds_split_range_op_msg_.table_name(),
+                  TableType::RangePartition};
+    const TableName table_name =
+        TableName{range_table_name.StringView(),
+                  TableName::Type(range_table_name.StringView())};
+
+    std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info;
+    for (size_t i = 0; i < recover_req.new_range_keys_.size(); i++)
+    {
+        new_range_info.emplace_back(std::move(recover_req.new_range_keys_[i]),
+                                    recover_req.new_partition_ids_[i]);
+    }
+
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+    std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
+    std::unique_lock<std::mutex> lk(
+        local_shards->split_flush_range_op_pool_mux_);
+    if (local_shards->split_flush_range_op_pool_.empty())
+    {
+        split_range_op =
+            std::make_unique<SplitFlushRangeOp>(table_name,
+                                                recover_req.table_schema_,
+                                                recover_req.node_group_id_,
+                                                recover_req.start_key_,
+                                                recover_req.end_key_,
+                                                recover_req.range_info_,
+                                                std::move(new_range_info),
+                                                this);
+    }
+    else
+    {
+        split_range_op =
+            std::move(local_shards->split_flush_range_op_pool_.back());
+        local_shards->split_flush_range_op_pool_.pop_back();
+        assert(split_range_op != nullptr);
+        split_range_op->Reset(table_name,
+                              recover_req.table_schema_,
+                              recover_req.node_group_id_,
+                              recover_req.start_key_,
+                              recover_req.end_key_,
+                              recover_req.range_info_,
+                              std::move(new_range_info),
+                              this);
+    }
+    lk.unlock();
+    assert(split_range_op != nullptr);
+    split_range_op->pending_pin_data_ = true;
+
+    const ::txlog::SplitRangeOpMessage::Stage stage =
+        recover_req.ds_split_range_op_msg_.stage();
+
+    if (stage == ::txlog::SplitRangeOpMessage_Stage_PrepareSplit)
+    {
+        split_range_op->prepare_log_op_.hd_result_.SetFinished();
+        split_range_op->op_ = &split_range_op->prepare_log_op_;
+    }
+    else
+    {
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        const StoreRange *range = shards->FindRange(
+            table_name, recover_req.node_group_id_, *recover_req.start_key_);
+        const auto &slices = range->Slices();
+        for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
+             ++slice_it)
+        {
+            if (slice_it == slices.cbegin())
+            {
+                split_range_op->slice_info_.emplace_back(nullptr,
+                                                         (*slice_it)->Size());
+            }
+            else
+            {
+                split_range_op->slice_info_.emplace_back(
+                    (*slice_it)->StartKey()->Clone(), (*slice_it)->Size());
+            }
+        }
+        split_range_op->commit_log_op_.hd_result_.SetFinished();
+        split_range_op->op_ = &split_range_op->commit_log_op_;
+    }
+
+    LOG(INFO) << "Recovering split flush tx " << TxNumber() << " on table "
+              << table_name.StringView() << ", range id "
+              << recover_req.range_info_->PartitionId();
+    split_flush_op_ = std::move(split_range_op);
+    PushOperation(split_flush_op_.get());
+    Forward();
+}
+
 void TransactionExecution::Process(InitTxnOperation &init_txn)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1182,7 +1171,8 @@ void TransactionExecution::Process(ReadOperation &read)
                                    read.hd_result_,
                                    read.iso_level_,
                                    read.protocol_,
-                                   read.read_tx_req_->is_for_write_);
+                                   read.read_tx_req_->is_for_write_,
+                                   read.read_tx_req_->is_recovering_);
         }
         else
         {
@@ -1236,11 +1226,11 @@ void TransactionExecution::Process(ReadOperation &read)
                 read.lock_range_result_.Reset();
 
                 lock_range_op_.key_ = &key;
-                lock_range_op_.range_table_name_ =
+                lock_range_op_.table_name_ =
                     TableName(read.read_tx_req_->tab_name_->StringView(),
                               TableType::RangePartition);
-                lock_range_op_.range_rec_ = &read.range_rec_;
-                lock_range_op_.lock_range_result_ = &read.lock_range_result_;
+                lock_range_op_.rec_ = &read.range_rec_;
+                lock_range_op_.hd_result_ = &read.lock_range_result_;
 
                 // Control flow jumps to lock_range_op_, do not execute further
                 // after `Process(lock_range_op_)` returns.
@@ -1455,49 +1445,48 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     }
 }
 
-#ifdef RANGE_PARTITION_ENABLED
-void TransactionExecution::Process(LockReadRangeOperation &lock_range)
+void TransactionExecution::Process(ReadLocalOperation &lock_local)
 {
-    cc_handler_->ReadLocal(lock_range.range_table_name_,
-                           *lock_range.key_,
-                           *lock_range.range_rec_,
+    cc_handler_->ReadLocal(lock_local.table_name_,
+                           *lock_local.key_,
+                           *lock_local.rec_,
                            ReadType::Inside,
                            tx_number_.load(std::memory_order_relaxed),
                            tx_term_,
                            CommandId(),
                            start_ts_,
-                           *lock_range.lock_range_result_,
+                           *lock_local.hd_result_,
                            IsolationLevel::RepeatableRead,
                            CcProtocol::Locking);
 
-    lock_range.Forward(this);
+    lock_local.Forward(this);
 }
 
-void TransactionExecution::PostProcess(LockReadRangeOperation &lock_range)
+void TransactionExecution::PostProcess(ReadLocalOperation &lock_local)
 {
-    if (lock_range.lock_range_result_->IsError())
+    if (lock_local.hd_result_->IsError())
     {
-        DLOG(ERROR) << "LockReadRangeOperation failed for cc error:"
-                    << lock_range.lock_range_result_->ErrorMsg();
+        DLOG(ERROR) << "ReadLocalOperation failed for cc error:"
+                    << lock_local.hd_result_->ErrorMsg();
         rec_resp_->FinishError(
-            ConvertCcError(lock_range.lock_range_result_->ErrorCode()));
+            ConvertCcError(lock_local.hd_result_->ErrorCode()));
     }
-    else if (lock_range.lock_range_result_->Value().rec_status_ ==
-             RecordStatus::Normal)
+    else if (lock_local.hd_result_->Value().rec_status_ == RecordStatus::Normal)
     {
         // The read lock on the range is added, put the range cce into read
         // set for later release read lock.
         // The range cannot be changed before this tx finishes
         // post-processing, so the read lock on the range is kept until
         // then.
-        const ReadKeyResult &read_res = lock_range.lock_range_result_->Value();
+        const ReadKeyResult &read_res = lock_local.hd_result_->Value();
         rw_set_.AddRead(
-            read_res.cce_addr_, read_res.ts_, &lock_range.range_table_name_);
+            read_res.cce_addr_, read_res.ts_, &lock_local.table_name_);
     }
     state_stack_.pop_back();
     Forward();
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 void TransactionExecution::Process(UnlockReadRangeOperation &unlock_range)
 {
     // remove range entry from read set and do PostRead
@@ -2567,10 +2556,15 @@ void TransactionExecution::Commit()
         return;
     }
 
-    tx_status_.store(TxnStatus::Committing, std::memory_order_release);
+    bool is_recovering = TxStatus() == TxnStatus::Recovering;
+    if (!is_recovering)
+    {
+        tx_status_.store(TxnStatus::Committing, std::memory_order_release);
+    }
 #ifndef ON_KEY_OBJECT
     if (rw_set_.WriteSetSize() > 0)
     {
+        assert(!is_recovering);
 #ifdef RANGE_PARTITION_ENABLED
         lock_write_ranges_.Reset();
         PushOperation(&lock_write_ranges_);
@@ -2583,8 +2577,20 @@ void TransactionExecution::Commit()
     else
 #endif
     {
-        PushOperation(&set_ts_);
-        Process(set_ts_);
+        if (is_recovering)
+        {
+            // For recover tx commit, commit_ts is already determined and
+            // we don't need to update TEntry since it is not assigned for
+            // a recovering tx. Just release all the locks in readset and
+            // recycle txm.
+            PushOperation(&validate_);
+            Process(validate_);
+        }
+        else
+        {
+            PushOperation(&set_ts_);
+            Process(set_ts_);
+        }
     }
 }
 
@@ -3056,6 +3062,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
         }
         else
         {
+            bool is_recovering = TxStatus() == TxnStatus::Recovering;
             tx_status_.store(TxnStatus::Committed, std::memory_order_release);
 
             // This is a read-only tx. Notifies early before post-processing.
@@ -3065,8 +3072,23 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 bool_resp_ = nullptr;
             }
 
-            PushOperation(&update_txn_);
-            Process(update_txn_);
+            if (!is_recovering)
+            {
+                PushOperation(&update_txn_);
+                Process(update_txn_);
+            }
+            else
+            {
+                // No need to update txn status since we did not assign TEntry
+                // for recovering tx.
+                post_process_.Reset(rw_set_.WriteSetSize() +
+                                        rw_set_.ForwardWriteCnt() +
+                                        rw_set_.ObjectCommandSize(),
+                                    0,
+                                    rw_set_.CatalogRangeSetSize());
+                PushOperation(&post_process_);
+                Process(post_process_);
+            }
         }
     }
 }
@@ -4541,10 +4563,10 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         obj_cmd_op.lock_range_result_.Reset();
 
         lock_range_op_.key_ = &key;
-        lock_range_op_.range_table_name_ =
+        lock_range_op_.table_name_ =
             TableName(table_name.StringView(), TableType::RangePartition);
-        lock_range_op_.range_rec_ = &obj_cmd_op.range_rec_;
-        lock_range_op_.lock_range_result_ = &obj_cmd_op.lock_range_result_;
+        lock_range_op_.rec_ = &obj_cmd_op.range_rec_;
+        lock_range_op_.hd_result_ = &obj_cmd_op.lock_range_result_;
 
         // Control flow jumps to lock_range_op_, do not execute further
         // after `Process(lock_range_op_)` returns.
