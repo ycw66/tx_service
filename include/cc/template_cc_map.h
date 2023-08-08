@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>  // std::max
+#include <cassert>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -4345,6 +4346,7 @@ public:
         const KeyT *start_key = static_cast<const KeyT *>(req.start_key_);
         const KeyT *end_key = static_cast<const KeyT *>(req.end_key_);
         Iterator it;
+        Iterator end_it;
         if (req.pause_key_.at(shard_->core_id_).second)
         {
             // scan is already finished on this core
@@ -4378,6 +4380,21 @@ public:
             it = Floor(*pause_key);
         }
 
+        if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
+        {
+            end_it = End();
+        }
+        else
+        {
+            std::pair<Iterator, ScanType> end_pair =
+                ForwardScanStart(*end_key, true);
+            end_it = end_pair.first;
+            if (end_pair.second == ScanType::ScanGap)
+            {
+                ++end_it;
+            }
+        }
+
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -4403,17 +4420,18 @@ public:
         }
         std::vector<LruEntry *> remove_entries;
 
-        // DataSyncScanCc is running on TxProcessor thread. To avoid blocking
-        // other transaction for a long time, we only process CkptScanBatch
-        // number of pages in each round.
+        // DataSyncScanCc is running on TxProcessor thread. To avoid
+        // blocking other transaction for a long time, we only process
+        // CkptScanBatch number of pages in each round.
+
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_ &&
-             it != End() && (end_key == nullptr || *(it->first) < *end_key);
-             it++)
+             it != end_it;
+             ++it)
         {
-            const KeyT &key = *(it->first);
+            const KeyT *key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
 
             if (shard_->EnableMvcc())
@@ -4421,7 +4439,7 @@ public:
                 shard_->DecrementMemory(cce->KickOutArchiveRecords(recycle_ts));
             }
 
-            if (cce->NeedCkpt() && KeyInRange(&key, start_key, end_key))
+            if (cce->NeedCkpt())
             {
 #ifdef RANGE_PARTITION_ENABLED
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
@@ -4438,7 +4456,7 @@ public:
                                               RecordSchema(),
                                               table_schema_->Version(),
                                               table_schema_->GetKVCatalogInfo(),
-                                              key,
+                                              *key,
                                               true,
                                               &req,
                                               pin_status,
@@ -4461,14 +4479,16 @@ public:
                     }
                     else if (pin_status == RangeSliceOpStatus::Retry)
                     {
-                        req.pause_key_.at(shard_->core_id_).first = key.Clone();
+                        req.pause_key_.at(shard_->core_id_).first =
+                            key->Clone();
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
                         return false;
                     }
                     else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
                     {
                         req.SetLoadingSlce(slice_id, shard_->core_id_);
-                        req.pause_key_.at(shard_->core_id_).first = key.Clone();
+                        req.pause_key_.at(shard_->core_id_).first =
+                            key->Clone();
                         return false;
                     }
                     else if (pin_status == RangeSliceOpStatus::NotOwner)
@@ -4497,15 +4517,15 @@ public:
                     }
                 }
 #endif
-                cce->ExportForCkpt(key,
+                cce->ExportForCkpt(*key,
                                    req.DataSyncVec(shard_->core_id_),
                                    req.ArchiveVec(shard_->core_id_),
                                    req.MoveBaseVec(shard_->core_id_),
                                    req.data_sync_ts_,
                                    recycle_ts,
                                    Type(),
-                                   shard_->EnableMvcc());
-                req.accumulated_scan_cnt_.at(shard_->core_id_)++;
+                                   shard_->EnableMvcc(),
+                                   req.accumulated_scan_cnt_[shard_->core_id_]);
             }
             scan_cnt++;
         }
@@ -4515,7 +4535,7 @@ public:
             Clean(cce);
         }
 
-        if (it == End() || (end_key != nullptr && !(*it->first < *end_key)))
+        if (it == end_it)
         {
             // scan data drained
             std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
@@ -4942,7 +4962,8 @@ public:
             {
                 if (req.WithFlush())
                 {
-                    std::vector<FlushRecord> tmp_ckpt_vec;
+                    std::vector<FlushRecord> tmp_ckpt_vec(1);
+                    size_t tmp_ckpt_vec_size = 0;
 
                     std::vector<FlushRecord> tmp_akv_vec;
                     std::vector<const TxKey *> tmp_mv_base_vec;
@@ -4953,7 +4974,28 @@ public:
                                        cce->commit_ts_,
                                        1U,
                                        Type(),
-                                       shard_->EnableMvcc());
+                                       shard_->EnableMvcc(),
+                                       tmp_ckpt_vec_size);
+
+                    assert(tmp_ckpt_vec_size <= 1);
+                    size_t offset = 0;
+                    for (size_t i = 0; i < tmp_akv_vec.size(); ++i)
+                    {
+                        auto &rec = tmp_akv_vec[i];
+                        rec.SetKey(
+                            tmp_ckpt_vec[reinterpret_cast<size_t>(rec.Key()) +
+                                         offset]
+                                .Key());
+                    }
+
+                    for (size_t i = 0; i < tmp_mv_base_vec.size(); ++i)
+                    {
+                        auto &rec = tmp_mv_base_vec[i];
+                        rec =
+                            tmp_ckpt_vec[reinterpret_cast<size_t>(rec) + offset]
+                                .Key();
+                    }
+
                     bool res = shard_->FlushEntryForTest(
                         cce, tmp_ckpt_vec, tmp_akv_vec, only_archives);
                     assert(res == true);
@@ -5040,25 +5082,56 @@ public:
     bool Execute(GetPostCkptSlice &req) override
     {
         RangeSliceId slice_id = req.SliceId();
-        std::vector<SliceChangeInfo> &item_vec = req.SliceRecordCollection();
+        std::vector<SliceChangeInfo> &item_vec =
+            req.SliceChangeInfoVec(shard_->core_id_);
+
         // Caller should have already pinned the slice.
+        auto &pause_key_and_is_drained = req.PauseKey(shard_->core_id_);
+        auto &pause_key_uptr = pause_key_and_is_drained.first;
+        bool is_drained = pause_key_and_is_drained.second;
+
+        if (is_drained)
+        {
+            assert(pause_key_uptr == nullptr);
+            req.SetFinish();
+            return false;
+        }
+
+        assert(!is_drained);
 
         Iterator map_it, map_end_it;
 
-        const KeyT *start_key =
-            static_cast<const KeyT *>(slice_id.Slice()->StartKey());
-        if (start_key == nullptr || start_key->Type() == KeyType::NegativeInf)
+        if (pause_key_uptr != nullptr)
         {
-            map_it = Begin();
-        }
-        else
-        {
+            const KeyT *pause_key_raw_ptr =
+                static_cast<const KeyT *>(pause_key_uptr.get());
             std::pair<Iterator, ScanType> start_pair =
-                ForwardScanStart(*start_key, true);
+                ForwardScanStart(*pause_key_raw_ptr, true);
             map_it = start_pair.first;
             if (start_pair.second == ScanType::ScanGap)
             {
                 ++map_it;
+            }
+        }
+        else
+        {
+            const KeyT *start_key =
+                static_cast<const KeyT *>(slice_id.Slice()->StartKey());
+
+            if (start_key == nullptr ||
+                start_key->Type() == KeyType::NegativeInf)
+            {
+                map_it = Begin();
+            }
+            else
+            {
+                std::pair<Iterator, ScanType> start_pair =
+                    ForwardScanStart(*start_key, true);
+                map_it = start_pair.first;
+                if (start_pair.second == ScanType::ScanGap)
+                {
+                    ++map_it;
+                }
             }
         }
 
@@ -5080,12 +5153,16 @@ public:
             }
         }
 
-        auto &ckpt_vec = req.CkptVec();
-        size_t start_idx = req.SliceFirstIdx();
-        size_t end_idx = req.SliceLastIdx();
-        size_t ckpt_idx = start_idx;
+        auto &ckpt_cce_raw_ptr_vec = req.CkptCceRawPtrVec(shard_->core_id_);
+        size_t &next_vec_idx = req.item_vec_size_[shard_->core_id_];
+        size_t ckpt_idx = req.SliceFirstIdx(shard_->core_id_);
+        size_t end_idx = ckpt_cce_raw_ptr_vec.size();
 
-        for (; map_it != map_end_it; ++map_it)
+        bool is_last_one = req.IsLastOne(shard_->core_id_);
+
+        for (size_t scan_cnt = 0;
+             scan_cnt < GetPostCkptSlice::ScanBatchSize && map_it != map_end_it;
+             ++map_it, ++scan_cnt)
         {
             const KeyT *cce_key = map_it->first;
             CcEntry<KeyT, ValueT> *cce = map_it->second;
@@ -5097,33 +5174,16 @@ public:
                 continue;
             }
 
-            // Skip until the ckpt item belongs to this core.
-            while (ckpt_idx < end_idx &&
-                   (ckpt_vec[ckpt_idx].Key()->Hash() & 0x3FF) %
-                           shard_->core_cnt_ !=
-                       shard_->core_id_)
+            if (!is_last_one && ckpt_idx == end_idx)
             {
-                ckpt_idx++;
+                // Need to aquire next batch flush vector
+                break;
             }
 
-            if (ckpt_idx < end_idx && cce == ckpt_vec[ckpt_idx].cce_)
+            assert(is_last_one || ckpt_idx < end_idx);
+            if (ckpt_idx < end_idx && reinterpret_cast<uintptr_t>(cce) ==
+                                          ckpt_cce_raw_ptr_vec[ckpt_idx])
             {
-                // This entry will be flushed in this round of checkpoint.
-                int32_t ckpt_size = 0;
-                if (ckpt_vec[ckpt_idx].payload_status_ == RecordStatus::Deleted)
-                {
-                    ckpt_size = 0;
-                }
-                else
-                {
-                    ckpt_size = ckpt_vec[ckpt_idx].Key()->Size() +
-                                ckpt_vec[ckpt_idx].PayloadSize();
-                }
-                item_vec.emplace_back(
-                    ckpt_vec[ckpt_idx].Key(),
-                    ckpt_size - ckpt_vec[ckpt_idx].delta_size_,
-                    ckpt_size);
-
                 ckpt_idx++;
             }
             else
@@ -5138,28 +5198,26 @@ public:
                     cce->data_store_size_.store(0, std::memory_order_release);
                     data_store_size = 0;
                 }
-                // This entry is not going to be flushed in this checkpoint, so
-                // the data store size before and post ckpt are the same.
-                item_vec.emplace_back(
-                    cce_key->Clone(), data_store_size, data_store_size);
+
+                // This entry is not going to be flushed in this checkpoint,
+                // so the data store size before and post ckpt are the same.
+
+                item_vec[next_vec_idx++].Reset(
+                    cce_key, data_store_size, data_store_size, true);
             }
         }
 
-        if (shard_->core_id_ == shard_->core_cnt_ - 1)
+        if (map_it == map_end_it)
         {
-            std::sort(item_vec.begin(),
-                      item_vec.end(),
-                      [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
-                      {
-                          const TxKey *l_key = lhs.SliceStartKey();
-                          const TxKey *r_key = rhs.SliceStartKey();
-                          return *l_key < *r_key;
-                      });
+            pause_key_and_is_drained = {nullptr, true};
             req.SetFinish();
         }
         else
         {
-            MoveRequest(&req, shard_->core_id_ + 1);
+            assert(map_it != map_end_it);
+            pause_key_and_is_drained = {map_it->first->Clone(), false};
+            req.UpdateFirstIdx(shard_->core_id_, ckpt_idx);
+            req.SetFinish();
         }
 
         return false;

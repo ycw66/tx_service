@@ -5,9 +5,12 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "cc_req_base.h"
 #include "range_record.h"
+#include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -401,22 +404,23 @@ private:
 struct GetPostCkptSlice : public CcRequestBase
 {
 public:
+    static constexpr size_t ScanBatchSize = 128;
+
     GetPostCkptSlice() = delete;
     GetPostCkptSlice(const TableName &table_name,
                      NodeGroupId ng_id,
                      StoreSlice *slice,
                      StoreRange *range,
-                     const std::vector<FlushRecord> &ckpt_vec,
-                     uint32_t first_slice_idx,
-                     uint32_t last_slice_idx,
+                     std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
                      uint64_t ckpt_ts,
-                     std::vector<SliceChangeInfo> &slice_items);
+                     size_t core_cnt,
+                     std::vector<bool> is_last_one_vec);
 
     bool Execute(CcShard &ccs) override;
 
-    std::vector<SliceChangeInfo> &SliceRecordCollection()
+    std::vector<SliceChangeInfo> &SliceChangeInfoVec(size_t core_idx)
     {
-        return slice_items_;
+        return slice_items_[core_idx];
     }
 
     RangeSliceId SliceId();
@@ -426,41 +430,64 @@ public:
         return ckpt_ts_;
     }
 
-    uint32_t SliceFirstIdx() const
+    uint32_t SliceFirstIdx(size_t core_idx) const
     {
-        return slice_first_idx_;
+        return slice_first_idxs_[core_idx];
     }
 
-    uint32_t SliceLastIdx() const
+    void UpdateFirstIdx(size_t core_idx, uint32_t new_slice_first_idx)
     {
-        return slice_last_idx_;
+        slice_first_idxs_[core_idx] = new_slice_first_idx;
     }
 
-    const std::vector<FlushRecord> &CkptVec() const
+    const std::vector<uintptr_t> &CkptCceRawPtrVec(size_t core_idx) const
     {
-        return ckpt_vec_;
+        return ckpt_cce_raw_ptr_vecs_[core_idx];
+    }
+
+    bool IsDrained(size_t core_idx) const
+    {
+        assert(pause_keys_[core_idx].first != nullptr ||
+               pause_keys_[core_idx].second);
+
+        return pause_keys_[core_idx].second;
+    }
+
+    bool IsLastOne(size_t core_idx) const
+    {
+        return is_last_one_vec_[core_idx];
+    }
+
+    std::pair<TxKey::Uptr, bool> &PauseKey(size_t core_idx)
+    {
+        return pause_keys_[core_idx];
     }
 
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return is_finished_; });
+        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
     void SetFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        is_finished_ = true;
-        err_code_ = CcErrorCode::NO_ERROR;
-        cv_.notify_one();
+        --unfinished_cnt_;
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
     }
 
     void SetError(CcErrorCode err_code)
     {
         std::unique_lock<std::mutex> lk(mux_);
-        is_finished_ = true;
+        --unfinished_cnt_;
         err_code_ = err_code;
-        cv_.notify_one();
+        if (unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
     }
 
     CcErrorCode ErrorCode()
@@ -472,7 +499,7 @@ public:
     bool IsFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        return is_finished_;
+        return unfinished_cnt_ == 0;
     }
 
     void SetOnLoad(bool on_load)
@@ -485,12 +512,20 @@ public:
         return on_load_;
     }
 
-    void Reset()
+    void Reset(std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs,
+               std::vector<bool> is_last_one_vec)
     {
         std::unique_lock<std::mutex> lk(mux_);
 
-        slice_items_.clear();
-        is_finished_ = false;
+        is_last_one_vec_ = std::move(is_last_one_vec);
+        unfinished_cnt_ = ckpt_cce_raw_ptr_vecs.size();
+        ckpt_cce_raw_ptr_vecs_ = ckpt_cce_raw_ptr_vecs;
+
+        for (size_t i = 0; i < slice_first_idxs_.size(); ++i)
+        {
+            item_vec_size_[i] = 0;
+        }
+
         err_code_ = CcErrorCode::NO_ERROR;
 
         on_load_ = false;
@@ -498,23 +533,28 @@ public:
 
     std::chrono::time_point<std::chrono::steady_clock> load_start_;
 
+    std::vector<size_t> item_vec_size_;
+
 private:
     const TableName &table_name_;
     NodeGroupId cc_ng_id_;
     StoreSlice *slice_;
     StoreRange *range_;
-    const std::vector<FlushRecord> &ckpt_vec_;
-    uint32_t slice_first_idx_;
-    uint32_t slice_last_idx_;
+    std::vector<size_t> slice_first_idxs_;
     uint64_t ckpt_ts_;
+
+    std::vector<std::pair<TxKey::Uptr, bool>> pause_keys_;
+    std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs_;
+    std::vector<bool> is_last_one_vec_;
+
     /**
      * @brief A collection of keys and their curr and post ckpt record sizes in
      * the slice in the data store.
      *
      */
-    std::vector<SliceChangeInfo> &slice_items_;
+    std::vector<std::vector<SliceChangeInfo>> slice_items_;
 
-    bool is_finished_{false};
+    size_t unfinished_cnt_;
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
     std::condition_variable cv_;

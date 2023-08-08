@@ -90,6 +90,7 @@ enum struct RangeSliceOpStatus
 
 struct SliceChangeInfo
 {
+    SliceChangeInfo() = default;
     SliceChangeInfo(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo &operator=(const SliceChangeInfo &rhs) = delete;
     SliceChangeInfo(const TxKey *start_key,
@@ -148,6 +149,35 @@ struct SliceChangeInfo
         post_update_size_ = rhs.post_update_size_;
     }
 
+    void Reset(const TxKey *key,
+               uint32_t cur_size,
+               uint32_t post_update_size,
+               bool is_clone)
+    {
+        if (!is_clone)
+        {
+            SetKey(key);
+        }
+        else
+        {
+            if (is_key_owner_)
+            {
+                // We can copy key to avoid memory allocation
+                assert(key_.uptr_ != nullptr);
+                key_.uptr_->Copy(*key);
+            }
+            else
+            {
+                // We need to create a new key
+                (void) key_.uptr_.release();
+                key_.uptr_ = key->Clone();
+                is_key_owner_ = true;
+            }
+        }
+        cur_size_ = cur_size;
+        post_update_size_ = post_update_size;
+    }
+
     void SetKey(const TxKey *ptr)
     {
         if (is_key_owner_)
@@ -170,7 +200,7 @@ struct SliceChangeInfo
         {
             // key_ is treated as a unique_ptr, first release ownership,
             // otherwise ptr_ will be deleted
-            key_.uptr_.release();
+            (void) key_.uptr_.release();
             key_.uptr_ = std::move(uptr);
         }
         is_key_owner_ = true;

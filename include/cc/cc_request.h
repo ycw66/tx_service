@@ -38,6 +38,7 @@
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_command.h"
+#include "tx_key.h"
 #include "tx_operation_result.h"
 #include "type.h"
 #include "util.h"
@@ -2233,7 +2234,7 @@ public:
     // how many pages to scan one time
     // static constexpr size_t DataSyncScanBatch = 20;
     // todo: limit scan by scanned size
-    static constexpr size_t DataSyncScanBatchSize = 1024;
+    static constexpr size_t DataSyncScanBatchSize = 128;
 
     DataSyncScanCc() = default;
 
@@ -2262,7 +2263,7 @@ public:
         for (size_t i = 0; i < core_cnt; i++)
         {
             data_sync_vec_.emplace_back();
-            data_sync_vec_.back().reserve(scan_batch_size);
+            data_sync_vec_.back().resize(scan_batch_size);
             archive_vec_.emplace_back();
             archive_vec_.back().reserve(scan_batch_size);
             mv_base_vec_.emplace_back();
@@ -2310,7 +2311,6 @@ public:
         res_.clear();
         for (size_t i = 0; i < core_cnt_; i++)
         {
-            data_sync_vec_.at(i).clear();
             archive_vec_.at(i).clear();
             mv_base_vec_.at(i).clear();
             loading_slice_.at(i) = RangeSliceId(nullptr, nullptr);
@@ -2377,28 +2377,30 @@ public:
 
     void SetLoadingSlce(RangeSliceId slice_id, uint16_t core_id)
     {
-        loading_slice_.at(core_id) = slice_id;
+        loading_slice_[core_id] = slice_id;
     }
 
     RangeSliceId LoadingSlice(uint16_t core_id) const
     {
-        return loading_slice_.at(core_id);
+        return loading_slice_[core_id];
     }
 
     std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
     {
-        return data_sync_vec_.at(core_id);
+        return data_sync_vec_[core_id];
     }
 
     std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
     {
-        return archive_vec_.at(core_id);
+        return archive_vec_[core_id];
     }
 
     std::vector<const TxKey *> &MoveBaseVec(uint16_t core_id)
     {
-        return mv_base_vec_.at(core_id);
+        return mv_base_vec_[core_id];
     }
+
+    std::vector<size_t> accumulated_scan_cnt_;
 
 private:
     const TableName *table_name_{nullptr};
@@ -2409,6 +2411,7 @@ private:
     std::vector<std::vector<FlushRecord>> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
     std::vector<std::vector<const TxKey *>> mv_base_vec_;
+
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
     const TxKey *start_key_{nullptr};
@@ -2418,7 +2421,6 @@ private:
     // core has finished scanning all keys already.
     std::vector<std::pair<TxKey::Uptr, bool>> pause_key_;
     size_t scan_batch_size_;
-    std::vector<size_t> accumulated_scan_cnt_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;

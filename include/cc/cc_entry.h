@@ -89,6 +89,7 @@ public:
     FlushRecord()
     {
     }
+
     ~FlushRecord()
     {
         if (is_key_owner_)
@@ -97,8 +98,47 @@ public:
         }
     }
 
-    FlushRecord(const FlushRecord &rhs) = delete;
-    FlushRecord &operator=(const FlushRecord &rhs) = delete;
+    FlushRecord(const FlushRecord &rhs)
+    {
+        if (rhs.is_key_owner_)
+        {
+            SetKey(rhs.key_.uptr_->Clone());
+        }
+        else
+        {
+            SetKey(rhs.key_.ptr_);
+        }
+
+        SetPayload(rhs.payload_);
+        payload_status_ = rhs.payload_status_;
+        commit_ts_ = rhs.commit_ts_;
+        cce_ = rhs.cce_;
+        delta_size_ = rhs.delta_size_;
+    }
+
+    FlushRecord &operator=(const FlushRecord &rhs)
+    {
+        if (this == &rhs)
+        {
+            return *this;
+        }
+
+        if (rhs.is_key_owner_)
+        {
+            SetKey(rhs.key_.uptr_->Clone());
+        }
+        else
+        {
+            SetKey(rhs.key_.ptr_);
+        }
+
+        SetPayload(rhs.payload_);
+        payload_status_ = rhs.payload_status_;
+        commit_ts_ = rhs.commit_ts_;
+        cce_ = rhs.cce_;
+        delta_size_ = rhs.delta_size_;
+        return *this;
+    }
 
     FlushRecord &operator=(FlushRecord &&rhs)
     {
@@ -144,6 +184,21 @@ public:
         cce_ = rhs.cce_;
     }
 
+    void CloneOrCopyKey(const TxKey &key)
+    {
+        if (is_key_owner_)
+        {
+            assert(key_.uptr_ != nullptr);
+            key_.uptr_->Copy(key);
+        }
+        else
+        {
+            (void) key_.uptr_.release();
+            key_.uptr_ = key.Clone();
+            is_key_owner_ = true;
+        }
+    }
+
     void SetKey(const TxKey *ptr)
     {
         if (is_key_owner_)
@@ -166,7 +221,7 @@ public:
         {
             // key_ is treated as a unique_ptr, first release ownership,
             // otherwise ptr_ will be deleted
-            key_.uptr_.release();
+            (void) key_.uptr_.release();
             key_.uptr_ = std::move(uptr);
         }
         is_key_owner_ = true;
@@ -762,46 +817,48 @@ public:
                          uint64_t to_ts,
                          uint64_t oldest_active_tx_ts,
                          TableType tbl_type,
-                         bool mvcc_enabled) const
+                         bool mvcc_enabled,
+                         size_t &ckpt_vec_size) const
     {
         size_t exported_count = 0;
         if (commit_ts_ <= ckpt_ts_)
         {
             return exported_count;
         }
-        const TxKey *key_ptr = nullptr;
+
+        size_t ckpt_idx = ckpt_vec_size;
         if (commit_ts_ <= to_ts)
         {
-            FlushRecord &ref = ckpt_vec.emplace_back();
-            std::unique_ptr<TxKey> key_uptr = std::make_unique<KeyT>(key);
-            key_ptr = key_uptr.get();
-            ref.SetKey(std::move(key_uptr));
+            FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+            ref.CloneOrCopyKey(key);
             ref.cce_ =
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
+
             if (payload_status_ == RecordStatus::Normal)
             {
                 ref.SetPayload(payload_);
             }
+
             ref.payload_status_ = payload_status_;
             ref.commit_ts_ = commit_ts_;
             int32_t data_store_size =
                 data_store_size_.load(std::memory_order_acquire);
-            if (data_store_size == INT32_MAX)
+            if (data_store_size != INT32_MAX)
             {
-                // Mark the delta as unknwon
-                ref.delta_size_ = INT32_MAX;
-            }
-            else
-            {
-                if (ref.payload_status_ == RecordStatus::Deleted)
-                {
-                    ref.delta_size_ = -data_store_size;
-                }
-                else
+                if (ref.payload_status_ != RecordStatus::Deleted)
                 {
                     ref.delta_size_ =
                         key.Size() + ref.PayloadSize() - data_store_size;
                 }
+                else
+                {
+                    ref.delta_size_ = -data_store_size;
+                }
+            }
+            else
+            {
+                // Mark the delta as unknwon
+                ref.delta_size_ = INT32_MAX;
             }
             exported_count++;
         }
@@ -810,6 +867,7 @@ public:
         {
             return exported_count;
         }
+
         if (archives_ != nullptr && archives_->size() > 0)
         {
             for (auto it = archives_->begin(); it != archives_->end(); it++)
@@ -824,11 +882,8 @@ public:
                     {
                         if (exported_count == 0)
                         {
-                            auto &ref = ckpt_vec.emplace_back();
-                            std::unique_ptr<TxKey> key_uptr =
-                                std::make_unique<KeyT>(key);
-                            key_ptr = key_uptr.get();
-                            ref.SetKey(std::move(key_uptr));
+                            FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                            ref.CloneOrCopyKey(key);
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
                             if (it->payload_status_ == RecordStatus::Normal)
@@ -870,7 +925,8 @@ public:
                         else
                         {
                             auto &ref = akv_vec.emplace_back();
-                            ref.SetKey(key_ptr);
+                            ref.SetKey(
+                                reinterpret_cast<const TxKey *>(ckpt_idx));
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
                             if (it->payload_status_ == RecordStatus::Normal)
@@ -901,7 +957,7 @@ public:
             // last ckpt version is needed but not in memory, and we're not sure
             // if an older version exists, need to copy record from "base table"
             // into "mvcc_archives table".
-            mv_base_vec.push_back(key_ptr);
+            mv_base_vec.push_back(reinterpret_cast<const TxKey *>(ckpt_idx));
         }
         return exported_count;
     }

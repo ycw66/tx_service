@@ -3177,14 +3177,47 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                  Sharder::Instance().GetLocalCcShardsCount();
                                  i++)
                             {
+                                size_t offset = data_sync_vecs[i].size();
+
+                                for (size_t j = 0;
+                                     j < scan_cc.accumulated_scan_cnt_[i];
+                                     ++j)
+                                {
+                                    // Copy
+                                    data_sync_vecs[i].emplace_back(
+                                        scan_cc.DataSyncVec(i)[j]);
+                                }
+
+                                for (size_t j = 0;
+                                     j < scan_cc.ArchiveVec(i).size();
+                                     ++j)
+                                {
+                                    auto &rec = scan_cc.ArchiveVec(i)[j];
+                                    rec.SetKey(
+                                        data_sync_vecs[i]
+                                                      [reinterpret_cast<size_t>(
+                                                           rec.Key()) +
+                                                       offset]
+                                                          .Key());
+                                }
+
+                                for (size_t j = 0;
+                                     j < scan_cc.MoveBaseVec(i).size();
+                                     ++j)
+                                {
+                                    auto &rec = scan_cc.MoveBaseVec(i)[j];
+                                    rec =
+                                        data_sync_vecs[i]
+                                                      [reinterpret_cast<size_t>(
+                                                           rec) +
+                                                       offset]
+                                                          .Key();
+                                }
+
                                 // if the data is drained
                                 scan_data_drained =
                                     res.at(i).second && scan_data_drained;
                                 // move the bucket into the tank
-                                std::move(
-                                    scan_cc.DataSyncVec(i).begin(),
-                                    scan_cc.DataSyncVec(i).end(),
-                                    std::back_inserter(data_sync_vecs.at(i)));
 
                                 std::move(
                                     scan_cc.ArchiveVec(i).begin(),
@@ -3218,11 +3251,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                        *data_sync_vec,
                                        rec_greater,
                                        true);
-                    // For archive vec we don't need to worry about duplicate
-                    // causing issue since we're not visiting their cc entry.
-                    // Also we cannot rely on key compare to dedup archive vec
-                    // since a key could have multiple version of archive
-                    // versions.
+
+                    // For archive vec we don't need to worry about
+                    // duplicate causing issue since we're not visiting
+                    // their cc entry. Also we cannot rely on key compare to
+                    // dedup archive vec since a key could have multiple
+                    // version of archive versions.
                     MergeSortedVectors(std::move(archive_vecs),
                                        *archive_vec,
                                        rec_greater,
@@ -3264,18 +3298,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         int32_t sum = curr_slice->Size() + slice_delta_size;
                         slice_size = sum >= 0 ? sum : 0;
                         curr_slice->SetPostCkptSize(slice_size);
-                        if (slice_size > StoreSlice::slice_upper_bound &&
-                            !range->UpdateSliceSpec(curr_slice,
-                                                    table_name,
-                                                    table_schema,
-                                                    node_group,
-                                                    ckpt_ts,
-                                                    *data_sync_vec,
-                                                    slice_start_idx,
-                                                    slice_end_idx))
+
+                        if (slice_size > StoreSlice::slice_upper_bound)
                         {
-                            hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
-                            return;
+                            if (!range->UpdateSliceSpec(curr_slice,
+                                                        table_name,
+                                                        table_schema,
+                                                        node_group,
+                                                        ckpt_ts,
+                                                        *data_sync_vec,
+                                                        slice_start_idx,
+                                                        slice_end_idx))
+                            {
+                                hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
+                                return;
+                            }
                         }
 
                         batch_it = slice_end_it;

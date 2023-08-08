@@ -438,25 +438,32 @@ const TxKey *FillStoreSliceCc::SliceEnd() const
     return range_slice_.EndKey();
 }
 
-GetPostCkptSlice::GetPostCkptSlice(const TableName &table_name,
-                                   NodeGroupId ng_id,
-                                   StoreSlice *slice,
-                                   StoreRange *range,
-                                   const std::vector<FlushRecord> &ckpt_vec,
-                                   uint32_t slice_first_idx,
-                                   uint32_t slice_last_idx,
-                                   uint64_t ckpt_ts,
-                                   std::vector<SliceChangeInfo> &slice_items)
+GetPostCkptSlice::GetPostCkptSlice(
+    const TableName &table_name,
+    NodeGroupId ng_id,
+    StoreSlice *slice,
+    StoreRange *range,
+    std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
+    uint64_t ckpt_ts,
+    size_t core_cnt,
+    std::vector<bool> is_last_one_vec)
     : table_name_(table_name),
       cc_ng_id_(ng_id),
       slice_(slice),
       range_(range),
-      ckpt_vec_(ckpt_vec),
-      slice_first_idx_(slice_first_idx),
-      slice_last_idx_(slice_last_idx),
       ckpt_ts_(ckpt_ts),
-      slice_items_(slice_items)
+      ckpt_cce_raw_ptr_vecs_(ckpt_cce_raw_ptr_vec),
+      is_last_one_vec_(std::move(is_last_one_vec))
 {
+    unfinished_cnt_ = core_cnt;
+    for (size_t i = 0; i < core_cnt; ++i)
+    {
+        item_vec_size_.emplace_back(0);
+        slice_first_idxs_.emplace_back(0);
+        slice_items_.emplace_back();
+        slice_items_.back().resize(ScanBatchSize);
+        pause_keys_.emplace_back(nullptr, false);
+    }
 }
 
 bool GetPostCkptSlice::Execute(CcShard &ccs)

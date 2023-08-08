@@ -9,7 +9,9 @@
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
+#include "tx_key.h"
 #include "tx_start_ts_collector.h"
+#include "util.h"
 
 namespace txservice
 {
@@ -487,23 +489,100 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         // kickouted before GetPostCkptSlice is executed.
         slice->pins_++;
         slice_lk.unlock();
+
+        size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+        assert(core_cnt > 0);
+
+        std::vector<std::vector<uintptr_t>> ckpt_cce_raw_ptr_vecs_inmut(
+            core_cnt);
+
+        bool scan_data_drained = false;
+        std::vector<std::vector<SliceChangeInfo>> slice_change_info_vecs(
+            core_cnt + 1);
+
+        assert(slice_end_idx <= flush_vec.size());
+
+        for (size_t idx = slice_first_idx; idx < slice_end_idx; ++idx)
+        {
+            auto hash_value = flush_vec[idx].Key()->Hash();
+            int32_t ckpt_size = 0;
+            if (flush_vec[idx].payload_status_ != RecordStatus::Deleted)
+            {
+                ckpt_size =
+                    flush_vec[idx].Key()->Size() + flush_vec[idx].PayloadSize();
+            }
+            else
+            {
+                ckpt_size = 0;
+            }
+            size_t shard_index = (hash_value & 0x3FF) & (core_cnt - 1);
+            ckpt_cce_raw_ptr_vecs_inmut[shard_index].push_back(
+                reinterpret_cast<uintptr_t>(flush_vec[idx].cce_));
+            slice_change_info_vecs[core_cnt].emplace_back(
+                flush_vec[idx].Key(),
+                ckpt_size - flush_vec[idx].delta_size_,
+                ckpt_size);
+        }
+
+        std::vector<bool> is_last_one_vec(core_cnt, true);
+
         GetPostCkptSlice post_ckpt_slice(table_name,
                                          ng_id,
                                          slice,
                                          this,
-                                         flush_vec,
-                                         slice_first_idx,
-                                         slice_end_idx,
+                                         ckpt_cce_raw_ptr_vecs_inmut,
                                          flush_ts,
-                                         item_vec);
+                                         core_cnt,
+                                         is_last_one_vec);
 
-        local_cc_shards_.EnqueueCcRequest(0, &post_ckpt_slice);
-        post_ckpt_slice.Wait();
-        // GetPostCkptSlice should never fail.
-        assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
+        while (!scan_data_drained)
+        {
+            scan_data_drained = true;
+            for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
+            {
+                local_cc_shards_.EnqueueCcRequest(shard_idx, &post_ckpt_slice);
+            }
+
+            post_ckpt_slice.Wait();
+            // GetPostCkptSlice should never fail.
+            assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
+
+            for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
+            {
+                scan_data_drained =
+                    scan_data_drained && post_ckpt_slice.IsDrained(shard_idx);
+
+                auto &cc_shard_slice_change_info_vec =
+                    post_ckpt_slice.SliceChangeInfoVec(shard_idx);
+
+                for (size_t idx = 0;
+                     idx < post_ckpt_slice.item_vec_size_[shard_idx];
+                     ++idx)
+                {
+                    // Need to clone key
+                    slice_change_info_vecs[shard_idx].emplace_back(
+                        cc_shard_slice_change_info_vec[idx].key_.uptr_->Clone(),
+                        cc_shard_slice_change_info_vec[idx].cur_size_,
+                        cc_shard_slice_change_info_vec[idx].post_update_size_);
+                }
+            }
+
+            post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut, is_last_one_vec);
+        }
 
         // unpin the slice
         UnpinSlice(slice);
+
+        auto key_greater =
+            [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
+        {
+            const TxKey *l_key = lhs.SliceStartKey();
+            const TxKey *r_key = rhs.SliceStartKey();
+            return *r_key < *l_key;
+        };
+
+        MergeSortedVectors(
+            std::move(slice_change_info_vecs), item_vec, key_greater, false);
     }
 
     // Split the slice based on post checkpoint item size, but do
@@ -562,9 +641,20 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     if (post_ckpt_subslice_size > 0)
     {
         assert(subslice_start < item_vec.size());
-        split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
-                                curr_subslice_size,
-                                post_ckpt_subslice_size);
+        if (item_vec[subslice_start].is_key_owner_)
+        {
+            split_keys.emplace_back(
+                std::move(item_vec[subslice_start].key_.uptr_),
+                curr_subslice_size,
+                post_ckpt_subslice_size);
+            item_vec[subslice_start].is_key_owner_ = false;
+        }
+        else
+        {
+            split_keys.emplace_back(item_vec[subslice_start].key_.ptr_,
+                                    curr_subslice_size,
+                                    post_ckpt_subslice_size);
+        }
     }
 
     // Split StoreSlice in memory. Slice info in KV store
@@ -613,8 +703,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                 std::make_unique<StoreSlice>();
             sub_slice->start_key_ = next_slice_start_key.get();
 
+            size_t boundary_keys_idx = slice_idx + idx - 1;
+
             // Inserts the new boundary keys.
-            boundary_keys_.emplace(boundary_keys_.begin() + slice_idx - 1 + idx,
+            boundary_keys_.emplace(boundary_keys_.begin() + boundary_keys_idx,
                                    std::move(next_slice_start_key));
 
             if (idx < split_keys.size() - 1)
@@ -678,6 +770,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
     size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
     auto slice_it = range_start_it;
     auto slice_end_it = range_start_it;
+
     while (slice_idx < slices_.size())
     {
         size_t curr_subrange_size = 0;
@@ -694,6 +787,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                 curr_subrange_size += slices_.at(slice_idx)->Size();
             }
         }
+
         // This should be the last slice in the previous range. Check if
         // the slice needs to be splitted, if so, split it here. This is
         // to avoid a single hot slice being very big and putting it
@@ -708,7 +802,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
             slice_it =
                 slices_.at(slice_idx - 1)->StartKey() == nullptr
                     ? range_start_it
-                    : std::lower_bound(slice_end_it,
+                    : std::lower_bound(range_start_it,
                                        range_end_it,
                                        *slices_.at(slice_idx - 1)->StartKey(),
                                        lower_bound_cmp);
@@ -732,6 +826,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                             std::distance(flush_vec.begin(), slice_it),
                             std::distance(flush_vec.begin(), slice_end_it),
                             true);
+
             // Now that the slice has been splitted, find the new slice
             // that will be the first slice in the new subrange.
             for (; curr_subrange_size < avg_subrange_size &&
@@ -815,8 +910,9 @@ size_t StoreRange::SearchSlice(const TxKey &search_key, bool inclusive) const
         }
         else if (*boundary_keys_.back() == search_key && !inclusive)
         {
-            // The search key equals to the last boundary key and the inclusive
-            // flag is false, the containing slice is the second to last slice.
+            // The search key equals to the last boundary key and the
+            // inclusive flag is false, the containing slice is the second
+            // to last slice.
             slice_idx = boundary_keys_.size() - 1;
         }
         else
@@ -834,8 +930,8 @@ size_t StoreRange::SearchSlice(const TxKey &search_key, bool inclusive) const
         if (*boundary_keys_[lower_bound_idx] == search_key && inclusive)
         {
             // If the search key equals to slice_key_[lower_bound_idx], the
-            // containing slice is [lower_bound_idx, lower_bound_idx + 1), if
-            // the inclusive flag is true.
+            // containing slice is [lower_bound_idx, lower_bound_idx + 1),
+            // if the inclusive flag is true.
             slice_idx = lower_bound_idx + 1;
         }
         else
@@ -864,7 +960,8 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
     bool force_load,
     std::unique_lock<std::mutex> &slice_lk)
 {
-    // The caller of this method has acquired the slice lock on the input mutex.
+    // The caller of this method has acquired the slice lock on the input
+    // mutex.
 
     if (slice.fetch_slice_cc_ == nullptr)
     {
@@ -923,8 +1020,8 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             slice.status_ != SliceStatus::BeingLoaded)
         {
             // If the demanding request sets the force_load flag and the
-            // fetching request does not, the demanding request is allowed to
-            // change the flag if filling into memory has not started.
+            // fetching request does not, the demanding request is allowed
+            // to change the flag if filling into memory has not started.
             slice.fetch_slice_cc_->SetForceLoad(true);
         }
 

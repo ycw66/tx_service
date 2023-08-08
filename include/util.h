@@ -1,5 +1,6 @@
 #pragma once
 
+#include <queue>
 #include <sstream>
 #include <string>
 #include <string_view>

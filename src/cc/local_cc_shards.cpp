@@ -1827,6 +1827,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                            cc_shards_.size(),
                            std::move(resume_pos),
                            DATA_SYNC_SCAN_BATCH_SIZE);
+
     while (!scan_data_drained)
     {
         for (size_t i = 0; i < cc_shards_.size(); i++)
@@ -1858,13 +1859,35 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
             for (size_t i = 0; i < cc_shards_.size(); i++)
             {
+                size_t offset = data_sync_vecs[i].size();
+
+                for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[i]; ++j)
+                {
+                    // Copy
+                    data_sync_vecs[i].emplace_back(scan_cc.DataSyncVec(i)[j]);
+                }
+
+                for (size_t j = 0; j < scan_cc.ArchiveVec(i).size(); ++j)
+                {
+                    auto &rec = scan_cc.ArchiveVec(i)[j];
+                    rec.SetKey(
+                        data_sync_vecs[i][reinterpret_cast<size_t>(rec.Key()) +
+                                          offset]
+                            .Key());
+                }
+
+                for (size_t j = 0; j < scan_cc.MoveBaseVec(i).size(); ++j)
+                {
+                    auto &rec = scan_cc.MoveBaseVec(i)[j];
+                    rec = data_sync_vecs[i]
+                                        [reinterpret_cast<size_t>(rec) + offset]
+                                            .Key();
+                }
+
                 // if the data is drained
                 scan_data_drained = res.at(i).second && scan_data_drained;
-                // move the bucket into the tank
-                std::move(scan_cc.DataSyncVec(i).begin(),
-                          scan_cc.DataSyncVec(i).end(),
-                          std::back_inserter(data_sync_vecs.at(i)));
 
+                // move the bucket into the tank
                 std::move(scan_cc.ArchiveVec(i).begin(),
                           scan_cc.ArchiveVec(i).end(),
                           std::back_inserter(archive_vecs.at(i)));
@@ -1897,6 +1920,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // flush record from ckpt_vec.
     MergeSortedVectors(
         std::move(data_sync_vecs), *data_sync_vec, rec_greater, true);
+
     // For archive vec we don't need to worry about duplicate causing
     // issue since we're not visiting their cc entry. Also we cannot
     // rely on key compare to dedup archive vec since a key could have
@@ -1918,12 +1942,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // seperate thread per range.
     std::vector<std::pair<const TxKey *, const TxKey *>> split_ranges;
     size_t batch_idx = 0;
-
     while (batch_idx < data_sync_vec->size())
     {
         std::pair<const StoreRange *, std::vector<const TxKey *>> split_pair;
         split_pair.first = nullptr;
-
         bool ret = UpdateSliceAndCalculateRangeUpdate(table_name,
                                                       table_schema,
                                                       ng_id,
