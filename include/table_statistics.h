@@ -75,7 +75,7 @@ public:
           units_(Units(param.records_)),
           sample_pool_(param.sample_keys_)
     {
-        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
+        assert(Records() >= static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void Reset(SamplePool &&sample_pool,
@@ -102,6 +102,13 @@ public:
 
         units_ += 1;
         insert_delete_counter_ += 1;
+
+        // units_ may be less than sample_pool_.Size(), because we don't deal
+        // with sample_pool_ when core count changes, but we re-calculate
+        // units_. It is not a problem for sample_pool_ if
+        //   `units_ < sample_pool_.Size() < sample_pool_.Capacity()`.
+        // As a result, the key will replace a random sample_key whose
+        // sample_pool_ index is in range[0, units_)
         sample_pool_.Insert(key, units_);
 
         if (insert_delete_counter_ > units_ / 10)
@@ -158,7 +165,6 @@ public:
         }
         units_ += Units(param.records_);
         sample_pool_.ClearCounter();
-        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
     }
 
     void Prune(const SamplePoolParam<KeyT> &param)
@@ -169,8 +175,10 @@ public:
         }
         units_ -= std::min(units_, static_cast<int64_t>(Units(param.records_)));
         sample_pool_.ClearCounter();
-        assert(units_ >= static_cast<int64_t>(sample_pool_.Size()));
-        units_ = std::max(units_, static_cast<int64_t>(sample_pool_.Size()));
+
+        int64_t records =
+            std::max(Records(), static_cast<int64_t>(sample_pool_.Size()));
+        units_ = (records + units_ - 1) / Unit();
     }
 
     void To(remote::NodeGroupSamplePool *remote_ccmap_sample_pool) const
@@ -249,7 +257,7 @@ private:
     // How many keys are inserted/deleted since last stats recalc.
     int64_t insert_delete_counter_{0};
 
-    // Always sample_pool_.Size() <= units_.
+    // Always sample_pool_.Size() <= Records().
     SamplePool sample_pool_;
 
     // Is this ccmap sample pool local or remote. If it is local, cc_shard_
@@ -737,19 +745,12 @@ private:
             {
                 KeyT &key = static_cast<KeyT &>(*samplekey);
 #ifdef RANGE_PARTITION_ENABLED
-                RouteEndpoint route_to =
+                NodeGroupId dest_ng_id =
                     RouteKeyByRange(ccs, table_or_index_name, cc_ng_id, key);
 #else
-                RouteEndpoint route_to = RouteKeyByHash(key);
+                NodeGroupId dest_ng_id = RouteKeyByHash(key);
 #endif
-                if (route_to.core_id_ ==
-                    Statistics::CoreDoSample(table_or_index_name))
-                {
-                    // We do sampling on one core, but tx processor count are
-                    // allowed to change.
-                    sample_pool_vec[route_to.ng_id_].emplace_back(
-                        std::move(key));
-                }
+                sample_pool_vec[dest_ng_id].emplace_back(std::move(key));
             }
 
             std::vector<uint64_t> sp_size_vec;
@@ -1017,12 +1018,6 @@ private:
 private:
     using Task = std::function<void(CcShard &ccs)>;
 
-    struct RouteEndpoint
-    {
-        NodeGroupId ng_id_;
-        uint16_t core_id_;
-    };
-
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
     {
@@ -1060,20 +1055,17 @@ private:
         }
     }
 
-    RouteEndpoint RouteKeyByHash(const KeyT &key) const
+    NodeGroupId RouteKeyByHash(const KeyT &key) const
     {
         uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
         NodeGroupId ng_id = Sharder::Instance().ShardToCcNodeGroup(shard_code);
-        uint32_t residual = shard_code & 0x3FF;
-        uint16_t core_id =
-            residual % Sharder::Instance().GetLocalCcShardsCount();
-        return {ng_id, core_id};
+        return ng_id;
     }
 
-    RouteEndpoint RouteKeyByRange(CcShard &ccs,
-                                  const TableName &table_or_index_name,
-                                  NodeGroupId cc_ng_id,
-                                  const KeyT &key) const
+    NodeGroupId RouteKeyByRange(CcShard &ccs,
+                                const TableName &table_or_index_name,
+                                NodeGroupId cc_ng_id,
+                                const KeyT &key) const
     {
         // Safe to use TableRangeEntry *.
         const TableRangeEntry *range_entry = ccs.GetTableRangeEntryNoLocking(
@@ -1085,10 +1077,7 @@ private:
                 .GetRangeOwnerNoLocking(
                     range_entry->GetRangeInfo()->PartitionId(), cc_ng_id)
                 ->BucketOwner();
-        uint32_t residual = key.Hash() & 0x3FF;
-        uint16_t core_id =
-            residual % Sharder::Instance().GetLocalCcShardsCount();
-        return {ng_id, core_id};
+        return ng_id;
     }
 
     std::unordered_map<NodeGroupId, SamplePoolParam<KeyT>>

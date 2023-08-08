@@ -450,11 +450,11 @@ public:
     void CleanTableRange(const TableName &table_name, const NodeGroupId ng_id);
 
     std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
-        const TableName &table_name, NodeGroupId ng_id);
+        TableSchema *table_schema, NodeGroupId ng_id);
 
     std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
-        const TableName &table_name,
-        const TableSchema *table_schema,
+        TableSchema *table_name,
+        TableSchema *dirty_table_schema,
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
@@ -462,6 +462,11 @@ public:
 
     StatisticsEntry *GetTableStatistics(const TableName &table_name,
                                         NodeGroupId ng_id);
+
+    const StatisticsEntry *LoadRangesAndStatisticsNx(
+        const TableSchema *curr_schema,
+        NodeGroupId cc_ng_id,
+        CcRequestBase *requester);
 
     void CleanTableStatistics(const TableName &table_name);
 
@@ -513,6 +518,20 @@ public:
                                  NodeGroupId ng_id,
                                  uint64_t schema_ts,
                                  bool is_create = true);
+
+    /**
+     * @brief Initializes the request's target cc map, if the table
+     * schema is available and indicates that the table exists. Sends an async
+     * request to fetch the schema from the data store, if the schema is not
+     * cached locally.
+     *
+     * @return const TableSchemaView* The pointer to the schema view of the
+     * request's target cc map. Null, if the schema is not cached at the node
+     * level.
+     */
+    const CatalogEntry *InitCcm(const TableName &table_name,
+                                NodeGroupId cc_ng_id,
+                                CcRequestBase *requester);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 

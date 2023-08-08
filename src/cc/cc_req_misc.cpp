@@ -114,23 +114,10 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
         {
             CatalogEntry *catalog_entry =
                 ccs.GetCatalog(table_name_, cc_ng_id_);
-            TableSchema *table_schema = catalog_entry->schema_.get();
-
-            std::unordered_map<TableName, std::vector<uint64_t>> ng_weights_map;
-
-            auto [statistics, inserted] =
-                ccs.InitTableStatistics(table_name_,
-                                        table_schema,
-                                        cc_ng_id_,
-                                        std::move(sample_pool_map_));
-            if (inserted)
-            {
-                table_schema->BindStatistics(statistics);
-                if (catalog_entry->dirty_schema_)
-                {
-                    catalog_entry->dirty_schema_->BindStatistics(statistics);
-                }
-            }
+            ccs.InitTableStatistics(catalog_entry->schema_.get(),
+                                    catalog_entry->dirty_schema_.get(),
+                                    cc_ng_id_,
+                                    std::move(sample_pool_map_));
         }
 
         for (CcRequestBase *&req : requesters_)
@@ -336,7 +323,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     if (ccm == nullptr)
     {
         const CatalogEntry *catalog_entry =
-            InitCcm(*table_name_, cc_ng_id_, ccs);
+            ccs.InitCcm(*table_name_, cc_ng_id_, this);
 
         if (catalog_entry != nullptr)
         {

@@ -1986,6 +1986,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                ACTION_FAULT_INJECTOR("upsert_table_post_all_lock");
                 op_ = &post_all_lock_op_;
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);

@@ -1139,26 +1139,29 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(
 }
 
 std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
-    const TableName &table_name, NodeGroupId ng_id)
+    TableSchema *table_schema, NodeGroupId ng_id)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
-    auto ng_statistics_it = table_statistics_map_.try_emplace(table_name);
+    auto ng_statistics_it =
+        table_statistics_map_.try_emplace(table_schema->GetBaseTableName());
     auto statistics_it = ng_statistics_it.first->second.try_emplace(ng_id);
     if (statistics_it.second)
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ =
-            catalog_factory_->CreateTableStatistics(table_name);
+        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
+            table_schema->GetBaseTableName());
+
+        table_schema->BindStatistics(statistics_entry.statistics_);
     }
 
     return {statistics_it.first->second.statistics_, statistics_it.second};
 }
 
 std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
-    const TableName &table_name,
-    const TableSchema *table_schema,
+    TableSchema *table_schema,
+    TableSchema *dirty_table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map,
@@ -1166,14 +1169,25 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
-    auto ng_statistics_it = table_statistics_map_.try_emplace(table_name);
+    auto ng_statistics_it =
+        table_statistics_map_.try_emplace(table_schema->GetBaseTableName());
     auto statistics_it = ng_statistics_it.first->second.try_emplace(ng_id);
     if (statistics_it.second)
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
         statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
-            table_name, table_schema, std::move(sample_pool_map), ccs, ng_id);
+            table_schema->GetBaseTableName(),
+            table_schema,
+            std::move(sample_pool_map),
+            ccs,
+            ng_id);
+
+        table_schema->BindStatistics(statistics_entry.statistics_);
+        if (dirty_table_schema)
+        {
+            dirty_table_schema->BindStatistics(statistics_entry.statistics_);
+        }
     }
 
     return {statistics_it.first->second.statistics_, statistics_it.second};

@@ -194,40 +194,31 @@ public:
                                 catalog_entry->dirty_schema_,
                                 catalog_entry->Version());
 
+#ifndef ON_KEY_OBJECT
                 if (catalog_entry->dirty_schema_)
                 {
                     if (catalog_entry->schema_)
                     {
-                        // ALTER TABLE statement
+                        // If the current node is not coordinator, table
+                        // statistics may haven't been loaded yet.
                         const StatisticsEntry *statistics_entry =
-                            shard_->GetTableStatistics(table_key->Name(),
-                                                       cc_ng_id_);
-                        if (statistics_entry == nullptr ||
-                            statistics_entry->statistics_ == nullptr)
+                            shard_->LoadRangesAndStatisticsNx(
+                                catalog_entry->schema_.get(), cc_ng_id_, &req);
+                        if (!statistics_entry)
                         {
-                            shard_->FetchTableStatistics(
-                                table_key->Name(), cc_ng_id_, &req);
                             return false;
                         }
-                        else
-                        {
-                            catalog_entry->dirty_schema_->BindStatistics(
-                                statistics_entry->statistics_);
-                        }
+                        catalog_entry->dirty_schema_->BindStatistics(
+                            statistics_entry->statistics_);
                     }
                     else
                     {
                         // CREATE TABLE statement
-                        auto [statistics, inserted] =
-                            shard_->InitTableStatistics(table_key->Name(),
-                                                        cc_ng_id_);
-                        if (inserted)
-                        {
-                            catalog_entry->dirty_schema_->BindStatistics(
-                                statistics);
-                        }
+                        shard_->InitTableStatistics(
+                            catalog_entry->dirty_schema_.get(), cc_ng_id_);
                     }
                 }
+#endif
             }
             else
             {
@@ -347,46 +338,6 @@ public:
         if (req.CommitType() == PostWriteType::PostCommit &&
             catalog_entry->DirtyVersion() > 0)
         {
-#ifndef ON_KEY_OBJECT
-            // TODO: Move table statistics recovering to other place.
-            // Initialize table statistics before split range.
-            // If it is in recover range stage, the table statistics hasn't been
-            // loaded yet.
-            if (catalog_entry->dirty_schema_)
-            {
-                if (catalog_entry->schema_)
-                {
-                    // ALTER TABLE statement
-                    const StatisticsEntry *statistics_entry =
-                        shard_->GetTableStatistics(table_key->Name(),
-                                                   cc_ng_id_);
-                    if (statistics_entry == nullptr ||
-                        statistics_entry->statistics_ == nullptr)
-                    {
-                        shard_->FetchTableStatistics(
-                            table_key->Name(), cc_ng_id_, &req);
-                        return false;
-                    }
-                    else
-                    {
-                        catalog_entry->dirty_schema_->BindStatistics(
-                            statistics_entry->statistics_);
-                    }
-                }
-                else
-                {
-                    assert(req.OpType() == OperationType::CreateTable);
-                    auto [statistics, inserted] = shard_->InitTableStatistics(
-                        table_key->Name(), cc_ng_id_);
-                    if (inserted)
-                    {
-                        catalog_entry->dirty_schema_->BindStatistics(
-                            statistics);
-                    }
-                }
-            }
-#endif
-
             if (new_schema == nullptr)
             {
                 // A remote tx is allowed to acquire write intents/locks and
@@ -741,60 +692,19 @@ public:
                 {
                     {
 #ifndef ON_KEY_OBJECT
-                        // Initialize table statistics
-#ifdef RANGE_PARTITION_ENABLED
-                        // Initialize table ranges before create table
-                        // statistics.
-                        TableName base_range_table_name{
-                            table_key->Name().StringView(),
-                            TableType::RangePartition};
-                        auto ranges = shard_->GetTableRangesForATable(
-                            base_range_table_name, req.NodeGroupId());
-                        if (ranges == nullptr)
-                        {
-                            shard_->FetchTableRanges(
-                                base_range_table_name,
-                                catalog_entry->schema_->GetKVCatalogInfo(),
-                                &req,
-                                req.NodeGroupId());
-                            return false;
-                        }
-                        for (const TableName &index_name :
-                             catalog_entry->schema_->IndexNames())
-                        {
-                            TableName index_range_table_name{
-                                index_name.StringView(),
-                                TableType::RangePartition};
-                            auto ranges = shard_->GetTableRangesForATable(
-                                index_range_table_name, req.NodeGroupId());
-                            if (ranges == nullptr)
-                            {
-                                shard_->FetchTableRanges(
-                                    index_range_table_name,
-                                    catalog_entry->schema_->GetKVCatalogInfo(),
-                                    &req,
-                                    req.NodeGroupId());
-                                return false;
-                            }
-                        }
-#endif
-
+                        // Initialize table statistics before create ccmap.
+                        //
+                        // Loading table statistics from storage into
+                        // memory, depends on table range information.
+                        // Before recovering range split operation,
+                        // table range information is unusable.
                         if (!req.IsInRecovering())
                         {
-                            // Initialize table statistics before create ccmap.
-                            //
-                            // Loading table statistics from storage into
-                            // memory, depends on table range information.
-                            // Before recovering range split operation,
-                            // table range information is unusable.
-                            const StatisticsEntry *statistics_entry =
-                                shard_->GetTableStatistics(table_key->Name(),
-                                                           req.NodeGroupId());
-                            if (statistics_entry == nullptr ||
-                                statistics_entry->statistics_ == nullptr)
+                            if (!shard_->LoadRangesAndStatisticsNx(
+                                    catalog_entry->schema_.get(),
+                                    req.NodeGroupId(),
+                                    &req))
                             {
-                                shard_->FetchTableStatistics(
-                                    table_key->Name(), req.NodeGroupId(), &req);
                                 return false;
                             }
                         }

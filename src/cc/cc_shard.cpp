@@ -849,26 +849,86 @@ uint64_t CcShard::CountSlices(const TableName &table_name,
 }
 
 std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
-    const TableName &table_name, NodeGroupId ng_id)
+    TableSchema *table_schema, NodeGroupId ng_id)
 {
-    return local_shards_.InitTableStatistics(table_name, ng_id);
+    return local_shards_.InitTableStatistics(table_schema, ng_id);
 }
 
 std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
-    const TableName &table_name,
-    const TableSchema *table_schema,
+    TableSchema *table_schema,
+    TableSchema *dirty_table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
         &&sample_pool_map)
 {
-    return local_shards_.InitTableStatistics(
-        table_name, table_schema, ng_id, std::move(sample_pool_map), this);
+    return local_shards_.InitTableStatistics(table_schema,
+                                             dirty_table_schema,
+                                             ng_id,
+                                             std::move(sample_pool_map),
+                                             this);
 }
 
 StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,
                                              NodeGroupId ng_id)
 {
     return local_shards_.GetTableStatistics(table_name, ng_id);
+}
+
+const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
+    const TableSchema *curr_schema,
+    NodeGroupId cc_ng_id,
+    CcRequestBase *requester)
+{
+    const StatisticsEntry *statistics_entry =
+        GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);
+    if (statistics_entry)
+    {
+        return statistics_entry;
+    }
+
+    // Initialize table ranges before create table
+    // statistics.
+    TableName base_range_table_name(
+        curr_schema->GetBaseTableName().StringView(),
+        TableType::RangePartition);
+    const auto *ranges =
+        GetTableRangesForATable(base_range_table_name, cc_ng_id);
+    if (ranges == nullptr)
+    {
+        FetchTableRanges(base_range_table_name,
+                         curr_schema->GetKVCatalogInfo(),
+                         requester,
+                         cc_ng_id);
+        return nullptr;
+    }
+
+    std::vector<TableName> index_names = curr_schema->IndexNames();
+    for (const TableName &index_name : index_names)
+    {
+        TableName index_range_table_name(index_name.StringView(),
+                                         TableType::RangePartition);
+        const auto *ranges =
+            GetTableRangesForATable(index_range_table_name, cc_ng_id);
+        if (ranges == nullptr)
+        {
+            FetchTableRanges(index_range_table_name,
+                             curr_schema->GetKVCatalogInfo(),
+                             requester,
+                             cc_ng_id);
+            return nullptr;
+        }
+    }
+
+    statistics_entry =
+        GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);
+    if (statistics_entry == nullptr)
+    {
+        FetchTableStatistics(
+            curr_schema->GetBaseTableName(), cc_ng_id, requester);
+        return nullptr;
+    }
+
+    return statistics_entry;
 }
 
 void CcShard::CleanTableStatistics(const TableName &table_name)
@@ -994,6 +1054,48 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         }
         return ccm_it.first->second.get();
     }
+}
+
+const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
+                                     NodeGroupId cc_ng_id,
+                                     CcRequestBase *requester)
+{
+    const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                    TableType::Primary};
+
+    const CatalogEntry *catalog_entry = GetCatalog(base_table_name, cc_ng_id);
+    if (catalog_entry == nullptr)
+    {
+        // The local node does not contain the table's schema instance. The
+        // FetchCatalog() method sends an async request toward the data
+        // store to fetch the catalog. After fetching is finished, this cc
+        // request is re-enqueued for re-execution.
+        FetchCatalog(base_table_name, cc_ng_id, requester);
+        return nullptr;
+    }
+
+    const TableSchema *curr_schema = catalog_entry->schema_.get();
+    if (curr_schema != nullptr && catalog_entry->Version() > 0)
+    {
+#ifndef ON_KEY_OBJECT
+        if (!LoadRangesAndStatisticsNx(curr_schema, cc_ng_id, requester))
+        {
+            return nullptr;
+        }
+#endif
+
+        std::vector<TableName> index_names = curr_schema->IndexNames();
+        CreateOrUpdatePkCcMap(
+            base_table_name, curr_schema, cc_ng_id, catalog_entry->Version());
+
+        for (const TableName &index_name : index_names)
+        {
+            CreateOrUpdateSkCcMap(
+                index_name, curr_schema, cc_ng_id, catalog_entry->Version());
+        }
+    }
+
+    return catalog_entry;
 }
 
 void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)

@@ -318,11 +318,32 @@ void TransactionExecution::RemoteStatisticsTx(
     TxErrorCode err = TxReadCatalog(this, read_req, exists);
     if (err == TxErrorCode::NO_ERROR && exists)
     {
+        const TableSchema *table_schema =
+            [](const CatalogRecord &catalog_rec,
+               uint64_t schema_version) -> const TableSchema *
+        {
+            if (const TableSchema *table_schema = catalog_rec.Schema();
+                table_schema->Version() == schema_version)
+            {
+                return table_schema;
+            }
+            else if (const TableSchema *table_schema =
+                         catalog_rec.DirtySchema();
+                     table_schema->Version() == schema_version)
+            {
+                return table_schema;
+            }
+            else
+            {
+                // unknown schema.
+                return nullptr;
+            }
+        }(catalog_rec, schema_version);
+
         // It is safe to use raw pointer to TableSchema and Statistics, because
         // they have been protected by Sharder::TryPinNodeGroupData in
         // CcStreamReceiver/BroadcastStatisticsRequest.
-        const TableSchema *table_schema = catalog_rec.Schema();
-        if (table_schema->Version() == schema_version)
+        if (table_schema && table_schema->Version() == schema_version)
         {
             Statistics *statistics = table_schema->StatisticsObject().get();
             statistics->OnRemoteStatisticsMessage(

@@ -528,12 +528,19 @@ public:
                            const NodeGroupId ng_id,
                            const TxKey &key);
 
+    /**
+     * Create table statistics and bind it to table_schema
+     */
     std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
-        const TableName &table_name, NodeGroupId ng_id);
+        TableSchema *table_schema, NodeGroupId ng_id);
 
+    /**
+     * Create table statistics and bind it to table_schema and
+     * dirty_table_schema if not null.
+     */
     std::pair<std::shared_ptr<Statistics>, bool> InitTableStatistics(
-        const TableName &table_name,
-        const TableSchema *table_schema,
+        TableSchema *table_schema,
+        TableSchema *dirty_table_schema,
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>

@@ -118,59 +118,6 @@ public:
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
-#ifndef ON_KEY_OBJECT
-                    {
-                        // Initialize table statistics
-#ifdef RANGE_PARTITION_ENABLED
-                        // Initialize table ranges before create table
-                        // statistics.
-                        TableName base_range_table_name{
-                            table_name_->GetBaseTableNameSV(),
-                            TableType::RangePartition};
-                        auto ranges = ccs.GetTableRangesForATable(
-                            base_range_table_name, node_group_id_);
-                        if (ranges == nullptr)
-                        {
-                            ccs.FetchTableRanges(
-                                base_range_table_name,
-                                table_schema->GetKVCatalogInfo(),
-                                this,
-                                node_group_id_);
-                            return false;
-                        }
-                        for (const TableName &index_name :
-                             table_schema->IndexNames())
-                        {
-                            TableName index_range_table_name{
-                                index_name.StringView(),
-                                TableType::RangePartition};
-                            auto ranges = ccs.GetTableRangesForATable(
-                                index_range_table_name, node_group_id_);
-                            if (ranges == nullptr)
-                            {
-                                ccs.FetchTableRanges(
-                                    index_range_table_name,
-                                    table_schema->GetKVCatalogInfo(),
-                                    this,
-                                    node_group_id_);
-                                return false;
-                            }
-                        }
-#endif
-                        // Initialize table statistics before create ccmap.
-                        const StatisticsEntry *statistics_entry =
-                            ccs.GetTableStatistics(base_table_name,
-                                                   node_group_id_);
-                        if (statistics_entry == nullptr ||
-                            statistics_entry->statistics_ == nullptr)
-                        {
-                            ccs.FetchTableStatistics(
-                                base_table_name, node_group_id_, this);
-                            return false;
-                        }
-                    }
-#endif
-
                     // The request is toward a special cc map that contains a
                     // table's range meta data.
                     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
@@ -204,94 +151,21 @@ public:
                     // Find base table name for index table.
                     // Fetch/Get Catalog is based on base table name, but Get
                     // ccmap is based on the real table name, for example, index
-                    // should get the corresponding sk_ccmap.
-                    assert(table_name_->Type() == TableType::Primary ||
-                           table_name_->Type() == TableType::Secondary ||
-                           table_name_->Type() == TableType::UniqueSecondary);
-                    const TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                    // should get the correspond sk_ccmap.
                     const CatalogEntry *catalog_entry =
-                        ccs.GetCatalog(base_table_name, node_group_id_);
-
-                    if (catalog_entry != nullptr)
+                        ccs.InitCcm(*table_name_, node_group_id_, this);
+                    if (catalog_entry == nullptr)
                     {
-                        const TableSchema *curr_schema =
-                            catalog_entry->schema_.get();
-                        if (curr_schema != nullptr)
-                        {
-#ifndef ON_KEY_OBJECT
-                            {
-                                // Initialize table statistics
-#ifdef RANGE_PARTITION_ENABLED
-                                // Initialize table ranges before create table
-                                // statistics.
-                                TableName base_range_table_name{
-                                    table_name_->GetBaseTableNameSV(),
-                                    TableType::RangePartition};
-                                auto ranges = ccs.GetTableRangesForATable(
-                                    base_range_table_name, node_group_id_);
-                                if (ranges == nullptr)
-                                {
-                                    ccs.FetchTableRanges(
-                                        base_range_table_name,
-                                        curr_schema->GetKVCatalogInfo(),
-                                        this,
-                                        node_group_id_);
-                                    return false;
-                                }
-                                for (const TableName &index_name :
-                                     curr_schema->IndexNames())
-                                {
-                                    TableName index_range_table_name{
-                                        index_name.StringView(),
-                                        TableType::RangePartition};
-                                    auto ranges = ccs.GetTableRangesForATable(
-                                        index_range_table_name, node_group_id_);
-                                    if (ranges == nullptr)
-                                    {
-                                        ccs.FetchTableRanges(
-                                            index_range_table_name,
-                                            curr_schema->GetKVCatalogInfo(),
-                                            this,
-                                            node_group_id_);
-                                        return false;
-                                    }
-                                }
-#endif
-                                // Initialize table statistics before create
-                                // ccmap.
-                                const StatisticsEntry *statistics_entry =
-                                    ccs.GetTableStatistics(base_table_name,
-                                                           node_group_id_);
-                                if (statistics_entry == nullptr ||
-                                    statistics_entry->statistics_ == nullptr)
-                                {
-                                    ccs.FetchTableStatistics(
-                                        base_table_name, node_group_id_, this);
-                                    return false;
-                                }
-                            }
-#endif
-
-                            ccs.CreateOrUpdatePkCcMap(base_table_name,
-                                                      curr_schema,
-                                                      node_group_id_,
-                                                      catalog_entry->Version());
-
-                            std::vector<TableName> index_names =
-                                curr_schema->IndexNames();
-                            for (const TableName &index_name : index_names)
-                            {
-                                ccs.CreateOrUpdateSkCcMap(
-                                    index_name,
-                                    curr_schema,
-                                    node_group_id_,
-                                    catalog_entry->Version());
-                            }
-
-                            ccm = ccs.GetCcm(*table_name_, node_group_id_);
-                        }
-                        else
+                        // The local node does not contain the table's schema
+                        // instance. The FetchCatalog() method will send an
+                        // async request toward the data store to fetch the
+                        // catalog. After fetching is finished, this cc request
+                        // is re-enqueued for re-execution.
+                        return false;
+                    }
+                    else
+                    {
+                        if (catalog_entry->schema_ == nullptr)
                         {
                             // The local node (LocalCcShards) contains a schema
                             // instance, which indicates that the table has been
@@ -300,20 +174,11 @@ public:
                                 CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
                             return true;
                         }
-                    }
-                    else
-                    {
-                        // The local node does not contain the table's schema
-                        // instance. The FetchCatalog() method will send an
-                        // async request toward the data store to fetch the
-                        // catalog. After fetching is finished, this cc request
-                        // is re-enqueued for re-execution.
-                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
-                        return false;
+
+                        ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                 }
             }
-
             if (!parallel_req_)
             {
                 ccm_ = ccm;
@@ -2786,9 +2651,9 @@ struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 public:
     ReplayLogCc(
         uint32_t ng_id,
-        const std::string_view &table_name_view,
-        const TableType table_type,
-        std::string_view &&blob,
+        std::string_view table_name_view,
+        TableType table_type,
+        std::string_view blob,
         uint64_t commit_ts,
         uint64_t txn,
         std::mutex &mux,
@@ -2830,7 +2695,6 @@ public:
             SetFinish();
             return false;
         }
-
         if (ccm_ == nullptr)
         {
             assert(table_name_ != nullptr);
@@ -2838,35 +2702,30 @@ public:
 
             if (ccm_ == nullptr)
             {
-                // Try to load the base table catalog
-                const txservice::TableName base_table_name{
-                    table_name_->GetBaseTableNameSV(), TableType::Primary};
-
-                // Make sure base table catalog already exists.
-                const CatalogEntry *catalog_entry =
-                    ccs.GetCatalog(base_table_name, node_group_id_);
-                if (catalog_entry == nullptr)
-                {
-                    ccs.FetchCatalog(base_table_name, node_group_id_, this);
-                    return false;
-                }
-
-                // If FetchCatalogCc failure due to storage fault,
-                // FetchCatalogCc::Execute() abort the ReplayLogCc directly.
-                assert(catalog_entry->Version() > 0);
-
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // table has been dropped
-                    assert(catalog_entry->Version() == 1);
-                    SetFinish();
-                    return false;
-                }
-
-                table_schema_ = catalog_entry->schema_.get();
-
                 if (table_name_->Type() == TableType::RangePartition)
                 {
+                    const txservice::TableName base_table_name{
+                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                    const CatalogEntry *catalog_entry =
+                        ccs.GetCatalog(base_table_name, node_group_id_);
+                    if (catalog_entry == nullptr)
+                    {
+                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
+                        return false;
+                    }
+
+                    // If FetchCatalogCc failure due to storage fault,
+                    // FetchCatalogCc::Execute() abort the ReplayLogCc
+                    assert(catalog_entry->Version() > 0);
+                    if (catalog_entry->schema_ == nullptr)
+                    {
+                        // table has been dropped
+                        SetFinish();
+                        return false;
+                    }
+
+                    table_schema_ = catalog_entry->schema_.get();
+
                     // The request is toward a special cc map that contains a
                     // tabmode's ranges.
                     auto ranges = ccs.GetTableRangesForATable(*table_name_,
@@ -2878,10 +2737,6 @@ public:
                                                      node_group_id_,
                                                      table_schema_->Version());
                         ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-#ifndef ON_KEY_OBJECT
-                        assert(ccs.GetTableStatistics(
-                                   base_table_name, node_group_id_) == nullptr);
-#endif
                     }
                     else
                     {
@@ -2900,72 +2755,14 @@ public:
                 }
                 else
                 {
-                    assert(table_name_->Type() == TableType::Primary ||
-                           table_name_->Type() == TableType::Secondary ||
-                           table_name_->Type() == TableType::UniqueSecondary);
-
-                    {
-#ifndef ON_KEY_OBJECT
-                        // Initialize table statistics
-#ifdef RANGE_PARTITION_ENABLED
-                        // Initialize table ranges before create table
-                        // statistics.
-                        TableName base_range_table_name{
-                            table_name_->GetBaseTableNameSV(),
-                            TableType::RangePartition};
-                        auto ranges = ccs.GetTableRangesForATable(
-                            base_range_table_name, node_group_id_);
-                        if (ranges == nullptr)
-                        {
-                            ccs.FetchTableRanges(
-                                base_range_table_name,
-                                table_schema_->GetKVCatalogInfo(),
-                                this,
-                                node_group_id_);
-                            return false;
-                        }
-                        for (const TableName &index_name :
-                             table_schema_->IndexNames())
-                        {
-                            TableName index_range_table_name{
-                                index_name.StringView(),
-                                TableType::RangePartition};
-                            auto ranges = ccs.GetTableRangesForATable(
-                                index_range_table_name, node_group_id_);
-                            if (ranges == nullptr)
-                            {
-                                ccs.FetchTableRanges(
-                                    index_range_table_name,
-                                    table_schema_->GetKVCatalogInfo(),
-                                    this,
-                                    node_group_id_);
-                                return false;
-                            }
-                        }
-#endif
-                        // Initialize table statistics before create ccmap.
-                        const StatisticsEntry *statistics_entry =
-                            ccs.GetTableStatistics(base_table_name,
-                                                   node_group_id_);
-                        if (statistics_entry == nullptr ||
-                            statistics_entry->statistics_ == nullptr)
-                        {
-                            ccs.FetchTableStatistics(
-                                base_table_name, node_group_id_, this);
-                            return false;
-                        }
-#endif
-                    }
-
                     const CatalogEntry *catalog_entry =
-                        InitCcm(*table_name_, node_group_id_, ccs);
+                        ccs.InitCcm(*table_name_, node_group_id_, this);
 
                     if (catalog_entry != nullptr)
                     {
                         // If FetchCatalogCc failure due to storage fault,
                         // FetchCatalogCc::Execute() abort the ReplayLogCc
                         assert(catalog_entry->Version() > 0);
-
                         if (catalog_entry->schema_ != nullptr &&
                             commit_ts_ >= catalog_entry->Version())
                         {
@@ -2995,7 +2792,6 @@ public:
                 table_schema_ = ccm_->GetTableSchema();
             }
         }
-
         ccm_->Execute(*this);
         return false;
     }
@@ -3100,6 +2896,77 @@ private:
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
+};
+
+/**
+ * A fake ReplayLogCc to load table statistics.
+ *
+ * Data CcMap depends on table statistics, because it need to maintain a sample
+ * pool. Thus, CreatePkCcMap or CreateSkCcMap must be after loading table
+ * statistics.
+ *
+ * Loading table statistics depends on table catalog and table ranges. Thus,
+ * loading table statistics must be after catalog recovery and range-split
+ * recovery.
+ *
+ * Add a phase to load table statistics during recovery.
+ */
+struct ReplayTableStatistics : public ReplayLogCc
+{
+public:
+    ReplayTableStatistics(uint32_t ng_id,
+                          const TableName &table_name,
+                          std::mutex &mux,
+                          std::condition_variable &cv,
+                          uint32_t &finish_cnt,
+                          bool &recovery_error)
+        : ReplayLogCc(ng_id,
+                      table_name.StringView(),
+                      table_name.Type(),
+                      ""sv,
+                      0,
+                      0,
+                      mux,
+                      cv,
+                      finish_cnt,
+                      recovery_error,
+                      nullptr,
+                      nullptr)
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        if (cc_ng_candid_term < 0 && cc_ng_term < 0)
+        {
+            SetFinish();
+            return false;
+        }
+
+        // Recocver table statistics before rerun catalog-upsert operation and
+        // range-split operation.
+
+        const CatalogEntry *catalog_entry =
+            ccs.GetCatalog(*table_name_, node_group_id_);
+        if (catalog_entry && catalog_entry->schema_)
+        {
+            if (!ccs.LoadRangesAndStatisticsNx(
+                    catalog_entry->schema_.get(), node_group_id_, this))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            // Table has been dropped.
+        }
+
+        SetFinish();
+        return false;
+    }
 };
 
 struct AnalyzeTableAllCc : public TemplatedCcRequest<AnalyzeTableAllCc, Void>
