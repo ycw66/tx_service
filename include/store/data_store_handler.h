@@ -205,7 +205,10 @@ public:
         const Schema *key_schema,
         const Schema *rec_schema,
         const KVCatalogInfo *kv_info,
-        bool scan_foward) = 0;
+        bool scan_foward,
+        bool full_column_scan = true,
+        const std::unordered_set<std::string_view> *scan_columns_name =
+            nullptr) = 0;
 
     /**
      * @brief Write batch historical versions into DataStore.
@@ -277,6 +280,16 @@ public:
         const txservice::TableName &table_name,
         const txservice::TableSchema *current_table_schema,
         txservice::AlterTableInfo &alter_table_info) = 0;
+
+    /**
+     * @brief Scan pk and columns that consist of the new sk from negative
+     * infinity.
+     */
+    virtual std::unique_ptr<DataStoreScanner> ScanPkAndNewSkColumns(
+        const TableName &table_name,
+        const TableSchema *table_schema,
+        const std::vector<DataStoreSearchCond> &search_conds,
+        const std::vector<TableName> &new_indexes_name) = 0;
 
     virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
 
