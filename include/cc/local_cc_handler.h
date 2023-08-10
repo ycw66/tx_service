@@ -78,6 +78,22 @@ public:
                    uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres) override;
 
+    /// <summary>
+    /// Installs the committed write and releases the write intention/lock after
+    /// the tx commits. The operation unblocks the pending requests, if there
+    /// are any, on the key.
+    /// </summary>
+    /// <param name="tx_number"></param>
+    /// <param name="tx_term"></param>
+    /// <param name="command_id"></param>
+    /// <param name="commit_ts"></param>
+    /// <param name="table_name"></param>
+    /// <param name="key"></param>
+    /// <param name="record"></param>
+    /// <param name="operation_type"></param>
+    /// <param name="expected_term">If this value is SKIP_CHECK_TERM, it means
+    /// that the caller does not care the term, and there is no need to check
+    /// the term</param>
     void ForwardPostWrite(TxNumber tx_number,
                           int64_t tx_term,
                           uint16_t command_id,
@@ -88,7 +104,8 @@ public:
                           OperationType operation_type,
                           uint32_t key_shard_code,
                           CcHandlerResult<PostProcessResult> &hres,
-                          bool blocked = true) override;
+                          bool blocked = true,
+                          int64_t expected_term = SKIP_CHECK_TERM) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the
@@ -360,7 +377,23 @@ public:
                      const TxKey *start_key = nullptr,
                      const TxKey *end_key = nullptr) override;
 
+    /**
+     * @brief Get the leader term of the input cc node group.
+     *
+     * @param ng_id The cc node group ID.
+     * @return INIT_TERM: request error. UNKNOWN_TERM: waiting the response from
+     * remote node. Others: normal term.
+     */
+    int64_t NodeGroupLeaderTerm(
+        uint32_t ng_id,
+        TxNumber tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        CcHandlerResult<std::vector<int64_t>> &hres) override;
+
 private:
+    static void HandleAcquireNodeGroupTermResponse(
+        brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response);
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is
     /// pinned.

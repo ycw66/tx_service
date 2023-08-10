@@ -54,6 +54,12 @@ public:
         ::txservice::remote::ClusterRemoveNodeResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void AcquireNodeGroupLeaderTerm(
+        ::google::protobuf::RpcController *controller,
+        const AcquireNodeGroupTermRequest *request,
+        AcquireNodeGroupTermResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

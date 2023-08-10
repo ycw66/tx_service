@@ -544,6 +544,11 @@ public:
 #endif
     }
 
+    void ResetForwardWriteCount()
+    {
+        forward_write_cnt_ = 0;
+    }
+
 private:
     // rset_, wset_cnt_, read_cache_ are not string owner.
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>

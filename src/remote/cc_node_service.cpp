@@ -288,5 +288,38 @@ void CcNodeService::ClusterRemoveNode(
     }
 }
 
+/**
+ * @brief RPC service: get the leader term of the specific node group.
+ */
+void CcNodeService::AcquireNodeGroupLeaderTerm(
+    ::google::protobuf::RpcController *controller,
+    const AcquireNodeGroupTermRequest *request,
+    AcquireNodeGroupTermResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    // This object helps you to call done->Run() in RAII style. If you need
+    // to process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    // Set response
+    response->set_tx_number(request->tx_number());
+    response->set_tx_term(request->tx_term());
+    response->set_command_id(request->command_id());
+    response->set_handler_addr(request->handler_addr());
+
+    uint32_t ng_id = request->node_group_id();
+    int64_t term = Sharder::Instance().LeaderTerm(ng_id);
+
+    if (term < 0)
+    {
+        response->set_node_group_term(INIT_TERM);
+    }
+    else
+    {
+        response->set_node_group_term(term);
+    }
+    response->set_node_group_id(ng_id);
+}
+
 }  // namespace remote
 }  // namespace txservice

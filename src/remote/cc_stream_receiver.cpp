@@ -3,6 +3,7 @@
 #include <brpc/controller.h>
 
 #include "cc/local_cc_shards.h"
+#include "constants.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
@@ -801,11 +802,33 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            RemotePostWrite *post_commit = postwrite_pool_.NextRequest();
-            TX_TRACE_ASSOCIATE(msg.get(), post_commit);
-            post_commit->Reset(std::move(msg));
-            local_shards_.EnqueueCcRequest(post_commit->KeyShardCode(),
-                                           post_commit);
+            RemotePostWrite *post_commit_cc = postwrite_pool_.NextRequest();
+            TX_TRACE_ASSOCIATE(msg.get(), post_commit_cc);
+            post_commit_cc->Reset(std::move(msg));
+
+            // Check node group leader term
+            uint32_t ng_id = post_commit_cc->NodeGroupId();
+            int64_t current_ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            int64_t expected_ng_term = post_commit_cc->NodeGroupTerm();
+            // If expected_ng_term is SKIP_CHECK_TERM, it means that the
+            // coordinator does not care the term, so there is no need to check
+            // the term.
+            if (expected_ng_term != SKIP_CHECK_TERM &&
+                expected_ng_term != current_ng_term)
+            {
+                // This node not the leader, or the expected node group term do
+                // not equal to the current node group term, that mean the
+                // leader transferred between this forward post write request
+                // and the former forward post write request.
+                post_commit_cc->Result()->SetError(
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                // Recycle this ccrequest.
+                post_commit_cc->Free();
+                break;
+            }
+
+            local_shards_.EnqueueCcRequest(post_commit_cc->KeyShardCode(),
+                                           post_commit_cc);
         }
         break;
     }

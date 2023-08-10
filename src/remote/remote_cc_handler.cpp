@@ -178,6 +178,7 @@ void txservice::remote::RemoteCcHandler::ForwardPostWrite(
     int64_t tx_term,
     uint16_t command_id,
     uint64_t commit_ts,
+    int64_t ng_term,
     const TxKey *key,
     const TableName &table_name,
     const TxRecord *record,
@@ -200,6 +201,7 @@ void txservice::remote::RemoteCcHandler::ForwardPostWrite(
     post_commit->set_src_node_id(src_node_id);
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     post_commit->set_node_group_id(ng_id);
+    post_commit->set_node_group_term(ng_term);
     key->Serialize(*post_commit->mutable_key());
     post_commit->set_table_name_str(table_name.String());
     post_commit->set_table_type(

@@ -8,6 +8,7 @@
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_execution.h"
 #include "tx_record.h"
 #include "tx_trace.h"
 #include "tx_worker_pool.h"
@@ -269,7 +270,8 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     OperationType operation_type,
     uint32_t key_shard_code,
     CcHandlerResult<PostProcessResult> &hres,
-    bool blocked)
+    bool blocked,
+    int64_t expected_term)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -283,6 +285,29 @@ void txservice::LocalCcHandler::ForwardPostWrite(
             // release the lock again.
             hres.SetFinished();
             return;
+        }
+
+        if (expected_term != SKIP_CHECK_TERM)
+        {
+            // The transaction that performs this operation requires that the
+            // node group leader cannot change during the entire transaction
+            // process. Therefore, it is necessary to record the leader term of
+            // each target node group when performing the operation for the
+            // first time. At the same time, in subsequent operations, by
+            // checking the node group's term to confirm whether changes have
+            // occurred.
+            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            if (expected_term != ng_term)
+            {
+                assert(expected_term > 0);
+                // Leader transferred. For example, a remote node group
+                // transferred to local node.
+                hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                LOG(ERROR) << "LocalCcHandler::ForwardPostWrite: The leader of "
+                              "the destinate node group transferred for ng#"
+                           << ng_id;
+                return;
+            }
         }
 
         PostWriteCc *req = postwrite_pool.NextRequest();
@@ -307,11 +332,13 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     {
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
+
         remote_hd_.ForwardPostWrite(cc_shards_.node_id_,
                                     tx_number,
                                     tx_term,
                                     command_id,
                                     commit_ts,
+                                    expected_term,
                                     key,
                                     table_name,
                                     record,
@@ -1500,4 +1527,130 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
                                    hres,
                                    type);
     }
+}
+
+int64_t txservice::LocalCcHandler::NodeGroupLeaderTerm(
+    uint32_t ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<std::vector<int64_t>> &hres)
+{
+    int64_t term = INIT_TERM;
+    uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (leader_node_id == cc_shards_.node_id_)
+    {
+        // This node is the leader of the input node group.
+        term = Sharder::Instance().LeaderTerm(ng_id);
+        assert(term > 0);
+
+        auto &terms = hres.Value();
+        terms.at(ng_id) = term;
+
+        hres.SetFinished();
+    }
+    else
+    {
+        std::string node_ip;
+        uint16_t node_port;
+        Sharder::Instance().GetNodeAddress(leader_node_id, node_ip, node_port);
+
+        brpc::Channel channel;
+        if (channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        {
+            // Fail to establish the channel to the tx node. Do not update the
+            // leader term of input node group.
+            LOG(ERROR) << "Update leader term: Fail to init the channel to the"
+                          " leader of ng#"
+                       << ng_id;
+            hres.SetError(CcErrorCode::NG_TERM_CHANGED);
+            return term;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+        remote::AcquireNodeGroupTermRequest request;
+        request.set_node_group_id(ng_id);
+        request.set_tx_number(tx_number);
+        request.set_tx_term(tx_term);
+        request.set_command_id(command_id);
+        request.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+        // This will be deleted after the response been handled.
+        remote::AcquireNodeGroupTermResponse *response_ptr =
+            new remote::AcquireNodeGroupTermResponse();
+
+        brpc::Controller *cntl_ptr = new brpc::Controller();
+        cntl_ptr->set_timeout_ms(100);
+        // Asynchronous mode
+        google::protobuf::Closure *done = brpc::NewCallback(
+            &HandleAcquireNodeGroupTermResponse, cntl_ptr, response_ptr);
+        stub.AcquireNodeGroupLeaderTerm(cntl_ptr, &request, response_ptr, done);
+
+        term = UNKNOWN_TERM;
+    }
+
+    return term;
+}
+
+/**
+ * Handle RPC response
+ */
+void txservice::LocalCcHandler::HandleAcquireNodeGroupTermResponse(
+    brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response)
+{
+    // std::unique_ptr make sure cntl/response will be deleted before
+    // returning.
+    std::unique_ptr<brpc::Controller> cntl_guard(cntl);
+    std::unique_ptr<remote::AcquireNodeGroupTermResponse> response_guard(
+        response);
+
+    if (cntl->Failed())
+    {
+        // RPC failed, fields in response are undefined, cannot use.
+        // Special case, cannot set HandlerResult.
+        LOG(ERROR)
+            << "Failed to process the AcquireNodeGroupTerm RPC. Error code: "
+            << cntl->ErrorCode() << ". Error Msg: " << cntl->ErrorText();
+        return;
+    }
+
+    // Handle response
+    CcHandlerResult<std::vector<int64_t>> *hd_res = nullptr;
+
+    uint32_t tx_node_id = (response->tx_number() >> 32L) >> 10L;
+    int64_t tx_term = response->tx_term();
+    if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+    {
+        LOG(WARNING)
+            << "Acquire node group term response, but tx node has failed.";
+        // The tx node has failed. Pointer stability does not hold anymore.
+        return;
+    }
+    else
+    {
+        hd_res = reinterpret_cast<CcHandlerResult<std::vector<int64_t>> *>(
+            response->handler_addr());
+
+        if (hd_res->Txm()->TxNumber() != response->tx_number() ||
+            hd_res->Txm()->CommandId() != response->command_id())
+        {
+            LOG(WARNING) << "Acquire node group term response, but original tx "
+                            "has terminated.";
+            // The original tx has terminated and the tx machine has been
+            // recycled. The response is directed to an obsolete tx. Skips
+            // setting the cc handler result.
+            return;
+        }
+    }
+
+    uint32_t ng_id = response->node_group_id();
+    int64_t term = response->node_group_term();
+
+    auto &terms = hd_res->Value();
+    terms.at(ng_id) = term;
+
+    hd_res->SetFinished();
+    LOG(INFO) << "Handle acquire node group term response for ng#" << ng_id
+              << ", and term: " << term;
+    // Closure created by NewCallback deletes itself at the end of Run.
 }

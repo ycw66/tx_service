@@ -109,6 +109,23 @@ message ClusterScaleStatusResponse
 	ClusterScaleStatus status = 1;
 }
 
+message AcquireNodeGroupTermRequest{
+	uint32 node_group_id = 1;
+	uint64 tx_number = 2;
+	int64 tx_term = 3;
+	uint64 command_id = 4;
+	uint64 handler_addr = 5;
+}
+
+message AcquireNodeGroupTermResponse{
+	uint32 node_group_id = 1;
+	int64 node_group_term = 2;
+	uint64 tx_number = 3;
+	int64 tx_term = 4;
+	uint64 command_id = 5;
+	uint64 handler_addr = 6;
+}
+
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -121,6 +138,7 @@ service CcRpcService {
 	rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
 	rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
 	rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
+	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
 }
 
 message TxId_msg {
@@ -330,6 +348,7 @@ message PostCommitRequest {
 message ForwardPostCommitRequest {
 	uint32 src_node_id = 1;
 	uint32 node_group_id = 2;
+	int64 node_group_term = 3;
 	bytes key = 4;
 	string table_name_str = 5;
 	CcTableType table_type = 6;

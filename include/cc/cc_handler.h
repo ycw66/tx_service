@@ -144,6 +144,9 @@ public:
      * @param blocked Whether blocked or return error if OOM during PostWrite
      * request. If return error, the caller should re-execute this request after
      * the cc shard has enough memory.
+     * @param expected_term When the value is not SKIP_CHECK_TERM, should
+     * compare this value with target node group's current term, if not match
+     * which means leader transfer occurred, will reject this operation.
      */
     virtual void ForwardPostWrite(TxNumber tx_number,
                                   int64_t tx_term,
@@ -155,7 +158,8 @@ public:
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
                                   CcHandlerResult<PostProcessResult> &hres,
-                                  bool blocked = true) = 0;
+                                  bool blocked = true,
+                                  int64_t expected_term = SKIP_CHECK_TERM) = 0;
 
     /**
      * @brief Post-processes a read/scan key. Post-processing clears the read
@@ -486,6 +490,20 @@ public:
                              CleanType clean_type,
                              const TxKey *start_key = nullptr,
                              const TxKey *end_key = nullptr) = 0;
+
+    /**
+     * @brief Get the leader term of the input cc node group.
+     *
+     * @param ng_id The cc node group ID.
+     * @return INIT_TERM: request error. UNKNOWN_TERM: waiting the response from
+     * remote node. Others: normal term.
+     */
+    virtual int64_t NodeGroupLeaderTerm(
+        uint32_t ng_id,
+        TxNumber tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        CcHandlerResult<std::vector<int64_t>> &hres) = 0;
 };
 
 }  // namespace txservice
