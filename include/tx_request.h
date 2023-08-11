@@ -145,6 +145,7 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
 struct ReadTxRequest : public TemplateTxRequest<ReadTxRequest, RecordStatus>
 {
 public:
+    // TODO(ZX) let ReadTxReq return std::pair<RecordStatus, uint64_t(entry_ts)>
     ReadTxRequest(const TableName *tab_name = nullptr,
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,

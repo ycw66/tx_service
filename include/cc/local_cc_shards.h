@@ -582,16 +582,25 @@ public:
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
 
-    // table_schema_op_pool_ and split_flush_range_op_pool_ are introduced to
-    // ensure the CcHandlerResult pointer validation: if failover didn't happen,
-    // the pointer receivied from remote PostWriteAll response CcMessage should
-    // always be valid(memory not freed). This is important in the case where
-    // network timeout happens and remote response arrives after UpsertTableOp
-    // has finished. To achieve this, the UpsertTableOp is moved to
-    // table_schema_op_pool_ once finished the last step of the schema op to
-    // maintain the validity of the pointer. (note: this is different from
-    // pointer stability, which is guaranteed by checking the node term and
-    // whether this node is the leader of a node group).
+    /*
+
+    table_schema_op_pool_ and split_flush_range_op_pool_ are introduced to
+    ensure the CcHandlerResult(stored in UpsertTableOp/SplitFlushRangeOp)
+    pointer validation:
+
+    if failover didn't happen, the pointer receivied from remote PostWriteAll
+    response CcMessage should always be valid(memory not being freed). This is
+    important in the case where network timeout happens and remote response(sent
+    by retry) arrives after UpsertTableOp has finished(finished means txm has
+    been reset and schema_op_ unique pointer in txm has been set to null).
+
+    To avoid this pointer invalidation, the UpsertTableOp is moved from txm to
+    local_cc_shards once finished the last step of the schema op to maintain
+    the validity of the pointer. (note: this is different from pointer
+    stability, which is guaranteed by checking the node term and whether this
+    node is the leader of a node group).
+
+    */
     std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
     std::mutex table_schema_op_pool_mux_;
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;

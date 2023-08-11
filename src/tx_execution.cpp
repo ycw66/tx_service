@@ -414,6 +414,12 @@ TxErrorCode TransactionExecution::TxUpsert(const TableName &table_name,
     }
 }
 
+void TransactionExecution::TxRevert(const TableName &table_name,
+                                    const TxKey &key)
+{
+    rw_set_.DeleteWrite(table_name, key);
+}
+
 bool TransactionExecution::IsTimeOut(int wait_secs)
 {
     ++state_forward_cnt_;

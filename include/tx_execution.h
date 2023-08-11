@@ -160,6 +160,8 @@ public:
                          TxRecord::Uptr rec,
                          OperationType op);
 
+    void TxRevert(const TableName &table_name, const TxKey &key);
+
 #ifdef EXT_TX_PROC_ENABLED
     void ExternalForward();
     std::atomic<uint16_t> *ExternalProcessorCnt();

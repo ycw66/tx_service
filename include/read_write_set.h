@@ -308,6 +308,25 @@ public:
         return nullptr;
     }
 
+    void DeleteWrite(const TableName &table_name, const TxKey &key)
+    {
+        auto tab_it = wset_.find(table_name);
+        assert(tab_it != wset_.end());
+
+        auto key_it = tab_it->second.find(&key);
+        assert(key_it != tab_it->second.end());
+
+        wset_bytes_cnt_ -= (key_it->second.key_->SerializedLength() +
+                            key_it->second.rec_->SerializedLength());
+
+        auto it = tab_it->second.erase(key_it);
+        if (tab_it->second.size() == 0)
+        {
+            wset_.erase(tab_it);
+        }
+        --wset_cnt_;
+    }
+
     std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>
     InitIter(const TableWriteSet &table_wset,
              const TxKey *start_key,
