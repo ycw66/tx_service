@@ -60,6 +60,11 @@ public:
         AcquireNodeGroupTermResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void FlushDataAll(::google::protobuf::RpcController *controller,
+                      const FlushDataAllRequest *request,
+                      FlushDataAllResponse *response,
+                      ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

@@ -741,4 +741,12 @@ struct CleanCcEntryForTestTxRequest
     bool flush_;
 };
 
+struct UploadTxRequest
+    : public TemplateTxRequest<UploadTxRequest, std::vector<int64_t>>
+{
+    UploadTxRequest() : TemplateTxRequest(nullptr, nullptr, nullptr)
+    {
+    }
+};
+
 }  // namespace txservice

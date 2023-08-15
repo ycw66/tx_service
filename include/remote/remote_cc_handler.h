@@ -231,6 +231,25 @@ public:
                          CcHandlerResultBase *hres,
                          ResultTemplateType type);
 
+    /**
+     * @brief Kickout the ccentrise whose commit_ts less than @@ckpt_ts from
+     * ccmap.
+     *
+     * @param tx_number Tx number
+     * @param tx_term Term of the tx node
+     * @param ng_id Id of the node group that to execute the request.
+     * @param commit_ts
+     */
+    void KickoutData(uint32_t src_node_id,
+                     TxNumber tx_number,
+                     int64_t tx_term,
+                     uint64_t command_id,
+                     const TableName &table_name,
+                     uint32_t ng_id,
+                     uint64_t commit_ts,
+                     txservice::CleanType clean_type,
+                     CcHandlerResult<Void> &hres);
+
 private:
     CcStreamSender &stream_sender_;
 };

@@ -504,6 +504,29 @@ public:
         int64_t tx_term,
         uint16_t command_id,
         CcHandlerResult<std::vector<int64_t>> &hres) = 0;
+
+    /**
+     * @brief Flush data whose cc entry's commit_ts less than @ckpt_ts into
+     * data store in all shards.
+     *
+     * @param table_name Table name to flush
+     * @param ng_id Id of the node group that to execute the ccrequest
+     * @param tx_term Term of the node group that launch the tx.
+     * @param data_sync_ts Ccentries whose commit_ts less than @data_sync_ts
+     * will be flushed into data store.
+     * @param is_dirty True if need to use table's dirtyschema.
+     * @param expected_term The expected destination node group term.
+     * @param hres Result handler of the request
+     */
+    virtual void FlushDataAll(const TableName &table_name,
+                              NodeGroupId ng_id,
+                              TxNumber tx_number,
+                              int64_t tx_term,
+                              uint16_t command_id,
+                              uint64_t data_sync_ts,
+                              bool is_dirty,
+                              int64_t &expected_term,
+                              CcHandlerResult<Void> &hres) = 0;
 };
 
 }  // namespace txservice

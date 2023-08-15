@@ -391,9 +391,38 @@ public:
         uint16_t command_id,
         CcHandlerResult<std::vector<int64_t>> &hres) override;
 
+    /// <summary>
+    /// Flush data whose cc entry's commit_ts less than @ckpt_ts into
+    /// data store in all shards.
+    /// </summary>
+    /// <param name="table_name"></param>
+    /// <param name="ng_id">Id of the node group to execute ccrequest</param>
+    /// <param name="tx_term">Term of the node group that launch the tx</param>
+    /// <param name="data_sync_ts">Ccentries whose commit_ts less than
+    /// @data_sync_ts will be flushed into data store.</param>
+    /// <param name="is_dirty"> True if need table's ditryschema. </param>
+    /// <param name="expected_term"> The expected destination node group term.
+    /// </param>
+    /// <param name="hres"></param>
+    void FlushDataAll(const TableName &table_name,
+                      NodeGroupId ng_id,
+                      TxNumber tx_number,
+                      int64_t tx_term,
+                      uint16_t command_id,
+                      uint64_t data_sync_ts,
+                      bool is_dirty,
+                      int64_t &expected_term,
+                      CcHandlerResult<Void> &hres) override;
+
 private:
     static void HandleAcquireNodeGroupTermResponse(
         brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response);
+    /*
+     * Handle response of Flush data all request
+     */
+    static void HandleFlushDataAllResponse(
+        brpc::Controller *cntl, remote::FlushDataAllResponse *response);
+
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is
     /// pinned.

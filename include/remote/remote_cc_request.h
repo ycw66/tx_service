@@ -654,5 +654,21 @@ private:
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
 };
+
+struct RemoteKickoutCcEntry : public KickoutCcEntryCc
+{
+public:
+    RemoteKickoutCcEntry();
+    RemoteKickoutCcEntry(const RemoteKickoutCcEntry &rhs) = delete;
+    RemoteKickoutCcEntry(RemoteKickoutCcEntry &&rhs) = delete;
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    TableName table_name_{empty_sv, TableType::Primary};
+    CcStreamSender *hd_{nullptr};
+    CcHandlerResult<Void> cc_res_{nullptr};
+};
 }  // namespace remote
 }  // namespace txservice

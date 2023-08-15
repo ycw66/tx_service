@@ -190,6 +190,39 @@ public:
                                                schema_rec->DirtySchemaImage(),
                                                req.CommitTs());
 
+                // For alter table, in some case, the current schema may not
+                // exists yet, so should create the current schema. For example,
+                // this node is the participant node of the alter table
+                // transaction, and does not execute any transaction about this
+                // table before this alter table tx since server start.
+                if (catalog_entry->schema_.get() == nullptr &&
+                    (req.OpType() == OperationType::AddIndex ||
+                     req.OpType() == OperationType::DropIndex))
+                {
+                    shard_->CreateCatalog(table_key->Name(),
+                                          req.NodeGroupId(),
+                                          schema_rec->SchemaImage(),
+                                          schema_rec->SchemaTs());
+
+#ifdef RANGE_PARTITION_ENABLED
+                    // Initialize table ranges.
+                    TableName base_range_table_name{
+                        table_key->Name().StringView(),
+                        TableType::RangePartition};
+                    auto ranges = shard_->GetTableRangesForATable(
+                        base_range_table_name, req.NodeGroupId());
+                    if (ranges == nullptr)
+                    {
+                        shard_->FetchTableRanges(
+                            base_range_table_name,
+                            catalog_entry->schema_->GetKVCatalogInfo(),
+                            &req,
+                            req.NodeGroupId());
+                        return false;
+                    }
+#endif
+                }
+
                 schema_rec->Set(catalog_entry->schema_,
                                 catalog_entry->dirty_schema_,
                                 catalog_entry->Version());
@@ -411,6 +444,21 @@ public:
                                               catalog_entry->DirtyVersion(),
                                               false);
 
+#ifdef RANGE_PARTITION_ENABLED
+                // Update pk range table if exist.
+                auto ranges = shard_->GetTableRangesForATable(
+                    table_key->Name(), req.NodeGroupId());
+                if (ranges != nullptr)
+                {
+                    shard_->CreateOrUpdateRangeCcMap(
+                        table_key->Name(),
+                        new_schema,
+                        req.NodeGroupId(),
+                        catalog_entry->DirtyVersion(),
+                        false);
+                }
+#endif
+
                 if (req.OpType() == OperationType::AddIndex ||
                     req.OpType() == OperationType::DropIndex)
                 {
@@ -442,7 +490,8 @@ public:
                                     old_index_name,
                                     new_schema,
                                     req.NodeGroupId(),
-                                    catalog_entry->DirtyVersion());
+                                    catalog_entry->DirtyVersion(),
+                                    false);
                             }
 #endif
                         }
@@ -461,8 +510,7 @@ public:
 #endif
                         }
                     }
-                    // for range table, upate tableschema.
-                }
+                }  // End of alter table index
             }
         }
         else if (req.CommitType() == PostWriteType::PrepareCommit &&

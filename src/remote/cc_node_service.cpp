@@ -1,6 +1,7 @@
 #include "remote/cc_node_service.h"
 
 #include "cc/local_cc_shards.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "tx_service.h"
 
@@ -319,6 +320,84 @@ void CcNodeService::AcquireNodeGroupLeaderTerm(
         response->set_node_group_term(term);
     }
     response->set_node_group_id(ng_id);
+}
+
+/**
+ * @brief RPC service: flush all tuples whose commit timestamp less than the
+ *  @@request.ckpt_ts into data store.
+ */
+void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
+                                 const FlushDataAllRequest *request,
+                                 FlushDataAllResponse *response,
+                                 ::google::protobuf::Closure *done)
+{
+    // This object helps to call done->Run() in RAII style. If you need to
+    // process the request asynchronously, pass done_guard.release().
+    brpc::ClosureGuard done_guard(done);
+
+    // Set response
+    response->set_tx_number(request->tx_number());
+    response->set_tx_term(request->tx_term());
+    response->set_command_id(request->command_id());
+    response->set_handler_addr(request->handler_addr());
+
+    uint32_t ng_id = request->node_group_id();
+    int64_t expected_ng_term = request->node_group_term();
+    // Check the term.
+    int64_t current_ng_term = Sharder::Instance().LeaderTerm(ng_id);
+    if (current_ng_term < 0 ||
+        (expected_ng_term > 0 && expected_ng_term != current_ng_term))
+    {
+        // The destinate node group's term has changed, ignore this request.
+        response->set_error_code(static_cast<google::protobuf::int32>(
+            CcErrorCode::REQUESTED_NODE_NOT_LEADER));
+        LOG(ERROR) << "CcNodeService FlushDataAll RPC: node not leader on ng#"
+                   << ng_id;
+        return;
+    }
+
+    std::string_view table_name_sv{request->table_name_str()};
+    TableType table_type =
+        ToLocalType::ConvertCcTableType(request->table_type());
+    TableName table_name = TableName(table_name_sv, table_type);
+
+    uint64_t data_sync_ts = request->data_sync_ts();
+    bool is_dirty = request->is_dirty();
+
+    if (table_type == TableType::Primary)
+    {
+        ACTION_FAULT_INJECTOR("term_FlushDataAllRPC_PK_crashed");
+    }
+    else if (table_type == TableType::Secondary)
+    {
+        ACTION_FAULT_INJECTOR("term_FlushDataAllRPC_SK_crashed");
+    }
+    DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
+               << ", and flush table:" << table_name.String();
+
+    std::mutex sender_mux;
+    std::condition_variable sender_cv;
+    uint16_t finished_cnt = 0;
+    std::atomic_bool failed = false;
+    local_shards_.EnqueueDataSyncTask(table_name,
+                                      ng_id,
+                                      current_ng_term,
+                                      data_sync_ts,
+                                      &sender_mux,
+                                      &sender_cv,
+                                      &finished_cnt,
+                                      &failed,
+                                      is_dirty);
+    std::unique_lock<std::mutex> lk(sender_mux);
+    sender_cv.wait(lk, [&finished_cnt] { return finished_cnt == 1; });
+
+    CcErrorCode error_code = !failed.load(std::memory_order_relaxed)
+                                 ? CcErrorCode::NO_ERROR
+                                 : CcErrorCode::DATA_STORE_ERR;
+
+    DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
+               << " finished with error: " << (int32_t) error_code;
+    response->set_error_code(static_cast<google::protobuf::int32>(error_code));
 }
 
 }  // namespace remote

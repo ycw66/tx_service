@@ -517,6 +517,16 @@ public:
         return is_waiting_ckpt_.load(std::memory_order_acquire);
     }
 
+    TxService *GetTxService() const
+    {
+        return tx_service_;
+    }
+
+    CatalogFactory *GetCatalogFactory() const
+    {
+        return catalog_factory_;
+    }
+
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
@@ -605,6 +615,8 @@ public:
     std::mutex table_schema_op_pool_mux_;
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
     std::mutex split_flush_range_op_pool_mux_;
+    std::vector<std::unique_ptr<UpsertTableIndexOp>> table_index_op_pool_;
+    std::mutex table_index_op_pool_mux_;
 
     // Since there's only 1 cluster scale event at a time across the cluster,
     // we don't need a pool for it. We just need to make sure that the op is not

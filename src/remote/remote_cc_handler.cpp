@@ -786,3 +786,38 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, hres);
 }
+
+void txservice::remote::RemoteCcHandler::KickoutData(
+    uint32_t src_node_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint64_t command_id,
+    const TableName &table_name,
+    uint32_t ng_id,
+    uint64_t commit_ts,
+    txservice::CleanType clean_type,
+    CcHandlerResult<Void> &hres)
+{
+    CcMessage send_msg;
+
+    // Message head
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_KickoutDataRequest);
+    send_msg.set_tx_number(tx_number);
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+
+    // Construct request body
+    KickoutDataRequest *kickout_data_req = send_msg.mutable_kickout_data_req();
+    kickout_data_req->set_src_node_id(src_node_id);
+    kickout_data_req->set_table_name_str(table_name.String());
+    kickout_data_req->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
+    kickout_data_req->set_node_group_id(ng_id);
+    kickout_data_req->set_ckpt_ts(commit_ts);
+    kickout_data_req->set_clean_type((txservice::remote::CleanType) clean_type);
+
+    // Send message
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
+}

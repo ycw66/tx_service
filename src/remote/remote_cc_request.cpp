@@ -1545,3 +1545,64 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
     hd_->RecycleCcMsg(std::move(input_msg_));
     return true;
 }
+
+txservice::remote::RemoteKickoutCcEntry::RemoteKickoutCcEntry()
+{
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_KickoutDataResponse);
+    // Set callback function
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *hres)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        // Construct response body
+        KickoutDataResponse *resp = output_msg_.mutable_kickout_data_resp();
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(hres->ErrorCode()));
+
+        // Send message
+        const KickoutDataRequest &req = input_msg_->kickout_data_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+
+        // Recycle the message
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteKickoutCcEntry::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_kickout_data_req());
+    cc_res_.Reset();
+
+    // Reset output msg
+    output_msg_.clear_tx_number();
+    output_msg_.clear_tx_term();
+    output_msg_.clear_command_id();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_kickout_data_resp();
+
+    // Construct local ccrequest using the info. in request body.
+    const KickoutDataRequest &req = input_msg->kickout_data_req();
+    std::string_view table_name_sv{req.table_name_str()};
+    table_name_ = TableName(table_name_sv,
+                            ToLocalType::ConvertCcTableType(req.table_type()));
+
+    size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+    KickoutCcEntryCc::Reset(table_name_,
+                            req.node_group_id(),
+                            req.ckpt_ts(),
+                            core_cnt,
+                            &cc_res_,
+                            (txservice::CleanType) req.clean_type());
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}

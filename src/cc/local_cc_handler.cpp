@@ -6,6 +6,7 @@
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_execution.h"
@@ -1476,16 +1477,111 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
     }
     else
     {
-        assert(false);
-        // Wait for create index pr from YSW.
-        // remote_hd_.KickoutDataAll(cc_shards_.node_id_,
-        //                          tx_number,
-        //                          tx_term,
-        //                          command_id,
-        //                          table_name,
-        //                          ng_id,
-        //                          commit_ts,
-        //                          hres);
+        remote_hd_.KickoutData(cc_shards_.node_id_,
+                               tx_number,
+                               tx_term,
+                               command_id,
+                               table_name,
+                               ng_id,
+                               commit_ts,
+                               clean_type,
+                               hres);
+    }
+}
+
+/**
+ * @param is_dirty If true, should use the dirty table schema.
+ * @param expected_term Reject this operation if expected_term doesn't match the
+ * current leader term of this Node Group if the value is not INIT_TERM(-1).
+ */
+void txservice::LocalCcHandler::FlushDataAll(const TableName &table_name,
+                                             NodeGroupId ng_id,
+                                             TxNumber tx_number,
+                                             int64_t tx_term,
+                                             uint16_t command_id,
+                                             uint64_t data_sync_ts,
+                                             bool is_dirty,
+                                             int64_t &expected_term,
+                                             CcHandlerResult<Void> &hres)
+{
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        if (table_name.Type() == TableType::Primary)
+        {
+            ACTION_FAULT_INJECTOR("term_FlushDataAll_PK_crashed");
+        }
+        else if (table_name.Type() == TableType::Secondary)
+        {
+            ACTION_FAULT_INJECTOR("term_FlushDataAll_SK_crashed");
+        }
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        if (ng_term < 0 || (expected_term > 0 && ng_term != expected_term))
+        {
+            // Leader transferred.
+            hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            LOG(ERROR) << "LocalCcHandler::FlushDataAll: the leader of the "
+                          "destinate node group transferred for ng#"
+                       << ng_id;
+            return;
+        }
+
+        cc_shards_.EnqueueDataSyncTask(table_name,
+                                       ng_id,
+                                       ng_term,
+                                       data_sync_ts,
+                                       nullptr,
+                                       nullptr,
+                                       nullptr,
+                                       nullptr,
+                                       is_dirty,
+                                       &hres);
+    }
+    else
+    {
+        // For remote node, use RPC service
+        std::string node_ip;
+        uint16_t node_port;
+        Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
+
+        brpc::Channel channel;
+        if (channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        {
+            // Fail to establish the channel to the target node.
+            LOG(ERROR) << "Flush data all: Fail to init the channel to the"
+                          " leader of ng#"
+                       << ng_id;
+            hres.SetError(CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED);
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+        remote::FlushDataAllRequest request;
+        request.set_tx_number(tx_number);
+        request.set_tx_term(tx_term);
+        request.set_command_id(command_id);
+        request.set_table_name_str(table_name.String());
+        request.set_table_type(
+            remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        request.set_node_group_id(ng_id);
+        request.set_node_group_term(expected_term);
+        request.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+        request.set_data_sync_ts(data_sync_ts);
+        request.set_is_dirty(is_dirty);
+        // This will be deleted after the response been handled.
+        remote::FlushDataAllResponse *response =
+            new remote::FlushDataAllResponse();
+
+        brpc::Controller *cntl = new brpc::Controller();
+        cntl->set_timeout_ms(-1);
+        // Asynchronous mode
+        google::protobuf::Closure *done =
+            brpc::NewCallback(&HandleFlushDataAllResponse, cntl, response);
+        stub.FlushDataAll(cntl, &request, response, done);
+        DLOG(INFO) << "Remote RPC FlushDataAll of ng#" << ng_id << ".";
     }
 }
 
@@ -1652,5 +1748,69 @@ void txservice::LocalCcHandler::HandleAcquireNodeGroupTermResponse(
     hd_res->SetFinished();
     LOG(INFO) << "Handle acquire node group term response for ng#" << ng_id
               << ", and term: " << term;
+    // Closure created by NewCallback deletes itself at the end of Run.
+}
+
+/**
+ * Handle RPC response
+ */
+void txservice::LocalCcHandler::HandleFlushDataAllResponse(
+    brpc::Controller *cntl, remote::FlushDataAllResponse *response)
+{
+    // std::unique_ptr make sure cntl/response will be deleted before
+    // returning.
+    std::unique_ptr<brpc::Controller> cntl_guard(cntl);
+    std::unique_ptr<remote::FlushDataAllResponse> response_guard(response);
+
+    if (cntl->Failed())
+    {
+        // RPC failed, fields in response are undefined, cannot use.
+        // Special case, cannot set HandlerResult.
+        LOG(ERROR) << "Failed to process the FlushDataAll RPC. Error code: "
+                   << cntl->ErrorCode() << ". Error Msg: " << cntl->ErrorText();
+        return;
+    }
+
+    // Handle response
+    CcHandlerResult<Void> *hd_res = nullptr;
+
+    uint32_t tx_node_id = (response->tx_number() >> 32L) >> 10L;
+    int64_t tx_term = response->tx_term();
+    if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+    {
+        LOG(WARNING) << "Flush data all response, but tx node has failed.";
+        // The tx node has failed. Pointer stability does not hold anymore.
+        return;
+    }
+    else
+    {
+        hd_res =
+            reinterpret_cast<CcHandlerResult<Void> *>(response->handler_addr());
+
+        if (hd_res->Txm()->TxNumber() != response->tx_number() ||
+            hd_res->Txm()->CommandId() != response->command_id())
+        {
+            LOG(WARNING) << "Flush data all response, but original tx has"
+                            " terminated.";
+            // The original tx has terminated and the tx machine has been
+            // recycled. The response is directed to an obsolete tx. Skips
+            // setting the cc handler result.
+            return;
+        }
+    }
+
+    if (response->error_code())
+    {
+        CcErrorCode error_code =
+            static_cast<CcErrorCode>(response->error_code());
+        LOG(ERROR) << "Handle flush data all response: Failed with error"
+                   << " message: " << cc_error_messages.at(error_code);
+        hd_res->SetError(error_code);
+    }
+    else
+    {
+        DLOG(INFO) << "Handle flush data all response successfully.";
+        hd_res->SetFinished();
+    }
     // Closure created by NewCallback deletes itself at the end of Run.
 }

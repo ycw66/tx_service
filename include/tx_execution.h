@@ -46,6 +46,7 @@ struct ClusterScaleTxRequest;
 struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
+struct UploadTxRequest;
 
 class TxProcessor;
 
@@ -131,6 +132,7 @@ public:
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
+    void ProcessTxRequest(UploadTxRequest &upload_req);
 
     /**
      * Interface for storage engine runtime.
@@ -176,6 +178,8 @@ public:
     int64_t TxTerm() const;
 
     uint16_t CommandId() const;
+
+    uint64_t CommitTs() const;
 
     uint32_t TxCcNodeId() const;
 
@@ -327,6 +331,18 @@ private:
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);
 
+    void Process(FlushDataAllOp &flush_data_all_op);
+    void PostProcess(FlushDataAllOp &flush_data_all_op);
+
+    void Process(AcquireLeaderTermOp &acquire_leader_term_op);
+    void PostProcess(AcquireLeaderTermOp &acquire_leader_term_op);
+
+    void Process(UploadOp &upload_op);
+    void PostProcess(UploadOp &upload_op);
+
+    void Process(KickoutDataAllOp &kickout_data_all_op);
+    void PostProcess(KickoutDataAllOp &kickout_data_all_op);
+
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
     void ScanClose(const std::vector<UnlockTuple> &unlock_batch,
@@ -423,6 +439,8 @@ private:
 
     std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
 
+    std::unique_ptr<UpsertTableIndexOp> index_op_;
+
     std::unordered_map<
         uint64_t,
         std::pair<TableWriteSet::const_iterator, TableWriteSet::const_iterator>>
@@ -453,6 +471,8 @@ private:
         *kvp_resp_;
     // Scan open result
     TxResult<size_t> *uint64_resp_;
+    // Response whose returned result is vector<int64_t>
+    TxResult<std::vector<int64_t>> *int64_vec_resp_;
 
     // detailed error message which indicates why does the transaction failed.
     // For example, during write log phase or validation phase.
@@ -508,6 +528,10 @@ private:
 
     ReleaseScanExtraLockOp abundant_lock_op_;
 
+    AcquireLeaderTermOp acquire_term_op_;
+    // Upload the data from local write set into ccmap.
+    UploadOp upload_op_;
+
     metrics::TimePoint tx_duration_start_;
 
     friend struct TransactionOperation;
@@ -548,6 +572,11 @@ private:
     friend struct AsyncOp;
     friend struct PostReadOperation;
     friend struct ObjectCommandOp;
+    friend struct FlushDataAllOp;
+    friend struct AcquireLeaderTermOp;
+    friend struct UploadOp;
+    friend struct KickoutDataAllOp;
+    friend struct UpsertTableIndexOp;
     friend class TxProcessor;
 };
 }  // namespace txservice

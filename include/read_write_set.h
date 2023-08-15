@@ -319,7 +319,7 @@ public:
         wset_bytes_cnt_ -= (key_it->second.key_->SerializedLength() +
                             key_it->second.rec_->SerializedLength());
 
-        auto it = tab_it->second.erase(key_it);
+        tab_it->second.erase(key_it);
         if (tab_it->second.size() == 0)
         {
             wset_.erase(tab_it);

@@ -33,6 +33,7 @@ thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
 thread_local CcRequestPool<RemoteAbortTransactionCc> abort_tran_pool_;
 thread_local CcRequestPool<RemoteBlockReqCheckCc> blocked_req_check_pool_;
+thread_local CcRequestPool<RemoteKickoutCcEntry> kickout_cc_entry_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -1371,6 +1372,72 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
 
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_KickoutDataRequest:
+    {
+        RemoteKickoutCcEntry *kickout_cc_entry_req =
+            kickout_cc_entry_pool_.NextRequest();
+        TX_TRACE_ASSOCIATE(msg.get(), kickout_cc_entry_req);
+        // Construct the ccrequest by deserializing the ccmessage
+        kickout_cc_entry_req->Reset(std::move(msg));
+        // Dispatch the request to all cores and run in parallel.
+        size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+        for (size_t idx = 0; idx < core_cnt; ++idx)
+        {
+            local_shards_.EnqueueCcRequest(idx, kickout_cc_entry_req);
+        }
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_KickoutDataResponse:
+    {
+        assert(msg->has_kickout_data_resp());
+
+        CcHandlerResult<Void> *hd_res = nullptr;
+
+        // Firstly, check whether the tx coordinator node is healthy, and
+        // the original tx is healthy, if not, throw away this ccmessage.
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx coordinator node has failed. Pointer stability
+            // does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            LOG(ERROR) << "Receive remote kickoutccentry response, but tx"
+                          " coordinator has filed.";
+            break;
+        }
+        else
+        {
+            hd_res =
+                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx state machine has
+                // been recycled. The response message is directed to an
+                // obsolete tx.
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+        }
+
+        // Handle the result.
+        const KickoutDataResponse &cc_resp = msg->kickout_data_resp();
+
+        if (!cc_resp.error_code())
+        {
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(cc_resp.error_code()));
+        }
+        else
+        {
+            hd_res->SetFinished();
+        }
+
+        // Recycle the cc message
         msg_pool_.enqueue(std::move(msg));
         break;
     }

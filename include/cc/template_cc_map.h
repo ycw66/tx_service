@@ -633,6 +633,20 @@ public:
                     shard_->mem_usage_ += added_mem_usage;
                 }
 
+                if (commit_ts < cce->commit_ts_)
+                {
+                    // Concurrent upsert_tx has write the latest value, so
+                    // discard the old value directly. For example, during add
+                    // index transaction, we will write the packed sk data that
+                    // generate from old pk records into the new sk ccmap, and
+                    // before this post write request, we do not acquire the
+                    // write lock on this TxKey, so this value has been updated
+                    // by a concurrent transaction.
+                    assert(is_forward);
+                    req.Result()->SetFinished();
+                    return true;
+                }
+
                 cce->commit_ts_ = commit_ts;
 
                 // FIXME: when working with MySQL, the key contains a binary

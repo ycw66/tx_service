@@ -15,4 +15,6 @@ inline const std::string UNIQUE_INDEX_NAME_PREFIX = "*~~";
 static constexpr int64_t UNKNOWN_TERM = -3;
 static constexpr int64_t SKIP_CHECK_TERM = -2;
 static constexpr int64_t INIT_TERM = -1;
+
+static constexpr uint32_t UPLOAD_BATCH_SIZE = 409600;
 }  // namespace txservice

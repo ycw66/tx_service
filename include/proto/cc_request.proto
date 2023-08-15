@@ -139,6 +139,7 @@ service CcRpcService {
 	rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
 	rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
 	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
+	rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
 }
 
 message TxId_msg {
@@ -220,6 +221,12 @@ enum SlicePosition {
 	LastSliceInRange = 2;
 	FirstSlice = 3;
 	LastSlice = 4;
+}
+
+enum CleanType {
+	CleanForFree = 0;
+	CleanForSplitRange = 1;
+	CleanForAlterTabel = 2;
 }
 
 message AcquireRequest {
@@ -610,6 +617,40 @@ message BlockedCcReqCheckResponse {
 	uint32 result_temp_type = 2;
 }
 
+message FlushDataAllRequest {
+	uint64 tx_number = 1;
+	int64 tx_term = 2;
+	uint64 command_id = 3;
+	string table_name_str = 4;
+	CcTableType table_type = 5;
+	uint32 node_group_id = 6;
+	int64 node_group_term = 7;
+	uint64 handler_addr = 8;
+	uint64 data_sync_ts = 9;
+	bool is_dirty = 10;
+}
+
+message FlushDataAllResponse {
+	int32 error_code = 1;
+	uint64 tx_number = 2;
+	int64 tx_term = 3;
+	uint64 command_id = 4;
+	uint64 handler_addr = 5;
+}
+
+message KickoutDataRequest {
+	uint32 src_node_id = 1;
+	uint32 node_group_id = 2;
+	string table_name_str = 3;
+	CcTableType table_type = 4;
+	uint64 ckpt_ts = 5;
+	CleanType clean_type = 6;
+}
+
+message KickoutDataResponse {
+	int32 error_code = 1;
+}
+
 message CcMessage {
 	enum MessageType {
 		AcquireRequest = 0;
@@ -645,6 +686,8 @@ message CcMessage {
 		ForwardPostCommitRequest = 43;
         AnalyzeTableAllRequest = 44;
         AnalyzeTableAllResponse = 45;
+		KickoutDataRequest = 46;
+		KickoutDataResponse = 47;
 	}
 
 	MessageType type = 1;
@@ -687,5 +730,7 @@ message CcMessage {
 		ForwardPostCommitRequest forward_post_commit_req = 51;
         AnalyzeTableAllRequest analyze_table_all_req = 52;
         AnalyzeTableAllResponse analyze_table_all_resp = 53;
+		KickoutDataRequest kickout_data_req = 54;
+		KickoutDataResponse kickout_data_resp = 55;
 	}
 }

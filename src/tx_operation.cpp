@@ -119,8 +119,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
             // read operation is set to be errored.
             hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
 
-            bool force_success = hd_result_.ForceError();
-            assert(force_success);
+            bool force_error = hd_result_.ForceError();
+            assert(force_error);
 
             txm->PostProcess(*this);
             return;
@@ -205,8 +205,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
             // timeout.
             // FIXME(lzx): Is it more appropriate to retry?
             // If the tx node fails, also force the tx to abort instantly.
-            bool force_success = hd_result_.ForceError();
-            if (force_success)
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
             {
                 txm->PostProcess(*this);
             }
@@ -930,8 +930,8 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
         }
         else
         {
-            bool force_success = hd_result_.ForceError();
-            if (force_success)
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
             {
                 txm->PostProcess(*this);
             }
@@ -1137,11 +1137,11 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             });
 
 #ifdef RANGE_PARTITION_ENABLED
-        bool force_success = slice_hd_result_.ForceError();
+        bool force_error = slice_hd_result_.ForceError();
 #else
-        bool force_success = hd_result_.ForceError();
+        bool force_error = hd_result_.ForceError();
 #endif
-        if (force_success)
+        if (force_error)
         {
             txm->PostProcess(*this);
         }
@@ -1540,7 +1540,7 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
                    const std::string &current_image,
                    const std::string &dirty_image,
                    uint64_t schema_ts,
-                   const std::string *alter_table_info_image)
+                   OperationType op_type)
     : table_key_(TableName(
           table_name_sv.data(), table_name_sv.size(), TableType::Primary))
 {
@@ -1549,9 +1549,85 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = schema_ts;
-    alter_table_info_image_str_ = alter_table_info_image != nullptr
-                                      ? *alter_table_info_image
-                                      : std::string("");
+    op_type_ = op_type;
+}
+
+void SchemaOp::FillPrepareLogRequestCommon(TransactionExecution *txm,
+                                           WriteToLogOp &prepare_log_op)
+{
+    prepare_log_op.log_type_ = TxLogType::PREPARE;
+
+    prepare_log_op.log_closure_.LogRequest().Clear();
+
+    ::txlog::WriteLogRequest *prepare_log_rec =
+        prepare_log_op.log_closure_.LogRequest().mutable_write_log_request();
+
+    prepare_log_rec->set_tx_term(txm->TxTerm());
+    prepare_log_rec->set_txn_number(txm->TxNumber());
+    prepare_log_rec->set_commit_timestamp(txm->CommitTs());
+
+    ::txlog::SchemaOpMessage *prepare_schema_msg =
+        prepare_log_rec->mutable_log_content()->mutable_schema_log();
+    prepare_schema_msg->set_table_name_str(table_key_.Name().String());
+    prepare_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
+    prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
+    prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
+    prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
+    prepare_schema_msg->mutable_table_op()->set_op_type(
+        static_cast<::google::protobuf::uint32>(op_type_));
+    prepare_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareSchema);
+}
+
+void SchemaOp::FillCommitLogRequestCommon(TransactionExecution *txm,
+                                          WriteToLogOp &commit_log_op)
+{
+    commit_log_op.log_type_ = TxLogType::COMMIT;
+
+    commit_log_op.log_closure_.LogRequest().Clear();
+
+    ::txlog::WriteLogRequest *commit_log_rec =
+        commit_log_op.log_closure_.LogRequest().mutable_write_log_request();
+
+    commit_log_rec->set_tx_term(txm->TxTerm());
+    commit_log_rec->set_txn_number(txm->TxNumber());
+
+    ::txlog::SchemaOpMessage *commit_schema_msg =
+        commit_log_rec->mutable_log_content()->mutable_schema_log();
+
+    commit_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
+
+    // The prepare log keeps all cc nodes' terms and match them in the log
+    // service to detect invalidated write intents. The commit log, however,
+    // does not match terms in the log service. This is because all
+    // operations after the prepare log are retried or replayed upon
+    // failures to guarantee that the schema operation always roll forward.
+    // If a cc node fails over, the new node must restore write intents
+    // gained prior to the prepare log and then replay operations between
+    // the prepare log and the commit log, which in this case upgrade write
+    // intents to write locks. So, there is no need to check the liveness of
+    // write locks when flushing the commit log.
+    commit_log_rec->mutable_node_terms()->clear();
+}
+
+void SchemaOp::FillCleanLogRequestCommon(TransactionExecution *txm,
+                                         WriteToLogOp &clean_log_op)
+{
+    clean_log_op.log_type_ = TxLogType::CLEAN;
+
+    clean_log_op.log_closure_.LogRequest().Clear();
+
+    ::txlog::WriteLogRequest *clean_log_rec =
+        clean_log_op.log_closure_.LogRequest().mutable_write_log_request();
+
+    clean_log_rec->set_tx_term(txm->TxTerm());
+    clean_log_rec->set_txn_number(txm->TxNumber());
+
+    ::txlog::SchemaOpMessage *clean_schema_msg =
+        clean_log_rec->mutable_log_content()->mutable_schema_log();
+
+    clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
+    clean_log_rec->mutable_node_terms()->clear();
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
@@ -1559,14 +1635,9 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
                              uint64_t curr_schema_ts,
                              const std::string &dirty_image,
                              OperationType op_type,
-                             TransactionExecution *txm,
-                             const std::string *alter_table_info_image)
-    : SchemaOp(table_name_str,
-               current_image,
-               dirty_image,
-               curr_schema_ts,
-               alter_table_info_image),
-      op_type_(op_type),
+                             TransactionExecution *txm)
+    : SchemaOp(
+          table_name_str, current_image, dirty_image, curr_schema_ts, op_type),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -1578,6 +1649,9 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       clean_log_op_(txm),
       read_cluster_result_(txm)
 {
+    assert(op_type_ == OperationType::CreateTable ||
+           op_type_ == OperationType::DropTable);
+
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
     lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
@@ -1605,8 +1679,6 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     post_all_lock_op_.rec_ = &catalog_rec_;
     post_all_lock_op_.op_type_ = op_type_;
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
-
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
@@ -1808,8 +1880,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::DropIndex)
+        else if (op_type_ == OperationType::DropTable)
         {
             // For DROP TABLE operations, the data store operation of
             // deleting the k-v table happens after the commit log is
@@ -1825,7 +1896,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // installs the dirty schema in the tx service and returns a
             // local view (pointer) of the committed and dirty schema.
             upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+            upsert_kv_table_op_.alter_table_info_ = nullptr;
             txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }
@@ -1853,8 +1924,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                  tx_node_candid_term >= 0))
             {
                 // Keep retrying if it is DropTable or DropIndex.
-                if (op_type_ == OperationType::DropTable ||
-                    op_type_ == OperationType::DropIndex)
+                if (op_type_ == OperationType::DropTable)
                 {
                     txm->PushOperation(&upsert_kv_table_op_);
                     txm->Process(upsert_kv_table_op_);
@@ -1899,8 +1969,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::DropIndex)
+        else if (op_type_ == OperationType::DropTable)
         {
             // Clear write set before commit dirty schema.
             txm->rw_set_.ClearTable(table_key_.Name());
@@ -1991,8 +2060,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (op_type_ == OperationType::DropTable ||
-                op_type_ == OperationType::DropIndex)
+            if (op_type_ == OperationType::DropTable)
             {
                 op_ = &upsert_kv_table_op_;
                 // Read table schema from local cc shard. This is because we
@@ -2003,10 +2071,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 auto catalog_entry =
                     shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
                 upsert_kv_table_op_.table_schema_ =
-                    (op_type_ == OperationType::DropTable)
-                        ? catalog_entry->schema_.get()
-                        : catalog_entry->dirty_schema_.get();
-                upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+                    catalog_entry->schema_.get();
+                upsert_kv_table_op_.alter_table_info_ = nullptr;
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
@@ -2099,7 +2165,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
 
             op_ = &clean_log_op_;
-            FillCleanLogRequest(txm);
+            FillCleanLogRequestCommon(txm, clean_log_op_);
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
         }
@@ -2156,9 +2222,11 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
                           uint64_t curr_schema_ts,
                           const std::string &dirty_image,
                           OperationType op_type,
-                          TransactionExecution *txm,
-                          const std::string *alter_table_info_image)
+                          TransactionExecution *txm)
 {
+    assert(op_type_ == OperationType::CreateTable ||
+           op_type_ == OperationType::DropTable);
+
     // reset TransactionOperation
     retry_num_ = RETRY_NUM;
     is_running_ = false;
@@ -2171,9 +2239,6 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = curr_schema_ts;
-    alter_table_info_image_str_ = alter_table_info_image != nullptr
-                                      ? *alter_table_info_image
-                                      : std::string("");
 
     // reset UpsertTableOp
     op_type_ = op_type;
@@ -2203,8 +2268,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     post_all_intent_op_.op_type_ = op_type_;
     post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
-    upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+    upsert_kv_table_op_.alter_table_info_ = nullptr;
     upsert_kv_table_op_.op_type_ = op_type_;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
@@ -2232,29 +2296,9 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 
 void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
 {
-    prepare_log_op_.log_type_ = TxLogType::PREPARE;
-
-    prepare_log_op_.log_closure_.LogRequest().Clear();
-
+    FillPrepareLogRequestCommon(txm, prepare_log_op_);
     ::txlog::WriteLogRequest *prepare_log_rec =
         prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    prepare_log_rec->set_tx_term(txm->tx_term_);
-    prepare_log_rec->set_txn_number(txm->TxNumber());
-    prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
-
-    ::txlog::SchemaOpMessage *prepare_schema_msg =
-        prepare_log_rec->mutable_log_content()->mutable_schema_log();
-    prepare_schema_msg->set_table_name_str(table_key_.Name().String());
-    prepare_schema_msg->set_table_type(
-        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
-    prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
-    prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
-    prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
-    prepare_schema_msg->set_alter_table_info_blob(alter_table_info_image_str_);
-    prepare_schema_msg->mutable_table_op()->set_op_type(
-        static_cast<::google::protobuf::uint32>(op_type_));
-    prepare_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareSchema);
 
     auto &node_terms = *prepare_log_rec->mutable_node_terms();
     node_terms.clear();
@@ -2267,18 +2311,10 @@ void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
 
 void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
 {
-    commit_log_op_.log_type_ = TxLogType::COMMIT;
-
-    commit_log_op_.log_closure_.LogRequest().Clear();
+    FillCommitLogRequestCommon(txm, commit_log_op_);
 
     ::txlog::WriteLogRequest *commit_log_rec =
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    commit_log_rec->set_tx_term(txm->tx_term_);
-    commit_log_rec->set_txn_number(txm->TxNumber());
-
-    ::txlog::SchemaOpMessage *commit_schema_msg =
-        commit_log_rec->mutable_log_content()->mutable_schema_log();
 
     if (upsert_kv_table_op_.hd_result_.IsError())
     {
@@ -2290,38 +2326,6 @@ void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
         assert(txm->commit_ts_ != tx_op_failed_ts_);
         commit_log_rec->set_commit_timestamp(txm->commit_ts_);
     }
-    commit_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
-
-    // The prepare log keeps all cc nodes' terms and match them in the log
-    // service to detect invalidated write intents. The commit log, however,
-    // does not match terms in the log service. This is because all
-    // operations after the prepare log are retried or replayed upon
-    // failures to guarantee that the schema operation always roll forward.
-    // If a cc node fails over, the new node must restore write intents
-    // gained prior to the prepare log and then replay operations between
-    // the prepare log and the commit log, which in this case upgrade write
-    // intents to write locks. So, there is no need to check the liveness of
-    // write locks when flushing the commit log.
-    commit_log_rec->mutable_node_terms()->clear();
-}
-
-void UpsertTableOp::FillCleanLogRequest(TransactionExecution *txm)
-{
-    clean_log_op_.log_type_ = TxLogType::CLEAN;
-
-    clean_log_op_.log_closure_.LogRequest().Clear();
-
-    ::txlog::WriteLogRequest *clean_log_rec =
-        clean_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    clean_log_rec->set_tx_term(txm->tx_term_);
-    clean_log_rec->set_txn_number(txm->TxNumber());
-
-    ::txlog::SchemaOpMessage *clean_schema_msg =
-        clean_log_rec->mutable_log_content()->mutable_schema_log();
-
-    clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
-    clean_log_rec->mutable_node_terms()->clear();
 }
 
 void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
@@ -4047,8 +4051,8 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             // read operation is set to be errored.
             hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
 
-            bool force_success = hd_result_.ForceError();
-            assert(force_success);
+            bool force_error = hd_result_.ForceError();
+            assert(force_error);
 
             txm->PostProcess(*this);
             return;
@@ -4452,6 +4456,2058 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
             txlog::BucketMigrateMessage_Stage_NotStarted);
         // This will set when the real migrate starts.
         migrate_process->set_migrate_ts(0);
+    }
+}
+
+FlushDataAllOp::FlushDataAllOp(TransactionExecution *txm) : hd_result_(txm)
+{
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    expected_ng_terms_.reserve(ng_cnt);
+
+    for (size_t idx = 0; idx < ng_cnt; ++idx)
+    {
+        expected_ng_terms_.push_back(INIT_TERM);
+    }
+}
+
+FlushDataAllOp::FlushDataAllOp(const TableName *table_name,
+                               TransactionExecution *txm)
+    : hd_result_(txm)
+{
+    table_names_.push_back(table_name);
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    expected_ng_terms_.reserve(ng_cnt);
+
+    for (size_t idx = 0; idx < ng_cnt; ++idx)
+    {
+        expected_ng_terms_.push_back(INIT_TERM);
+    }
+}
+
+void FlushDataAllOp::Reset(size_t ng_cnt, size_t table_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(ng_cnt * table_cnt);
+    node_group_cnt_ = ng_cnt;
+
+    Resize();
+}
+
+void FlushDataAllOp::Clear()
+{
+    table_names_.clear();
+    for (size_t idx = 0; idx < expected_ng_terms_.size(); ++idx)
+    {
+        expected_ng_terms_.at(idx) = INIT_TERM;
+    }
+}
+
+void FlushDataAllOp::Resize()
+{
+    assert(node_group_cnt_ > 0);
+
+    size_t old_size = expected_ng_terms_.size();
+    if (old_size < node_group_cnt_)
+    {
+        for (size_t idx = old_size; idx < node_group_cnt_; ++idx)
+        {
+            expected_ng_terms_.push_back(INIT_TERM);
+        }
+    }
+}
+
+void FlushDataAllOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+void FlushDataAllOp::Forward(TransactionExecution *txm)
+{
+    // Start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::TX_NODE_NOT_LEADER)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut(600))
+    {
+        LOG(INFO) << "Flush data all operation timeout 60s, force to failed.";
+        bool force_error = hd_result_.ForceError();
+        // If force_error is false, means this operaiton finished normal.
+        if (force_error)
+        {
+            txm->PostProcess(*this);
+        }
+    }
+}
+
+AcquireLeaderTermOp::AcquireLeaderTermOp(TransactionExecution *txm)
+    : hd_result_(txm)
+{
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    auto &ng_terms = hd_result_.Value();
+    for (uint32_t idx = 0; idx < ng_cnt; ++idx)
+    {
+        ng_terms.push_back(INIT_TERM);
+    }
+}
+
+void AcquireLeaderTermOp::Reset(size_t ng_cnt)
+{
+    hd_result_.Reset();
+    auto &ng_terms = hd_result_.Value();
+
+    // Resize the vector of the node group terms.
+    size_t old_size = ng_terms.size();
+    if (ng_cnt > old_size)
+    {
+        for (size_t idx = old_size; idx < ng_cnt; ++idx)
+        {
+            ng_terms.push_back(INIT_TERM);
+        }
+    }
+}
+
+void AcquireLeaderTermOp::Clear()
+{
+    auto &ng_terms = hd_result_.Value();
+    for (size_t idx = 0; idx < ng_terms.size(); ++idx)
+    {
+        ng_terms.at(idx) = INIT_TERM;
+    }
+}
+
+void AcquireLeaderTermOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+    else if (hd_result_.IsFinished())
+    {
+        if (hd_result_.IsError())
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        LOG(INFO) << "Acquire node group leader term operation timeout 10s, "
+                     "force to failed.";
+        hd_result_.ForceError();
+    }
+}
+
+UploadOp::UploadOp(TransactionExecution *txm)
+    : hd_result_(txm)
+#ifdef RANGE_PARTITION_ENABLED
+      ,
+      catalog_range_hd_result_(txm),
+      releasing_range_lock_(false)
+#endif
+{
+    hd_result_.Value().Clear();
+
+#ifdef RANGE_PARTITION_ENABLED
+    range_entries_.clear();
+#endif
+}
+
+void UploadOp::Reset(size_t write_cnt, size_t catalog_range_read_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(write_cnt);
+
+#ifdef RANGE_PARTITION_ENABLED
+    catalog_range_hd_result_.Reset();
+    catalog_range_hd_result_.Value().Clear();
+    if (catalog_range_read_cnt == 0)
+    {
+        catalog_range_hd_result_.SetFinished();
+    }
+    else
+    {
+        catalog_range_hd_result_.SetRefCnt(catalog_range_read_cnt);
+    }
+    releasing_range_lock_ = false;
+#endif
+}
+
+void UploadOp::Reset()
+{
+    hd_result_.Reset();
+    hd_result_.Value().Clear();
+
+#ifdef RANGE_PARTITION_ENABLED
+    range_entries_.clear();
+#endif
+    upload_status_ = UploadStatus::Ongoing;
+}
+
+void UploadOp::Forward(TransactionExecution *txm)
+{
+    // Start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        // For non-leader-transfer error, re-run this op.
+        if (upload_status_ == UploadStatus::Ongoing && hd_result_.IsError() &&
+            hd_result_.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::TX_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::OUT_OF_MEMORY &&
+            hd_result_.ErrorCode() != CcErrorCode::FORCE_FAIL)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+#ifdef RANGE_PARTITION_ENABLED
+        if (catalog_range_hd_result_.IsFinished())
+        {
+            upload_status_ = UploadStatus::Finished;
+            txm->PostProcess(*this);
+        }
+        else if (!releasing_range_lock_)
+        {
+            // Release range lock
+            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+            releasing_range_lock_ = true;
+        }
+#else
+        upload_status_ = UploadStatus::Finished;
+        txm->PostProcess(*this);
+#endif
+    }
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+    {
+        LOG(INFO) << "Upload entries operation timeout 10s, force to failed.";
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
+        {
+#ifdef RANGE_PARTITION_ENABLED
+            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+            releasing_range_lock_ = true;
+#else
+            upload_status_ = UploadStatus::Finished;
+            txm->PostProcess(*this);
+#endif
+        }
+    }
+}
+
+void UploadOp::AddRangeEntry(const TableName &table_name,
+                             const CcEntryAddr &cce_addr)
+{
+#ifdef RANGE_PARTITION_ENABLED
+    auto cce_iter = range_entries_.find(table_name);
+    if (cce_iter == range_entries_.end())
+    {
+        auto insert_it = range_entries_.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(table_name.StringView(), table_name.Type()),
+            std::forward_as_tuple(std::unordered_set<CcEntryAddr>()));
+        cce_iter = insert_it.first;
+    }
+
+    cce_iter->second.insert(cce_addr);
+#endif
+}
+
+void UploadOp::RemoveRangeEntry(TransactionExecution *txm)
+{
+#ifdef RANGE_PARTITION_ENABLED
+    for (auto table_it = range_entries_.begin();
+         table_it != range_entries_.end();
+         ++table_it)
+    {
+        const TableName &range_table_name = table_it->first;
+        std::unordered_set<CcEntryAddr> &entries = table_it->second;
+        std::for_each(entries.begin(),
+                      entries.end(),
+                      [&range_table_name, txm](CcEntryAddr cce_addr)
+                      { txm->rw_set_.DedupRead(range_table_name, cce_addr); });
+    }
+    range_entries_.clear();
+#endif
+}
+
+KickoutDataAllOp::KickoutDataAllOp(TransactionExecution *txm) : hd_result_(txm)
+{
+}
+
+void KickoutDataAllOp::Reset(uint32_t ng_cnt, size_t table_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(ng_cnt * table_cnt);
+}
+
+void KickoutDataAllOp::Clear()
+{
+    table_names_.clear();
+}
+
+void KickoutDataAllOp::ResetHandlerTxm(TransactionExecution *txm)
+{
+    hd_result_.ResetTxm(txm);
+}
+
+void KickoutDataAllOp::Forward(TransactionExecution *txm)
+{
+    // Start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        // If leader-transferred, do not need to kickout data any more.
+        if (hd_result_.IsError() &&
+            hd_result_.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_result_.ErrorCode() != CcErrorCode::TX_NODE_NOT_LEADER)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut(30))
+    {
+        LOG(INFO) << "Kickout data all operation timeout 30s, re-run this "
+                     "operation with the retry number: "
+                  << retry_num_;
+        if (retry_num_ > 0)
+        {
+            ReRunOp(txm);
+            return;
+        }
+        else
+        {
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
+        }
+    }
+}
+
+UpsertTableIndexOp::UpsertTableIndexOp(
+    const std::string_view table_name_sv,
+    const std::string &current_image,
+    uint64_t curr_schema_ts,
+    const std::string &dirty_image,
+    const std::string &alter_table_info_image,
+    OperationType op_type,
+    TransactionExecution *txm)
+    : SchemaOp(
+          table_name_sv, current_image, dirty_image, curr_schema_ts, op_type),
+      lock_cluster_config_op_(),
+      acquire_all_intent_op_(txm),
+      upgrade_all_intent_to_lock_op_(txm),
+      prepare_log_op_(txm),
+      downgrade_all_lock_to_intent_op_(txm),
+      upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
+      flush_all_old_tuples_pk_op_(&table_key_.Name(), txm),
+      fetch_old_tuples_from_kv_gen_sk_data_upload_op_(txm),
+      flush_all_old_tuples_sk_op_(txm),
+      kickout_data_all_op_(txm),
+      prepare_log_for_sk_op_(txm),
+      acquire_all_lock_op_(txm),
+      commit_log_op_(txm),
+      post_all_lock_op_(txm),
+      clean_log_op_(txm),
+      read_cluster_result_(txm),
+      alter_table_info_image_str_(alter_table_info_image)
+{
+    assert(op_type_ == OperationType::AddIndex ||
+           op_type_ == OperationType::DropIndex);
+
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
+    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_intent_op_.key_ = &table_key_;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
+
+    upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
+    upgrade_all_intent_to_lock_op_.key_ = &table_key_;
+    upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
+    upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
+
+    downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
+    downgrade_all_lock_to_intent_op_.key_ = &table_key_;
+    downgrade_all_lock_to_intent_op_.rec_ = &catalog_rec_;
+    downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
+    downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
+
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.key_ = &table_key_;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+
+    post_all_lock_op_.table_name_ = &catalog_ccm_name;
+    post_all_lock_op_.key_ = &table_key_;
+    post_all_lock_op_.rec_ = &catalog_rec_;
+    post_all_lock_op_.op_type_ = op_type_;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+
+    TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &upgrade_all_intent_to_lock_op_,
+                       "upgrade_all_intent_to_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &downgrade_all_lock_to_intent_op_,
+                       "downgrade_all_lock_to_intent_op_");
+    TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &flush_all_old_tuples_pk_op_, "flush_all_old_tuples_pk_op_");
+    TX_TRACE_ASSOCIATE(this,
+                       &fetch_old_tuples_from_kv_gen_sk_data_upload_op_,
+                       "fetch_old_tuples_from_kv_gen_sk_data_upload_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &flush_all_old_tuples_sk_op_, "flush_all_old_tuples_sk_op_");
+    TX_TRACE_ASSOCIATE(this, &prepare_log_for_sk_op_, "prepare_log_for_sk_op_");
+    TX_TRACE_ASSOCIATE(this, &kickout_data_all_op_, "kickout_data_all_op_");
+    TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
+    TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
+}
+
+void UpsertTableIndexOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            LOG(ERROR)
+                << "Alter Table Index read cluster config failed, tx_number:"
+                << txm->TxNumber();
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+            return;
+        }
+        // Acquire write intent, and then upgrade to write lock(Locking),
+        // rather than acquire write lock(OCC) directly, aim to avoid two
+        // situations: (1) concurrent DDL deadlock. (2) concurrent DML cause to
+        // always abort this tx.
+        LOG(INFO) << "Alter Table Index transaction prepare acquire all write"
+                  << " intent, txn: " << txm->TxNumber();
+        op_ = &acquire_all_intent_op_;
+        txm->PushOperation(&acquire_all_intent_op_);
+        txm->Process(acquire_all_intent_op_);
+    }
+    else if (op_ == &acquire_all_intent_op_)
+    {
+        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
+            0)
+        {
+            LOG(ERROR) << "Upsert index for table: "
+                       << table_key_.Name().String()
+                       << ", acquire write intent failed, tx_number:"
+                       << txm->tx_number_;
+            txm->bool_resp_->SetErrorCode(
+                TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
+            // Fails to acquire the write intent on the schema. Since write
+            // intents only conflict with other writes, there must be
+            // another tx trying to modify the same table's schema. Stops
+            // the schema operation. Set the commit ts to 0 to signal that
+            // the following post write operation releases all write
+            // intents.
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+            return;
+        }
+
+        // To avoid deadlock. If hold write lock directly, rather than get
+        // write intent, and upgrade to write lock, concurrent DDL on the
+        // same table may cause to deadlock.
+        LOG(INFO) << "Alter Table Index transaction prepare acquire all write"
+                  << " lock, txn: " << txm->TxNumber();
+        op_ = &upgrade_all_intent_to_lock_op_;
+        txm->PushOperation(&upgrade_all_intent_to_lock_op_);
+        txm->Process(upgrade_all_intent_to_lock_op_);
+    }
+    else if (op_ == &upgrade_all_intent_to_lock_op_)
+    {
+        if (upgrade_all_intent_to_lock_op_.fail_cnt_.load(
+                std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Upsert index for table: "
+                       << table_key_.Name().String()
+                       << ", upgrade write lock failed, tx_number: "
+                       << txm->tx_number_;
+            // Set the commit ts to 0 to signal that the following post write
+            // operation releases all write intents.
+            txm->commit_ts_ = tx_op_failed_ts_;
+            // Moves to the last operation that removes all write
+            // intents/locks.
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+            return;
+        }
+
+        // Assigns a commit timestamp to the txm as the version of the new
+        // schema. Rules to calculate the commit ts: the new schema's version
+        // should be greater than (1) the current version, (2) the maximal
+        // commit ts of all tx that have read the schema, (3) the local time
+        // when the tx starts.
+        txm->commit_ts_ = txm->commit_ts_bound_ + 1;
+
+        for (size_t idx = 0; idx < upgrade_all_intent_to_lock_op_.upload_cnt_;
+             ++idx)
+        {
+            const AcquireAllResult &upgrade_all_res =
+                upgrade_all_intent_to_lock_op_.hd_results_[idx].Value();
+            uint64_t ts = std::max(upgrade_all_res.commit_ts_ + 1,
+                                   upgrade_all_res.last_vali_ts_ + 1);
+            txm->commit_ts_ = std::max(txm->commit_ts_, ts);
+        }
+
+        LOG(INFO) << "Alter Table Index transaction write prepare log, txn: "
+                  << txm->TxNumber();
+        op_ = &prepare_log_op_;
+        FillPrepareLogRequest(txm);
+        txm->PushOperation(&prepare_log_op_);
+        txm->Process(prepare_log_op_);
+    }
+    else if (op_ == &prepare_log_op_)
+    {
+        if (prepare_log_op_.hd_result_.IsError())
+        {
+            if (prepare_log_op_.hd_result_.ErrorCode() ==
+                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+            {
+                // prepare log result unknown, keep retrying until getting a
+                // clear response, either success or failure, or the coordinator
+                // itself is no longer leader
+                int64_t tx_node_term =
+                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+                if (tx_node_term > 0)
+                {
+                    LOG(WARNING) << "Upsert index for table: "
+                                 << table_key_.Name().String()
+                                 << ", write prepare log result unknown, "
+                                    "tx_number:"
+                                 << txm->tx_number_ << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    txm->PushOperation(&prepare_log_op_);
+                    txm->Process(prepare_log_op_);
+                }
+                else
+                {
+                    LOG(ERROR) << "Upsert index for table: "
+                               << table_key_.Name().String()
+                               << ", write prepare log result unknown, "
+                                  "tx_number:"
+                               << txm->tx_number_
+                               << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if it
+                    // does. Should not release the write intents. If prepare
+                    // log is not written, the write intents will be released
+                    // individually via orphan lock recovery mechanism.
+                    txm->bool_resp_->SetErrorCode(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
+
+                    txm->bool_resp_->Finish(false);
+                    txm->state_stack_.pop_back();
+                    assert(txm->state_stack_.empty());
+                    LocalCcShards *local_cc_shards =
+                        Sharder::Instance().GetLocalCcShards();
+                    std::unique_lock<std::mutex> lk(
+                        local_cc_shards->table_index_op_pool_mux_);
+                    local_cc_shards->table_index_op_pool_.emplace_back(
+                        std::move(txm->index_op_));
+                }
+            }
+            else
+            {
+                LOG(ERROR) << "Upsert index for table: "
+                           << table_key_.Name().String()
+                           << ", write prepare log failed, tx_number:"
+                           << txm->tx_number_;
+                // Fails to flush the prepare log. The schema operation is
+                // considered failed if the prepare log is not flushed. The
+                // commit ts is set to 0 to signal that the following post write
+                // operation releases all write intents.
+                txm->commit_ts_ = tx_op_failed_ts_;
+                // Moves to the last operation that removes all write
+                // intents/locks.
+                op_ = &post_all_lock_op_;
+
+                txm->bool_resp_->SetErrorCode(
+                    TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
+
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction install dirty table"
+                      << " schema, txn: " << txm->TxNumber();
+            op_ = &downgrade_all_lock_to_intent_op_;
+
+            txm->PushOperation(&downgrade_all_lock_to_intent_op_);
+            txm->Process(downgrade_all_lock_to_intent_op_);
+        }
+    }
+    else if (op_ == &downgrade_all_lock_to_intent_op_)
+    {
+        if (downgrade_all_lock_to_intent_op_.hd_result_.IsError())
+        {
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // After the prepare log is flushed, the schema op is guaranteed
+            // to succeed and can only roll forward. Retry this step to
+            // install the dirty schema in the tx service, if the tx node is
+            // still the leader. The tx is also allowed to proceed if the tx
+            // is in the recovery mode and the tx node is a leader
+            // candidate.
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
+            {
+                // set catalog_rec_'s binary_value_ to image_str since it
+                // could be set to TableSchemaView pointer in localshard.
+                catalog_rec_.SetSchemaImage(image_str_);
+                catalog_rec_.SetDirtySchemaImage(dirty_image_str_);
+
+                txm->PushOperation(&downgrade_all_lock_to_intent_op_);
+                txm->Process(downgrade_all_lock_to_intent_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        // TODO(ysw): For DropIndex, since we already got all WriteLock, so it
+        // OK as the order below:
+        // WriteLock->Preparelog->InstallDirtySchema(but donot downgrade to
+        // WriteIntent)->Commitlog.
+        else if (op_type_ == OperationType::DropIndex)
+        {
+            // For DROP INDEX opertaion, the data store operation of deleting
+            // the k-v table happens after the commit log is flushed.
+            LOG(INFO) << "Alter Table Index transaction post acquire all"
+                      << " write lock, txn: " << txm->TxNumber();
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction upsert data store"
+                      << " info, txn: " << txm->TxNumber();
+            op_ = &upsert_kv_table_op_;
+            // The post write request right after flushing the prepare log
+            // installs the dirty schema in the tx service and returns a
+            // local view (pointer) of the committed and dirty schema.
+            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
+            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+            txm->PushOperation(&upsert_kv_table_op_);
+            txm->Process(upsert_kv_table_op_);
+        }
+    }
+    else if (op_ == &upsert_kv_table_op_)
+    {
+        if (upsert_kv_table_op_.hd_result_.IsError())
+        {
+            // The candidate term is set when the cc node becomes the Raft
+            // leader of the cc node group. It is set to -1 after the cc
+            // node leader has replayed the log and the leader term is set.
+            // Since the candidate term is set to -1 after the leader term ,
+            // obtains the candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // The data store operation failed. Retries the operation if the
+            // tx node is the leader or the tx is in the recovery mode and
+            // the cc node is a leader candidate.
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
+            {
+                // NOTE: The logic of this part is consistent with the logic in
+                // UpsertTableOp::Forward.
+                // Keep retrying if it is DropIndex.
+                if (op_type_ == OperationType::DropIndex)
+                {
+                    txm->PushOperation(&upsert_kv_table_op_);
+                    txm->Process(upsert_kv_table_op_);
+                }
+                else
+                {
+                    LOG(ERROR) << "Upsert index for table: "
+                               << table_key_.Name().String()
+                               << ", Failed to create tables in kv store";
+
+                    /*
+                    After upsert kv fails, we need to flush a commit log to
+                    indicate this error.
+                    If we skip this commit log and jump to post_all_lock_op_
+                    directly, once the participant crashes at the point between
+                    it releases write intent and the coordinator flushes
+                    clean_log, then during recovery, the participant sees a
+                    prepare_log(whose commit_ts is not 0) and recovers write
+                    lock and dirty_catalog.
+                    Since the coordinator has finished its job, the write
+                    lock recovered by participant becomes orphan lock, and the
+                    dirty catalog can not be rejected either.
+                    Also, in the current design, post_all_intent_op_ does not
+                    release the write intent, which means the write intent is
+                    still being held after upsert_kv_table_op_(during
+                    CreateTable or AddIndex). If create table or add index in kv
+                    fails, the only thing we should do after writing commit_log
+                    is to reject dirty schema. So there is no need to upgrade
+                    write intent to write lock, and it is safe to skip
+                    acquire_all_lock_op_ and jump directly to commit_log_op_.
+                    */
+                    op_ = &commit_log_op_;
+                    FillCommitLogRequest(txm);
+                    txm->PushOperation(&commit_log_op_);
+                    txm->Process(commit_log_op_);
+                }
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else if (op_type_ == OperationType::DropIndex)
+        {
+            // For DROP INDEX, the data store operation happens after all
+            // write locks are acquired and commit log is flushed.
+            LOG(INFO) << "Alter Table Index transaction commit dirty table"
+                      << " schema, txn: " << txm->TxNumber();
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+        }
+        else
+        {
+#if !(defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+            // #ifndef RANGE_PARTITION_ENABLED
+            LOG(INFO) << "Alter Table Index transaction flush all old base"
+                      << " table data into data store, txn: " << txm->TxNumber()
+                      << ", and commit ts: " << txm->commit_ts_;
+            assert(op_type_ == OperationType::AddIndex);
+
+            flush_all_old_tuples_pk_op_.commit_ts_ = txm->commit_ts_;
+            flush_all_old_tuples_pk_op_.is_dirty_ = false;
+            flush_all_old_tuples_pk_op_.Clear();
+            flush_all_old_tuples_pk_op_.table_names_.push_back(
+                &table_key_.Name());
+
+            op_ = &flush_all_old_tuples_pk_op_;
+            txm->PushOperation(&flush_all_old_tuples_pk_op_);
+            txm->Process(flush_all_old_tuples_pk_op_);
+        }
+    }
+    else if (op_ == &flush_all_old_tuples_pk_op_)
+    {
+        if (flush_all_old_tuples_pk_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Upsert index for table: "
+                       << table_key_.Name().String()
+                       << ", flush all old tuples pk failed,"
+                          " tx_number:"
+                       << txm->tx_number_;
+
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candidate_term >= 0))
+            {
+                LOG(INFO) << "Retry flush all old pk data.";
+                txm->PushOperation(&flush_all_old_tuples_pk_op_);
+                txm->Process(flush_all_old_tuples_pk_op_);
+            }
+            else
+            {
+                // Finish this tx if this node is no longer the leader.
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+#endif
+            LOG(INFO) << "Alter Table Index transaction fetch all old pk data"
+                      << " from data store and generate new sk data for new"
+                      << " added index and upload new sk data into ccmap,"
+                      << " txn: " << txm->TxNumber();
+            std::vector<int64_t> &ng_terms =
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                    .Value();
+            ng_terms.clear();
+
+            // To sleep 4s if failed.
+            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.retry_num_ = 3;
+            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.op_func_ =
+                [this, txm, &ng_terms]
+            {
+                // Launch a new thread instead of sending it to tx workpool to
+                // avoid blocking range split workers.
+                std::thread upload_worker = std::thread(
+                    [this, txm, &ng_terms]
+                    { this->FetchTuplesAndUploadPackedKey(txm, ng_terms); });
+                upload_worker.detach();
+            };
+
+            op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
+            txm->PushOperation(
+                &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+            txm->Process(fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+        }
+    }
+    else if (op_ == &fetch_old_tuples_from_kv_gen_sk_data_upload_op_)
+    {
+        if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                .IsError())
+        {
+            LOG(ERROR) << "Upsert index for table: "
+                       << table_key_.Name().String()
+                       << ", fetch old tuples from kv and upload packed sk"
+                          " failed, tx_number:"
+                       << txm->tx_number_;
+
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candidate_term >= 0))
+            {
+                LOG(INFO) << "Upsert index: Retry fetch tuples from kv and"
+                             " generate packed sk data.";
+                txm->PushOperation(
+                    &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+                txm->Process(fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+            }
+            else
+            {
+                // Finish this tx if this node is no longer the leader.
+                ForceToFinish(txm);
+            }
+            return;
+        }
+
+        CODE_FAULT_INJECTOR(
+            "term_AlterTableIndex_GeneratePackedSkOp_Continue", {
+                static uint64_t count = 0;
+                if (count++ % 100000 == 0)
+                {
+                    DLOG(INFO) << "FaultInject term_AlterTableIndex_Generate"
+                                  "PackedSkOp_Continue";
+                }
+                return;
+            });
+
+        assert(op_type_ == OperationType::AddIndex);
+        assert(alter_table_info_.index_add_count_ ==
+               alter_table_info_.index_add_names_.size());
+
+        auto add_index_it = alter_table_info_.index_add_names_.cbegin();
+        assert(add_index_it != alter_table_info_.index_add_names_.cend());
+
+        // Be sure that the no failover happen between this operation and the
+        // former operation.
+        // NOTE: if no record to upload in the former stage, this @ng_terms
+        // should be empty.
+        std::vector<int64_t> &ng_terms =
+            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.Value();
+        // Fast path
+        if (ng_terms.size() == 0)
+        {
+            // No old tuples to operate, so just jump the write sk log stage.
+            op_ = &prepare_log_for_sk_op_;
+            FillPrepareIndexTableLogRequest(txm);
+            txm->PushOperation(&prepare_log_for_sk_op_);
+            txm->Process(prepare_log_for_sk_op_);
+            return;
+        }
+
+        LOG(INFO) << "Alter Table Index transaction flush all old sk data"
+                  << " from new added index ccmap into data store, txn: "
+                  << txm->TxNumber() << ", and commit ts: " << txm->commit_ts_;
+        flush_all_old_tuples_sk_op_.Clear();
+        flush_all_old_tuples_sk_op_.expected_ng_terms_ = std::move(ng_terms);
+
+        for (; add_index_it != alter_table_info_.index_add_names_.cend();
+             ++add_index_it)
+        {
+            flush_all_old_tuples_sk_op_.table_names_.push_back(
+                &(add_index_it->first));
+        }
+
+        flush_all_old_tuples_sk_op_.is_dirty_ = true;
+        flush_all_old_tuples_sk_op_.commit_ts_ = txm->commit_ts_;
+
+        op_ = &flush_all_old_tuples_sk_op_;
+        txm->PushOperation(&flush_all_old_tuples_sk_op_);
+        txm->Process(flush_all_old_tuples_sk_op_);
+    }
+    else if (op_ == &flush_all_old_tuples_sk_op_)
+    {
+        if (flush_all_old_tuples_sk_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Upsert table index flush all old tuples sk failed,"
+                       << " tx_number:" << txm->tx_number_;
+
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candidate_term >= 0))
+            {
+                if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                {
+                    LOG(WARNING) << "Flush old sk data failed because of leader"
+                                    " transferred, and retry generate packed sk"
+                                    " data.";
+                    // For this stage, should re-execute from the previous stage
+                    // if leader transferred.
+                    op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_
+                        .is_running_ = false;
+                    txm->PushOperation(
+                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+                    // To sleep serval seconds.
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ReRunOp(
+                        txm);
+                }
+                else
+                {
+                    LOG(INFO) << "Flush old sk data failed, and retry flush old"
+                              << " sk operation";
+
+                    op_ = &flush_all_old_tuples_sk_op_;
+                    txm->PushOperation(&flush_all_old_tuples_sk_op_);
+                    txm->Process(flush_all_old_tuples_sk_op_);
+                }
+            }
+            else
+            {
+                // Finish this tx if this node is no longer the leader.
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction kickout all sk data"
+                      << " from new added index ccmap, txn: "
+                      << txm->TxNumber();
+            assert(op_type_ == OperationType::AddIndex);
+            assert(alter_table_info_.index_add_count_ ==
+                   alter_table_info_.index_add_names_.size());
+
+            auto add_index_it = alter_table_info_.index_add_names_.cbegin();
+            assert(add_index_it != alter_table_info_.index_add_names_.cend());
+
+            kickout_data_all_op_.Clear();
+            for (; add_index_it != alter_table_info_.index_add_names_.cend();
+                 ++add_index_it)
+            {
+                kickout_data_all_op_.table_names_.push_back(
+                    &(add_index_it->first));
+            }
+
+            kickout_data_all_op_.commit_ts_ = txm->commit_ts_;
+
+            op_ = &kickout_data_all_op_;
+            txm->PushOperation(&kickout_data_all_op_);
+            txm->Process(kickout_data_all_op_);
+        }
+    }
+    else if (op_ == &kickout_data_all_op_)
+    {
+        if (kickout_data_all_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Upsert table index kickout old tuples sk failed,"
+                          " tx_number:"
+                       << txm->tx_number_;
+
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candidate_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candidate_term >= 0))
+            {
+                LOG(WARNING) << "Retry kickout data.";
+
+                txm->PushOperation(&kickout_data_all_op_);
+                txm->Process(kickout_data_all_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction write prepare index"
+                      << " log, txn: " << txm->TxNumber();
+            op_ = &prepare_log_for_sk_op_;
+            FillPrepareIndexTableLogRequest(txm);
+            txm->PushOperation(&prepare_log_for_sk_op_);
+            txm->Process(prepare_log_for_sk_op_);
+        }
+    }
+    else if (op_ == &prepare_log_for_sk_op_)
+    {
+        if (prepare_log_for_sk_op_.hd_result_.IsError())
+        {
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // Fails to flush the prepare flush log. Retries the operation if
+            // the tx node is still the leader or the tx is in the recovery
+            // mode and the cc node is a leader candidate.
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    prepare_log_for_sk_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&prepare_log_for_sk_op_);
+                txm->Process(prepare_log_for_sk_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction post acquire all"
+                      << " write lock, txn: " << txm->TxNumber();
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+    }
+    else if (op_ == &acquire_all_lock_op_)
+    {
+        if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // Fails to acquire the write lock. The schema operation can
+            // only roll forward after flushing the prepare log. Retries the
+            // request if the tx node is still the leader or the tx is in
+            // the recovery mode and the cc node is a leader candidate.
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
+            {
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction write commit log"
+                      << ", txn: " << txm->TxNumber();
+            op_ = &commit_log_op_;
+            FillCommitLogRequest(txm);
+            txm->PushOperation(&commit_log_op_);
+            txm->Process(commit_log_op_);
+        }
+    }
+    else if (op_ == &commit_log_op_)
+    {
+        if (commit_log_op_.hd_result_.IsError())
+        {
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // Fails to flush the commit log. Retries the operation if the
+            // tx node is still the leader or the tx is in the  recovery
+            // mode and the cc node is a leader candidate.
+            if (tx_node_term >= 0 ||
+                (txm->tx_status_ == TxnStatus::Recovering &&
+                 tx_node_candid_term >= 0))
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else if (op_type_ == OperationType::DropIndex)
+        {
+            LOG(INFO) << "Alter Table Index transaction upsert data store"
+                      << " info, txn: " << txm->TxNumber();
+            op_ = &upsert_kv_table_op_;
+            // Read table schema from local cc shard. This is because we
+            // could be recovering from commit stage, in which case we have
+            // skipped post_all_intent_op_ and the schema in catalog_rec_
+            // would be empty.
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+            auto catalog_entry =
+                shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
+            upsert_kv_table_op_.table_schema_ =
+                catalog_entry->dirty_schema_.get();
+            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+            txm->PushOperation(&upsert_kv_table_op_);
+            txm->Process(upsert_kv_table_op_);
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction commit dirty table"
+                      << " schema, txn: " << txm->TxNumber();
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+        }
+    }
+    else if (op_ == &post_all_lock_op_)
+    {
+        bool failed = post_all_lock_op_.hd_result_.IsError();
+
+        if (txm->commit_ts_ == tx_op_failed_ts_ &&
+            post_all_lock_op_.write_type_ == PostWriteType::PrepareCommit)
+        {
+            // The schema operation failed without flushing the prepare log.
+            // Do not retry post-processing (release write intents) even if
+            // it fails. Remaining write intents on the schema, if there are
+            // any, will be recovered by individual cc nodes separately.
+            txm->bool_resp_->Finish(false);
+
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+            LocalCcShards *local_cc_shards =
+                Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(
+                local_cc_shards->table_index_op_pool_mux_);
+            local_cc_shards->table_index_op_pool_.emplace_back(
+                std::move(txm->index_op_));
+        }
+        else if (failed)
+        {
+            // When a cc node leader begins recovery, the candidate term is
+            // set to the Raft term. When recovery finishes, the candidate
+            // term is set to -1 after the leader term. So, obtains the
+            // candidate term before the leader term.
+            int64_t tx_node_candid_term =
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+            int64_t tx_node_term =
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+            // After the prepare log is flushed, if flush kv succeeds, the
+            // schema op is guaranteed to succeed and can only roll forward.
+            // Retry this step to install the committed schema and remove write
+            // locks, if the tx node is still the leader or the tx is in the
+            // recovery mode and the cc node is a leader candidate. However, if
+            // flush kv fails, this schema op has already been rolled back while
+            // processing this post_all_lock_op_, so here we only need to
+            // ForceToFinish.
+            if ((tx_node_term >= 0 ||
+                 (txm->tx_status_ == TxnStatus::Recovering &&
+                  tx_node_candid_term >= 0)) &&
+                txm->commit_ts_ != tx_op_failed_ts_)
+            {
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction write clean log"
+                      << ", txn: " << txm->TxNumber();
+            // The tx's modification of the schema has succeeded. If the tx
+            // has previously read the same schema and keeps a pointer in
+            // the read set to the cc entry of the schema, removes it from
+            // the read set. As a result, the tx will not try to release the
+            // read lock of the schema when committing.
+            const CcEntryAddr &schema_entry_addr =
+                acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
+                    .Value()
+                    .local_cce_addr_;
+            txm->rw_set_.DedupRead(schema_entry_addr);
+
+            op_ = &clean_log_op_;
+            FillCleanLogRequestCommon(txm, clean_log_op_);
+            txm->PushOperation(&clean_log_op_);
+            txm->Process(clean_log_op_);
+        }
+    }
+    else if (op_ == &clean_log_op_)
+    {
+        // When a cc node leader begins recovery, the candidate term is set
+        // to the Raft term. When recovery finishes, the candidate term is
+        // set to -1 after the leader term. So, obtains the candidate term
+        // before the leader term.
+        int64_t tx_node_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+        int64_t tx_node_term =
+            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+
+        if (clean_log_op_.hd_result_.IsError() &&
+            (tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
+                                   tx_node_candid_term >= 0)))
+        {
+            // set retry flag and retry clean log
+            ::txlog::WriteLogRequest *log_req =
+                clean_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
+            txm->PushOperation(&clean_log_op_);
+            txm->Process(clean_log_op_);
+        }
+        else if (txm->tx_status_ == TxnStatus::Recovering)
+        {
+            // When the tx is in the recovery state, no external caller is
+            // waiting for the response. So, txm->bool_resp_ is null.
+
+            LocalCcShards *local_cc_shards =
+                Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(
+                local_cc_shards->table_index_op_pool_mux_);
+            local_cc_shards->table_index_op_pool_.emplace_back(
+                std::move(txm->index_op_));
+            lk.unlock();
+            txm->Reset();
+            // Setting the tx's status to finished signals that this tx
+            // state machine can be recycled for a new tx.
+            txm->tx_status_.store(TxnStatus::Finished,
+                                  std::memory_order_release);
+        }
+        else
+        {
+            if (txm->commit_ts_ == tx_op_failed_ts_)
+            {
+                // Flush kv error or fail to flush prepare_log.
+                txm->bool_resp_->Finish(false);
+            }
+            else
+            {
+                assert(txm->commit_ts_ > 0);
+                txm->bool_resp_->Finish(true);
+            }
+
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+
+            LocalCcShards *local_cc_shards =
+                Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(
+                local_cc_shards->table_index_op_pool_mux_);
+            local_cc_shards->table_index_op_pool_.emplace_back(
+                std::move(txm->index_op_));
+        }
+    }
+    else
+    {
+        assert(false);
+    }
+}
+
+void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
+                               const std::string &current_image,
+                               uint64_t curr_schema_ts,
+                               const std::string &dirty_image,
+                               const std::string &alter_table_image,
+                               OperationType op_type,
+                               TransactionExecution *txm)
+{
+    assert(op_type_ == OperationType::AddIndex ||
+           op_type_ == OperationType::DropIndex);
+
+    // 1. Reset TransactionOperation
+    retry_num_ = RETRY_NUM;
+    is_running_ = false;
+
+    // 2. Reset SchemaOp
+    table_key_.Name() = TableName(
+        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    catalog_rec_.SetSchemaImage(current_image);
+    catalog_rec_.SetDirtySchemaImage(dirty_image);
+    image_str_ = current_image;
+    dirty_image_str_ = dirty_image;
+    curr_schema_ts_ = curr_schema_ts;
+    op_type_ = op_type;
+
+    // 3. Reset UpsertTableIndexOp
+    op_ = nullptr;
+
+    read_cluster_result_.Reset();
+    lock_cluster_config_op_.Reset();
+    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    lock_cluster_config_op_.table_name_ =
+        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+
+    alter_table_info_image_str_ = alter_table_image;
+    alter_table_info_.Reset();
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+
+    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
+    acquire_all_intent_op_.Reset(node_group_cnt);
+    upgrade_all_intent_to_lock_op_.Reset(node_group_cnt);
+    prepare_log_op_.Reset();
+    downgrade_all_lock_to_intent_op_.Reset(node_group_cnt);
+    upsert_kv_table_op_.Reset();
+    flush_all_old_tuples_pk_op_.Reset(node_group_cnt, 1);
+    flush_all_old_tuples_pk_op_.Clear();
+    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.Reset();
+    flush_all_old_tuples_sk_op_.Reset(node_group_cnt, 1);
+    flush_all_old_tuples_sk_op_.Clear();
+    kickout_data_all_op_.Reset(node_group_cnt, 1);
+    kickout_data_all_op_.Clear();
+    prepare_log_for_sk_op_.Reset();
+    acquire_all_lock_op_.Reset(node_group_cnt);
+    commit_log_op_.Reset();
+    post_all_lock_op_.Reset(node_group_cnt);
+    clean_log_op_.Reset();
+
+    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_intent_op_.key_ = &table_key_;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
+
+    upgrade_all_intent_to_lock_op_.table_name_ = &catalog_ccm_name;
+    upgrade_all_intent_to_lock_op_.key_ = &table_key_;
+    upgrade_all_intent_to_lock_op_.cc_op_ = CcOperation::Write;
+    upgrade_all_intent_to_lock_op_.protocol_ = CcProtocol::Locking;
+
+    downgrade_all_lock_to_intent_op_.table_name_ = &catalog_ccm_name;
+    downgrade_all_lock_to_intent_op_.key_ = &table_key_;
+    downgrade_all_lock_to_intent_op_.rec_ = &catalog_rec_;
+    downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
+    downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
+
+    upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+    upsert_kv_table_op_.op_type_ = op_type_;
+
+    flush_all_old_tuples_pk_op_.table_names_.push_back(&table_key_.Name());
+
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.key_ = &table_key_;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+
+    post_all_lock_op_.table_name_ = &catalog_ccm_name;
+    post_all_lock_op_.key_ = &table_key_;
+    post_all_lock_op_.rec_ = &catalog_rec_;
+    post_all_lock_op_.op_type_ = op_type_;
+    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+    // Reset cc_handler_res txm
+    acquire_all_intent_op_.ResetHandlerTxm(txm);
+    upgrade_all_intent_to_lock_op_.ResetHandlerTxm(txm);
+    prepare_log_op_.ResetHandlerTxm(txm);
+    downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
+    upsert_kv_table_op_.ResetHandlerTxm(txm);
+    flush_all_old_tuples_pk_op_.ResetHandlerTxm(txm);
+    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ResetHandlerTxm(txm);
+    flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
+    kickout_data_all_op_.ResetHandlerTxm(txm);
+    prepare_log_for_sk_op_.ResetHandlerTxm(txm);
+    acquire_all_lock_op_.ResetHandlerTxm(txm);
+    commit_log_op_.ResetHandlerTxm(txm);
+    post_all_lock_op_.ResetHandlerTxm(txm);
+    clean_log_op_.ResetHandlerTxm(txm);
+}
+
+void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
+{
+    FillPrepareLogRequestCommon(txm, prepare_log_op_);
+
+    ::txlog::WriteLogRequest *prepare_log_rec =
+        prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
+
+    ::txlog::SchemaOpMessage *prepare_schema_msg =
+        prepare_log_rec->mutable_log_content()->mutable_schema_log();
+    prepare_schema_msg->set_alter_table_info_blob(alter_table_info_image_str_);
+
+    auto &node_terms = *prepare_log_rec->mutable_node_terms();
+    node_terms.clear();
+    for (uint32_t nid = 0; nid < upgrade_all_intent_to_lock_op_.upload_cnt_;
+         ++nid)
+    {
+        node_terms[nid] =
+            upgrade_all_intent_to_lock_op_.hd_results_[nid].Value().node_term_;
+    }
+}
+
+void UpsertTableIndexOp::FillPrepareIndexTableLogRequest(
+    TransactionExecution *txm)
+{
+    prepare_log_for_sk_op_.log_type_ = TxLogType::PREPARE;
+
+    prepare_log_for_sk_op_.log_closure_.LogRequest().Clear();
+
+    ::txlog::WriteLogRequest *prepare_log_for_sk_rec =
+        prepare_log_for_sk_op_.log_closure_.LogRequest()
+            .mutable_write_log_request();
+
+    prepare_log_for_sk_rec->set_tx_term(txm->tx_term_);
+    prepare_log_for_sk_rec->set_txn_number(txm->tx_number_);
+    prepare_log_for_sk_rec->set_commit_timestamp(txm->commit_ts_);
+
+    ::txlog::SchemaOpMessage *prepare_schema_for_sk_msg =
+        prepare_log_for_sk_rec->mutable_log_content()->mutable_schema_log();
+    prepare_schema_for_sk_msg->set_stage(
+        ::txlog::SchemaOpMessage_Stage_PrepareIndexTable);
+
+    prepare_log_for_sk_rec->mutable_node_terms()->clear();
+}
+
+void UpsertTableIndexOp::FillCommitLogRequest(TransactionExecution *txm)
+{
+    FillCommitLogRequestCommon(txm, commit_log_op_);
+
+    ::txlog::WriteLogRequest *commit_log_rec =
+        commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
+
+    if (this->upsert_kv_table_op_.hd_result_.IsError())
+    {
+        // Serve as new catalog_ts. Set to 0 if flush kv fails.
+        commit_log_rec->set_commit_timestamp(tx_op_failed_ts_);
+    }
+    else
+    {
+        assert(txm->commit_ts_ != tx_op_failed_ts_);
+        commit_log_rec->set_commit_timestamp(txm->commit_ts_);
+    }
+}
+
+void UpsertTableIndexOp::ForceToFinish(TransactionExecution *txm)
+{
+    clean_log_op_.hd_result_.SetFinished();
+    op_ = &clean_log_op_;
+    Forward(txm);
+}
+
+void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
+    TransactionExecution *txm, std::vector<int64_t> &ng_terms)
+{
+    assert(alter_table_info_.index_add_count_ > 0 &&
+           alter_table_info_.index_add_count_ ==
+               alter_table_info_.index_add_names_.size());
+
+    LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
+    TransactionExecution *upload_txm = local_cc_shards->GetTxService()->NewTx();
+
+    InitTxRequest init_req;
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    init_req.Reset();
+    upload_txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        LOG(ERROR) << "[Generate packed sk]Init upload transaction failed.";
+        fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
+            CcErrorCode::INIT_TX_ERR);
+        return;
+    }
+
+    assert(txm != nullptr);
+
+    uint64_t commit_ts = txm->commit_ts_;
+    const TableName &base_table_name = table_key_.Name();
+    TableSchema *table_schema =
+        const_cast<TableSchema *>(catalog_rec_.DirtySchema());
+
+    // Set the upload txm's commit_ts
+    upload_txm->commit_ts_ = commit_ts;
+
+    const TxKey *target_key = nullptr;
+    const TxRecord *target_rec = nullptr;
+    uint64_t target_version_ts = UINT64_MAX;
+
+    LOG(INFO) << "Generate packed sk, Upload txn: " << upload_txm->TxNumber()
+              << ", and parent txn: " << txm->TxNumber()
+              << ". And Upload commit ts: " << upload_txm->commit_ts_;
+
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+    // #ifdef RANGE_PARTITION_ENABLED
+    TransactionExecution *scan_txm = local_cc_shards->GetTxService()->NewTx();
+    // Set isolation level as snapshot so that can release range lock after
+    // scan over one range.
+    init_req.iso_level_ = IsolationLevel::Snapshot;
+    init_req.protocol_ = CcProtocol::OccRead;
+    init_req.Reset();
+    scan_txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        LOG(ERROR) << "[Generate packed sk]Init scan transaction failed.";
+        fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
+            CcErrorCode::INIT_TX_ERR);
+        return;
+    }
+
+    scan_txm->commit_ts_ = commit_ts;
+    LOG(INFO) << "Generate packed sk, ScanBatch txn: " << scan_txm->TxNumber();
+
+    const TxKey *start_key =
+        local_cc_shards->GetCatalogFactory()->NegativeInfKey();
+    ScanOpenTxRequest scan_open(
+        &base_table_name, ScanIndexType::Primary, start_key);
+    scan_txm->Execute(&scan_open);
+    scan_open.Wait();
+
+    if (scan_open.IsError())
+    {
+        LOG(ERROR) << "[Generate packed sk]Scan open failed: "
+                   << scan_open.ErrorMsg();
+        // Abort the scan txm and upload txm
+        AbortTxRequest abort_req;
+        abort_req.Reset();
+        scan_txm->Execute(&abort_req);
+        abort_req.Wait();
+        abort_req.Reset();
+        upload_txm->Execute(&abort_req);
+        abort_req.Wait();
+        fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
+            CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR);
+        return;
+    }
+
+    size_t scan_alias = scan_open.Result();
+    RecordStatus ccm_scan_rec_status = RecordStatus::Normal;
+
+    std::vector<ScanBatchTuple> scan_batch;
+    scan_batch.clear();
+    size_t scan_batch_idx = UINT64_MAX;
+    bool is_last_scan_batch = false;
+    scan_batch_cnt_ = 0;
+#else
+    // Construct the search condition.
+    std::vector<store::DataStoreSearchCond> search_conds;
+    search_conds.push_back({"___version___",
+                            "<=",
+                            std::to_string(commit_ts),
+                            store::DataStoreDataType::Numeric});
+
+    // 1. Scan
+    store::DataStoreHandler *const store_hd =
+        Sharder::Instance().GetLocalCcShards()->store_hd_;
+    std::vector<TableName> new_indexes_name;
+    for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+         index_it != alter_table_info_.index_add_names_.cend();
+         ++index_it)
+    {
+        new_indexes_name.emplace_back(index_it->first);
+    }
+    std::unique_ptr<store::DataStoreScanner> ds_scanner =
+        store_hd->ScanPkAndNewSkColumns(
+            base_table_name, table_schema, search_conds, new_indexes_name);
+
+    assert(ds_scanner.get() != nullptr);
+
+    bool is_ds_key_deleted = false;
+#endif
+
+    uint32_t upload_batch_cnt = 0, total_upload_cnt = 0;
+    bool has_initialized = false, need_move_next = true;
+
+    // 2. Handle tuples one by one
+    do
+    {
+        if (need_move_next)
+        {
+            target_key = nullptr;
+            target_rec = nullptr;
+        }
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+        // #ifdef RANGE_PARTITION_ENABLED
+        if (need_move_next)
+        {
+            if (scan_batch_idx < scan_batch.size())
+            {
+                ScanBatchTuple &scan_tuple = scan_batch[scan_batch_idx];
+                target_key = scan_tuple.key_;
+                target_rec = scan_tuple.record_;
+                ccm_scan_rec_status = scan_tuple.status_;
+                target_version_ts = scan_tuple.version_ts_;
+
+                ++scan_batch_idx;
+            }
+            else if (scan_batch_idx == UINT64_MAX ||
+                     !scan_batch.empty() && !is_last_scan_batch)
+            {
+                // Fetches the next batch.
+                scan_batch_idx = 0;
+                scan_batch.clear();
+
+                ScanBatchTxRequest scan_batch_req(
+                    scan_alias, base_table_name, &scan_batch);
+                scan_batch_req.prefetch_slice_cnt_ = PrefetchSize();
+                scan_txm->Execute(&scan_batch_req);
+                scan_batch_req.Wait();
+
+                ++scan_batch_cnt_;
+
+                if (scan_batch_req.IsError())
+                {
+                    LOG(ERROR)
+                        << "[Generate packed sk]Scan next batch failed: "
+                        << scan_batch_req.ErrorMsg() << ", with result status: "
+                        << (uint32_t) scan_batch_req.tx_result_.Status();
+
+                    ScanCloseTxRequest close_req(
+                        scan_batch, 0, scan_alias, &base_table_name);
+                    scan_txm->Execute(&close_req);
+                    close_req.Wait();
+
+                    // Abort the upload txm and scan txm
+                    AbortTxRequest abort_req;
+                    abort_req.Reset();
+                    upload_txm->Execute(&abort_req);
+                    abort_req.Wait();
+                    abort_req.Reset();
+                    scan_txm->Execute(&abort_req);
+                    abort_req.Wait();
+                    if (has_initialized)
+                    {
+                        // Finish the pack sk operation
+                        table_schema->FinishGeneratePackedSk();
+                    }
+                    // Set finish after free related objects.
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                        .SetError(CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR);
+                    return;
+                }
+
+                is_last_scan_batch = scan_batch_req.Result();
+                if (!scan_batch.empty())
+                {
+                    ScanBatchTuple &scan_tuple = scan_batch[scan_batch_idx];
+                    target_key = scan_tuple.key_;
+                    target_rec = scan_tuple.record_;
+                    ccm_scan_rec_status = scan_tuple.status_;
+                    target_version_ts = scan_tuple.version_ts_;
+                    ++scan_batch_idx;
+                }
+                else
+                {
+                    // No more tuples
+                    break;
+                }
+            }
+
+            if (target_key == nullptr)
+            {
+                // No more tuples
+                break;
+            }
+
+            if (!(ccm_scan_rec_status == RecordStatus::Normal &&
+                  target_version_ts <= commit_ts))
+            {
+                // Skip the non-Normal records, and get the next tuple.
+                continue;
+            }
+        } /* End of need move next */
+
+        assert(target_version_ts != 1);
+#else
+        is_ds_key_deleted = false;
+        ds_scanner->Current(
+            target_key, target_rec, target_version_ts, is_ds_key_deleted);
+        if (target_key == nullptr)
+        {
+            // No more rows.
+            break;
+        }
+        if (is_ds_key_deleted)
+        {
+            // Skip the deleted record and Move to the next tuple
+            ds_scanner->MoveNext();
+            continue;
+        }
+#endif
+
+        if (!has_initialized)
+        {
+            // 2.1 Prepare the pack sk operation.
+            table_schema->PrepareGeneratePackedSk();
+            has_initialized = true;
+        }
+
+        TxErrorCode err = TxErrorCode::NO_ERROR;
+        // Pack record for secondary index
+        for (auto index_it = alter_table_info_.index_add_names_.cbegin();
+             index_it != alter_table_info_.index_add_names_.cend();
+             ++index_it)
+        {
+            // 2.2 Generate packed sk
+            auto packed_sk = table_schema->GeneratePackedSk(
+                target_key, target_rec, index_it->first);
+
+            if (packed_sk.first.get() == nullptr)
+            {
+                LOG(ERROR) << "Failed to generate packed sk for table: ["
+                           << index_it->first.StringView() << "].";
+                // Abort the upload txm and scan txm
+                AbortTxRequest abort_req;
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+                // #ifdef RANGE_PARTITION_ENABLED
+                ScanCloseTxRequest close_req(
+                    scan_batch, 0, scan_alias, &base_table_name);
+                scan_txm->Execute(&close_req);
+                close_req.Wait();
+                abort_req.Reset();
+                scan_txm->Execute(&abort_req);
+                abort_req.Wait();
+#else
+                ds_scanner->End();
+                ds_scanner = nullptr;
+#endif
+                abort_req.Reset();
+                upload_txm->Execute(&abort_req);
+                abort_req.Wait();
+                // Finish the pack sk operation
+                table_schema->FinishGeneratePackedSk();
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                    .SetError(CcErrorCode::PACK_SK_ERR);
+                return;
+            }
+
+            // 2.3 Upload to sk ccmap
+            err = upload_txm->TxUpsert(index_it->first,
+                                       std::move(packed_sk.first),
+                                       std::move(packed_sk.second),
+                                       OperationType::Insert);
+
+            // TxUpsert only failed caused by exceed the
+            // @@ReadWriteSet::MaxWriteSetBytesCnt of the local write set.
+            // Then, should upload this batch write entry, rather than stop
+            // packed sk operation with error code.
+            if (err != TxErrorCode::NO_ERROR)
+            {
+                assert(err == TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR);
+                need_move_next = false;
+                break;
+            }
+            need_move_next = true;
+        } /* end of foreache add_index_names_ */
+
+        // Upload this batch write entry depending on the record count or the
+        // record bytes.
+        if (++upload_batch_cnt >= UPLOAD_BATCH_SIZE ||
+            err == TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR)
+        {
+            UploadTxRequest upload_req;
+            upload_req.Reset();
+            upload_txm->Execute(&upload_req);
+            upload_req.Wait();
+
+            if (upload_req.ErrorCode() != TxErrorCode::NO_ERROR)
+            {
+                LOG(WARNING) << "!!!WARNING!!! Upload new packed sk data "
+                                "failed with error message: "
+                             << upload_req.ErrorMsg()
+                             << ", for table: " << base_table_name.StringView();
+
+                // Non-leader transferred error, should re-upload this batch
+                // TxKeys.
+                while (upload_req.ErrorCode() != TxErrorCode::CC_REQ_FOLLOWER)
+                {
+                    std::this_thread::sleep_for(10s);
+                    upload_txm->Execute(&upload_req);
+                    upload_req.Wait();
+                    if (upload_req.ErrorCode() == TxErrorCode::NO_ERROR)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // Node group leader transferred, should restart this operation.
+            if (upload_req.ErrorCode() == TxErrorCode::CC_REQ_FOLLOWER)
+            {
+                LOG(ERROR) << "Upload new packed sk data failed cause by "
+                              "leader transferred for table: "
+                           << base_table_name.StringView();
+                // Abort the upload txm and scan txm
+                AbortTxRequest abort_req;
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+                // #ifdef RANGE_PARTITION_ENABLED
+                ScanCloseTxRequest close_req(
+                    scan_batch, 0, scan_alias, &base_table_name);
+                scan_txm->Execute(&close_req);
+                close_req.Wait();
+                abort_req.Reset();
+                scan_txm->Execute(&abort_req);
+                abort_req.Wait();
+#else
+                // Clean the data store scanner.
+                ds_scanner->End();
+                ds_scanner = nullptr;
+#endif
+                abort_req.Reset();
+                upload_txm->Execute(&abort_req);
+                abort_req.Wait();
+                // Finish the pack sk operation
+                table_schema->FinishGeneratePackedSk();
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                    .SetError(CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR);
+                return;
+            }
+
+            total_upload_cnt += upload_batch_cnt;
+            if (total_upload_cnt % 1024000 == 0)
+            {
+                LOG(INFO) << "Alter Table Index transaction upload sk data"
+                          << " into added sk ccmap, has upload batch count: "
+                          << total_upload_cnt
+                          << ",and upload txn: " << upload_txm->TxNumber();
+            }
+
+            // Reset
+            upload_batch_cnt = 0;
+            // check the ng terms
+            ng_terms = std::move(upload_req.Result());
+        }
+
+#if !(defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+        // #ifndef RANGE_PARTITION_ENABLED
+        // Move to the next tuple
+        if (need_move_next)
+        {
+            ds_scanner->MoveNext();
+        }
+#endif
+    } while (true);
+
+    // Upload the remaining records.
+    if (upload_batch_cnt > 0)
+    {
+        LOG(INFO) << "Alter Table Index transaction upload sk data into"
+                  << " added sk ccmap for the last batch, upload txn: "
+                  << upload_txm->TxNumber();
+        UploadTxRequest upload_req;
+        upload_req.Reset();
+        upload_txm->Execute(&upload_req);
+        upload_req.Wait();
+
+        if (upload_req.ErrorCode() != TxErrorCode::NO_ERROR)
+        {
+            LOG(WARNING)
+                << "!!!WARNING!!! Upload the last batch new packed sk data "
+                   "failed with error message: "
+                << upload_req.ErrorMsg()
+                << ", for table: " << base_table_name.StringView();
+
+            // Non-leader transferred error, should re-upload this batch
+            // TxKeys.
+            while (upload_req.ErrorCode() != TxErrorCode::CC_REQ_FOLLOWER)
+            {
+                std::this_thread::sleep_for(10s);
+                upload_txm->Execute(&upload_req);
+                upload_req.Wait();
+                if (upload_req.ErrorCode() == TxErrorCode::NO_ERROR)
+                {
+                    break;
+                }
+            }
+        }
+
+        // Node group leader transferred, should restart this operation.
+        if (upload_req.ErrorCode() == TxErrorCode::CC_REQ_FOLLOWER)
+        {
+            LOG(ERROR) << "Upload the last batch new packed sk data failed "
+                          "cause by leader transferred for table: "
+                       << base_table_name.StringView();
+            // Abort the upload txm and scan txm
+            AbortTxRequest abort_req;
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+            // #ifdef RANGE_PARTITION_ENABLED
+            ScanCloseTxRequest close_req(
+                scan_batch, 0, scan_alias, &base_table_name);
+            scan_txm->Execute(&close_req);
+            close_req.Wait();
+            abort_req.Reset();
+            scan_txm->Execute(&abort_req);
+            abort_req.Wait();
+#else
+            ds_scanner->End();
+            ds_scanner = nullptr;
+#endif
+            abort_req.Reset();
+            upload_txm->Execute(&abort_req);
+            abort_req.Wait();
+            // Finish the pack sk operation
+            table_schema->FinishGeneratePackedSk();
+            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
+                CcErrorCode::UPLOAD_RECORD_TO_CCMAP_ERR);
+            return;
+        }
+        // check the ng terms
+        ng_terms = std::move(upload_req.Result());
+    }
+
+    // Commit the upload txm and scan txm
+    CommitTxRequest commit_req;
+#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+    // #ifdef RANGE_PARTITION_ENABLED
+    ScanCloseTxRequest close_req(scan_batch, 0, scan_alias, &base_table_name);
+    scan_txm->Execute(&close_req);
+    close_req.Wait();
+    commit_req.Reset();
+    scan_txm->Execute(&commit_req);
+    commit_req.Wait();
+#else
+    ds_scanner->End();
+    ds_scanner = nullptr;
+#endif
+
+    commit_req.Reset();
+    upload_txm->Execute(&commit_req);
+    commit_req.Wait();
+
+    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
+
+    if (has_initialized)
+    {
+        // Finish the packed sk operation
+        table_schema->FinishGeneratePackedSk();
     }
 }
 }  // namespace txservice

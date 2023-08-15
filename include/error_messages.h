@@ -47,6 +47,12 @@ enum struct TxErrorCode
 
     // Ckpt
     CKPT_PIN_RANGE_SLICE_FAIL,
+
+    // Acquire range read lock
+    GET_RANGE_ID_ERROR,
+
+    // Acquire leader term
+    ACQUIRE_LEADER_TERM_FAIL,
 };
 
 static const std::map<TxErrorCode, std::string> tx_error_messages{
@@ -85,7 +91,9 @@ static const std::map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::REQUEST_LOST, "The returned message of ccrequest missed."},
     {TxErrorCode::OUT_OF_MEMORY, "Transaction failed due to out of memory."},
     {TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL,
-     "The checkpoint error due to pin range slice failed."}};
+     "The checkpoint error due to pin range slice failed."},
+    {TxErrorCode::GET_RANGE_ID_ERROR, "Acquire range read lock failed."},
+    {TxErrorCode::ACQUIRE_LEADER_TERM_FAIL, "Acquire leader term failed."}};
 
 enum struct CcErrorCode
 {
@@ -153,6 +161,14 @@ enum struct CcErrorCode
     // Shard memory full
     OUT_OF_MEMORY,
 
+    // Leader term
+    ACQUIRE_LEADER_TERM_ERR,
+    ESTABLISH_NODE_CHANNEL_FAILED,
+    //
+    INIT_TX_ERR,
+    PACK_SK_ERR,
+    UPLOAD_RECORD_TO_CCMAP_ERR,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -204,6 +220,11 @@ static const std::map<CcErrorCode, std::string> cc_error_messages{
 
     // detect dead lock
     {CcErrorCode::DEAD_LOCK_ABORT, "DEAD_LOCK_ABORT"},
+
+    // acquire leader term
+    {CcErrorCode::ACQUIRE_LEADER_TERM_ERR, "ACQUIRE_LEADER_TERM_ERROR"},
+    {CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
+     "ESTABLISH_NODE_CHANNEL_FAILED"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

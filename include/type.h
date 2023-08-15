@@ -694,6 +694,14 @@ struct AlterTableInfo
         assert(offset == altered_table_info_image.length());
     }
 
+    void Reset()
+    {
+        index_add_count_ = 0;
+        index_drop_count_ = 0;
+        index_add_names_.clear();
+        index_drop_names_.clear();
+    }
+
     uint8_t index_add_count_;
     uint8_t index_drop_count_;
     // map of <mysql_index_table_name, kv_index_table_name>
