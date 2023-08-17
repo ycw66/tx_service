@@ -79,13 +79,17 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver < 0)
     {
-        // The stream is invalid, when the stream version is less than 0.
-        // SendMessage error return -1 to indicate the request needs retry.
-        if (res != nullptr)
-        {
-            res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
-        return false;
+        DLOG(INFO) << "CC stream is connecting, buffer the message for resend";
+        // resend the message if stream is connecting
+        auto resend_message_list = resend_message_list_.try_emplace(
+            dest_node_id, moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
+        resend_message_list.first->second.enqueue(
+            std::make_unique<ResendMessage>(msg, res));
+
+        // always wake up connector thread to either reconnect streams or
+        // resend messages.
+        out_cv_.notify_one();
+        return true;
     }
 
     brpc::StreamId &stream_id = stream_it->second.first;
@@ -308,7 +312,10 @@ void CcStreamSender::ConnectStreams()
     std::unique_lock<std::mutex> lk(outbound_mux_);
     while (!terminate_)
     {
-        out_cv_.wait_for(lk, 5s, [this] { return terminate_; });
+        out_cv_.wait_for(
+            lk,
+            5s,
+            [this] { return terminate_ || to_connect_nodes_.size() != 0; });
 
         if (to_connect_nodes_.size() == 0)
         {

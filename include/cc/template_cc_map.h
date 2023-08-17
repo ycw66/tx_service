@@ -1321,7 +1321,12 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        ACTION_FAULT_INJECTOR("before_post_read");
+        CODE_FAULT_INJECTOR("before_post_read", {
+            LOG(INFO) << "FaultInject before_post_read: skip executing "
+                         "PostReadCc to timeout transaction";
+            return true;
+        });
+
         auto hd_res = req.Result();
         CODE_FAULT_INJECTOR(
             "term_TemplateCcMap_Execute_PostReadCc", {

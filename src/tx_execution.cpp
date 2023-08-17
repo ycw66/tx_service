@@ -4320,7 +4320,7 @@ void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)
                              txid_,
                              fault_inject_op_.vct_node_id_,
                              fault_inject_op_.hd_result_);
-    return;
+    StartTiming();
 }
 
 void TransactionExecution::PostProcess(FaultInjectOp &fault_inject_op_)

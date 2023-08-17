@@ -867,6 +867,14 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
+    else if (txm->IsTimeOut())
+    {
+        bool force_success = hd_result_.ForceError();
+        if (force_success)
+        {
+            txm->PostProcess(*this);
+        }
+    }
 }
 
 ScanOpenOperation::ScanOpenOperation(TransactionExecution *txm)
