@@ -2528,8 +2528,16 @@ void LocalCcShards::SplitFlushRange(
 
     if (realtime_sampling_)
     {
-        catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
-            table_name, catalog_rec.Schema(), node_group);
+        if (!is_dirty)
+        {
+            catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
+                table_name, catalog_rec.Schema(), node_group);
+        }
+        else
+        {
+            catalog_rec.DirtySchema()->StatisticsObject()->PriorSplitRange(
+                table_name, catalog_rec.DirtySchema(), node_group);
+        }
     }
 
     const TxKey *old_start_key = split_info.first->RangeStartKey();
