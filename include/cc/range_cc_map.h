@@ -47,6 +47,7 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::AcquireCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::ReleaseCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
+    using TemplateCcMap<KeyT, RangeRecord>::CheckCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
@@ -426,13 +427,13 @@ public:
 
         // Prepare RangeRecord
         RangeRecord *upload_range_rec = nullptr;
-        const TxKey *target_key = nullptr;
+        const KeyT *target_key = nullptr;
         std::vector<std::pair<TxKey::Uptr, uint32_t>> range_slices;
         // Place holder for decoded range info if req is remote
         if (req.Key() != nullptr)
         {
             upload_range_rec = static_cast<RangeRecord *>(req.Payload());
-            target_key = req.Key();
+            target_key = static_cast<const KeyT *>(req.Key());
         }
         else
         {
@@ -465,6 +466,26 @@ public:
                 *req.PayloadStr(), decoded_rec.get(), range_slices);
             upload_range_rec = decoded_rec.get();
             req.SetDecodedPayload(std::move(decoded_rec));
+        }
+
+        CcEntry<KeyT, RangeRecord> *target_cce = Find(*target_key).second;
+
+        // Check whether cce key lock holder is the given tx of the
+        // PostWriteAllCc before apply change.
+        if (target_cce == nullptr || CheckCceKeyLock(target_cce, req) == false)
+        {
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                req.Result()->SetFinished();
+                req.SetDecodedPayload(nullptr);
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
         }
 
         if (req.CommitType() == PostWriteType::PrepareCommit)
@@ -513,8 +534,6 @@ public:
             // Register the range owner bucket for the new ranges
             auto bucket_map = static_cast<RangeBucketCcMap *>(
                 shard_->GetCcm(range_bucket_ccm_name, this->cc_ng_id_));
-            auto target_cce =
-                Find(*static_cast<const KeyT *>(req.Key())).second;
             auto new_range_owner_rec =
                 std::make_unique<std::vector<LruEntry *>>();
             for (int32_t new_id :
@@ -537,6 +556,7 @@ public:
             std::vector<const RangeInfo *> new_range_infos;
             TableRangeEntry *old_entry = shard_->GetTableRangeEntry(
                 this->table_name_, req.NodeGroupId(), target_key);
+            assert(old_entry != nullptr);
             RangeInfo *old_info = old_entry->range_info_.get();
 
             if (shard_->core_id_ == 0)
@@ -699,8 +719,6 @@ public:
             assert(new_range_infos.size());
 
             // add new range entry to range cc map
-            auto target_cce =
-                Find(*static_cast<const KeyT *>(req.Key())).second;
             auto &new_range_owner_rec =
                 *target_cce->payload_->new_range_owner_rec_;
             for (uint idx = 0; idx < new_range_infos.size(); idx++)

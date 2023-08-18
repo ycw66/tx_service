@@ -6112,6 +6112,20 @@ protected:
         return FindEmplace(key);
     }
 
+    bool CheckCceKeyLock(const CcEntry<KeyT, ValueT> *cce_ptr,
+                         const PostWriteAllCc &req) const
+    {
+        // For PrepareCommit, the post-write-all request keeps write
+        // intent or downgrades the write lock to the write intent.
+        // For PostCommit, the post-write-all request release write
+        // intent or write lock.
+        return cce_ptr->key_lock_ptr_ &&
+               ((cce_ptr->key_lock_ptr_->HasWriteLock() &&
+                 cce_ptr->key_lock_ptr_->WriteLockTx() == req.Txn()) ||
+                (cce_ptr->key_lock_ptr_->HasWriteIntent() &&
+                 cce_ptr->key_lock_ptr_->WriteIntentTx() == req.Txn()));
+    }
+
     ScanType GetScanType(bool is_include_floor_cce)
     {
         if (is_include_floor_cce)

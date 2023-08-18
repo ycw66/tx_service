@@ -139,6 +139,38 @@ public:
             }
         }
 
+        CcEntry<CatalogKey, CatalogRecord> *cce_ptr =
+            TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key).second;
+
+        // Check whether cce key lock holder is the given tx of the
+        // PostWriteAllCc before apply change.
+        if (cce_ptr == nullptr || CheckCceKeyLock(cce_ptr, req) == false)
+        {
+            // When the catalog entry is null in the post-write-all
+            // phase, it means that (1) the cc req is a resend request and
+            // previous has successed, (2) the cc node group must have failed
+            // over once, and (3) there is no catalog op in the log (so that the
+            // recovered cc node group has no catalog entry). No catalog op in
+            // the log means that this schema op fails before the prepare log
+            // and this post-write-all request is to release the write
+            // lock/intent. Given that the cc node group has failed once, the
+            // previously acquired intent/lock has gone. There is no need to
+            // proceed to release the intent/lock. The request is set to
+            // finished.
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                req.Result()->SetFinished();
+                req.SetDecodedPayload(nullptr);
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+
         CatalogRecord *schema_rec = nullptr;
         CatalogEntry *catalog_entry = nullptr;
 
@@ -287,38 +319,8 @@ public:
                     shard_->CleanTableStatistics(table_key->Name());
                 }
 
-                CcEntry<CatalogKey, CatalogRecord> *cce =
-                    TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key)
-                        .second;
-                if (cce == nullptr)
-                {
-                    // When the catalog entry is null in the post-write-all
-                    // phase, it means that (1) the cc node group must have
-                    // failed over once, and (2) there is no catalog op in the
-                    // log (so that the recovered cc node group has no catalog
-                    // entry). No catalog op in the log means that this schema
-                    // op fails before the prepare log and this post-write-all
-                    // request is to release the write lock/intent. Given that
-                    // the cc node group has failed once, the previously
-                    // acquired intent/lock has gone. There is no need to
-                    // proceed to release the intent/lock. The request is set to
-                    // finished.
-                    if (shard_->core_id_ == shard_->core_cnt_ - 1)
-                    {
-                        req.Result()->SetFinished();
-                        req.SetDecodedPayload(nullptr);
-                        return true;
-                    }
-                    else
-                    {
-                        req.ResetCcm();
-                        MoveRequest(&req, shard_->core_id_ + 1);
-                        return false;
-                    }
-                }
-
-                cce->payload_->ClearDirtySchema();
-                cce->payload_->SetDirtySchemaImage("");
+                cce_ptr->payload_->ClearDirtySchema();
+                cce_ptr->payload_->SetDirtySchemaImage("");
                 return TemplateCcMap::Execute(req);
             }
 
