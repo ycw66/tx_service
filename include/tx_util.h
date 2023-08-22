@@ -99,7 +99,7 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
     bool ok = !read_tx_req.IsError();
     if (ok)
     {
-        const RecordStatus &rec_status = read_tx_req.Result();
+        const RecordStatus &rec_status = read_tx_req.Result().first;
         if (rec_status == RecordStatus::Deleted)
         {
             exists = false;

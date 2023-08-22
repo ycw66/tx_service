@@ -423,7 +423,6 @@ void LocalCcShards::CreateSchemaRecoveryTx(
                                    true,
                                    0,
                                    false,
-                                   nullptr,
                                    true);
             txm->Execute(&read_req);
             read_req.Wait();
@@ -523,7 +522,6 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                    true,
                                    0,
                                    false,
-                                   nullptr,
                                    true);
             txm->Execute(&read_req);
             read_req.Wait();
@@ -545,7 +543,6 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                              true,
                              0,
                              false,
-                             nullptr,
                              true);
                 txm->Execute(&read_req);
                 read_req.Wait();
@@ -1782,7 +1779,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     data_sync_txm->Execute(&read_req);
     read_req.Wait();
 
-    if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
+    RecordStatus rec_status = read_req.Result().first;
+
+    if (read_req.IsError() || rec_status != RecordStatus::Normal)
     {
         // Use AbortTxRequest to release read lock.
         AbortTxRequest abort_req;
@@ -1791,7 +1790,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         assert(abort_req.Result() == false);
 
         task_worker_lk.lock();
-        if (read_req.Result() != RecordStatus::Normal)
+        if (rec_status != RecordStatus::Normal)
         {
             LOG(ERROR) << "DataSync try to add read lock on deleted table, "
                           "table name: "
@@ -2503,7 +2502,7 @@ void LocalCcShards::SplitFlushRange(
     split_txm->Execute(&read_req);
     read_req.Wait();
 
-    if (read_req.IsError() || read_req.Result() != RecordStatus::Normal)
+    if (read_req.IsError() || read_req.Result().first != RecordStatus::Normal)
     {
         // Use AbortTxRequest to release read lock.
         AbortTxRequest abort_req;

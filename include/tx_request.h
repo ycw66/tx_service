@@ -142,19 +142,18 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
     CcProtocol protocol_{CcProtocol::OCC};
 };
 
-struct ReadTxRequest : public TemplateTxRequest<ReadTxRequest, RecordStatus>
+struct ReadTxRequest
+    : public TemplateTxRequest<ReadTxRequest, std::pair<RecordStatus, uint64_t>>
 {
 public:
-    // TODO(ZX) let ReadTxReq return std::pair<RecordStatus, uint64_t(entry_ts)>
     ReadTxRequest(const TableName *tab_name = nullptr,
                   const TxKey *key = nullptr,
                   TxRecord *rec = nullptr,
                   bool is_for_write = false,
                   bool is_for_share = false,
                   bool read_local = false,
-                  uint64_t corresponding_sk_commit_ts = 0,
+                  uint64_t ts = 0,
                   bool is_covering_keys = false,
-                  uint64_t *unique_sk_commit_ts = nullptr,
                   bool is_recovering = false,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
@@ -166,9 +165,8 @@ public:
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           read_local_(read_local),
-          corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
+          ts_(ts),
           is_covering_keys_(is_covering_keys),
-          unique_sk_commit_ts_(unique_sk_commit_ts),
           is_recovering_(is_recovering)
     {
     }
@@ -179,9 +177,8 @@ public:
              bool is_for_write = false,
              bool is_for_share = false,
              bool read_local = false,
-             uint64_t corresponding_sk_commit_ts = 0,
+             uint64_t ts = 0,
              bool is_covering_keys = false,
-             uint64_t *unique_sk_commit_ts = nullptr,
              bool is_recovering = false)
     {
         tab_name_ = tab_name;
@@ -190,9 +187,8 @@ public:
         is_for_write_ = is_for_write;
         is_for_share_ = is_for_share;
         read_local_ = read_local;
-        corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
+        ts_ = ts;
         is_covering_keys_ = is_covering_keys;
-        unique_sk_commit_ts_ = unique_sk_commit_ts;
         is_recovering_ = is_recovering;
     }
 
@@ -202,11 +198,30 @@ public:
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;
-    uint64_t corresponding_sk_commit_ts_;
+
+    /*
+
+    Here, the timestamp serves two roles:
+
+    1. When mvcc is enabled, this ts represents the start timestamp of the
+    transaction.
+
+    2. When mvcc is disabled, this ts represents the secondary key commit
+    timestamp when performing a PkRead preceded by a sk read/scan. This ts is
+    required in PkRead() to check whether the pk row is valid to read.
+
+    The pk row is invalid to read if it is being modified concurrently. For
+    example, txn#1 is updating a row (1,a,1) into (1,b,1) in table t1(i INT, j
+    CHAR, k INT, PRIMARY KEY(i), UNIQUE(j)), while txn#2 wants to read a row
+    where j=b. If ,in txn#1, (b,1) has been inserted into sk table(t1*~~j) while
+    (1,b,1) has not been inserted into base table(t1), txn#2 will see (b,1) and
+    use i=1 to do a pk read, but then find (1,a,1) instead, which is incorrect.
+
+    */
+    uint64_t ts_;
 
     // For unique_sk point query
     bool is_covering_keys_;
-    uint64_t *unique_sk_commit_ts_;
 
     // If this is a read request for recovering. If true we should
     // rely on candidate leader term instead of current term to decide

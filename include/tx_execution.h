@@ -460,8 +460,10 @@ private:
 
     // Response whose returned result is void
     TxResult<Void> *void_resp_;
-    // Response whose returned result is record
+    // Response whose returned result is record, used by ObjectCommandTxRequest
     TxResult<RecordStatus> *rec_resp_;
+    // Response whose returned result is record-ts-pair, used by ReadTxRequest
+    TxResult<std::pair<RecordStatus, uint64_t>> *rtp_resp_;
     // Response whose returned result is bool
     TxResult<bool> *bool_resp_;
     // Scan result

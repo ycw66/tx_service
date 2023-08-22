@@ -46,6 +46,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       scans_(),
       void_resp_(nullptr),
       rec_resp_(nullptr),
+      rtp_resp_(nullptr),
       bool_resp_(nullptr),
       kvp_resp_(nullptr),
       uint64_resp_(nullptr),
@@ -100,6 +101,7 @@ void TransactionExecution::Reset(CcProtocol proto)
     command_id_.store(0, std::memory_order_release);
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
+    rtp_resp_ = nullptr;
     bool_resp_ = nullptr;
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
@@ -519,7 +521,7 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
         return;
     }
 
-    rec_resp_ = &read_req.tx_result_;
+    rtp_resp_ = &read_req.tx_result_;
 
     read_.read_type_ = ReadType::Inside;
     read_.read_tx_req_ = &read_req;
@@ -1320,8 +1322,7 @@ void TransactionExecution::Process(ReadOperation &read)
         const TableName &table_name = *read.read_tx_req_->tab_name_;
         const TxKey &key = *read.read_tx_req_->key_;
         TxRecord &rec = *read.read_tx_req_->rec_;
-        const uint64_t corresponding_sk_commit_ts =
-            read.read_tx_req_->corresponding_sk_commit_ts_;
+        const uint64_t ts = read.read_tx_req_->ts_;
         bool is_covering_keys = read.read_tx_req_->is_covering_keys_;
 
         // Reads the specified key from the local cc map to which this tx is
@@ -1370,14 +1371,16 @@ void TransactionExecution::Process(ReadOperation &read)
                     {
                         state_stack_.pop_back();
                         assert(state_stack_.empty());
-                        rec_resp_->Finish(RecordStatus::Deleted);
+                        rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
+                            RecordStatus::Deleted, 0));
                     }
                     else
                     {
                         rec.Copy(*write->rec_.get());
                         state_stack_.pop_back();
                         assert(state_stack_.empty());
-                        rec_resp_->Finish(RecordStatus::Normal);
+                        rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
+                            RecordStatus::Normal, 0));
                     }
                     return;
                 }
@@ -1385,12 +1388,17 @@ void TransactionExecution::Process(ReadOperation &read)
                 // Step 2: fast path if key is the same as last read key.
                 const TxRecord *cache_rec =
                     rw_set_.FindCacheRead(table_name, key);
-                if (cache_rec != nullptr)
+                // read_cache_ deos not have commit ts info that unique
+                // secondary index read needs. So it is incorrect to use
+                // this fast path when table type is UniqueSecondary.
+                if (cache_rec != nullptr &&
+                    table_name.Type() != TableType::UniqueSecondary)
                 {
                     rec.Copy(*cache_rec);
                     state_stack_.pop_back();
                     assert(state_stack_.empty());
-                    rec_resp_->Finish(RecordStatus::Normal);
+                    rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
+                        RecordStatus::Normal, 0));
                     return;
                 }
             }
@@ -1455,9 +1463,9 @@ void TransactionExecution::Process(ReadOperation &read)
             {
                 read_ts = start_ts_;
             }
-            else if (corresponding_sk_commit_ts != 0)
+            else if (ts != 0)
             {
-                read_ts = corresponding_sk_commit_ts;
+                read_ts = ts;
             }
 
             cc_handler_->Read(table_name,
@@ -1545,7 +1553,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     {
         DLOG(ERROR) << "ReadOperation failed for cc error:"
                     << read_.hd_result_.ErrorMsg();
-        rec_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
+        rtp_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
     }
     else
     {
@@ -1564,15 +1572,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
         if (read_.read_type_ == ReadType::Inside)
         {
             const TableName *table_name = read_tx_req->tab_name_;
-            if (table_name->Type() == TableType::UniqueSecondary &&
-                read_tx_req->unique_sk_commit_ts_ != nullptr)
-            {
-                // We only need commit timestamp of unique secondary key entry
-                // in read_only scenario to trace back to primary key table.
-                *(read_tx_req->unique_sk_commit_ts_) = read_res.ts_;
-            }
             LockType lock_type = read_res.lock_type_;
-
             if (lock_type != LockType::NoLock)
             {
                 DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -1603,7 +1603,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                         << static_cast<int>(read_res.rec_status_)
                         << " ,lock: " << static_cast<int>(read_res.lock_type_)
                         << " ,table: " << table_name->String();
-                    rec_resp_->FinishError(
+                    rtp_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
 
                     return;
@@ -1625,7 +1625,8 @@ void TransactionExecution::PostProcess(ReadOperation &read)
             cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
         }
 
-        rec_resp_->Finish(read_res.rec_status_);
+        rtp_resp_->Finish(std::pair<RecordStatus, uint64_t>(
+            read_res.rec_status_, read_res.ts_));
     }
 }
 
@@ -1652,7 +1653,7 @@ void TransactionExecution::PostProcess(ReadLocalOperation &lock_local)
     {
         DLOG(ERROR) << "ReadLocalOperation failed for cc error:"
                     << lock_local.hd_result_->ErrorMsg();
-        rec_resp_->FinishError(
+        rtp_resp_->FinishError(
             ConvertCcError(lock_local.hd_result_->ErrorCode()));
     }
     else if (lock_local.hd_result_->Value().rec_status_ == RecordStatus::Normal)
