@@ -412,7 +412,7 @@ public:
         const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map,
+            sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id)
         : base_table_name_(base_table_name)
@@ -505,13 +505,15 @@ public:
 
     // This method is called in one of Sharder::tx_worker_pool_ thread.
     void OnRemoteStatisticsMessage(
-        const TableName &table_or_index_name,
+        TableName table_or_index_name,
         const TableSchema *table_schema,
-        const remote::NodeGroupSamplePool &remote_sample_pool) override
+        remote::NodeGroupSamplePool remote_sample_pool) override
     {
         Task task =
-            [this, &table_or_index_name, table_schema, &remote_sample_pool](
-                CcShard &ccs)
+            [this,
+             table_or_index_name = std::move(table_or_index_name),
+             table_schema,
+             remote_sample_pool = std::move(remote_sample_pool)](CcShard &ccs)
         {
             NodeGroupId ng_id =
                 static_cast<NodeGroupId>(remote_sample_pool.ng_id());
@@ -718,7 +720,7 @@ private:
         const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map)
+            sample_pool_map)
     {
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
         for (auto &[table_or_index_name, index_sample_pool] : sample_pool_map)
@@ -816,6 +818,11 @@ private:
     void Broadcast(const TableSchema *table_schema,
                    const TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool) const
     {
+        const TableName &table_or_index_name =
+            ccmap_sample_pool.GetTableOrIndexName();
+        assert(table_or_index_name == table_schema->GetBaseTableName() ||
+               table_schema->IndexKeySchema(table_or_index_name) != nullptr);
+
         remote::CcStreamSender *stream_sender =
             Sharder::Instance().GetCcStreamSender();
 
@@ -831,10 +838,8 @@ private:
         broadcast_stat_req->set_src_node_id(src_node_id);
         broadcast_stat_req->set_node_group_id(UINT32_MAX);
         broadcast_stat_req->set_table_type(
-            remote::ToRemoteType::ConvertTableType(
-                ccmap_sample_pool.GetTableOrIndexName().Type()));
-        broadcast_stat_req->set_table_name_str(
-            ccmap_sample_pool.GetTableOrIndexName().String());
+            remote::ToRemoteType::ConvertTableType(table_or_index_name.Type()));
+        broadcast_stat_req->set_table_name_str(table_or_index_name.String());
         broadcast_stat_req->set_schema_version(table_schema->Version());
         remote::NodeGroupSamplePool *remote_sample_pool =
             broadcast_stat_req->mutable_node_group_sample_pool();
@@ -856,14 +861,14 @@ private:
                 else
                 {
                     Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                        [table_name = ccmap_sample_pool.GetTableOrIndexName(),
+                        [table_or_index_name,
                          schema_version = table_schema->Version(),
                          remote_sample_pool = *remote_sample_pool]() mutable
                         {
                             Sharder::Instance()
                                 .GetLocalCcShards()
                                 ->CreateRemoteStatisticsTx(
-                                    std::move(table_name),
+                                    std::move(table_or_index_name),
                                     schema_version,
                                     std::move(remote_sample_pool));
                         });

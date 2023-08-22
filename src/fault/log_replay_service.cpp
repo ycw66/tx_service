@@ -296,7 +296,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
     std::unordered_set<TableName> range_split_tables;
-    std::unordered_set<TableName> catalog_upsert_tables;
 
     std::mutex mux;
     std::condition_variable cv;
@@ -334,18 +333,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 TableName base_table_name{table_name.GetBaseTableNameSV(),
                                           TableType::Primary};
                 range_split_tables.insert(base_table_name);
-            }
-
-            for (const ::txlog::ReplaySchemaMsg &replay_schema_msg :
-                 msg.schema_op_msgs())
-            {
-                ::txlog::SchemaOpMessage schema_op_msg;
-                schema_op_msg.ParseFromString(
-                    replay_schema_msg.schema_op_blob());
-                TableName table_name(
-                    schema_op_msg.table_name_str(),
-                    static_cast<TableType>(schema_op_msg.table_type()));
-                catalog_upsert_tables.insert(std::move(table_name));
             }
         }
 
@@ -440,39 +427,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 return 0;
             }
         }
-
-#ifndef ON_KEY_OBJECT
-        // Load table statistics before create ccmap in range-split-op,
-        // catalog-upsert-op, etc.
-        for (const TableName &table_name : range_split_tables)
-        {
-            std::unique_ptr<ReplayLogCc> &cc_req = cc_req_vec.emplace_back(
-                std::make_unique<ReplayTableStatistics>(cc_ng_id,
-                                                        table_name,
-                                                        mux,
-                                                        cv,
-                                                        finish_log_cnt,
-                                                        recovery_error));
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
-        }
-        for (const TableName &table_name : catalog_upsert_tables)
-        {
-            std::unique_ptr<ReplayLogCc> &cc_req = cc_req_vec.emplace_back(
-                std::make_unique<ReplayTableStatistics>(cc_ng_id,
-                                                        table_name,
-                                                        mux,
-                                                        cv,
-                                                        finish_log_cnt,
-                                                        recovery_error));
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
-        }
-        WaitAndClearRequests(
-            stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
-        if (recovery_error)
-        {
-            return 0;
-        }
-#endif
 
         // parse and process log records
         const std::string &log_records = msg.binary_log_records();

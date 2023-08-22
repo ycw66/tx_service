@@ -896,7 +896,7 @@ std::pair<std::shared_ptr<Statistics>, bool> CcShard::InitTableStatistics(
     TableSchema *dirty_table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-        &&sample_pool_map)
+        sample_pool_map)
 {
     return local_shards_.InitTableStatistics(table_schema,
                                              dirty_table_schema,

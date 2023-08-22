@@ -255,35 +255,16 @@ public:
 #endif
                 }
 
+                if (catalog_entry->schema_ && catalog_entry->dirty_schema_)
+                {
+                    // Alter table
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        catalog_entry->schema_->StatisticsObject());
+                }
+
                 schema_rec->Set(catalog_entry->schema_,
                                 catalog_entry->dirty_schema_,
                                 catalog_entry->Version());
-
-#ifndef ON_KEY_OBJECT
-                if (catalog_entry->dirty_schema_)
-                {
-                    if (catalog_entry->schema_)
-                    {
-                        // If the current node is not coordinator, table
-                        // statistics may haven't been loaded yet.
-                        const StatisticsEntry *statistics_entry =
-                            shard_->LoadRangesAndStatisticsNx(
-                                catalog_entry->schema_.get(), cc_ng_id_, &req);
-                        if (!statistics_entry)
-                        {
-                            return false;
-                        }
-                        catalog_entry->dirty_schema_->BindStatistics(
-                            statistics_entry->statistics_);
-                    }
-                    else
-                    {
-                        // CREATE TABLE statement
-                        shard_->InitTableStatistics(
-                            catalog_entry->dirty_schema_.get(), cc_ng_id_);
-                    }
-                }
-#endif
             }
             else
             {
@@ -343,6 +324,12 @@ public:
                         std::make_unique<CatalogRecord>();
                     schema_rec = empty_rec.get();
                     req.SetDecodedPayload(std::move(empty_rec));
+                }
+
+                if (!catalog_entry->schema_ && catalog_entry->dirty_schema_)
+                {
+                    shard_->InitTableStatistics(
+                        catalog_entry->dirty_schema_.get(), cc_ng_id_);
                 }
 
                 schema_rec->Set(catalog_entry->dirty_schema_,
@@ -743,20 +730,12 @@ public:
                     {
 #ifndef ON_KEY_OBJECT
                         // Initialize table statistics before create ccmap.
-                        //
-                        // Loading table statistics from storage into
-                        // memory, depends on table range information.
-                        // Before recovering range split operation,
-                        // table range information is unusable.
-                        if (!req.IsInRecovering())
+                        if (!shard_->LoadRangesAndStatisticsNx(
+                                catalog_entry->schema_.get(),
+                                req.NodeGroupId(),
+                                &req))
                         {
-                            if (!shard_->LoadRangesAndStatisticsNx(
-                                    catalog_entry->schema_.get(),
-                                    req.NodeGroupId(),
-                                    &req))
-                            {
-                                return false;
-                            }
+                            return false;
                         }
 #endif
                     }
@@ -912,6 +891,23 @@ public:
                     return false;
                 }
                 catalog_entry = new_catalog_entry;
+            }
+
+            if (catalog_entry->schema_)
+            {
+                if (!shard_->LoadRangesAndStatisticsNx(
+                        catalog_entry->schema_.get(), req.NodeGroupId(), &req))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                if (catalog_entry->dirty_schema_)
+                {
+                    shard_->InitTableStatistics(
+                        catalog_entry->dirty_schema_.get(), req.NodeGroupId());
+                }
             }
         }
         else

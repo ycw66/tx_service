@@ -200,13 +200,6 @@ int Sharder::Init(const std::string &path)
             return -1;
         }
 
-        if (cc_stream_server_.Start(ng_configs_.at(node_id_).front().port_,
-                                    NULL) != 0)
-        {
-            LOG(FATAL) << "Fail to start the cc stream server.";
-            return -1;
-        }
-
         cc_stream_sender_ = std::make_unique<remote::CcStreamSender>(msg_pool_);
         for (auto &pair : ng_configs_)
         {
@@ -236,6 +229,14 @@ int Sharder::Init(const std::string &path)
                                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
         LOG(FATAL) << "Fail to add the cc node service to the server.";
+        return -1;
+    }
+
+    if (ng_configs_.size() > 1 &&
+        cc_stream_server_.Start(ng_configs_.at(node_id_).front().port_, NULL) !=
+            0)
+    {
+        LOG(FATAL) << "Fail to start the cc stream server.";
         return -1;
     }
 

@@ -1035,6 +1035,12 @@ public:
                 // should not be here if log is in clean stage
                 assert(false);
             }
+
+            if (!shard_->LoadRangesAndStatisticsNx(
+                    table_schema_, req.NodeGroupId(), &req))
+            {
+                return false;
+            }
         }
         else
         {

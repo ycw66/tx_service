@@ -323,9 +323,9 @@ public:
                                 int64_t tx_term);
 
     void CreateRemoteStatisticsTx(
-        TableName &&table_or_index_name,
+        TableName table_or_index_name,
         uint64_t schema_version,
-        remote::NodeGroupSamplePool &&remote_sample_pool);
+        remote::NodeGroupSamplePool remote_sample_pool);
 
     /**
      * ---------------------------------
@@ -550,7 +550,7 @@ public:
         NodeGroupId ng_id,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map,
+            sample_pool_map,
         CcShard *ccs);
 
     StatisticsEntry *GetTableStatistics(const TableName &table_name,

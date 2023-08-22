@@ -244,9 +244,9 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 }
 
 void TransactionExecution::RemoteStatisticsTx(
-    const TableName &table_or_index_name,
+    TableName table_or_index_name,
     uint64_t schema_version,
-    const remote::NodeGroupSamplePool &remote_sample_pool)
+    remote::NodeGroupSamplePool remote_sample_pool)
 {
     TableName base_table_name(table_or_index_name.GetBaseTableNameSV(),
                               TableType::Primary);
@@ -267,16 +267,15 @@ void TransactionExecution::RemoteStatisticsTx(
             [](const CatalogRecord &catalog_rec,
                uint64_t schema_version) -> const TableSchema *
         {
-            if (const TableSchema *table_schema = catalog_rec.Schema();
-                table_schema->Version() == schema_version)
+            if (catalog_rec.Schema() &&
+                catalog_rec.Schema()->Version() == schema_version)
             {
-                return table_schema;
+                return catalog_rec.Schema();
             }
-            else if (const TableSchema *table_schema =
-                         catalog_rec.DirtySchema();
-                     table_schema->Version() == schema_version)
+            else if (catalog_rec.DirtySchema() &&
+                     catalog_rec.DirtySchema()->Version() == schema_version)
             {
-                return table_schema;
+                return catalog_rec.DirtySchema();
             }
             else
             {
@@ -288,11 +287,16 @@ void TransactionExecution::RemoteStatisticsTx(
         // It is safe to use raw pointer to TableSchema and Statistics, because
         // they have been protected by Sharder::TryPinNodeGroupData in
         // CcStreamReceiver/BroadcastStatisticsRequest.
-        if (table_schema && table_schema->Version() == schema_version)
+        if (table_schema)
         {
+            assert(table_schema->GetBaseTableName() == table_or_index_name ||
+                   table_schema->IndexKeySchema(table_or_index_name) !=
+                       nullptr);
             Statistics *statistics = table_schema->StatisticsObject().get();
             statistics->OnRemoteStatisticsMessage(
-                table_or_index_name, table_schema, remote_sample_pool);
+                std::move(table_or_index_name),
+                table_schema,
+                std::move(remote_sample_pool));
         }
     }
 }

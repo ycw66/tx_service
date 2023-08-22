@@ -252,6 +252,12 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
+    else if (catalog_entry.Version() == old_schema_ts &&
+             catalog_entry.DirtyVersion() == dirty_schema_ts)
+    {
+        // Rerun ReplayLogCc req.
+        return {true, &catalog_entry};
+    }
     else if (dirty_schema_ts == 0)
     {
         // It is kv_store_failure and is restoring old schema, treat as
@@ -442,22 +448,24 @@ void LocalCcShards::CreateSchemaRecoveryTx(
 }
 
 void LocalCcShards::CreateRemoteStatisticsTx(
-    TableName &&table_or_index_name,
+    TableName table_or_index_name,
     uint64_t schema_version,
-    remote::NodeGroupSamplePool &&remote_sample_pool)
+    remote::NodeGroupSamplePool remote_sample_pool)
 {
     TransactionExecution *txm = NewTxInit(
         tx_service_, IsolationLevel::Serializable, CcProtocol::Locking);
     if (txm)
     {
-        txm->RemoteStatisticsTx(
-            table_or_index_name, schema_version, remote_sample_pool);
+        txm->RemoteStatisticsTx(std::move(table_or_index_name),
+                                schema_version,
+                                std::move(remote_sample_pool));
 
+        // Commit the transaction and ignore commit error(leader transfer).
+        // For readonly transaction, commit transaction is same with abort.
         CommitTxRequest commit_req;
         commit_req.Reset();
         txm->Execute(&commit_req);
         commit_req.Wait();
-        assert(commit_req.Result() == true);
     }
 }
 
@@ -1276,7 +1284,7 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     TableSchema *dirty_table_schema,
     NodeGroupId ng_id,
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-        &&sample_pool_map,
+        sample_pool_map,
     CcShard *ccs)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -2528,16 +2536,10 @@ void LocalCcShards::SplitFlushRange(
 
     if (realtime_sampling_)
     {
-        if (!is_dirty)
-        {
-            catalog_rec.Schema()->StatisticsObject()->PriorSplitRange(
-                table_name, catalog_rec.Schema(), node_group);
-        }
-        else
-        {
-            catalog_rec.DirtySchema()->StatisticsObject()->PriorSplitRange(
-                table_name, catalog_rec.DirtySchema(), node_group);
-        }
+        const TableSchema *which_schema =
+            is_dirty ? catalog_rec.DirtySchema() : catalog_rec.Schema();
+        which_schema->StatisticsObject()->PriorSplitRange(
+            table_name, which_schema, node_group);
     }
 
     const TxKey *old_start_key = split_info.first->RangeStartKey();

@@ -119,12 +119,16 @@ public:
     virtual std::unique_ptr<Statistics> CreateTableStatistics(
         const TableName &base_table_name) = 0;
 
+    /**
+     * @param sample_pool_map is declared as value-type. Copy won't happen if it
+     * is a right-value since C++11.
+     */
     virtual std::unique_ptr<Statistics> CreateTableStatistics(
         const TableName &base_table_name,
         const TableSchema *table_schema,
         std::unordered_map<TableName,
                            std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-            &&sample_pool_map,
+            sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) = 0;
 
