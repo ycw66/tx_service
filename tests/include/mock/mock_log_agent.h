@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "log_service/include/log_agent.h"
+#include "log_agent.h"
 #include "txlog.h"
 
 namespace txservice

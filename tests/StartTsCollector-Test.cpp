@@ -1,7 +1,4 @@
-// Let Catch provide main():
-#define CATCH_CONFIG_MAIN
-
-#include <catch2/catch.hpp>
+#include <catch2/catch_all.hpp>
 #include <filesystem>
 #include <iostream>
 
@@ -156,4 +153,11 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     {
         delete req;
     }
+}
+
+int main(int argc, char **argv)
+{
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
+    int ret = Catch::Session().run(argc, argv);
+    return ret;
 }
