@@ -69,6 +69,8 @@ struct FlushRecord
     {
         const TxKey *ptr_;
         std::unique_ptr<TxKey> uptr_;
+        // key_idx records where the TxKey raw ptr should be obtained.
+        size_t key_idx_;
         ~KeyPtr()
         {
         }
@@ -90,6 +92,21 @@ public:
     {
     }
 
+    FlushRecord(std::unique_ptr<TxKey> uptr,
+                std::shared_ptr<TxRecord> payload,
+                RecordStatus payload_status,
+                uint64_t commit_ts,
+                LruEntry *cce,
+                int32_t delta_size)
+    {
+        SetKey(std::move(uptr));
+        SetPayload(std::move(payload));
+        payload_status_ = payload_status;
+        commit_ts_ = commit_ts;
+        cce_ = cce;
+        delta_size_ = delta_size;
+    }
+
     ~FlushRecord()
     {
         if (is_key_owner_)
@@ -98,49 +115,7 @@ public:
         }
     }
 
-    FlushRecord(const FlushRecord &rhs)
-    {
-        if (rhs.is_key_owner_)
-        {
-            SetKey(rhs.key_.uptr_->Clone());
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
-        }
-
-        SetPayload(rhs.payload_);
-        payload_status_ = rhs.payload_status_;
-        commit_ts_ = rhs.commit_ts_;
-        cce_ = rhs.cce_;
-        delta_size_ = rhs.delta_size_;
-    }
-
-    FlushRecord &operator=(const FlushRecord &rhs)
-    {
-        if (this == &rhs)
-        {
-            return *this;
-        }
-
-        if (rhs.is_key_owner_)
-        {
-            SetKey(rhs.key_.uptr_->Clone());
-        }
-        else
-        {
-            SetKey(rhs.key_.ptr_);
-        }
-
-        SetPayload(rhs.payload_);
-        payload_status_ = rhs.payload_status_;
-        commit_ts_ = rhs.commit_ts_;
-        cce_ = rhs.cce_;
-        delta_size_ = rhs.delta_size_;
-        return *this;
-    }
-
-    FlushRecord &operator=(FlushRecord &&rhs)
+    FlushRecord &operator=(FlushRecord &&rhs) noexcept
     {
         if (this == &rhs)
         {
@@ -165,7 +140,7 @@ public:
         return *this;
     }
 
-    FlushRecord(FlushRecord &&rhs)
+    FlushRecord(FlushRecord &&rhs) noexcept
     {
         if (rhs.is_key_owner_)
         {
@@ -197,6 +172,22 @@ public:
             key_.uptr_ = key.Clone();
             is_key_owner_ = true;
         }
+    }
+
+    void SetKeyIndex(size_t offset)
+    {
+        if (is_key_owner_)
+        {
+            key_.uptr_.reset();
+        }
+        key_.key_idx_ = offset;
+        is_key_owner_ = false;
+    }
+
+    size_t GetKeyIndex() const
+    {
+        assert(!is_key_owner_);
+        return key_.key_idx_;
     }
 
     void SetKey(const TxKey *ptr)
@@ -239,6 +230,11 @@ public:
             return nullptr;
         }
         return payload_.get();
+    }
+
+    std::shared_ptr<TxRecord> GetPayload() const
+    {
+        return payload_;
     }
 
     size_t PayloadSize() const
@@ -813,7 +809,7 @@ public:
     size_t ExportForCkpt(const KeyT &key,
                          std::vector<FlushRecord> &ckpt_vec,
                          std::vector<FlushRecord> &akv_vec,
-                         std::vector<const TxKey *> &mv_base_vec,
+                         std::vector<size_t> &mv_base_vec,
                          uint64_t to_ts,
                          uint64_t oldest_active_tx_ts,
                          TableType tbl_type,
@@ -925,8 +921,7 @@ public:
                         else
                         {
                             auto &ref = akv_vec.emplace_back();
-                            ref.SetKey(
-                                reinterpret_cast<const TxKey *>(ckpt_idx));
+                            ref.SetKeyIndex(ckpt_idx);
                             ref.cce_ = const_cast<LruEntry *>(
                                 static_cast<const LruEntry *>(this));
                             if (it->payload_status_ == RecordStatus::Normal)
@@ -957,7 +952,7 @@ public:
             // last ckpt version is needed but not in memory, and we're not sure
             // if an older version exists, need to copy record from "base table"
             // into "mvcc_archives table".
-            mv_base_vec.push_back(reinterpret_cast<const TxKey *>(ckpt_idx));
+            mv_base_vec.push_back(ckpt_idx);
         }
         return exported_count;
     }

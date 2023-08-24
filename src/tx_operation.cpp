@@ -3195,9 +3195,15 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                      j < scan_cc.accumulated_scan_cnt_[i];
                                      ++j)
                                 {
-                                    // Copy
+                                    auto &rec = scan_cc.DataSyncVec(i)[j];
+                                    // Clone key
                                     data_sync_vecs[i].emplace_back(
-                                        scan_cc.DataSyncVec(i)[j]);
+                                        rec.Key()->Clone(),
+                                        rec.GetPayload(),
+                                        rec.payload_status_,
+                                        rec.commit_ts_,
+                                        rec.cce_,
+                                        rec.delta_size_);
                                 }
 
                                 for (size_t j = 0;
@@ -3206,24 +3212,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 {
                                     auto &rec = scan_cc.ArchiveVec(i)[j];
                                     rec.SetKey(
-                                        data_sync_vecs[i]
-                                                      [reinterpret_cast<size_t>(
-                                                           rec.Key()) +
-                                                       offset]
-                                                          .Key());
+                                        data_sync_vecs[i][rec.GetKeyIndex() +
+                                                          offset]
+                                            .Key());
                                 }
 
                                 for (size_t j = 0;
-                                     j < scan_cc.MoveBaseVec(i).size();
+                                     j < scan_cc.MoveBaseIdxVec(i).size();
                                      ++j)
                                 {
-                                    auto &rec = scan_cc.MoveBaseVec(i)[j];
-                                    rec =
-                                        data_sync_vecs[i]
-                                                      [reinterpret_cast<size_t>(
-                                                           rec) +
-                                                       offset]
-                                                          .Key();
+                                    size_t key_idx =
+                                        scan_cc.MoveBaseIdxVec(i)[j];
+                                    const TxKey *key_raw_ptr =
+                                        data_sync_vecs[i][key_idx + offset]
+                                            .Key();
+                                    mv_base_vecs[i].push_back(key_raw_ptr);
                                 }
 
                                 // if the data is drained
@@ -3235,11 +3238,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                     scan_cc.ArchiveVec(i).begin(),
                                     scan_cc.ArchiveVec(i).end(),
                                     std::back_inserter(archive_vecs.at(i)));
-
-                                std::move(
-                                    scan_cc.MoveBaseVec(i).begin(),
-                                    scan_cc.MoveBaseVec(i).end(),
-                                    std::back_inserter(mv_base_vecs.at(i)));
                             }
                             scan_cc.Reset(std::move(res));
                         }

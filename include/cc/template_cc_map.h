@@ -4539,7 +4539,7 @@ public:
                 cce->ExportForCkpt(*key,
                                    req.DataSyncVec(shard_->core_id_),
                                    req.ArchiveVec(shard_->core_id_),
-                                   req.MoveBaseVec(shard_->core_id_),
+                                   req.MoveBaseIdxVec(shard_->core_id_),
                                    req.data_sync_ts_,
                                    recycle_ts,
                                    Type(),
@@ -4563,8 +4563,8 @@ public:
         }
         else
         {
-            // set the pause_key_ to mark resume position and put the CkptScanCc request into CcQueue
-            // again.
+            // set the pause_key_ to mark resume position and put the CkptScanCc
+            // request into CcQueue again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
@@ -4985,11 +4985,13 @@ public:
                     size_t tmp_ckpt_vec_size = 0;
 
                     std::vector<FlushRecord> tmp_akv_vec;
-                    std::vector<const TxKey *> tmp_mv_base_vec;
+                    std::vector<size_t> tmp_mv_base_idx_vec;
+                    std::vector<const TxKey *> tmp_mv_base_key_vec;
+
                     cce->ExportForCkpt(*cce_key,
                                        tmp_ckpt_vec,
                                        tmp_akv_vec,
-                                       tmp_mv_base_vec,
+                                       tmp_mv_base_idx_vec,
                                        cce->commit_ts_,
                                        1U,
                                        Type(),
@@ -5002,17 +5004,14 @@ public:
                     {
                         auto &rec = tmp_akv_vec[i];
                         rec.SetKey(
-                            tmp_ckpt_vec[reinterpret_cast<size_t>(rec.Key()) +
-                                         offset]
-                                .Key());
+                            tmp_ckpt_vec[rec.GetKeyIndex() + offset].Key());
                     }
 
-                    for (size_t i = 0; i < tmp_mv_base_vec.size(); ++i)
+                    for (size_t i = 0; i < tmp_mv_base_idx_vec.size(); ++i)
                     {
-                        auto &rec = tmp_mv_base_vec[i];
-                        rec =
-                            tmp_ckpt_vec[reinterpret_cast<size_t>(rec) + offset]
-                                .Key();
+                        size_t key_idx = tmp_mv_base_idx_vec[i];
+                        const TxKey *key_raw_ptr = tmp_ckpt_vec[key_idx].Key();
+                        tmp_mv_base_key_vec.emplace_back(key_raw_ptr);
                     }
 
                     bool res = shard_->FlushEntryForTest(

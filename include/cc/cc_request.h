@@ -2,6 +2,7 @@
 
 #include <algorithm>  // std::min
 #include <condition_variable>
+#include <cstddef>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -2266,8 +2267,8 @@ public:
             data_sync_vec_.back().resize(scan_batch_size);
             archive_vec_.emplace_back();
             archive_vec_.back().reserve(scan_batch_size);
-            mv_base_vec_.emplace_back();
-            mv_base_vec_.back().reserve(scan_batch_size);
+            mv_base_idx_vec_.emplace_back();
+            mv_base_idx_vec_.back().reserve(scan_batch_size);
             res_.emplace_back(nullptr, false);
             loading_slice_.emplace_back(RangeSliceId(nullptr, nullptr));
             accumulated_scan_cnt_.emplace_back(0);
@@ -2312,7 +2313,7 @@ public:
         for (size_t i = 0; i < core_cnt_; i++)
         {
             archive_vec_.at(i).clear();
-            mv_base_vec_.at(i).clear();
+            mv_base_idx_vec_.at(i).clear();
             loading_slice_.at(i) = RangeSliceId(nullptr, nullptr);
             res_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.at(i) = 0;
@@ -2395,9 +2396,9 @@ public:
         return archive_vec_[core_id];
     }
 
-    std::vector<const TxKey *> &MoveBaseVec(uint16_t core_id)
+    std::vector<size_t> &MoveBaseIdxVec(uint16_t core_id)
     {
-        return mv_base_vec_[core_id];
+        return mv_base_idx_vec_[core_id];
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
@@ -2410,7 +2411,7 @@ private:
     std::vector<std::vector<FlushRecord>> data_sync_vec_;
     std::vector<std::vector<FlushRecord>> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<std::vector<const TxKey *>> mv_base_vec_;
+    std::vector<std::vector<size_t>> mv_base_idx_vec_;
 
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
