@@ -3352,8 +3352,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                           "data sync, tx number "
                        << txm->TxNumber();
             ClearDataSyncVec();
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
             RetrySubOperation(txm, &data_sync_scan_op_);
             return;
         }
@@ -3377,8 +3375,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Split Flush transaction failed to flush data, "
                           "tx number "
                        << txm->TxNumber();
-
             RetrySubOperation(txm, &flush_op_);
+
             return;
         }
 

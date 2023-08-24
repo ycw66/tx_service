@@ -2675,6 +2675,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     flush_worker_lk.unlock();
 
     bool succ = true;
+    bool flush_ret = true;
 
     // Flush to data store if this node group leader term does not
     // change
@@ -2683,7 +2684,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         Sharder::Instance().LeaderTerm(node_group) == leader_term)
     {
         // Flushes to the data store
-        bool flush_ret = true;
         std::unordered_set<uint32_t> skipped_record;
 
         if (EnableMvcc() && mv_base_vec->size() > 0)
@@ -2710,12 +2710,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         if (flush_ret && EnableMvcc())
         {
-            flush_ret = store_hd_->PutArchivesAll(node_group,
-                                                  table_name,
-                                                  schema->GetKVCatalogInfo(),
-                                                  *archive_vec);
-
-            if (!flush_ret)
+            if (!store_hd_->PutArchivesAll(node_group,
+                                           table_name,
+                                           schema->GetKVCatalogInfo(),
+                                           *archive_vec))
             {
                 // If ckpt succeeds and flushing undo fails, it is safe
                 // to update the local checkpoint timestamp, but not
@@ -2734,7 +2732,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             {
                 // There are records that are skipped during put all. We cannot
                 // truncate log, but we can update local checkpoint ts on
-                // ccentries.
+                // ccentries. Note that this should only happen if this flush
+                // work is enqueued by a regular data sync request. The caller
+                // will need to redo data sync scan instead of directly retrying
+                // flush data operation.
+                LOG(INFO)
+                    << "Putall on table " << table_name.Trace() << " skipped "
+                    << skipped_record.size()
+                    << " records that are not owned by current node group yet.";
                 succ = false;
             }
             for (size_t i = 0; i < data_sync_vec->size(); i++)
@@ -2755,26 +2760,57 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 ccs->Enqueue(&reset_cc);
             }
             reset_cc.Wait();
-#ifdef RANGE_PARTITION_ENABLED
-            // Update the slice size in data store.
             if (data_sync_vec->size())
             {
-                while (!UpdateStoreSlice(table_name,
-                                         schema->Version(),
-                                         node_group,
-                                         *data_sync_vec,
-                                         true))
+                bool term_change = false;
+#ifdef RANGE_PARTITION_ENABLED
+                // Update the slice size in data store.
+                while (!term_change && !UpdateStoreSlice(table_name,
+                                                         schema->Version(),
+                                                         node_group,
+                                                         *data_sync_vec,
+                                                         true))
                 {
                     // Keep retrying here since we've finished the flush
                     // already, it's too expensive to start from the beginning
                     // all over again.
                     LOG(ERROR) << "Data sync failed to update store slice info "
                                   "on table "
-                               << table_name.Trace() << ".";
+                               << table_name.Trace() << ", retrying.";
                     std::this_thread::sleep_for(1s);
+                    if (!Sharder::Instance().CheckLeaderTerm(node_group,
+                                                             leader_term))
+                    {
+                        LOG(ERROR)
+                            << "Leader term changed during store slice update";
+                        succ = false;
+                        term_change = true;
+                    }
+                }
+#endif
+                while (!term_change && realtime_sampling_ &&
+                       !schema->StatisticsObject()->PostCheckpoint(store_hd_,
+                                                                   table_name,
+                                                                   schema,
+                                                                   node_group,
+                                                                   data_sync_ts,
+                                                                   false))
+                {
+                    LOG(ERROR)
+                        << "Data sync failed to update statistics of table "
+                        << table_name.Trace() << ", retrying.";
+                    std::this_thread::sleep_for(1s);
+                    // Check leader term in infinite while loop.
+                    if (!Sharder::Instance().CheckLeaderTerm(node_group,
+                                                             leader_term))
+                    {
+                        LOG(ERROR) << "Leader term changed during table "
+                                      "statistics update";
+                        succ = false;
+                        term_change = true;
+                    }
                 }
             }
-#endif
         }
         else
         {
@@ -2790,17 +2826,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             assert(res);
 #endif
             succ = false;
-        }
-
-        if (succ)
-        {
-            succ = !realtime_sampling_ ||
-                   schema->StatisticsObject()->PostCheckpoint(store_hd_,
-                                                              table_name,
-                                                              schema,
-                                                              node_group,
-                                                              data_sync_ts,
-                                                              false);
         }
     }
 

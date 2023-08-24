@@ -4385,7 +4385,7 @@ public:
             }
             else
             {
-                it = Floor(*start_key);
+                it = LowerBound(*start_key);
                 if (it->first == NegativeInfinity<KeyT>::Instance())
                 {
                     it++;
@@ -4396,7 +4396,7 @@ public:
         {
             const KeyT *pause_key = static_cast<const KeyT *>(
                 req.pause_key_.at(shard_->core_id_).first.get());
-            it = Floor(*pause_key);
+            it = LowerBound(*pause_key);
         }
 
         if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
@@ -4563,7 +4563,7 @@ public:
         }
         else
         {
-            // set the start_page_ and put the CkptScanCc request into CcQueue
+            // set the pause_key_ to mark resume position and put the CkptScanCc request into CcQueue
             // again.
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)

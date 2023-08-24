@@ -180,6 +180,11 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
             NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
         }
+        else
+        {
+            LOG(INFO) << "Checkpoint of node group #" << node_group
+                      << " failed, redo log not truncated.";
+        }
     }
     // notify ccshard ckpt has finished and can re-check freeable ccentries.
     local_shards_.SetWaitingCkpt(false);
