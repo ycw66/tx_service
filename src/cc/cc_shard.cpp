@@ -728,6 +728,7 @@ std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
 
 void CcShard::FetchCatalog(const TableName &table_name,
                            NodeGroupId cc_ng_id,
+                           int64_t cc_ng_term,
                            CcRequestBase *requester)
 {
     FetchCatalogCc *fetch_req = nullptr;
@@ -739,7 +740,8 @@ void CcShard::FetchCatalog(const TableName &table_name,
     else
     {
         std::unique_ptr<FetchCatalogCc> fetch_catalog_cc =
-            std::make_unique<FetchCatalogCc>(table_name, *this, cc_ng_id);
+            std::make_unique<FetchCatalogCc>(
+                table_name, *this, cc_ng_id, cc_ng_term);
         fetch_req = fetch_catalog_cc.get();
         fetch_reqs_.emplace(table_name, std::move(fetch_catalog_cc));
     }
@@ -753,6 +755,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
 
 void CcShard::FetchTableStatistics(const TableName &table_name,
                                    NodeGroupId cc_ng_id,
+                                   int64_t cc_ng_term,
                                    CcRequestBase *requester)
 {
     FetchTableStatisticsCc *fetch_req = nullptr;
@@ -765,7 +768,7 @@ void CcShard::FetchTableStatistics(const TableName &table_name,
     {
         std::unique_ptr<FetchTableStatisticsCc> fetch_statistics_cc =
             std::make_unique<FetchTableStatisticsCc>(
-                table_name, *this, cc_ng_id);
+                table_name, *this, cc_ng_id, cc_ng_term);
         fetch_req = fetch_statistics_cc.get();
         fetch_reqs_.emplace(table_name, std::move(fetch_statistics_cc));
     }
@@ -781,7 +784,8 @@ void CcShard::FetchTableStatistics(const TableName &table_name,
 void CcShard::FetchTableRanges(const TableName &table_name,
                                const KVCatalogInfo *kv_info,
                                CcRequestBase *requester,
-                               NodeGroupId ng_id)
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term)
 {
     FetchTableRangesCc *fetch_req = nullptr;
     auto table_it = fetch_reqs_.find(table_name);
@@ -795,7 +799,7 @@ void CcShard::FetchTableRanges(const TableName &table_name,
 
         std::unique_ptr<FetchTableRangesCc> fetch_range_cc =
             std::make_unique<FetchTableRangesCc>(
-                insert_it.first->first, *this, ng_id);
+                insert_it.first->first, *this, cc_ng_id, cc_ng_term);
         fetch_req = fetch_range_cc.get();
 
         insert_it.first->second = std::move(fetch_range_cc);
@@ -914,6 +918,7 @@ StatisticsEntry *CcShard::GetTableStatistics(const TableName &table_name,
 const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     const TableSchema *curr_schema,
     NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
     CcRequestBase *requester)
 {
     const StatisticsEntry *statistics_entry =
@@ -935,7 +940,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         FetchTableRanges(base_range_table_name,
                          curr_schema->GetKVCatalogInfo(),
                          requester,
-                         cc_ng_id);
+                         cc_ng_id,
+                         cc_ng_term);
         return nullptr;
     }
 
@@ -951,7 +957,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
             FetchTableRanges(index_range_table_name,
                              curr_schema->GetKVCatalogInfo(),
                              requester,
-                             cc_ng_id);
+                             cc_ng_id,
+                             cc_ng_term);
             return nullptr;
         }
     }
@@ -961,7 +968,7 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     if (statistics_entry == nullptr)
     {
         FetchTableStatistics(
-            curr_schema->GetBaseTableName(), cc_ng_id, requester);
+            curr_schema->GetBaseTableName(), cc_ng_id, cc_ng_term, requester);
         return nullptr;
     }
 
@@ -1095,6 +1102,7 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
 
 const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
                                      NodeGroupId cc_ng_id,
+                                     int64_t cc_ng_term,
                                      CcRequestBase *requester)
 {
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
@@ -1107,7 +1115,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
         // FetchCatalog() method sends an async request toward the data
         // store to fetch the catalog. After fetching is finished, this cc
         // request is re-enqueued for re-execution.
-        FetchCatalog(base_table_name, cc_ng_id, requester);
+        FetchCatalog(base_table_name, cc_ng_id, cc_ng_term, requester);
         return nullptr;
     }
 
@@ -1115,7 +1123,8 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
     if (curr_schema != nullptr && catalog_entry->Version() > 0)
     {
 #ifndef ON_KEY_OBJECT
-        if (!LoadRangesAndStatisticsNx(curr_schema, cc_ng_id, requester))
+        if (!LoadRangesAndStatisticsNx(
+                curr_schema, cc_ng_id, cc_ng_term, requester))
         {
             return nullptr;
         }
@@ -1437,7 +1446,8 @@ void CcShard::UpdateTsBase(uint64_t ts)
 }
 
 RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
-                                    const NodeGroupId ng_id,
+                                    NodeGroupId cc_ng_id,
+                                    int64_t cc_ng_term,
                                     const Schema *key_schema,
                                     const Schema *rec_schema,
                                     uint64_t schema_ts,
@@ -1450,7 +1460,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     uint8_t prefetch_size)
 {
     return local_shards_.PinRangeSlice(table_name,
-                                       ng_id,
+                                       cc_ng_id,
+                                       cc_ng_term,
                                        key_schema,
                                        rec_schema,
                                        schema_ts,
@@ -1465,7 +1476,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
 }
 
 RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
-                                    const NodeGroupId ng_id,
+                                    NodeGroupId cc_ng_id,
+                                    int64_t cc_ng_term,
                                     const Schema *key_schema,
                                     const Schema *rec_schema,
                                     uint64_t schema_ts,
@@ -1479,7 +1491,8 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                     uint8_t prefetch_size)
 {
     return local_shards_.PinRangeSlice(table_name,
-                                       ng_id,
+                                       cc_ng_id,
+                                       cc_ng_term,
                                        key_schema,
                                        rec_schema,
                                        schema_ts,

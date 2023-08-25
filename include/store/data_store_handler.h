@@ -19,6 +19,9 @@
 namespace txservice
 {
 class TxService;
+struct FetchCatalogCc;
+struct FetchTableStatisticsCc;
+struct FetchTableRangesCc;
 struct SliceDataItem;
 class StoreSlice;
 struct LoadRangeSliceRequest;
@@ -102,10 +105,10 @@ public:
         const txservice::AlterTableInfo *alter_table_info = nullptr) = 0;
 
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
-                                   void *fetch_req) = 0;
+                                   FetchCatalogCc *fetch_cc) = 0;
 
     virtual void FetchTableRanges(const KVCatalogInfo *kv_info,
-                                  void *fetch_req) = 0;
+                                  FetchTableRangesCc *fetch_cc) = 0;
 
     /**
      * @brief Read a row from base table or skindex table in datastore with
@@ -127,11 +130,11 @@ public:
                     std::string &schema_image,
                     bool &found) const;
 
-    virtual void FetchCurrentTableStatistics(const TableName &ccm_table_name,
-                                             void *fetch_req) = 0;
+    virtual void FetchCurrentTableStatistics(
+        const TableName &ccm_table_name, FetchTableStatisticsCc *fetch_cc) = 0;
 
     virtual void FetchTableStatistics(const TableName &ccm_table_name,
-                                      void *fetch_req) = 0;
+                                      FetchTableStatisticsCc *fetch_cc) = 0;
 
     virtual bool UpsertTableStatistics(
         const TableName &ccm_table_name,

@@ -29,13 +29,16 @@ public:
     virtual ~FetchCc() = default;
     void AddRequester(CcRequestBase *requester);
     size_t RequesterCount() const;
+    NodeGroupId GetNodeGroupId() const;
+    int64_t LeaderTerm() const;
 
 protected:
-    FetchCc(CcShard &ccs, NodeGroupId cc_ng_id);
+    FetchCc(CcShard &ccs, NodeGroupId cc_ng_id, int64_t cc_ng_term);
 
     std::vector<CcRequestBase *> requesters_;
     CcShard &ccs_;
     NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
 };
 
 struct FetchCatalogCc : public FetchCc
@@ -44,7 +47,8 @@ public:
     FetchCatalogCc() = delete;
     FetchCatalogCc(const TableName &table_name,
                    CcShard &ccs,
-                   NodeGroupId cc_ng_id);
+                   NodeGroupId cc_ng_id,
+                   int64_t cc_ng_term);
     ~FetchCatalogCc() = default;
 
     bool Execute(CcShard &ccs) override;
@@ -80,7 +84,8 @@ public:
     FetchTableStatisticsCc() = delete;
     FetchTableStatisticsCc(const TableName &table_name,
                            CcShard &ccs,
-                           NodeGroupId cc_ng_id);
+                           NodeGroupId cc_ng_id,
+                           int64_t cc_ng_term);
     ~FetchTableStatisticsCc() = default;
 
     bool Execute(CcShard &ccs) override;
@@ -141,7 +146,8 @@ struct FetchTableRangesCc : public FetchCc
 public:
     FetchTableRangesCc(const TableName &table_name,
                        CcShard &ccs,
-                       NodeGroupId ng_id);
+                       NodeGroupId cc_ng_id,
+                       int64_t cc_ng_term);
 
     bool Execute(CcShard &ccs) override;
     void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
@@ -221,7 +227,9 @@ public:
                           uint64_t schema_ts,
                           const TxKey *start_key,
                           const TxKey *end_key,
-                          uint64_t snapshot_ts)
+                          uint64_t snapshot_ts,
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term)
         : table_name_(&tbl_name),
           key_schema_(key_schema),
           rec_schema_(rec_schema),
@@ -229,7 +237,9 @@ public:
           start_key_(start_key),
           end_key_(end_key),
           snapshot_ts_(snapshot_ts),
-          slice_size_(0)
+          slice_size_(0),
+          cc_ng_id_(cc_ng_id),
+          cc_ng_term_(cc_ng_term)
     {
     }
 
@@ -299,6 +309,16 @@ public:
         return snapshot_ts_;
     }
 
+    NodeGroupId GetNodeGroupId() const
+    {
+        return cc_ng_id_;
+    }
+
+    int64_t LeaderTerm() const
+    {
+        return cc_ng_term_;
+    }
+
     bool IsError() const
     {
         return failed_;
@@ -317,6 +337,8 @@ private:
     const TxKey *end_key_;
     uint64_t snapshot_ts_;
     uint32_t slice_size_;
+    NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
     bool failed_{false};
 };
 
@@ -324,7 +346,8 @@ struct FillStoreSliceCc : public CcRequestBase
 {
 public:
     FillStoreSliceCc(const TableName &table_name,
-                     NodeGroupId cc_ng,
+                     NodeGroupId cc_ng_id,
+                     int64_t cc_ng_term,
                      const Schema *key_schema,
                      const Schema *rec_schema,
                      uint64_t schema_ts,

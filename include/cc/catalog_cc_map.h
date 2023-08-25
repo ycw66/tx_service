@@ -249,7 +249,8 @@ public:
                             base_range_table_name,
                             catalog_entry->schema_->GetKVCatalogInfo(),
                             &req,
-                            req.NodeGroupId());
+                            req.NodeGroupId(),
+                            ng_term);
                         return false;
                     }
 #endif
@@ -733,6 +734,7 @@ public:
                         if (!shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
                                 req.NodeGroupId(),
+                                ng_term,
                                 &req))
                         {
                             return false;
@@ -757,7 +759,7 @@ public:
             else
             {
                 shard_->FetchCatalog(
-                    table_key->Name(), req.NodeGroupId(), &req);
+                    table_key->Name(), req.NodeGroupId(), ng_term, &req);
                 return false;
             }
         }
@@ -896,7 +898,10 @@ public:
             if (catalog_entry->schema_)
             {
                 if (!shard_->LoadRangesAndStatisticsNx(
-                        catalog_entry->schema_.get(), req.NodeGroupId(), &req))
+                        catalog_entry->schema_.get(),
+                        req.NodeGroupId(),
+                        ng_term,
+                        &req))
                 {
                     return false;
                 }

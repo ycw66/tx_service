@@ -1627,6 +1627,7 @@ public:
                         RangeSliceId slice_id = shard_->PinRangeSlice(
                             table_name_,
                             cc_ng_id_,
+                            ng_term,
                             KeySchema(),
                             RecordSchema(),
                             schema_ts_,
@@ -3607,6 +3608,7 @@ public:
             RangeSliceOpStatus pin_status;
             slice_id = shard_->PinRangeSlice(table_name_,
                                              req.NodeGroupId(),
+                                             ng_term,
                                              KeySchema(),
                                              RecordSchema(),
                                              schema_ts_,
@@ -4471,6 +4473,7 @@ public:
                     RangeSliceId slice_id =
                         shard_->PinRangeSlice(table_name_,
                                               req.NodeGroupId(),
+                                              ng_term,
                                               KeySchema(),
                                               RecordSchema(),
                                               table_schema_->Version(),
@@ -4705,6 +4708,7 @@ public:
             RangeSliceId slice_id =
                 shard_->PinRangeSlice(table_name_,
                                       cc_ng_id_,
+                                      ng_term,
                                       key_schema,
                                       table_schema_->RecordSchema(),
                                       table_schema_->Version(),

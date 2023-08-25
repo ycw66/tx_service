@@ -115,7 +115,8 @@ public:
                     if (catalog_entry == nullptr ||
                         catalog_entry->schema_ == nullptr)
                     {
-                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
+                        ccs.FetchCatalog(
+                            base_table_name, node_group_id_, ng_term_, this);
                         return false;
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
@@ -144,7 +145,8 @@ public:
                         ccs.FetchTableRanges(*table_name_,
                                              table_schema->GetKVCatalogInfo(),
                                              this,
-                                             node_group_id_);
+                                             node_group_id_,
+                                             ng_term_);
                         return false;
                     }
                 }
@@ -155,8 +157,8 @@ public:
                     // ccmap is based on the real table name, for example, index
                     // should get the corresponding sk_ccmap.
                     assert(!table_name_->IsMeta());
-                    const CatalogEntry *catalog_entry =
-                        ccs.InitCcm(*table_name_, node_group_id_, this);
+                    const CatalogEntry *catalog_entry = ccs.InitCcm(
+                        *table_name_, node_group_id_, ng_term_, this);
                     if (catalog_entry == nullptr)
                     {
                         // The local node does not contain the table's schema
@@ -2240,27 +2242,29 @@ public:
     DataSyncScanCc() = default;
 
     DataSyncScanCc(const TableName &table_name,
-                   const uint64_t data_sync_ts,
-                   const uint64_t node_group,
-                   const uint16_t core_cnt,
+                   uint64_t data_sync_ts,
+                   uint64_t node_group_id,
+                   int64_t node_group_term,
+                   uint16_t core_cnt,
                    std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
-                   const size_t scan_batch_size,
+                   size_t scan_batch_size,
                    const TxKey *target_start_key = nullptr,
                    const TxKey *target_end_key = nullptr)
-        : core_cnt_(core_cnt),
+        : table_name_(&table_name),
+          node_group_id_(node_group_id),
+          node_group_term_(node_group_term),
+          core_cnt_(core_cnt),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
           pause_key_(std::move(resume_pos)),
           scan_batch_size_(scan_batch_size),
+          err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
           mux_(),
           cv_()
     {
         assert(scan_batch_size_ > DataSyncScanBatchSize);
-        this->table_name_ = &table_name;
-        node_group_id_ = node_group;
-        err_ = CcErrorCode::NO_ERROR;
         for (size_t i = 0; i < core_cnt; i++)
         {
             data_sync_vec_.emplace_back();
@@ -2406,6 +2410,7 @@ public:
 private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
+    int64_t node_group_term_;
     uint16_t core_cnt_;
     uint64_t data_sync_ts_;
     std::vector<std::vector<FlushRecord>> data_sync_vec_;
@@ -2714,7 +2719,11 @@ public:
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     if (catalog_entry == nullptr)
                     {
-                        ccs.FetchCatalog(base_table_name, node_group_id_, this);
+                        ccs.FetchCatalog(
+                            base_table_name,
+                            node_group_id_,
+                            std::max(cc_ng_candid_term, cc_ng_term),
+                            this);
                         return false;
                     }
 
@@ -2750,17 +2759,22 @@ public:
                         // ranges and initializes the table's range cc map.
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
-                        ccs.FetchTableRanges(*table_name_,
-                                             table_schema_->GetKVCatalogInfo(),
-                                             this,
-                                             node_group_id_);
+                        ccs.FetchTableRanges(
+                            *table_name_,
+                            table_schema_->GetKVCatalogInfo(),
+                            this,
+                            node_group_id_,
+                            std::max(cc_ng_candid_term, cc_ng_term));
                         return false;
                     }
                 }
                 else
                 {
                     const CatalogEntry *catalog_entry =
-                        ccs.InitCcm(*table_name_, node_group_id_, this);
+                        ccs.InitCcm(*table_name_,
+                                    node_group_id_,
+                                    std::max(cc_ng_candid_term, cc_ng_term),
+                                    this);
 
                     if (catalog_entry != nullptr)
                     {

@@ -1037,7 +1037,7 @@ public:
             }
 
             if (!shard_->LoadRangesAndStatisticsNx(
-                    table_schema_, req.NodeGroupId(), &req))
+                    table_schema_, req.NodeGroupId(), ng_term, &req))
             {
                 return false;
             }

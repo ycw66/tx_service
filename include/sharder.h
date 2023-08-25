@@ -1,6 +1,8 @@
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
+
+#include <condition_variable>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -277,11 +279,12 @@ public:
         return node_id_;
     }
 
-    void RemoteNodeFinishRecovery(uint32_t ng_id)
+    void NodeGroupFinishRecovery(uint32_t ng_id)
     {
         std::lock_guard<std::mutex> lk(recovery_state_mux_);
 
-        recovered_leader_set.emplace(ng_id);
+        recovered_leader_set_.emplace(ng_id);
+        recovery_state_cv_.notify_one();
     }
 
     LocalCcShards *GetLocalCcShards()
@@ -361,6 +364,7 @@ private:
      */
     void ConfigRouteTable();
 
+private:
     uint32_t node_id_;
     // Map from node group id to member ip list and port list. The first item in
     // vector is the preferred leader of the node group.
@@ -377,11 +381,12 @@ private:
 
     // Used to protect recovered_leader_set
     std::mutex recovery_state_mux_;
+    std::condition_variable recovery_state_cv_;
 
     // Used at node start stage to check whether all the involed tx_nodes finish
     // the log recovery. If some nodes stepdown during cluster startup, the
     // normal retry logic for each operation will handle it.
-    std::unordered_set<uint32_t> recovered_leader_set;
+    std::unordered_set<uint32_t> recovered_leader_set_;
 
     std::unordered_map<uint32_t, std::unique_ptr<fault::CcNode>> cc_nodes_;
     /**

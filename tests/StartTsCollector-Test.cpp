@@ -153,6 +153,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     {
         delete req;
     }
+
+    tx_service_->Shutdown();
 }
 
 int main(int argc, char **argv)

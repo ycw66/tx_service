@@ -102,22 +102,22 @@ public:
     }
 
     void FetchTableCatalog(const TableName &ccm_table_name,
-                           void *fetch_req) override
+                           FetchCatalogCc *fetch_cc) override
     {
     }
 
     void FetchCurrentTableStatistics(const txservice::TableName &ccm_table_name,
-                                     void *fetch_req) override
+                                     FetchTableStatisticsCc *fetch_cc) override
     {
     }
 
     void FetchTableStatistics(const txservice::TableName &ccm_table_name,
-                              void *fetch_req) override
+                              FetchTableStatisticsCc *fetch_cc) override
     {
     }
 
     void FetchTableRanges(const txservice::KVCatalogInfo *kv_info,
-                          void *fetch_req) override
+                          FetchTableRangesCc *fetch_cc) override
     {
     }
 

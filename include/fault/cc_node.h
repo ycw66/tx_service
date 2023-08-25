@@ -74,6 +74,7 @@ public:
     /**
      * Pin data of this node group if this ccnode is group leader.
      * Must be called in pair with UnpinData().
+     *
      * @return leader term of this ccnode
      */
     int64_t PinData();

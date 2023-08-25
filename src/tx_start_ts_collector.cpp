@@ -27,31 +27,33 @@ void TxStartTsCollector::Start()
 {
     DLOG(INFO) << "TxStartTsCollector start, interval seconds: "
                << delay_seconds_;
-    active_.store(true);
+    active_ = true;
     thd_ = std::thread([this] { Run(); });
 }
 
 void TxStartTsCollector::Shutdown()
 {
-    active_.store(false);
+    {
+        std::unique_lock<std::mutex> lk(active_mux_);
+        active_ = false;
+        active_cv_.notify_one();
+    }
     thd_.join();
 }
 
 void TxStartTsCollector::Run()
 {
-    uint32_t period = 0U;
-    while (active_.load())
+    std::unique_lock<std::mutex> lk(active_mux_);
+
+    while (active_)
     {
-        if (period < delay_seconds_)
-        {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            period++;
-        }
-        else
-        {
-            min_start_ts_ = CollectMinTxStartTs();
-            period = 0U;
-        }
+        active_cv_.wait_for(lk,
+                            std::chrono::seconds(delay_seconds_),
+                            [this]() { return active_ == false; });
+        lk.unlock();
+        min_start_ts_ = CollectMinTxStartTs();
+
+        lk.lock();
     }
 }
 

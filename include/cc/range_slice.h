@@ -409,6 +409,7 @@ public:
     ~StoreRange() = default;
 
     RangeSliceId PinSlice(const TableName &tbl_name,
+                          int64_t ng_term,
                           const TxKey &search_key,
                           bool inclusive,
                           const Schema *key_schema,
@@ -424,6 +425,7 @@ public:
                           uint8_t prefetch_size);
 
     RangeSliceOpStatus PinSlice(const TableName &tbl_name,
+                                int64_t ng_term,
                                 StoreSlice *slice,
                                 const Schema *key_schema,
                                 const Schema *rec_schema,
@@ -450,6 +452,7 @@ public:
                          const TableName &table_name,
                          const TableSchema *schema,
                          NodeGroupId ng_id,
+                         int64_t ng_term,
                          uint64_t flush_ts,
                          const std::vector<FlushRecord> &flush_vec,
                          size_t start_idx,
@@ -464,6 +467,7 @@ public:
         const TableName &table_name,
         const TableSchema *schema,
         NodeGroupId ng_id,
+        int64_t ng_term,
         uint64_t flush_ts,
         size_t post_ckpt_size,
         std::vector<FlushRecord>::const_iterator range_start_it,
@@ -597,6 +601,7 @@ private:
     };
 
     LoadSliceStatus LoadSlice(const TableName &tbl_name,
+                              int64_t cc_ng_term,
                               StoreSlice &slice,
                               const Schema *key_schema,
                               const Schema *rec_schema,

@@ -464,6 +464,7 @@ public:
     const StatisticsEntry *LoadRangesAndStatisticsNx(
         const TableSchema *curr_schema,
         NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
         CcRequestBase *requester);
 
     void CleanTableStatistics(const TableName &table_name);
@@ -491,16 +492,19 @@ public:
      */
     void FetchCatalog(const TableName &table_name,
                       NodeGroupId cc_ng_id,
+                      int64_t cc_ng_term,
                       CcRequestBase *requester);
 
     void FetchTableStatistics(const TableName &table_name,
                               NodeGroupId cc_ng_id,
+                              int64_t cc_ng_term,
                               CcRequestBase *requester);
 
     void FetchTableRanges(const TableName &range_table_name,
                           const KVCatalogInfo *kv_info,
                           CcRequestBase *requester,
-                          NodeGroupId ng_id);
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term);
 
     void RemoveFetchRequest(const TableName &table_name);
 
@@ -529,6 +533,7 @@ public:
      */
     const CatalogEntry *InitCcm(const TableName &table_name,
                                 NodeGroupId cc_ng_id,
+                                int64_t cc_ng_term,
                                 CcRequestBase *requester);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
@@ -556,7 +561,8 @@ public:
     void DecreaseLockCount();
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
-                               const NodeGroupId ng_id,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,
@@ -569,7 +575,8 @@ public:
                                uint8_t prefetch_size);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
-                               const NodeGroupId ng_id,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,

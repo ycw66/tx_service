@@ -392,28 +392,25 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
     ng_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
     local_shards_.UpdateTsBase(last_ckpt_ts);
+
+    NodeGroupFinishRecovery(cc_ng_id);
 }
 
 void Sharder::WaitClusterReady()
 {
-    std::unique_lock<std::mutex> lk(recovery_state_mux_);
-
-    while (true)
+    bool recovery_all_finished = false;
+    do
     {
-        bool recovery_all_finished = true;
-        for (auto &pair : ng_configs_)
+        std::unique_lock<std::mutex> lk(recovery_state_mux_);
+        for (const auto &pair : ng_configs_)
         {
             uint32_t ng_id = pair.first;
-            if (recovered_leader_set.find(ng_id) == recovered_leader_set.end())
+            if (recovered_leader_set_.find(ng_id) ==
+                recovered_leader_set_.end())
             {
-                recovery_all_finished = false;
-
                 if (ng_id == node_id_)
                 {
-                    if (Sharder::Instance().LeaderTerm(ng_id) > 0)
-                    {
-                        recovered_leader_set.emplace(ng_id);
-                    }
+                    // Wait FinishLogReplay emplace recovered_leader_set_.
                 }
                 else
                 {
@@ -437,18 +434,12 @@ void Sharder::WaitClusterReady()
             }
         }
 
-        if (recovery_all_finished)
-        {
-            break;
-        }
-        else
-        {
-            using namespace std::chrono_literals;
-            lk.unlock();
-            std::this_thread::sleep_for(1s);
-            lk.lock();
-        }
-    }
+        recovery_all_finished = recovery_state_cv_.wait_for(
+            lk,
+            1s,
+            [this]()
+            { return recovered_leader_set_.size() == ng_configs_.size(); });
+    } while (!recovery_all_finished);
 }
 
 void Sharder::RecoverTx(uint64_t lock_tx_number,

@@ -3117,6 +3117,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
              archive_vec = &archive_vec_,
              mv_base_vec = &mv_base_vec_,
              node_group = node_group_,
+             tx_term = txm->tx_term_,
              ckpt_ts = txm->commit_ts_,
              &local_cc_shards = txm->GetTxProcessor()->local_cc_shards_,
              &hd_res = data_sync_scan_op_.hd_result_]
@@ -3132,6 +3133,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                  archive_vec,
                  mv_base_vec,
                  node_group,
+                 tx_term,
                  ckpt_ts,
                  &local_cc_shards,
                  &hd_res]
@@ -3157,6 +3159,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         table_name,
                         ckpt_ts,
                         node_group,
+                        tx_term,
                         Sharder::Instance().GetLocalCcShardsCount(),
                         std::move(resume_pos),
                         LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
@@ -3315,6 +3318,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                         table_name,
                                                         table_schema,
                                                         node_group,
+                                                        tx_term,
                                                         ckpt_ts,
                                                         *data_sync_vec,
                                                         slice_start_idx,

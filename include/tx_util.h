@@ -96,33 +96,27 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
         return read_tx_req.ErrorCode();
     }
 
-    bool ok = !read_tx_req.IsError();
-    if (ok)
+    const RecordStatus &rec_status = read_tx_req.Result().first;
+    if (rec_status == RecordStatus::Deleted)
     {
-        const RecordStatus &rec_status = read_tx_req.Result().first;
-        if (rec_status == RecordStatus::Deleted)
+        exists = false;
+        return TxErrorCode::NO_ERROR;
+    }
+    else
+    {
+        assert(rec_status == RecordStatus::Normal);
+
+        CatalogRecord *catalog_rec =
+            static_cast<CatalogRecord *>(read_tx_req.rec_);
+        if (catalog_rec->Schema())
         {
-            exists = false;
+            exists = true;
+            return TxErrorCode::NO_ERROR;
         }
         else
         {
-            assert(rec_status == RecordStatus::Normal);
-
-            CatalogRecord *catalog_rec =
-                static_cast<CatalogRecord *>(read_tx_req.rec_);
-            if (catalog_rec->Schema())
-            {
-                exists = true;
-            }
-            else
-            {
-                return TxErrorCode::UNDEFINED_ERR;
-            }
-
-            catalog_rec->SetSchemaImage(catalog_rec->Schema()->SchemaImage());
+            return TxErrorCode::UNDEFINED_ERR;
         }
     }
-
-    return TxErrorCode::NO_ERROR;
 }
 }  // namespace txservice

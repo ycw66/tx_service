@@ -58,10 +58,7 @@ public:
      */
     void Terminate();
 
-    void Join()
-    {
-        thd_.join();
-    }
+    void Join();
 
 private:
     enum struct Status

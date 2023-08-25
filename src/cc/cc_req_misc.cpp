@@ -9,8 +9,8 @@
 
 namespace txservice
 {
-FetchCc::FetchCc(CcShard &ccs, NodeGroupId cc_ng_id)
-    : ccs_(ccs), cc_ng_id_(cc_ng_id)
+FetchCc::FetchCc(CcShard &ccs, NodeGroupId cc_ng_id, int64_t cc_ng_term)
+    : ccs_(ccs), cc_ng_id_(cc_ng_id), cc_ng_term_(cc_ng_term)
 {
 }
 
@@ -24,10 +24,21 @@ size_t FetchCc::RequesterCount() const
     return requesters_.size();
 }
 
+NodeGroupId FetchCc::GetNodeGroupId() const
+{
+    return cc_ng_id_;
+}
+
+int64_t FetchCc::LeaderTerm() const
+{
+    return cc_ng_term_;
+}
+
 FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
                                CcShard &ccs,
-                               uint32_t cc_ng_id)
-    : FetchCc(ccs, cc_ng_id),
+                               uint32_t cc_ng_id,
+                               int64_t cc_ng_term)
+    : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
                   table_name.Type())
@@ -94,8 +105,9 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
 
 FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
                                                CcShard &ccs,
-                                               uint32_t cc_ng_id)
-    : FetchCc(ccs, cc_ng_id),
+                                               uint32_t cc_ng_id,
+                                               int64_t cc_ng_term)
+    : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
                   table_name.Type())
@@ -151,8 +163,9 @@ void FetchTableStatisticsCc::SetFinish(int err)
 
 FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
                                        CcShard &ccs,
-                                       NodeGroupId ng_id)
-    : FetchCc(ccs, ng_id), table_name_(table_name)
+                                       NodeGroupId cc_ng_id,
+                                       int64_t cc_ng_term)
+    : FetchCc(ccs, cc_ng_id, cc_ng_term), table_name_(table_name)
 {
 }
 
@@ -262,7 +275,8 @@ void LoadRangeSliceRequest::SetError()
 }
 
 FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
-                                   NodeGroupId cc_ng,
+                                   NodeGroupId cc_ng_id,
+                                   int64_t cc_ng_term,
                                    const Schema *key_schema,
                                    const Schema *rec_schema,
                                    uint64_t schema_ts,
@@ -272,7 +286,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                                    uint64_t snapshot_ts,
                                    LocalCcShards &cc_shards)
     : table_name_(&table_name),
-      cc_ng_id_(cc_ng),
+      cc_ng_id_(cc_ng_id),
       force_load_(force_load),
       finish_cnt_(0),
       load_slice_req_(table_name,
@@ -281,7 +295,9 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                       schema_ts,
                       slice.StartKey(),
                       slice.EndKey(),
-                      snapshot_ts),
+                      snapshot_ts,
+                      cc_ng_id,
+                      cc_ng_term),
       range_slice_(slice),
       range_(range),
       local_cc_shards_(cc_shards)
@@ -323,7 +339,10 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     if (ccm == nullptr)
     {
         const CatalogEntry *catalog_entry =
-            ccs.InitCcm(*table_name_, cc_ng_id_, this);
+            ccs.InitCcm(*table_name_,
+                        cc_ng_id_,
+                        std::max(cc_ng_term, cc_ng_candid_term),
+                        this);
 
         if (catalog_entry != nullptr)
         {

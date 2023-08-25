@@ -414,7 +414,8 @@ public:
         const TableName &table_name, const NodeGroupId ng_id, const TxKey *key);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
-                               const NodeGroupId ng_id,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,
@@ -428,7 +429,8 @@ public:
                                uint8_t prefetch_size);
 
     RangeSliceId PinRangeSlice(const TableName &table_name,
-                               const NodeGroupId ng_id,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
                                const Schema *key_schema,
                                const Schema *rec_schema,
                                uint64_t schema_ts,
@@ -658,7 +660,10 @@ private:
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
     std::thread timer_thd_;
-    std::atomic<bool> timer_terminate_;
+    bool timer_terminate_;
+    std::mutex timer_terminate_mux_;
+    std::condition_variable timer_terminate_cv_;
+    // std::atomic<bool> timer_terminate_;
 
     // When ccshard is full and no ccentry can be kicked-out, it will notify
     // checkpointer to do checkpoint and set flag is_wait_ckpt_ to true.
@@ -744,7 +749,7 @@ private:
                      CcHandlerResult<Void> *hres = nullptr)
             : table_name_(table_name),
               node_group_id_(ng_id),
-              ng_leader_term_(ng_term),
+              node_group_term_(ng_term),
               data_sync_ts_(data_sync_ts),
               task_sender_mux_(task_sender_mux),
               task_sender_cv_(task_sender_cv),
@@ -823,7 +828,7 @@ private:
 
         const TableName &table_name_;
         uint32_t node_group_id_;
-        int64_t ng_leader_term_{-1};
+        int64_t node_group_term_{-1};
         uint64_t data_sync_ts_{0};
         // Used to protect and synchronize the task status between task_worker
         // and task_sender.
@@ -881,6 +886,7 @@ private:
         const TableName &table_name,
         const TableSchema *schema,
         NodeGroupId node_group_id,
+        int64_t node_group_term,
         std::vector<FlushRecord> &data_sync_vec,
         uint64_t data_sync_ts,
         size_t &batch_idx,
@@ -920,7 +926,8 @@ private:
     struct UpdateSliceSpecWork
     {
     public:
-        UpdateSliceSpecWork(uint32_t node_group,
+        UpdateSliceSpecWork(uint32_t node_group_id,
+                            int64_t node_group_term,
                             uint64_t data_sync_ts,
                             const TableName &table_name,
                             const TableSchema *schema,
@@ -933,7 +940,8 @@ private:
                             std::condition_variable &sender_cv,
                             size_t &finish_work_cnt,
                             bool &fail)
-            : node_group_(node_group),
+            : node_group_id_(node_group_id),
+              node_group_term_(node_group_term),
               data_sync_ts_(data_sync_ts),
               table_name_(table_name),
               table_schema_(schema),
@@ -949,7 +957,8 @@ private:
         {
         }
 
-        uint32_t node_group_;
+        uint32_t node_group_id_;
+        int64_t node_group_term_;
         uint64_t data_sync_ts_;
         TableName table_name_;
         const TableSchema *table_schema_;
@@ -1001,8 +1010,8 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
                       std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
                       TransactionExecution *data_sync_txm)
-            : node_group_(data_sync_task->node_group_id_),
-              ng_leader_term_(data_sync_task->ng_leader_term_),
+            : node_group_id_(data_sync_task->node_group_id_),
+              node_group_term_(data_sync_task->node_group_term_),
               data_sync_ts_(data_sync_task->data_sync_ts_),
               table_name_(data_sync_task->table_name_),
               schema_(schema),
@@ -1016,8 +1025,8 @@ private:
         {
         }
 
-        FlushDataWork(uint32_t node_group,
-                      int64_t term,
+        FlushDataWork(uint32_t node_group_id,
+                      int64_t node_group_term,
                       uint64_t data_sync_ts,
                       const TableName &table_name,
                       const TableSchema *schema,
@@ -1025,8 +1034,8 @@ private:
                       std::vector<FlushRecord> *archive_vec,
                       std::vector<const TxKey *> *mv_base_vec,
                       CcHandlerResult<Void> *res)
-            : node_group_(node_group),
-              ng_leader_term_(term),
+            : node_group_id_(node_group_id),
+              node_group_term_(node_group_term),
               data_sync_ts_(data_sync_ts),
               table_name_(table_name),
               schema_(schema),
@@ -1038,8 +1047,8 @@ private:
         {
         }
 
-        uint32_t node_group_;
-        int64_t ng_leader_term_;
+        uint32_t node_group_id_;
+        int64_t node_group_term_;
         uint64_t data_sync_ts_;
         TableName table_name_;
         const TableSchema *schema_;

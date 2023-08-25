@@ -122,6 +122,7 @@ StoreRange::StoreRange(const TxKey *start_key,
 }
 
 RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
+                                  int64_t ng_term,
                                   const TxKey &search_key,
                                   bool inclusive,
                                   const Schema *key_schema,
@@ -176,6 +177,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         }
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                             ng_term,
                                              *slice,
                                              key_schema,
                                              rec_schema,
@@ -213,6 +215,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
             if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
             {
                 LoadSlice(tbl_name,
+                          ng_term,
                           *prefetch_slice,
                           key_schema,
                           rec_schema,
@@ -232,6 +235,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
 }
 
 RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
+                                        int64_t ng_term,
                                         StoreSlice *slice,
                                         const Schema *key_schema,
                                         const Schema *rec_schema,
@@ -275,6 +279,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         }
 
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
+                                             ng_term,
                                              *slice,
                                              key_schema,
                                              rec_schema,
@@ -345,6 +350,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  const TableName &table_name,
                                  const TableSchema *schema,
                                  NodeGroupId ng_id,
+                                 int64_t ng_term,
                                  uint64_t flush_ts,
                                  const std::vector<FlushRecord> &flush_vec,
                                  size_t slice_first_idx,
@@ -380,10 +386,11 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                        schema->Version(),
                                        slice->StartKey(),
                                        slice->EndKey(),
-                                       snapshot_ts);
-        load_req.post_lambda_ =
-            [this, &load_slice_mux, &load_slice_cv, &finished](
-                LoadRangeSliceRequest *load_req)
+                                       snapshot_ts,
+                                       ng_id,
+                                       ng_term);
+        load_req.post_lambda_ = [&load_slice_mux, &load_slice_cv, &finished](
+                                    LoadRangeSliceRequest *load_req)
         {
             // Signal the caller that the slice is loaded
             std::unique_lock<std::mutex> lk(load_slice_mux);
@@ -753,6 +760,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
     const TableName &table_name,
     const TableSchema *schema,
     NodeGroupId ng_id,
+    int64_t ng_term,
     uint64_t flush_ts,
     size_t post_ckpt_size,
     std::vector<FlushRecord>::const_iterator range_start_it,
@@ -821,6 +829,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                             table_name,
                             schema,
                             ng_id,
+                            ng_term,
                             flush_ts,
                             flush_vec,
                             std::distance(flush_vec.begin(), slice_it),
@@ -948,6 +957,7 @@ size_t StoreRange::SearchSlice(const TxKey &search_key, bool inclusive) const
 
 StoreRange::LoadSliceStatus StoreRange::LoadSlice(
     const TableName &tbl_name,
+    int64_t ng_term,
     StoreSlice &slice,
     const Schema *key_schema,
     const Schema *rec_schema,
@@ -975,6 +985,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         slice.fetch_slice_cc_ =
             std::make_unique<FillStoreSliceCc>(tbl_name,
                                                cc_ng_id_,
+                                               ng_term,
                                                key_schema,
                                                rec_schema,
                                                schema_ts,

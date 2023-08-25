@@ -899,6 +899,7 @@ private:
                 base_table_name_, sample_pool_map, ckpt_ts);
             if (!ok)
             {
+                using namespace std::chrono_literals;
                 std::this_thread::sleep_for(100ms);
             }
         }

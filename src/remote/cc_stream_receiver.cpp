@@ -1228,7 +1228,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (resp.error_code() == 0)
         {
-            Sharder::Instance().RemoteNodeFinishRecovery(resp.node_group_id());
+            Sharder::Instance().NodeGroupFinishRecovery(resp.node_group_id());
         }
         msg_pool_.enqueue(std::move(msg));
         break;

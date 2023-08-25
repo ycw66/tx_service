@@ -735,7 +735,7 @@ public:
         Sharder::Instance().WaitClusterReady();
     }
 
-    ~TxService()
+    void Shutdown()
     {
         DeadLockCheck::SetStop();
         ckpt_.Terminate();

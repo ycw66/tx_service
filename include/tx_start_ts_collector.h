@@ -46,7 +46,9 @@ private:
     void Run();
     uint64_t CollectMinTxStartTs();
 
-    std::atomic<bool> active_;
+    bool active_;
+    std::mutex active_mux_;
+    std::condition_variable active_cv_;
 
     // {ng_id -> min_tx_start_ts}
     std::unordered_map<uint32_t, uint64_t> min_start_ts_map_;

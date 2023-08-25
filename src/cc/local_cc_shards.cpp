@@ -116,7 +116,11 @@ LocalCcShards::LocalCcShards(
 
 LocalCcShards::~LocalCcShards()
 {
-    timer_terminate_.store(true, std::memory_order_release);
+    {
+        std::scoped_lock<std::mutex> lk(timer_terminate_mux_);
+        timer_terminate_ = true;
+        timer_terminate_cv_.notify_one();
+    }
     timer_thd_.join();
     cc_shards_.clear();
 }
@@ -149,7 +153,8 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
 
 void LocalCcShards::TimerRun()
 {
-    while (!timer_terminate_.load(std::memory_order_acquire))
+    std::unique_lock<std::mutex> lk(timer_terminate_mux_);
+    do
     {
         using namespace std::chrono_literals;
 
@@ -160,8 +165,9 @@ void LocalCcShards::TimerRun()
         LocalCcShards::local_clock.store(clock_ts, std::memory_order_relaxed);
         UpdateTsBase(clock_ts);
 
-        std::this_thread::sleep_for(2s);
-    }
+        timer_terminate_cv_.wait_for(
+            lk, 2s, [this]() { return timer_terminate_ == true; });
+    } while (!timer_terminate_);
 }
 
 std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
@@ -887,7 +893,8 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
 }
 
 RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
-                                          const NodeGroupId ng_id,
+                                          NodeGroupId cc_ng_id,
+                                          int64_t cc_ng_term,
                                           const Schema *key_schema,
                                           const Schema *rec_schema,
                                           uint64_t schema_ts,
@@ -906,12 +913,12 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                TableType::RangePartition);
 
     TableRangeEntry *entry =
-        GetTableRangeEntryInternal(range_table_name, ng_id, &key);
+        GetTableRangeEntryInternal(range_table_name, cc_ng_id, &key);
     if (!entry)
     {
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
-            range_table_name, kv_info, cc_request, ng_id);
+            range_table_name, kv_info, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
@@ -922,6 +929,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
     }
 
     return entry->RangeSlices()->PinSlice(table_name,
+                                          cc_ng_term,
                                           key,
                                           inclusive,
                                           key_schema,
@@ -938,7 +946,8 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
 }
 
 RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
-                                          const NodeGroupId ng_id,
+                                          NodeGroupId cc_ng_id,
+                                          int64_t cc_ng_term,
                                           const Schema *key_schema,
                                           const Schema *rec_schema,
                                           uint64_t schema_ts,
@@ -958,12 +967,12 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                TableType::RangePartition);
 
     TableRangeEntry *entry =
-        GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
+        GetTableRangeEntryInternal(range_table_name, cc_ng_id, range_id);
     if (!entry)
     {
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
-            range_table_name, kv_info, cc_request, ng_id);
+            range_table_name, kv_info, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
@@ -980,6 +989,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
     }
 
     return entry->RangeSlices()->PinSlice(table_name,
+                                          cc_ng_term,
                                           key,
                                           inclusive,
                                           key_schema,
@@ -1832,6 +1842,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     DataSyncScanCc scan_cc(table_name,
                            target_data_sync_ts,
                            ng_id,
+                           ng_term,
                            cc_shards_.size(),
                            std::move(resume_pos),
                            DATA_SYNC_SCAN_BATCH_SIZE);
@@ -1957,6 +1968,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         bool ret = UpdateSliceAndCalculateRangeUpdate(table_name,
                                                       table_schema,
                                                       ng_id,
+                                                      ng_term,
                                                       *data_sync_vec,
                                                       target_data_sync_ts,
                                                       batch_idx,
@@ -2139,6 +2151,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
     const TableName &table_name,
     const TableSchema *schema,
     NodeGroupId node_group_id,
+    int64_t node_group_term,
     std::vector<FlushRecord> &flush_batch,
     uint64_t data_sync_ts,
     size_t &batch_idx,
@@ -2268,6 +2281,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                 curr_range->CalculateRangeSplitKeys(table_name,
                                                     schema,
                                                     node_group_id,
+                                                    node_group_term,
                                                     data_sync_ts,
                                                     post_ckpt_size,
                                                     range_start_it,
@@ -2326,6 +2340,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                         std::unique_lock<std::mutex> worker_lk(
                             slice_update_mux_);
                         pending_slice_work_.emplace_back(node_group_id,
+                                                         node_group_term,
                                                          data_sync_ts,
                                                          table_name,
                                                          schema,
@@ -2643,12 +2658,13 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
     // Retrieve first pending work and pop it.
     FlushDataWork &cur_work = pending_flush_work_.back();
-    uint32_t node_group = cur_work.node_group_;
-    int64_t leader_term = cur_work.ng_leader_term_;
+    uint32_t node_group = cur_work.node_group_id_;
+    int64_t leader_term = cur_work.node_group_term_;
     TableName table_name = cur_work.table_name_;
     const TableSchema *schema = cur_work.schema_;
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
-    std::unique_ptr<vector<FlushRecord>> data_sync_vec_owner, archive_vec_owner;
+    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
+        archive_vec_owner;
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
     std::unique_ptr<std::vector<const TxKey *>> mv_base_owner;
     std::vector<const TxKey *> *mv_base_vec;
@@ -2940,7 +2956,8 @@ void LocalCcShards::UpdateSliceSpecWorker()
         UpdateSliceSpecWork &cur_work = pending_slice_work_.back();
 
         uint64_t data_sync_ts = cur_work.data_sync_ts_;
-        uint32_t node_group = cur_work.node_group_;
+        uint32_t node_group_id = cur_work.node_group_id_;
+        int64_t node_group_term = cur_work.node_group_term_;
         TableName table_name = cur_work.table_name_;
         const TableSchema *schema = cur_work.table_schema_;
         StoreRange *range = cur_work.range_;
@@ -2959,7 +2976,8 @@ void LocalCcShards::UpdateSliceSpecWorker()
         bool res = range->UpdateSliceSpec(slice,
                                           table_name,
                                           schema,
-                                          node_group,
+                                          node_group_id,
+                                          node_group_term,
                                           data_sync_ts,
                                           flush_vec,
                                           start_idx,

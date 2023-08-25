@@ -228,6 +228,14 @@ int64_t CcNode::PinData()
     {
         pinning_threads_++;
     }
+    else
+    {
+        leader_term = candidate_leader_term_.load(std::memory_order_acquire);
+        if (leader_term > 0)
+        {
+            pinning_threads_++;
+        }
+    }
     return leader_term;
 }
 

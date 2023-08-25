@@ -8,7 +8,6 @@
 
 #include "proto/cc_request.pb.h"
 
-using namespace std;
 namespace txservice
 {
 const uint64_t MICRO_SECOND = 1000000;
@@ -98,7 +97,6 @@ public:
     static void MergeLocalWaitingLockInfo(const CheckDeadLockResult &dlres);
     static void SetStop()
     {
-        inst_->stop_ = true;
         delete inst_;
         inst_ = nullptr;
     }
@@ -137,7 +135,7 @@ protected:
 
     std::thread thd_;
     // If process has been closed and this thread need to stop;
-    bool stop_;
+    std::atomic<bool> stop_;
 
     // mutex_ and con_var_ are used to wait local node and remote nodes to
     // finish dead lock check and return the related cc entrys and tx ids.
@@ -145,7 +143,7 @@ protected:
     std::condition_variable con_var_;
 
     LocalCcShards &local_shards_;
-    unique_ptr<CheckDeadLockCc> dead_lock_cc_;
+    std::unique_ptr<CheckDeadLockCc> dead_lock_cc_;
     // The last time to receive check command
     uint64_t last_check_time_;
     // The node to rise dead lock check.

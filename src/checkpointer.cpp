@@ -223,7 +223,6 @@ void Checkpointer::Run()
 
     lk.lock();
     ckpt_thd_status_ = Status::Terminated;
-    ckpt_cv_.notify_all();
 }
 
 /**
@@ -246,21 +245,20 @@ bool Checkpointer::IsTerminated()
 
 void Checkpointer::Terminate()
 {
-    {
-        std::unique_lock<std::mutex> lk(ckpt_mux_);
-        assert(ckpt_thd_status_ == Status::Active);
-        ckpt_thd_status_ = Status::Terminating;
-    }
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
+    assert(ckpt_thd_status_ == Status::Active);
+    ckpt_thd_status_ = Status::Terminating;
     ckpt_cv_.notify_one();
+}
 
+void Checkpointer::Join()
+{
     // The checkpoint worker is terminated, when the tx service is
     // going to be shut down. The checkpoint worker flushes one more
     // time unflushed records to the data store, before exiting. The
     // caller of this method, i.e., the destructor of the tx
     // service, is blocked until last flushing finishes.
-    std::unique_lock<std::mutex> lk(ckpt_mux_);
-    ckpt_cv_.wait(lk,
-                  [this] { return ckpt_thd_status_ == Status::Terminated; });
+    thd_.join();
 }
 
 void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
