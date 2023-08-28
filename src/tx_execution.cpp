@@ -4536,15 +4536,18 @@ void TransactionExecution::Process(FlushDataOp &flush_op)
         });
     flush_op.hd_result_.Reset();
     flush_op.is_running_ = true;
-    Sharder::Instance().GetLocalCcShards()->FlushData(*flush_op.tab_name_,
-                                                      flush_op.schema_,
-                                                      flush_op.data_sync_ts_,
-                                                      tx_term_,
-                                                      flush_op.node_group_,
-                                                      flush_op.data_sync_vec_,
-                                                      flush_op.archive_vec_,
-                                                      flush_op.mv_vec_,
-                                                      flush_op.hd_result_);
+
+    Sharder::Instance().GetLocalCcShards()->FlushData(
+        *flush_op.tab_name_,
+        flush_op.schema_,
+        flush_op.data_sync_ts_,
+        tx_term_,
+        flush_op.node_group_,
+        flush_op.data_sync_vec_,
+        flush_op.archive_vec_,
+        flush_op.mv_vec_,
+        flush_op.hd_result_,
+        flush_op.delay_update_ckpt_ts_);
 }
 
 void TransactionExecution::PostProcess(FlushDataOp &flush_op)

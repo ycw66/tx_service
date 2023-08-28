@@ -470,7 +470,8 @@ public:
                    std::vector<FlushRecord> *ckpt_vec,
                    std::vector<FlushRecord> *archive_vec,
                    std::vector<const TxKey *> *mv_vec,
-                   CcHandlerResult<Void> &hres);
+                   CcHandlerResult<Void> &hres,
+                   bool delay_update_ckpt_ts);
 
     void EnqueueDataSyncTask(const TableName &table_name,
                              uint32_t ng_id,
@@ -1009,7 +1010,8 @@ private:
                       std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
                       std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
                       std::unique_ptr<std::vector<const TxKey *>> &&mv_base_vec,
-                      TransactionExecution *data_sync_txm)
+                      TransactionExecution *data_sync_txm,
+                      bool delay_update_ckpt_ts)
             : node_group_id_(data_sync_task->node_group_id_),
               node_group_term_(data_sync_task->node_group_term_),
               data_sync_ts_(data_sync_task->data_sync_ts_),
@@ -1019,6 +1021,7 @@ private:
               archive_vec_(std::move(archive_vec)),
               mv_base_vec_(std::move(mv_base_vec)),
               vec_owner_(true),
+              delay_update_ckpt_ts_(delay_update_ckpt_ts),
               data_sync_task_(data_sync_task),
               data_sync_txm_(data_sync_txm),
               hand_res_(nullptr)
@@ -1033,7 +1036,8 @@ private:
                       std::vector<FlushRecord> *data_sync_vec,
                       std::vector<FlushRecord> *archive_vec,
                       std::vector<const TxKey *> *mv_base_vec,
-                      CcHandlerResult<Void> *res)
+                      CcHandlerResult<Void> *res,
+                      bool delay_update_ckpt_ts)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
               data_sync_ts_(data_sync_ts),
@@ -1043,6 +1047,7 @@ private:
               archive_vec_ptr_(archive_vec),
               mv_base_vec_ptr_(mv_base_vec),
               vec_owner_(false),
+              delay_update_ckpt_ts_(delay_update_ckpt_ts),
               hand_res_(res)
         {
         }
@@ -1059,6 +1064,7 @@ private:
         std::vector<FlushRecord> *archive_vec_ptr_{nullptr};
         std::vector<const TxKey *> *mv_base_vec_ptr_{nullptr};
         bool vec_owner_{true};
+        bool delay_update_ckpt_ts_{false};
 
         // Increased by worker after finishing the retrieved work.
         std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};

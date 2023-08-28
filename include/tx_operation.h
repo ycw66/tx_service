@@ -742,6 +742,7 @@ struct FlushDataOp : public TransactionOperation
     std::vector<FlushRecord> *archive_vec_{nullptr};
     std::vector<const TxKey *> *mv_vec_{nullptr};
     CcHandlerResult<Void> hd_result_;
+    bool delay_update_ckpt_ts_{false};
 };
 
 struct KickoutDataOp : public TransactionOperation
@@ -863,7 +864,8 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     AsyncOp<Void> data_sync_scan_op_;
     /**
      * @brief Flush data in memory before commit_ts to KV storage. These data
-     * will be flushed into both old and new partitions.
+     * will be flushed into new partitions. We can't safely update ckpt_ts of
+     * CcEntry for now.
      */
     FlushDataOp flush_op_;
     /**
@@ -871,6 +873,13 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * new partition.
      */
     AcquireAllOp commit_acquire_all_write_op_;
+
+    /**
+     * @brief We can safely update ckpt_ts of CcEntry after acquiring range
+     * write lock
+     */
+    AsyncOp<Void> update_ckpt_ts_op_;
+
     /**
      * @brief Write commit log.
      */

@@ -1,5 +1,7 @@
 #include "cc/local_cc_shards.h"
 
+#include <cstdint>
+
 #include "range_bucket_key_record.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -1121,7 +1123,8 @@ void LocalCcShards::FlushData(const TableName &table_name,
                               std::vector<FlushRecord> *data_sync_vec,
                               std::vector<FlushRecord> *archive_vec,
                               std::vector<const TxKey *> *mv_vec,
-                              CcHandlerResult<Void> &hres)
+                              CcHandlerResult<Void> &hres,
+                              bool delay_update_ckpt_ts)
 {
     std::unique_lock<std::mutex> flush_worker_lk(flush_worker_mux_);
     pending_flush_work_.emplace_back(node_group,
@@ -1132,7 +1135,8 @@ void LocalCcShards::FlushData(const TableName &table_name,
                                      data_sync_vec,
                                      archive_vec,
                                      mv_vec,
-                                     &hres);
+                                     &hres,
+                                     delay_update_ckpt_ts);
     flush_worker_cv_.notify_one();
 }
 
@@ -2072,7 +2076,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                                          std::move(data_sync_vec),
                                          std::move(archive_vec),
                                          std::move(mv_base_vec),
-                                         data_sync_txm);
+                                         data_sync_txm,
+                                         false);
         flush_worker_cv_.notify_one();
     }
     else
@@ -2663,6 +2668,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     TableName table_name = cur_work.table_name_;
     const TableSchema *schema = cur_work.schema_;
     uint64_t data_sync_ts = cur_work.data_sync_ts_;
+    bool is_delay_update_ckpt_ts = cur_work.delay_update_ckpt_ts_;
     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_owner,
         archive_vec_owner;
     std::vector<FlushRecord> *data_sync_vec, *archive_vec;
@@ -2759,24 +2765,29 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     << " records that are not owned by current node group yet.";
                 succ = false;
             }
-            for (size_t i = 0; i < data_sync_vec->size(); i++)
+
+            if (!is_delay_update_ckpt_ts)
             {
-                if (skipped_record.find(i) != skipped_record.end())
+                for (size_t i = 0; i < data_sync_vec->size(); i++)
                 {
-                    continue;
+                    if (skipped_record.find(i) != skipped_record.end())
+                    {
+                        continue;
+                    }
+                    auto &ref = data_sync_vec->at(i);
+                    // todo: remove cce_
+                    ref.cce_->ckpt_ts_.store(ref.commit_ts_,
+                                             std::memory_order_release);
+                    ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
                 }
-                auto &ref = data_sync_vec->at(i);
-                // todo: remove cce_
-                ref.cce_->ckpt_ts_.store(ref.commit_ts_,
-                                         std::memory_order_release);
-                ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
+                ResetCleanStartPageCc reset_cc(cc_shards_.size());
+                for (auto &ccs : cc_shards_)
+                {
+                    ccs->Enqueue(&reset_cc);
+                }
+                reset_cc.Wait();
             }
-            ResetCleanStartPageCc reset_cc(cc_shards_.size());
-            for (auto &ccs : cc_shards_)
-            {
-                ccs->Enqueue(&reset_cc);
-            }
-            reset_cc.Wait();
+
             if (data_sync_vec->size())
             {
                 bool term_change = false;

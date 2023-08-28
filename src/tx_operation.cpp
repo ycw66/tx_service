@@ -15,6 +15,7 @@
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
+#include "tx_key.h"
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_trace.h"
@@ -2552,6 +2553,7 @@ void FlushDataOp::Forward(TransactionExecution *txm)
 void FlushDataOp::Reset()
 {
     hd_result_.Reset();
+    delay_update_ckpt_ts_ = false;
 }
 
 KickoutDataOp::KickoutDataOp(TransactionExecution *txm) : hd_result_(txm)
@@ -2628,6 +2630,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       data_sync_scan_op_(txm),
       flush_op_(txm),
       commit_acquire_all_write_op_(txm),
+      update_ckpt_ts_op_(txm),
       commit_log_op_(txm),
       ds_upsert_range_op_(txm),
       kickout_old_range_data_op_(txm),
@@ -2662,6 +2665,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     flush_op_.mv_vec_ = &mv_base_vec_;
     flush_op_.schema_ = table_schema_;
     flush_op_.node_group_ = node_group_;
+    flush_op_.delay_update_ckpt_ts_ = true;
 
     commit_acquire_all_write_op_.table_name_ = &range_table_name_;
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
@@ -2757,6 +2761,9 @@ void SplitFlushRangeOp::Reset(
 
     commit_acquire_all_write_op_.ResetHandlerTxm(txm);
 
+    update_ckpt_ts_op_.Reset();
+    update_ckpt_ts_op_.ResetHandlerTxm(txm);
+
     commit_log_op_.Reset();
     commit_log_op_.ResetHandlerTxm(txm);
 
@@ -2801,6 +2808,7 @@ void SplitFlushRangeOp::Reset(
     flush_op_.mv_vec_ = &mv_base_vec_;
     flush_op_.schema_ = table_schema_;
     flush_op_.node_group_ = node_group_;
+    flush_op_.delay_update_ckpt_ts_ = true;
 
     commit_acquire_all_write_op_.table_name_ = &range_table_name_;
     commit_acquire_all_write_op_.cc_op_ = CcOperation::Write;
@@ -3386,8 +3394,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             LOG(INFO) << "FaultInject  term_SplitFlushOp_FlushOp_Continue";
             return;
         });
-        // clear and release ckpt vecs
-        ClearDataSyncVec();
+
         // Now we can copy out the slice info since it's finalized after
         // flush data
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
@@ -3417,6 +3424,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
         {
+            ClearDataSyncVec();
             ForceToFinish(txm);
             return;
         }
@@ -3431,7 +3439,134 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        update_ckpt_ts_op_.op_func_ =
+            [data_sync_vec = &data_sync_vec_,
+             &hd_result = update_ckpt_ts_op_.hd_result_,
+             &new_range_info = new_range_info_,
+             node_group = node_group_,
+             old_start_key = old_start_key_,
+             old_end_key = old_end_key_]
+        {
+            TxWorkerPool *tx_worker_pool =
+                Sharder::Instance().GetTxWorkerPool();
+            tx_worker_pool->SubmitWork(
+                [data_sync_vec,
+                 &hd_result,
+                 &new_range_info,
+                 node_group,
+                 old_start_key,
+                 old_end_key]
+                {
+                    auto lower_bound_cmp =
+                        [](const FlushRecord &rec, const TxKey &key)
+                    { return *rec.Key() < key; };
+
+                    LocalCcShards *local_shards =
+                        Sharder::Instance().GetLocalCcShards();
+
+                    assert(!new_range_info.empty());
+                    assert(old_start_key != nullptr);
+                    assert(old_end_key != nullptr);
+
+                    const TxKey *start_key = old_start_key;
+                    const TxKey *end_key = new_range_info.begin()->first.get();
+
+                    auto start_it = data_sync_vec->begin();
+                    auto end_it = std::lower_bound(start_it,
+                                                   data_sync_vec->end(),
+                                                   *end_key,
+                                                   lower_bound_cmp);
+
+                    // Update ckpt_ts of old range data
+                    for (auto iter = start_it; iter != end_it; ++iter)
+                    {
+                        auto &ref = *iter;
+                        ref.cce_->ckpt_ts_.store(ref.commit_ts_,
+                                                 std::memory_order_release);
+                        ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
+                    }
+
+                    for (auto iter = new_range_info.cbegin();
+                         iter != new_range_info.cend();
+                         ++iter)
+                    {
+                        NodeGroupId new_owner =
+                            local_shards
+                                ->GetRangeOwner(iter->second, node_group)
+                                ->BucketOwner();
+
+                        if (new_owner == node_group)
+                        {
+                            start_key = iter->first.get();
+                            assert(start_key != nullptr);
+
+                            if (std::next(iter) == new_range_info.cend())
+                            {
+                                end_key = old_end_key;
+                            }
+                            else
+                            {
+                                end_key = std::next(iter)->first.get();
+                            }
+
+                            start_it = std::lower_bound(end_it,
+                                                        data_sync_vec->end(),
+                                                        *start_key,
+                                                        lower_bound_cmp);
+
+                            end_it =
+                                end_key == old_end_key
+                                    ? data_sync_vec->end()
+                                    : std::lower_bound(start_it,
+                                                       data_sync_vec->end(),
+                                                       *end_key,
+                                                       lower_bound_cmp);
+
+                            for (auto iter = start_it; iter != end_it; ++iter)
+                            {
+                                auto &ref = *iter;
+                                ref.cce_->ckpt_ts_.store(
+                                    ref.commit_ts_, std::memory_order_release);
+                                ref.cce_->data_store_size_.fetch_add(
+                                    ref.delta_size_);
+                            }
+                        }
+                        else
+                        {
+                            // Will be kicked out
+                        }
+                    }
+
+                    ResetCleanStartPageCc reset_cc(local_shards->Count());
+                    for (size_t idx = 0; idx < local_shards->Count(); ++idx)
+                    {
+                        local_shards->EnqueueCcRequest(idx, &reset_cc);
+                    }
+                    reset_cc.Wait();
+
+                    hd_result.SetFinished();
+                });
+        };
+
         ACTION_FAULT_INJECTOR("range_split_commit_acquire_all");
+
+        ForwardToSubOperation(txm, &update_ckpt_ts_op_);
+    }
+    else if (op_ == &update_ckpt_ts_op_)
+    {
+        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
+        {
+            ClearDataSyncVec();
+            ForceToFinish(txm);
+            return;
+        }
+
+        // Should never fail.
+        assert(!update_ckpt_ts_op_.hd_result_.IsError());
+
+        // Clear and release ckpt vec to reduce memory usage.
+        ClearDataSyncVec();
+
         FillCommitLogRequest(txm);
         LOG(INFO) << "Split Flush transaction write commit log, range id "
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
