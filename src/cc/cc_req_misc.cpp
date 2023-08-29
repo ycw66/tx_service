@@ -53,8 +53,12 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
             Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
 
-        if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
         {
+            // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
+            // time, the creating catalog will be cleaned by ClearCcNodeGroup,
+            // and the running cc_requests will check term invalid.
+
             if (status_ == RecordStatus::Normal)
             {
                 assert(commit_ts_ > 0);
@@ -70,16 +74,23 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
                 // of history, i.e., ts=1.
                 ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
             }
-        }
 
-        for (CcRequestBase *&req : requesters_)
+            for (CcRequestBase *req : requesters_)
+            {
+                ccs.Enqueue(ccs.core_id_, req);
+            }
+        }
+        else
         {
-            ccs.Enqueue(ccs.core_id_, req);
+            for (CcRequestBase *req : requesters_)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
         }
     }
     else
     {
-        for (CcRequestBase *&req : requesters_)
+        for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
         }
@@ -122,24 +133,34 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
             Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
 
-        if (cc_ng_candid_term >= 0 || cc_ng_term >= 0)
+        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
         {
+            // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
+            // time, the creating catalog will be cleaned by ClearCcNodeGroup,
+            // and the running cc_requests will check term invalid.
+
             CatalogEntry *catalog_entry =
                 ccs.GetCatalog(table_name_, cc_ng_id_);
             ccs.InitTableStatistics(catalog_entry->schema_.get(),
                                     catalog_entry->dirty_schema_.get(),
                                     cc_ng_id_,
                                     std::move(sample_pool_map_));
+            for (CcRequestBase *req : requesters_)
+            {
+                ccs.Enqueue(ccs.core_id_, req);
+            }
         }
-
-        for (CcRequestBase *&req : requesters_)
+        else
         {
-            ccs.Enqueue(ccs.core_id_, req);
+            for (CcRequestBase *req : requesters_)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
         }
     }
     else
     {
-        for (CcRequestBase *&req : requesters_)
+        for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
         }
@@ -173,16 +194,33 @@ bool FetchTableRangesCc::Execute(CcShard &ccs)
 {
     if (error_code_ == 0)
     {
-        ccs.InitTableRanges(table_name_, ranges_vec_, cc_ng_id_);
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
 
-        for (CcRequestBase *&req : requesters_)
+        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
         {
-            ccs.Enqueue(ccs.core_id_, req);
+            // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
+            // time, the creating catalog will be cleaned by ClearCcNodeGroup,
+            // and the running cc_requests will check term invalid.
+
+            ccs.InitTableRanges(table_name_, ranges_vec_, cc_ng_id_);
+            for (CcRequestBase *req : requesters_)
+            {
+                ccs.Enqueue(ccs.core_id_, req);
+            }
+        }
+        else
+        {
+            for (CcRequestBase *req : requesters_)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
         }
     }
     else
     {
-        for (CcRequestBase *&req : requesters_)
+        for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
         }
@@ -287,6 +325,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
                                    LocalCcShards &cc_shards)
     : table_name_(&table_name),
       cc_ng_id_(cc_ng_id),
+      cc_ng_term_(cc_ng_term),
       force_load_(force_load),
       finish_cnt_(0),
       load_slice_req_(table_name,
@@ -328,9 +367,9 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     int64_t cc_ng_candid_term =
         Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-    if (cc_ng_candid_term < 0 && cc_ng_term < 0)
+    if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
     {
-        SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        SetError(CcErrorCode::NG_TERM_CHANGED);
         return false;
     }
 

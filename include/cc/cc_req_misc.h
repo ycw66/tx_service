@@ -411,6 +411,7 @@ public:
 private:
     const TableName *table_name_;
     NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
     bool force_load_;
     uint16_t finish_cnt_;
     std::mutex mux_;
