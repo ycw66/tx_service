@@ -436,12 +436,14 @@ public:
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Update pk range table if exist.
+                TableName base_range_table_name{table_key->Name().StringView(),
+                                                TableType::RangePartition};
                 auto ranges = shard_->GetTableRangesForATable(
-                    table_key->Name(), req.NodeGroupId());
+                    base_range_table_name, req.NodeGroupId());
                 if (ranges != nullptr)
                 {
                     shard_->CreateOrUpdateRangeCcMap(
-                        table_key->Name(),
+                        base_range_table_name,
                         new_schema,
                         req.NodeGroupId(),
                         catalog_entry->DirtyVersion(),
@@ -472,12 +474,15 @@ public:
                                 false);
 #ifdef RANGE_PARTITION_ENABLED
                             // Update current sk range table if exist.
+                            TableName index_range_table_name{
+                                old_index_name.StringView(),
+                                TableType::RangePartition};
                             auto ranges = shard_->GetTableRangesForATable(
-                                old_index_name, req.NodeGroupId());
+                                index_range_table_name, req.NodeGroupId());
                             if (ranges != nullptr)
                             {
                                 shard_->CreateOrUpdateRangeCcMap(
-                                    old_index_name,
+                                    index_range_table_name,
                                     new_schema,
                                     req.NodeGroupId(),
                                     catalog_entry->DirtyVersion(),

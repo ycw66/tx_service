@@ -6004,6 +6004,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
         table_name_str.data(), table_name_str.size(), TableType::Primary);
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
+    catalog_rec_.ClearDirtySchema();
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = curr_schema_ts;
@@ -6483,16 +6484,18 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 
             if (upload_req.ErrorCode() != TxErrorCode::NO_ERROR)
             {
-                LOG(WARNING) << "!!!WARNING!!! Upload new packed sk data "
-                                "failed with error message: "
-                             << upload_req.ErrorMsg()
-                             << ", for table: " << base_table_name.StringView();
+                LOG(WARNING)
+                    << "!!!WARNING!!! Upload new packed sk data "
+                       "failed with error message: "
+                    << upload_req.ErrorMsg()
+                    << ", for base table: " << base_table_name.StringView();
 
                 // Non-leader transferred error, should re-upload this batch
                 // TxKeys.
                 while (upload_req.ErrorCode() != TxErrorCode::CC_REQ_FOLLOWER)
                 {
-                    std::this_thread::sleep_for(10s);
+                    std::this_thread::sleep_for(150s);
+                    upload_req.Reset();
                     upload_txm->Execute(&upload_req);
                     upload_req.Wait();
                     if (upload_req.ErrorCode() == TxErrorCode::NO_ERROR)
@@ -6576,13 +6579,14 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                 << "!!!WARNING!!! Upload the last batch new packed sk data "
                    "failed with error message: "
                 << upload_req.ErrorMsg()
-                << ", for table: " << base_table_name.StringView();
+                << ", for base table: " << base_table_name.StringView();
 
             // Non-leader transferred error, should re-upload this batch
             // TxKeys.
             while (upload_req.ErrorCode() != TxErrorCode::CC_REQ_FOLLOWER)
             {
-                std::this_thread::sleep_for(10s);
+                std::this_thread::sleep_for(100s);
+                upload_req.Reset();
                 upload_txm->Execute(&upload_req);
                 upload_req.Wait();
                 if (upload_req.ErrorCode() == TxErrorCode::NO_ERROR)
