@@ -72,6 +72,10 @@ struct TableSchema
         const TxRecord *record,
         const TableName &index_name) const = 0;
     virtual void FinishGeneratePackedSk() = 0;
+    virtual bool HasAutoIncrement() const = 0;
+    virtual const TableName *GetSequenceTableName() const = 0;
+    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
+        const TableName &table_name) const = 0;
 };
 
 class CatalogFactory

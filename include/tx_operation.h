@@ -550,6 +550,20 @@ struct DsUpsertTableOp : public TransactionOperation
     txservice::AlterTableInfo *alter_table_info_{nullptr};
 };
 
+template <typename ResultType>
+struct AsyncOp : public TransactionOperation
+{
+    AsyncOp() = delete;
+    explicit AsyncOp(TransactionExecution *txm);
+    void ResetHandlerTxm(TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+    void Reset();
+
+    std::function<void()> op_func_;
+    CcHandlerResult<ResultType> hd_result_;
+};
+
 struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
@@ -629,6 +643,17 @@ struct UpsertTableOp : public SchemaOp
      */
     DsUpsertTableOp upsert_kv_table_op_;
     /**
+     * @brief Flush sequence data log to the log service. This data log ensures
+     * that even in the case of failover, the values in the sequence ccmap are
+     * up-to-date.
+     */
+    WriteToLogOp sequence_data_log_op_;
+    /**
+     * @brief Reset the sequence record in the sequence table if this table has
+     * auto_increment column during create table.
+     */
+    AsyncOp<PostProcessResult> reset_sequence_record_op_;
+    /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      *
      */
@@ -703,20 +728,6 @@ public:
 
     bool succeed_{false};
     CcHandlerResult<bool> hd_result_;
-};
-
-template <typename ResultType>
-struct AsyncOp : public TransactionOperation
-{
-    AsyncOp() = delete;
-    explicit AsyncOp(TransactionExecution *txm);
-    void ResetHandlerTxm(TransactionExecution *txm);
-
-    void Forward(TransactionExecution *txm) override;
-    void Reset();
-
-    std::function<void()> op_func_;
-    CcHandlerResult<ResultType> hd_result_;
 };
 
 struct NoOp : public TransactionOperation

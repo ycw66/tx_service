@@ -158,6 +158,21 @@ public:
     {
         assert(false);
     }
+    bool HasAutoIncrement() const override
+    {
+        return false;
+    }
+    const TableName *GetSequenceTableName() const override
+    {
+        assert(false);
+        return nullptr;
+    }
+    std::pair<TxKey::Uptr, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
+        const TableName &table_name) const override
+    {
+        assert(false);
+        return std::pair(nullptr, nullptr);
+    }
 
 private:
     std::unordered_map<uint, std::pair<TableName, MockKeySchema>>

@@ -4500,6 +4500,7 @@ void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 template void TransactionExecution::Process(AsyncOp<Void> &ds_op);
 template void TransactionExecution::Process(
     AsyncOp<std::vector<int64_t>> &ds_op);
+template void TransactionExecution::Process(AsyncOp<PostProcessResult> &ds_op);
 
 template <typename ResultType>
 void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
@@ -4521,6 +4522,8 @@ void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
 template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
 template void TransactionExecution::PostProcess(
     AsyncOp<std::vector<int64_t>> &ds_op);
+template void TransactionExecution::PostProcess(
+    AsyncOp<PostProcessResult> &ds_op);
 
 void TransactionExecution::Process(FlushDataOp &flush_op)
 {
