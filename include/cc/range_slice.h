@@ -534,17 +534,21 @@ public:
             // first check if any of the slices that will be removed is pinned
             // or being loaded
             std::unique_lock<std::mutex> slice_lk((*slice)->slice_mux_);
-            if ((*slice)->pins_ > 0 ||
-                (*slice)->status_ == SliceStatus::BeingLoaded)
+            if ((*slice)->pins_ > 0)
             {
-                if ((*slice)->pins_)
-                {
-                    LOG(INFO) << "slice pinned when trying to split range";
-                }
-                else
-                {
-                    LOG(INFO) << "slice loading when tyring to split range";
-                }
+                DLOG(INFO) << "slice pinned when trying to split range";
+                return removed_slices;
+            }
+            else if ((*slice)->status_ == SliceStatus::BeingLoaded)
+            {
+                DLOG(INFO) << "slice filling into memory when trying to "
+                              "split range";
+                return removed_slices;
+            }
+            else if ((*slice)->FillCcRequest() != nullptr)
+            {
+                DLOG(INFO) << "slice loading from data store when trying to "
+                              "split range";
                 return removed_slices;
             }
             slice++;
