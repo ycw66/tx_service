@@ -183,6 +183,7 @@ void TransactionExecution::SetRecoverTxState(uint64_t txn,
     tx_number_.store(txn, std::memory_order_relaxed);
     tx_term_ = tx_term;
     commit_ts_ = commit_ts;
+    tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
 }
 
 TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
