@@ -4280,11 +4280,10 @@ void TransactionExecution::Process(DsUpsertTableOp &ds_upsert_table_op)
         });
     ds_upsert_table_op.Reset();
     ds_upsert_table_op.is_running_ = true;
-    cc_handler_->DataStoreUpsertTable(ds_upsert_table_op.table_schema_,
-                                      ds_upsert_table_op.op_type_,
-                                      commit_ts_,
-                                      ds_upsert_table_op.hd_result_,
-                                      ds_upsert_table_op.alter_table_info_);
+    if (ds_upsert_table_op.op_func_ != nullptr)
+    {
+        ds_upsert_table_op.op_func_();
+    }
 }
 
 void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)
