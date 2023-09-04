@@ -1912,7 +1912,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     if (scan_next.scan_state_ == nullptr)
     {
         auto scan_it = scans_.find(alias);
-        assert(scan_it != scans_.end());
+        if (scan_it == scans_.end())
+        {
+            bool_resp_->FinishError(TxErrorCode::NG_TERM_CHANGED);
+            state_stack_.pop_back();
+            return;
+        }
+
         scan_next.UpdateScanState(&scan_it->second);
     }
     scan_next.alias_ = alias;
@@ -2627,7 +2633,10 @@ void TransactionExecution::ScanClose(
 {
     CcScanner *scanner = nullptr;
     auto scan_it = scans_.find(alias);
-    assert(scan_it != scans_.end());
+    if (scan_it != scans_.end())
+    {
+        return;
+    }
     scanner = scan_it->second.scanner_.get();
 
     if (!unlock_batch.empty())
