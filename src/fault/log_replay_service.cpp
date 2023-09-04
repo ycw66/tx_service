@@ -226,14 +226,14 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
+    inbound_connections_.insert_or_assign(
+        stream_socket,
+        ConnectionInfo(log_group_id, cc_ng_id, cc_ng_term, recovering));
     response->set_success(true);
     LOG(INFO) << "replay service accepting new stream: " << stream_socket
               << " from log group: " << log_group_id
               << " to cc_ng: " << cc_ng_id << " at term: " << cc_ng_term;
 
-    inbound_connections_.insert_or_assign(
-        stream_socket,
-        ConnectionInfo(log_group_id, cc_ng_id, cc_ng_term, recovering));
     active_stream_cnt_++;
 }
 
@@ -658,13 +658,14 @@ void ReplayService::WaitAndClearRequests(
 
         // find the replay error node group and its term.
         auto it = inbound_connections_.find(stream_id);
-        assert(it != inbound_connections_.end());
-        if (it != inbound_connections_.end())
+        if (it == inbound_connections_.end())
         {
-            error_node_group_id = it->second.cc_ng_id_;
-            error_term = it->second.cc_ng_term_;
-            it->second.recovery_error_ = true;
+            return;
         }
+
+        error_node_group_id = it->second.cc_ng_id_;
+        error_term = it->second.cc_ng_term_;
+        it->second.recovery_error_ = true;
 
         // close all the streams belonging to the current node group and term.
         for (const auto &[stream_id, info] : inbound_connections_)
