@@ -74,10 +74,6 @@ public:
     {
     }
 
-    NodeConfig(const NodeConfig &rhs)
-        : node_id_(rhs.node_id_), host_name_(rhs.host_name_), port_(rhs.port_)
-    {
-    }
     uint32_t node_id_{UINT32_MAX};
     std::string host_name_{""};
     uint16_t port_{0};

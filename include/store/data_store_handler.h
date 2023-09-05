@@ -66,8 +66,8 @@ public:
      * should only be called during bootstrap.
      */
     virtual bool InitializeClusterConfig(
-        std::vector<std::string> &ips,
-        std::vector<uint16_t> &ports,
+        const std::vector<std::string> &ips,
+        const std::vector<uint16_t> &ports,
         std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) = 0;
 

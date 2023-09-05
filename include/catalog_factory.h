@@ -20,6 +20,22 @@ struct KVCatalogInfo
     virtual std::string Serialize() const = 0;
     virtual void Deserialize(const char *buf, size_t &offset) = 0;
 
+    virtual const std::string &GetKvTableName(const TableName &table_name) const
+    {
+        const TableType table_type = table_name.Type();
+        assert(table_type == TableType::Primary ||
+               table_type == TableType::Secondary ||
+               table_type == TableType::UniqueSecondary);
+        if (table_name.Type() == TableType::Primary)
+        {
+            return kv_table_name_;
+        }
+        else
+        {
+            return kv_index_names_.at(table_name);
+        }
+    }
+
     std::string kv_table_name_;
     // map of <mysql_index_table_name, kv_index_table_name>
     std::unordered_map<txservice::TableName, std::string> kv_index_names_;

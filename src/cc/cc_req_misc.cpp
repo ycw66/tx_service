@@ -250,6 +250,11 @@ void FetchTableRangesCc::AppendTableRanges(std::vector<InitRangeEntry> &&ranges)
     }
 }
 
+void FetchTableRangesCc::AppendTableRange(InitRangeEntry &&range)
+{
+    ranges_vec_.push_back(std::move(range));
+}
+
 void FetchTableRangesCc::SetFinish(int err)
 {
     error_code_ = err;

@@ -3901,8 +3901,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 {
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    bool succ =
-                        store_hd->UpsertRanges(table_name, range_info, tx_ts);
+                    bool succ = store_hd->UpsertRanges(
+                        table_name, std::move(range_info), tx_ts);
                     if (succ)
                     {
                         hd_res.SetFinished();
@@ -5706,7 +5706,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-#if !(defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE == KV_CASS
             // #ifndef RANGE_PARTITION_ENABLED
             LOG(INFO) << "Alter Table Index transaction flush all old base"
                       << " table data into data store, txn: " << txm->TxNumber()
@@ -6537,7 +6537,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
               << ", and parent txn: " << txm->TxNumber()
               << ". And Upload commit ts: " << upload_txm->commit_ts_;
 
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
     // #ifdef RANGE_PARTITION_ENABLED
     TransactionExecution *scan_txm = local_cc_shards->GetTxService()->NewTx();
     // Set isolation level as snapshot so that can release range lock after
@@ -6629,7 +6629,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             target_key = nullptr;
             target_rec = nullptr;
         }
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
         // #ifdef RANGE_PARTITION_ENABLED
         if (need_move_next)
         {
@@ -6761,7 +6761,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                            << index_it->first.StringView() << "].";
                 // Abort the upload txm and scan txm
                 AbortTxRequest abort_req;
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
                 // #ifdef RANGE_PARTITION_ENABLED
                 ScanCloseTxRequest close_req(
                     scan_batch, 0, scan_alias, &base_table_name);
@@ -6844,7 +6844,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                            << base_table_name.StringView();
                 // Abort the upload txm and scan txm
                 AbortTxRequest abort_req;
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
                 // #ifdef RANGE_PARTITION_ENABLED
                 ScanCloseTxRequest close_req(
                     scan_batch, 0, scan_alias, &base_table_name);
@@ -6883,7 +6883,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             ng_terms = std::move(upload_req.Result());
         }
 
-#if !(defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE == KV_CASS
         // #ifndef RANGE_PARTITION_ENABLED
         // Move to the next tuple
         if (need_move_next)
@@ -6935,7 +6935,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                        << base_table_name.StringView();
             // Abort the upload txm and scan txm
             AbortTxRequest abort_req;
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
             // #ifdef RANGE_PARTITION_ENABLED
             ScanCloseTxRequest close_req(
                 scan_batch, 0, scan_alias, &base_table_name);
@@ -6963,7 +6963,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 
     // Commit the upload txm and scan txm
     CommitTxRequest commit_req;
-#if (defined RANGE_PARTITION_ENABLED && defined WITH_DYNAMO_DB)
+#if WITH_KV_STORAGE != KV_CASS
     // #ifdef RANGE_PARTITION_ENABLED
     ScanCloseTxRequest close_req(scan_batch, 0, scan_alias, &base_table_name);
     scan_txm->Execute(&close_req);
