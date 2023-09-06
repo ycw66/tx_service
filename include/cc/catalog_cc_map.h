@@ -301,8 +301,11 @@ public:
                     shard_->CleanTableStatistics(table_key->Name());
                 }
 
-                cce_ptr->payload_->ClearDirtySchema();
-                cce_ptr->payload_->SetDirtySchemaImage("");
+                if (cce_ptr->payload_)
+                {
+                    cce_ptr->payload_->ClearDirtySchema();
+                    cce_ptr->payload_->SetDirtySchemaImage("");
+                }
                 return TemplateCcMap::Execute(req);
             }
 

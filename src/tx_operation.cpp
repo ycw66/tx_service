@@ -1776,6 +1776,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         op_ = &prepare_log_op_;
         FillPrepareLogRequest(txm);
         txm->PushOperation(&prepare_log_op_);
+        CODE_FAULT_INJECTOR("upsert_table_prepare_log_fail", {
+            LOG(INFO) << "FaultInject  upsert_table_prepare_log_fail";
+            prepare_log_op_.is_running_ = true;
+            prepare_log_op_.hd_result_.SetError(CcErrorCode::WRITE_LOG_FAILED);
+            return;
+        });
         txm->Process(prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
