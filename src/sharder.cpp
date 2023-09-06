@@ -72,11 +72,8 @@ Sharder::~Sharder() = default;
 void Sharder::Shutdown()
 {
     LOG(INFO) << "Shutting down the sharder at node #" << node_id_;
-
     if (ng_configs_.size() > 1)
     {
-        cc_stream_sender_ = nullptr;
-
         cc_stream_receiver_->Shutdown();
         cc_stream_server_.Stop(0);
         cc_stream_server_.Join();
@@ -111,6 +108,15 @@ void Sharder::Shutdown()
     tx_worker_pool_ = nullptr;
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
+}
+
+void Sharder::CloseStreamSender()
+{
+    LOG(INFO) << "Close Stream sender at node #" << node_id_;
+    if (ng_configs_.size() > 1)
+    {
+        cc_stream_sender_ = nullptr;
+    }
 }
 
 void Sharder::CloseBraft()

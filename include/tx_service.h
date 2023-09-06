@@ -757,6 +757,10 @@ public:
         {
             thd_idx.join();
         }
+
+        // Maybe there has remote request in cache, so here close stream sender
+        // after TxProcessor terminated.
+        Sharder::Instance().CloseStreamSender();
     }
 
     TransactionExecution *NewTx()

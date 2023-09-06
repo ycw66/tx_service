@@ -71,6 +71,7 @@ public:
     }
 
     void Shutdown();
+    void CloseStreamSender();
     void CloseBraft();
 
     /**
