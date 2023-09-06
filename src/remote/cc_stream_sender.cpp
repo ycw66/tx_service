@@ -312,19 +312,17 @@ void CcStreamSender::ConnectStreams()
     std::unique_lock<std::mutex> lk(outbound_mux_);
     while (!terminate_)
     {
-        out_cv_.wait_for(
-            lk,
-            5s,
-            [this] { return terminate_ || to_connect_nodes_.size() != 0; });
-
-        if (to_connect_nodes_.size() == 0)
-        {
-            continue;
-        }
+        out_cv_.wait(
+            lk, 1s, [this] { return terminate_; });
 
         if (terminate_)
         {
             break;
+        }
+
+        if (to_connect_nodes_.size() == 0)
+        {
+            continue;
         }
 
         std::vector<std::pair<uint32_t, int64_t>> nodes(
