@@ -418,7 +418,7 @@ void CcShard::DetachLru(LruPage *page)
     page->lru_next_ = nullptr;
 }
 
-void CcShard::UpdateLruList(LruPage *page)
+void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
 {
     // We should not add meta cc map page into lru list since they
     // should never be kicked out of memory.
@@ -447,6 +447,17 @@ void CcShard::UpdateLruList(LruPage *page)
     tail_ccp_.lru_prev_ = page;
     page->lru_next_ = &tail_ccp_;
     page->lru_prev_ = second_tail;
+
+    // If the update is a emplace update, these new loaded data might be
+    // kickable from cc map. Usually if the clean_start_page is at tail we're
+    // not able to load new data into memory, except some special case where we
+    // use force_load. In these cases the new loaded data should be able to be
+    // kicked from memory once it is unpinned. Set clean_start_page at the new
+    // updated page in this case.
+    if (is_emplace && clean_start_ccp_ == &tail_ccp_)
+    {
+        clean_start_ccp_ = page;
+    }
 }
 
 TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,

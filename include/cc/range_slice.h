@@ -333,7 +333,7 @@ public:
     bool ChangeAllowed()
     {
         std::unique_lock<std::mutex> lk(slice_mux_);
-        return pins_ == 0 && status_ != SliceStatus::BeingLoaded;
+        return pins_ == 1;
     }
 
 private:
@@ -435,7 +435,8 @@ public:
                                 CcRequestBase *cc_request,
                                 CcShard *cc_shard,
                                 store::DataStoreHandler *store_hd,
-                                bool force_load = false);
+                                bool force_load = false,
+                                uint8_t prefetch_size = 0);
 
     void UnpinSlice(StoreSlice *slice);
 

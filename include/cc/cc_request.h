@@ -2274,7 +2274,6 @@ public:
             mv_base_idx_vec_.emplace_back();
             mv_base_idx_vec_.back().reserve(scan_batch_size);
             res_.emplace_back(nullptr, false);
-            loading_slice_.emplace_back(RangeSliceId(nullptr, nullptr));
             accumulated_scan_cnt_.emplace_back(0);
         }
     }
@@ -2318,7 +2317,6 @@ public:
         {
             archive_vec_.at(i).clear();
             mv_base_idx_vec_.at(i).clear();
-            loading_slice_.at(i) = RangeSliceId(nullptr, nullptr);
             res_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.at(i) = 0;
         }
@@ -2380,16 +2378,6 @@ public:
         return res_;
     }
 
-    void SetLoadingSlce(RangeSliceId slice_id, uint16_t core_id)
-    {
-        loading_slice_[core_id] = slice_id;
-    }
-
-    RangeSliceId LoadingSlice(uint16_t core_id) const
-    {
-        return loading_slice_[core_id];
-    }
-
     std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
     {
         return data_sync_vec_[core_id];
@@ -2436,8 +2424,6 @@ private:
     // scan result
     std::vector<std::pair<TxKey::Uptr, bool>> res_;
 
-    std::vector<RangeSliceId> loading_slice_;
-
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;
 
@@ -2451,8 +2437,40 @@ struct RunOnTxProcessorCc : public CcRequestBase
 {
 public:
     explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task)
-        : task_(task), done_(false), mux_(), cv_()
+        : task_(task), is_finished_(false), mux_(), cv_()
     {
+    }
+
+    void Reset()
+    {
+        is_finished_ = false;
+        error_code_ = CcErrorCode::NO_ERROR;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this]() { return is_finished_; });
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return error_code_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return error_code_;
+    }
+
+    void AbortCcRequest(CcErrorCode error_code) override
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        is_finished_ = true;
+        error_code_ = error_code;
+        cv_.notify_one();
     }
 
     bool Execute(CcShard &ccs) override
@@ -2461,22 +2479,17 @@ public:
 
         task_(ccs);
 
-        done_ = true;
+        error_code_ = CcErrorCode::NO_ERROR;
+        is_finished_ = true;
         cv_.notify_one();
 
         return false;
     }
 
-    void Wait()
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return done_; });
-    }
-
 private:
     std::function<void(CcShard &ccs)> task_;
-
-    bool done_{false};
+    bool is_finished_{false};
+    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
     std::condition_variable cv_;
 };
@@ -3396,7 +3409,7 @@ private:
 struct ResetCleanStartPageCc : public CcRequestBase
 {
 public:
-    ResetCleanStartPageCc(size_t core_cnt)
+    explicit ResetCleanStartPageCc(size_t core_cnt)
         : mux_(), cv_(), pending_shard_(core_cnt)
     {
     }

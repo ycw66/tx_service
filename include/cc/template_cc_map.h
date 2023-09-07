@@ -4429,16 +4429,6 @@ public:
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
 
-        if (req.LoadingSlice(shard_->core_id_).Range() != nullptr)
-        {
-            // request was blocked on slice loading last time it
-            // was processed. Now the slice has already been pinned
-            // by this request when the slice is loaded into memory,
-            // so we need to unpin it here.
-            req.LoadingSlice(shard_->core_id_).Unpin();
-            req.SetLoadingSlce(RangeSliceId(nullptr, nullptr),
-                               shard_->core_id_);
-        }
         std::vector<LruEntry *> remove_entries;
 
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -4496,8 +4486,6 @@ public:
                             cce->data_store_size_.store(0);
                         }
                         slice_id.Unpin();
-                        req.SetLoadingSlce(RangeSliceId(nullptr, nullptr),
-                                           shard_->core_id_);
                     }
                     else if (pin_status == RangeSliceOpStatus::Retry)
                     {
@@ -4508,7 +4496,6 @@ public:
                     }
                     else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
                     {
-                        req.SetLoadingSlce(slice_id, shard_->core_id_);
                         req.pause_key_.at(shard_->core_id_).first =
                             key->Clone();
                         return false;
@@ -5965,7 +5952,7 @@ protected:
         if (lb_it != End() && *lb_it->first == key)
         {
             CcEntry<KeyT, ValueT> *cce = lb_it->second;
-            shard_->UpdateLruList(cce->parent_page_);
+            shard_->UpdateLruList(cce->parent_page_, false);
             return {lb_it->first, cce};
         }
         else
@@ -6040,7 +6027,7 @@ protected:
             // found, return Iterator
             Iterator iterator(target_page, idx_in_page, &neg_inf_);
             CcEntry<KeyT, ValueT> *cce_ptr = iterator->second;
-            shard_->UpdateLruList(cce_ptr->parent_page_);
+            shard_->UpdateLruList(cce_ptr->parent_page_, false);
             return iterator;
         }
 
@@ -6103,7 +6090,7 @@ protected:
         TryUpdatePageKey(target_it);
 
         // update lru list
-        shard_->UpdateLruList(target_page);
+        shard_->UpdateLruList(target_page, true);
         shard_->mem_usage_ += mem_increased;
         size_++;
 

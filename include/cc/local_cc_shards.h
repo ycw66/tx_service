@@ -71,6 +71,11 @@ public:
     LocalCcShards(LocalCcShards const &) = delete;
     void operator=(LocalCcShards const &) = delete;
 
+    CcShard *GetCcShard(size_t core_idx)
+    {
+        return cc_shards_[core_idx].get();
+    }
+
     void EnqueueCcRequest(uint32_t thd_id,
                           uint32_t shard_code,
                           CcRequestBase *req)

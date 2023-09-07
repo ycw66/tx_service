@@ -3590,7 +3590,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                                         slice_start_idx,
                                                         slice_end_idx))
                             {
-                                hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
+                                hd_res.SetError(CcErrorCode::NG_TERM_CHANGED);
                                 return;
                             }
                         }

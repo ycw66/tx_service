@@ -6,6 +6,7 @@
 
 #include "cc_req_misc.h"
 #include "cc_shard.h"
+#include "error_messages.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
@@ -40,14 +41,6 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
     status_ = SliceStatus::FullyCached;
     size_ = slice_size;
 
-    if (to_alter_)
-    {
-        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        // Wake up all waiting threads since there could be multiple slices
-        // waiting on the same range wait_cv_.
-        range.wait_cv_.notify_all();
-    }
-
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
         cc_shard->Enqueue(cc_req);
@@ -74,14 +67,6 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
 
     assert(pins_ == 0);
     status_ = SliceStatus::PartiallyCached;
-
-    if (to_alter_)
-    {
-        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        // Wake up all waiting threads since there could be multiple slices
-        // waiting on the same range wait_cv_.
-        range.wait_cv_.notify_all();
-    }
 
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
@@ -245,7 +230,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                         CcRequestBase *cc_request,
                                         CcShard *cc_shard,
                                         store::DataStoreHandler *store_hd,
-                                        bool force_load)
+                                        bool force_load,
+                                        uint8_t prefetch_size)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -278,6 +264,8 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
             meter->Collect(cc_shard->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "miss");
         }
 
+        RangeSliceOpStatus pin_status;
+
         LoadSliceStatus load_ret = LoadSlice(tbl_name,
                                              ng_term,
                                              *slice,
@@ -292,18 +280,57 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
                                              force_load,
                                              slice_lk);
 
-        if (load_ret == LoadSliceStatus::Success)
+        switch (load_ret)
         {
-            return RangeSliceOpStatus::BlockedOnLoad;
-        }
-        else
-        {
+        case LoadSliceStatus::Success:
+            pin_status = RangeSliceOpStatus::BlockedOnLoad;
+            break;
+        default:
             // This method is only called by the checkpointer, who sets the
             // force_load flag to true. So, LoadSlice() in this method always
             // reads the slice from the data store, even if there is thrashing.
             assert(load_ret == LoadSliceStatus::Error);
-            return RangeSliceOpStatus::Error;
+            pin_status = RangeSliceOpStatus::Error;
+            break;
         }
+
+        slice_lk.unlock();
+
+        if (prefetch_size > 0)
+        {
+            size_t slice_idx = 0;
+            if (slice->StartKey() != nullptr)
+            {
+                slice_idx = SearchSlice(*slice->StartKey(), true);
+            }
+            size_t sid = slice_idx + 1;
+            for (size_t fid = 0; fid < prefetch_size && sid < slices_.size();
+                 ++fid, ++sid)
+            {
+                StoreSlice *prefetch_slice = slices_[sid].get();
+                std::unique_lock<std::mutex> prefetch_lk(
+                    prefetch_slice->slice_mux_);
+
+                if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                {
+                    LoadSlice(tbl_name,
+                              ng_term,
+                              *prefetch_slice,
+                              key_schema,
+                              rec_schema,
+                              schema_ts,
+                              snapshot_ts,
+                              kv_info,
+                              nullptr,
+                              cc_shard,
+                              store_hd,
+                              false,
+                              prefetch_lk);
+                }
+            }
+        }
+
+        return pin_status;
     }
 }
 
@@ -317,7 +344,7 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
 
     // The slice is unpinned. If the checkpointer has requested to alter the
     // slice, wakes up the checkpointer.
-    if (slice->pins_ == 0 && slice->to_alter_)
+    if (slice->pins_ == 1 && slice->to_alter_)
     {
         // Unlocks the slice before locking the range. This is because all
         // locking operations follow the range-slice order to avoid deadlocks.
@@ -357,240 +384,183 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  size_t slice_end_idx,
                                  bool range_locked)
 {
-    std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
     std::vector<SliceChangeInfo> item_vec;
-    if (slice->status_ != SliceStatus::FullyCached)
+
+    uint64_t snapshot_ts =
+        local_cc_shards_.EnableMvcc()
+            ? TxStartTsCollector::Instance().GlobalMinSiTxStartTs()
+            : 0;
+    const Schema *key_schema;
+    if (table_name.Type() == TableType::Secondary)
     {
-        // Load the slice from data store
-        slice_lk.unlock();
-
-        std::mutex load_slice_mux;
-        std::condition_variable load_slice_cv;
-        bool finished = false;
-        uint64_t snapshot_ts =
-            local_cc_shards_.EnableMvcc()
-                ? TxStartTsCollector::Instance().GlobalMinSiTxStartTs()
-                : 0;
-        const Schema *key_schema;
-        if (table_name.Type() == TableType::Secondary)
-        {
-            key_schema = schema->IndexKeySchema(table_name);
-        }
-        else
-        {
-            key_schema = schema->KeySchema();
-        }
-        LoadRangeSliceRequest load_req(table_name,
-                                       key_schema,
-                                       schema->RecordSchema(),
-                                       schema->Version(),
-                                       slice->StartKey(),
-                                       slice->EndKey(),
-                                       snapshot_ts,
-                                       ng_id,
-                                       ng_term);
-        load_req.post_lambda_ = [&load_slice_mux, &load_slice_cv, &finished](
-                                    LoadRangeSliceRequest *load_req)
-        {
-            // Signal the caller that the slice is loaded
-            std::unique_lock<std::mutex> lk(load_slice_mux);
-            finished = true;
-            load_slice_cv.notify_one();
-        };
-        // Load the slice from data store
-        while (true)
-        {
-            if (!local_cc_shards_.store_hd_->LoadRangeSlice(
-                    table_name,
-                    schema->GetKVCatalogInfo(),
-                    partition_id_,
-                    &load_req))
-            {
-                // There is a data store error when loading the slice, retry
-                // until succeed.
-                LOG(ERROR) << "Get post ckpt slice failed "
-                           << table_name.StringView();
-                // sleep for a second before retrying so that we don't consume
-                // too much data store traffic
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            }
-
-            std::unique_lock<std::mutex> load_slice_lk(load_slice_mux);
-            load_slice_cv.wait(load_slice_lk, [&finished] { return finished; });
-            if (!load_req.IsError())
-            {
-                break;
-            }
-            // There is a data store error when loading the slice.
-            LOG(ERROR) << "Get post ckpt slice failed "
-                       << table_name.StringView();
-            finished = false;
-            load_req.Reset();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-
-        // Process the slice
-        auto &slice_data = load_req.SliceData();
-        if (slice_data.empty())
-        {
-            // If the slice is empty in data store, mark the slice as fully
-            // cached
-            slice_lk.lock();
-            if (slice->status_ != SliceStatus::BeingLoaded)
-            {
-                slice->status_ = SliceStatus::FullyCached;
-            }
-            slice_lk.unlock();
-        }
-        auto flush_vec_it = flush_vec.begin() + slice_first_idx;
-        auto slice_end_it = flush_vec.begin() + slice_end_idx;
-        auto loaded_it = slice_data.begin();
-        while (flush_vec_it != slice_end_it || loaded_it != slice_data.end())
-        {
-            int32_t item_size = 0;
-            if (loaded_it == slice_data.end() ||
-                (flush_vec_it != slice_end_it &&
-                 (*flush_vec_it->Key() == *loaded_it->key_ ||
-                  *flush_vec_it->Key() < *loaded_it->key_)))
-            {
-                // Take the item from flush vector
-                if (flush_vec_it->payload_status_ == RecordStatus::Deleted)
-                {
-                    item_size = 0;
-                }
-                else
-                {
-                    item_size = flush_vec_it->Key()->Size() +
-                                flush_vec_it->PayloadSize();
-                }
-                item_vec.emplace_back(flush_vec_it->Key(),
-                                      item_size - flush_vec_it->delta_size_,
-                                      item_size);
-
-                if (loaded_it != slice_data.end() &&
-                    *flush_vec_it->Key() == *loaded_it->key_)
-                {
-                    loaded_it++;
-                }
-                flush_vec_it++;
-            }
-            else
-            {
-                if (!loaded_it->is_deleted_)
-                {
-                    // Take the item from loaded slice, this item will
-                    // not change in this round of checkpoint
-                    item_size =
-                        loaded_it->key_->Size() + loaded_it->record_->Size();
-                    item_vec.emplace_back(
-                        std::move(loaded_it->key_), item_size, item_size);
-                }
-                loaded_it++;
-            }
-        }
+        key_schema = schema->IndexKeySchema(table_name);
     }
     else
     {
-        // If slice is already fully cached, pin the slice so that it won't get
-        // kickouted before GetPostCkptSlice is executed.
-        slice->pins_++;
-        slice_lk.unlock();
+        key_schema = schema->KeySchema();
+    }
 
-        size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
-        assert(core_cnt > 0);
+    // Dispatch notify_cc to the first core
+    RunOnTxProcessorCc notify_cc([](CcShard &ccs) {});
+    CcShard *notify_cc_shard = local_cc_shards_.GetCcShard(0);
 
-        std::vector<std::vector<uintptr_t>> ckpt_cce_raw_ptr_vecs_inmut(
-            core_cnt);
+    uint8_t unused_prefetch_size = 0;
 
-        bool scan_data_drained = false;
-        std::vector<std::vector<SliceChangeInfo>> slice_change_info_vecs(
-            core_cnt + 1);
+    while (true)
+    {
+        RangeSliceOpStatus status = PinSlice(table_name,
+                                             ng_term,
+                                             slice,
+                                             key_schema,
+                                             schema->RecordSchema(),
+                                             schema->Version(),
+                                             snapshot_ts,
+                                             schema->GetKVCatalogInfo(),
+                                             &notify_cc,
+                                             notify_cc_shard,
+                                             local_cc_shards_.store_hd_,
+                                             true,
+                                             unused_prefetch_size);
 
-        assert(slice_end_idx <= flush_vec.size());
-
-        for (size_t idx = slice_first_idx; idx < slice_end_idx; ++idx)
+        if (status == RangeSliceOpStatus::Successful)
         {
-            auto hash_value = flush_vec[idx].Key()->Hash();
-            int32_t ckpt_size = 0;
-            if (flush_vec[idx].payload_status_ != RecordStatus::Deleted)
-            {
-                ckpt_size =
-                    flush_vec[idx].Key()->Size() + flush_vec[idx].PayloadSize();
-            }
-            else
-            {
-                ckpt_size = 0;
-            }
-            size_t shard_index = (hash_value & 0x3FF) & (core_cnt - 1);
-            ckpt_cce_raw_ptr_vecs_inmut[shard_index].push_back(
-                reinterpret_cast<uintptr_t>(flush_vec[idx].cce_));
-            slice_change_info_vecs[core_cnt].emplace_back(
-                flush_vec[idx].Key(),
-                ckpt_size - flush_vec[idx].delta_size_,
-                ckpt_size);
+            assert(slice->pins_ > 0 &&
+                   slice->status_ == SliceStatus::FullyCached);
+            break;
         }
-
-        std::vector<bool> is_last_one_vec(core_cnt, true);
-
-        GetPostCkptSlice post_ckpt_slice(table_name,
-                                         ng_id,
-                                         slice,
-                                         this,
-                                         ckpt_cce_raw_ptr_vecs_inmut,
-                                         flush_ts,
-                                         core_cnt,
-                                         is_last_one_vec);
-
-        while (!scan_data_drained)
+        else if (status == RangeSliceOpStatus::Error)
         {
-            scan_data_drained = true;
-            for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
+            LOG(ERROR) << "There is a data store error when loading the slice, "
+                          "table name: "
+                       << table_name.StringView();
+            // There is a data store error when loading the slice, retry
+            // until succeed. sleep for a second before retrying so that we
+            // don't consume too much data store traffic
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        else
+        {
+            notify_cc.Wait();
+            if (notify_cc.IsError())
             {
-                local_cc_shards_.EnqueueCcRequest(shard_idx, &post_ckpt_slice);
-            }
-
-            post_ckpt_slice.Wait();
-            // GetPostCkptSlice should never fail.
-            assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
-
-            for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
-            {
-                scan_data_drained =
-                    scan_data_drained && post_ckpt_slice.IsDrained(shard_idx);
-
-                auto &cc_shard_slice_change_info_vec =
-                    post_ckpt_slice.SliceChangeInfoVec(shard_idx);
-
-                for (size_t idx = 0;
-                     idx < post_ckpt_slice.item_vec_size_[shard_idx];
-                     ++idx)
+                if (notify_cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
                 {
-                    // Need to clone key
-                    slice_change_info_vecs[shard_idx].emplace_back(
-                        cc_shard_slice_change_info_vec[idx].key_.uptr_->Clone(),
-                        cc_shard_slice_change_info_vec[idx].cur_size_,
-                        cc_shard_slice_change_info_vec[idx].post_update_size_);
+                    LOG(ERROR) << "There is a data store error when loading "
+                                  "the slice, "
+                                  "table name: "
+                               << table_name.StringView();
+                    // sleep for a second before retrying so that we don't
+                    // consume too much data store traffic
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                else if (notify_cc.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
+                {
+                    // The force load flag was set to true, so we will force
+                    // fill the range data to memory in the next round.
+                }
+                else
+                {
+                    assert(notify_cc.ErrorCode() ==
+                           CcErrorCode::NG_TERM_CHANGED);
+                    // Not leader anymore
+                    return false;
                 }
             }
+        }
+        notify_cc.Reset();
+    }
 
-            post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut, is_last_one_vec);
+    assert(slice->pins_ > 0 && slice->status_ == SliceStatus::FullyCached);
+
+    size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+    assert(core_cnt > 0);
+
+    std::vector<std::vector<uintptr_t>> ckpt_cce_raw_ptr_vecs_inmut(core_cnt);
+
+    bool scan_data_drained = false;
+    std::vector<std::vector<SliceChangeInfo>> slice_change_info_vecs(core_cnt +
+                                                                     1);
+
+    assert(slice_end_idx <= flush_vec.size());
+
+    for (size_t idx = slice_first_idx; idx < slice_end_idx; ++idx)
+    {
+        auto hash_value = flush_vec[idx].Key()->Hash();
+        int32_t ckpt_size = 0;
+        if (flush_vec[idx].payload_status_ != RecordStatus::Deleted)
+        {
+            ckpt_size =
+                flush_vec[idx].Key()->Size() + flush_vec[idx].PayloadSize();
+        }
+        else
+        {
+            ckpt_size = 0;
+        }
+        size_t shard_index = (hash_value & 0x3FF) & (core_cnt - 1);
+        ckpt_cce_raw_ptr_vecs_inmut[shard_index].push_back(
+            reinterpret_cast<uintptr_t>(flush_vec[idx].cce_));
+        slice_change_info_vecs[core_cnt].emplace_back(
+            flush_vec[idx].Key(),
+            ckpt_size - flush_vec[idx].delta_size_,
+            ckpt_size);
+    }
+
+    std::vector<bool> is_last_one_vec(core_cnt, true);
+
+    GetPostCkptSlice post_ckpt_slice(table_name,
+                                     ng_id,
+                                     slice,
+                                     this,
+                                     ckpt_cce_raw_ptr_vecs_inmut,
+                                     flush_ts,
+                                     core_cnt,
+                                     is_last_one_vec);
+
+    while (!scan_data_drained)
+    {
+        scan_data_drained = true;
+        for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
+        {
+            local_cc_shards_.EnqueueCcRequest(shard_idx, &post_ckpt_slice);
         }
 
-        // unpin the slice
-        UnpinSlice(slice);
+        post_ckpt_slice.Wait();
+        // GetPostCkptSlice should never fail.
+        assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
 
-        auto key_greater =
-            [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
+        for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
         {
-            const TxKey *l_key = lhs.SliceStartKey();
-            const TxKey *r_key = rhs.SliceStartKey();
-            return *r_key < *l_key;
-        };
+            scan_data_drained =
+                scan_data_drained && post_ckpt_slice.IsDrained(shard_idx);
 
-        MergeSortedVectors(
-            std::move(slice_change_info_vecs), item_vec, key_greater, false);
+            auto &cc_shard_slice_change_info_vec =
+                post_ckpt_slice.SliceChangeInfoVec(shard_idx);
+
+            for (size_t idx = 0;
+                 idx < post_ckpt_slice.item_vec_size_[shard_idx];
+                 ++idx)
+            {
+                // Need to clone key
+                slice_change_info_vecs[shard_idx].emplace_back(
+                    cc_shard_slice_change_info_vec[idx].key_.uptr_->Clone(),
+                    cc_shard_slice_change_info_vec[idx].cur_size_,
+                    cc_shard_slice_change_info_vec[idx].post_update_size_);
+            }
+        }
+
+        post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut, is_last_one_vec);
     }
+
+    auto key_greater =
+        [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
+    {
+        const TxKey *l_key = lhs.SliceStartKey();
+        const TxKey *r_key = rhs.SliceStartKey();
+        return *r_key < *l_key;
+    };
+
+    MergeSortedVectors(
+        std::move(slice_change_info_vecs), item_vec, key_greater, false);
 
     // Split the slice based on post checkpoint item size, but do
     // not update the slice size with the post checkpoint yet since
@@ -669,7 +639,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     if (split_keys.size() > 1)
     {
         std::unique_lock<std::shared_mutex> range_lk(mux_);
-        slice_lk.lock();
+        std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
 
         assert(!slice->to_alter_);
         slice->to_alter_ = true;
@@ -681,9 +651,9 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         wait_cv_.wait(range_lk,
                       [slice_ptr = slice]
                       { return slice_ptr->ChangeAllowed(); });
+        assert(slice->pins_ == 1 && slice->status_ == SliceStatus::FullyCached);
 
         slice_lk.lock();
-        assert(slice->pins_ == 0);
 
         size_t slice_idx = slice->start_key_ == nullptr
                                ? 0
@@ -741,8 +711,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
             sub_slice->size_ = split_keys[idx].cur_size_;
             sub_slice->post_ckpt_size_ = split_keys[idx].post_update_size_;
-            // Sub-slices inherit the original slice's status, e.g., if the
-            // original slice is fully cached, all sub-slices are too cached.
+
             sub_slice->status_ = slice->status_;
             sub_slice->last_load_ts_ = slice->last_load_ts_;
 
@@ -752,6 +721,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         }
         slice->to_alter_ = false;
     }
+
+    UnpinSlice(slice);
 
     return true;
 }

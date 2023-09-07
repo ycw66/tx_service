@@ -255,7 +255,7 @@ public:
      * page.
      * @param page
      */
-    void UpdateLruList(LruPage *page);
+    void UpdateLruList(LruPage *page, bool is_emplace);
 
     /**
      * Detaches the page from the double linked list. This function is invoked
