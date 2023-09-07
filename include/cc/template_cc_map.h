@@ -5300,6 +5300,8 @@ public:
             auto [freed_cnt, next_page] =
                 CleanPageAndReBalance(ccp, clean_type, &req, &is_success);
             ++scan_page_cnt;
+            // Move to next page
+            ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
             if (!is_success)
             {
                 // Clean failed, retry in the next round.
@@ -5307,8 +5309,6 @@ public:
                            << shard_->core_id_;
                 break;
             }
-            // Move to next page
-            ccp = static_cast<CcPage<KeyT, ValueT> *>(next_page);
         }
 
         if (ccp == &pg_ps_inf_ ||
@@ -5377,11 +5377,18 @@ public:
      * Clean erasable entries in lru_page, re-balance pages after clean.
      *
      * @param lru_page
+     * @param clean_type
      * @param kickout_cc [optional]
      * @param is_success [optional]
-     * @return result pair of which the first is free count and the second is
-     * the lru_next_ of the page or the next_page_ of the ccpage if
-     * @is_single_ccmap is true.
+     * @return result pair of which the first is free count and the scond is the
+     * next page which will be cleaned. If clean type is CleanForFree, the next
+     * page is the lru_next_ of the page. Otherwise, the value of the next page
+     * is setted depending on clean status:
+     * When clean successfully, return the current page's next page in the below
+     * cases: page is empty; no borrow or merge; borrow from previous; merge
+     * with previous. Return the current page in the below cases: borrow from
+     * next; merge with next.
+     * When clean failed, return the current page always.
      */
     std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *lru_page,
@@ -5433,6 +5440,17 @@ public:
             auto page_it = ccmp_.find(old_page_key);
             assert(page_it != ccmp_.end());
             TryUpdatePageKey(page_it);
+
+            if (kickout_cc != nullptr && !success)
+            {
+                // If the caller care the clean status, reset the value of
+                // @@next_page depending on the clean result:
+                // 1) When the current page has been cleaned successfully, there
+                // is no need to reset the value of @@next_page.
+                // 2) When this current page has not been cleaned successfully,
+                // should set the current page as the next_page.
+                next_page = page;
+            }
         }
         else
         {
@@ -5483,6 +5501,20 @@ public:
 
                 RedistributeBetweenPages(
                     page1_it, page2_it, page1_last_read_ts, page2_last_read_ts);
+
+                if (kickout_cc != nullptr &&
+                    (success && page == &page1_it->second || !success))
+                {
+                    // If the caller care the clean status, reset the value of
+                    // @@next_page depending on the clean result:
+                    // 1) When the current page has been cleaned successfully,
+                    // if borrow from the next(that's mean page == page1),
+                    // should set the current page as the @@next_page.
+                    // 2) When this current page has not been cleaned
+                    // successfully, should return the current page as the
+                    // @@next_page.
+                    next_page = page;
+                }
             }
             else if (can_merge_with_prev || can_merge_with_next)
             {
@@ -5497,8 +5529,10 @@ public:
                 uint64_t page1_last_read_ts = last_read_ts;
                 uint64_t page2_last_read_ts = last_read_ts;
 
+                bool real_merge_with_prev = false;
                 if (can_merge_with_prev)
                 {
+                    real_merge_with_prev = true;
                     // merge `page` with its previous page
                     page1_it--;
                     page1_last_read_ts = page1_it->second.LastReadTs();
@@ -5510,14 +5544,47 @@ public:
                     page2_last_read_ts = page2_it->second.LastReadTs();
                 }
 
+                CcPage<KeyT, ValueT> *merged_page = &page1_it->second;
+                CcPage<KeyT, ValueT> *discarded_page = &page2_it->second;
+
+                if (kickout_cc == nullptr && next_page == discarded_page)
+                {
+                    // For this case, the next page to be cleaned comes from the
+                    // lru list.
+                    // The next_page is current page's lru_next_, and if the
+                    // next_page == discarded_page, the discarded_page must be
+                    // the next page of the current page, that is to say, the
+                    // current page will merge with the next. So the current
+                    // page must equal to the merged page, and should set the
+                    // @@next_page is merged page.
+                    assert(page == merged_page);
+                    next_page = merged_page;
+                }
+
                 // merge page1 and page2
-                next_page = MergePages(page1_it,
-                                       page2_it,
-                                       page1_last_read_ts,
-                                       page2_last_read_ts,
-                                       page,
-                                       mem_decreased,
-                                       kickout_cc != nullptr);
+                MergePages(page1_it,
+                           page2_it,
+                           page1_last_read_ts,
+                           page2_last_read_ts,
+                           page,
+                           mem_decreased);
+
+                if (kickout_cc != nullptr)
+                {
+                    // For this case, should set the value of @@next_page
+                    // depending on the clean result:
+                    // 1) When the current page has been cleaned successfully,
+                    // if merged with previous page, set the value is the
+                    // merged_page's next_page_; if merged with next page, set
+                    // the value is the merged_page itself.
+                    // 2) When the current page has not been cleaned
+                    // successfully. Should set the value is the merged_page
+                    // itself no matter merged with previous page or merged
+                    // with next page.
+                    next_page = (real_merge_with_prev && success)
+                                    ? merged_page->next_page_
+                                    : merged_page;
+                }
             }
         }
 
@@ -7013,27 +7080,23 @@ protected:
      * Merge page1 and page2. Update the map and lru list after the
      * merge.
      *
+     * @param page1_it The iterator to the merged page
+     * @param page2_it The iterator to the discarded page
      * @param page
      * @param page_key
      * @param mem_decreased
-     * @param is_single_ccmap [optional]
-     * @return the lru_next_ of page or the next_page_ of ccpage if
-     * @is_single_ccmap is true
      */
-    LruPage *MergePages(
+    void MergePages(
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page1_it,
         typename std::map<KeyT, CcPage<KeyT, ValueT>>::iterator &page2_it,
         uint64_t page1_last_read_ts,
         uint64_t page2_last_read_ts,
         CcPage<KeyT, ValueT> *page,
-        size_t &mem_decreased,
-        bool is_single_ccmap = false)
+        size_t &mem_decreased)
     {
         CcPage<KeyT, ValueT> *page1 = &page1_it->second;
         CcPage<KeyT, ValueT> *page2 = &page2_it->second;
 
-        // if either page is pinned, use the pinned page as the merged page and
-        // discard the other
         auto merged_page_it = page1_it;
         auto discarded_page_it = page2_it;
         CcPage<KeyT, ValueT> *merged_page = &merged_page_it->second;
@@ -7068,14 +7131,6 @@ protected:
         map_next->prev_page_ = merged_page;
 
         // Update the LRU list.
-        // record page's original lru_next as it will change after the Lru list
-        // is updated
-        LruPage *next = page->lru_next_;
-        // skip the discarded page
-        if (next == discarded_page)
-        {
-            next = discarded_page->lru_next_;
-        }
         // the merged page should take the more recently used page's position in
         // the LRU list
         if (page1->lru_next_ == page2 || page1->lru_prev_ == page2)
@@ -7118,16 +7173,6 @@ protected:
             // merged page key has changed
             TryUpdatePageKey(merged_page_it);
         }
-
-        // If only clean a single table, use ccpage list.
-        if (is_single_ccmap)
-        {
-            // If merged with previous ccpage, return the next_page_ of the new
-            // merged page, otherwise, return the new merged page itself.
-            next = page2 == page ? merged_page->next_page_ : merged_page;
-        }
-
-        return next;
     }
 
     CcPage<KeyT, ValueT> *PageNegInf()
