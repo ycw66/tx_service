@@ -5,6 +5,7 @@
 
 namespace txservice::fault
 {
+
 CcNode::CcNode(const uint32_t ng_id,
                const uint32_t node_id,
                const std::string &ip,
@@ -144,6 +145,7 @@ int CcNode::TransferLeader()
     // start this node happens to be elected as the leader), tries to
     // transfer the leadership to the first node for rebalance.
 
+    std::shared_lock<std::shared_mutex> config_lk(config_mux_);
     if (node_idx_ > 0 && node_->is_leader())
     {
         butil::EndPoint addr;
@@ -330,6 +332,62 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
     }
 }
 
+bool CcNode::UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
+                                   const std::vector<uint16_t> &ng_ports,
+                                   CcRequestBase *cc_req,
+                                   CcShard *cc_shard)
+{
+    std::unique_lock<std::shared_mutex> lk(config_mux_);
+    bool ng_updated = false;
+    for (size_t idx = 0; idx < ng_ips.size(); ++idx)
+    {
+        if (ng_ips[idx] == ip_ && ng_ports[idx] == port_)
+        {
+            node_idx_ = idx;
+        }
+        if (idx >= ng_ips_.size())
+        {
+            ng_updated = true;
+            ng_ips_.push_back(ng_ips[idx]);
+            ng_ports_.push_back(ng_ports[idx]);
+        }
+        else if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
+        {
+            ng_updated = true;
+            ng_ips_[idx] = ng_ips[idx];
+            ng_ports_[idx] = ng_ports[idx];
+        }
+    }
+
+    // Update node group config only if node is preferred leader.
+    if (ng_updated && node_idx_ == 0)
+    {
+        std::string raft_conf;
+        for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
+        {
+            if (nid > 0)
+            {
+                raft_conf.append(",");
+            }
+
+            raft_conf.append(ng_ips_.at(nid));
+            raft_conf.append(":");
+            raft_conf.append(std::to_string(ng_ports_.at(nid)));
+            raft_conf.append(":");
+            raft_conf.append(std::to_string(nid));
+        }
+        braft::Configuration braft_config;
+        braft_config.parse_from(raft_conf);
+
+        // Put the cc req back in queue in the closure callback.
+        ChangePeerClosure *closure =
+            new ChangePeerClosure(cc_req, cc_shard, braft_config, node_);
+        node_->change_peers(braft_config, closure);
+        return true;
+    }
+    return false;
+}
+
 void CcNode::on_leader_start(int64_t term)
 {
     {
@@ -400,5 +458,24 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
 
     // notify replay service to request leader transfer immediately
     replay_service_->NotifyLeaderTransfer();
+}
+
+void ChangePeerClosure::Run()
+{
+    if (!status().ok())
+    {
+        // Retry
+        LOG(ERROR) << "Failed to update braft config during cluster config "
+                      "update. Retrying...";
+        node_->change_peers(new_config_, this);
+        return;
+    }
+
+    // Free closure on exit if change_peers succeed.
+    std::unique_ptr<ChangePeerClosure> self_guard(this);
+    // Each node is only responsible for updating the ng of which it
+    // is the preferred leader. So we must be the only one braft ng
+    // change. We can now put the cc req back into queue.
+    shard_->Enqueue(cc_req_);
 }
 }  // namespace txservice::fault

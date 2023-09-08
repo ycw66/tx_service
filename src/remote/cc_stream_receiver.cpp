@@ -1276,24 +1276,26 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             remote::NodeGroupSamplePool remote_sample_pool =
                 msg->broadcast_statistics_req().node_group_sample_pool();
 
-            Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                [this,
-                 dest_ng_id,
-                 table_name = std::move(table_name),
-                 schema_version,
-                 remote_sample_pool = std::move(remote_sample_pool)]() mutable
-                {
-                    int64_t leader_term =
-                        Sharder::Instance().TryPinNodeGroupData(dest_ng_id);
-                    if (leader_term >= 0)
+            int64_t leader_term =
+                Sharder::Instance().TryPinNodeGroupData(dest_ng_id);
+
+            if (leader_term >= 0)
+            {
+                Sharder::Instance().GetTxWorkerPool()->SubmitWork(
+                    [this,
+                     dest_ng_id,
+                     table_name = std::move(table_name),
+                     schema_version,
+                     remote_sample_pool =
+                         std::move(remote_sample_pool)]() mutable
                     {
                         local_shards_.CreateRemoteStatisticsTx(
                             std::move(table_name),
                             schema_version,
                             std::move(remote_sample_pool));
                         Sharder::Instance().UnpinNodeGroupData(dest_ng_id);
-                    }
-                });
+                    });
+            }
         }
 
         msg_pool_.enqueue(std::move(msg));

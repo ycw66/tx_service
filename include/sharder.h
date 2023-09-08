@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <condition_variable>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,6 +13,7 @@
 #include "brpc/server.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
+#include "tx_serialize.h"
 #include "txlog.h"
 #include "type.h"
 
@@ -24,6 +26,8 @@ class LocalCcShards;
 class TxLog;
 class TxWorkerPool;
 struct TableName;
+struct CcRequestBase;
+class CcShard;
 
 namespace fault
 {
@@ -37,6 +41,63 @@ class CcNodeService;
 class CcStreamSender;
 class CcStreamReceiver;
 }  // namespace remote
+struct NodeConfig
+{
+public:
+    NodeConfig() = default;
+    NodeConfig(uint32_t node_id, const std::string &host_name, uint16_t port)
+        : node_id_(node_id), host_name_(host_name), port_(port)
+    {
+    }
+
+    NodeConfig(const NodeConfig &rhs)
+        : node_id_(rhs.node_id_), host_name_(rhs.host_name_), port_(rhs.port_)
+    {
+    }
+
+    void Serialize(std::string &buf) const
+    {
+        SerializeToStr(&node_id_, buf);
+        Serializer<std::string>::Serialize(host_name_, buf);
+        SerializeToStr(&port_, buf);
+    }
+
+    size_t SerializedLength() const
+    {
+        return sizeof(uint32_t) + sizeof(uint16_t) + host_name_.length() +
+               sizeof(uint16_t);
+    }
+
+    void Deserialize(const char *buf, size_t &offset)
+    {
+        DesrializeFrom(buf, offset, &node_id_);
+        host_name_ = Serializer<std::string>::Deserialize(buf, offset);
+        DesrializeFrom(buf, offset, &port_);
+    }
+
+    uint32_t node_id_{UINT32_MAX};
+    std::string host_name_{""};
+    uint16_t port_{0};
+};
+struct ClusterConfig
+{
+    ClusterConfig() = default;
+    ClusterConfig(const ClusterConfig &rhs) : version_(rhs.version_)
+    {
+        for (auto &pair : rhs.ng_configs_)
+        {
+            ng_configs_.emplace(pair.first, pair.second);
+        }
+        for (auto &pair : rhs.cc_nodes_)
+        {
+            cc_nodes_.emplace(pair.first, pair.second);
+        }
+    }
+
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> ng_configs_;
+    std::unordered_map<NodeGroupId, std::shared_ptr<fault::CcNode>> cc_nodes_;
+    uint64_t version_{0};
+};
 
 /**
  * Sharder is the collection of services supplied by TxService, which includes:
@@ -55,18 +116,23 @@ class Sharder
 public:
     static Sharder &Instance(
         uint32_t node_id = 0,
-        const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
+        const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs =
+            nullptr,
+        uint64_t config_version = 0,
         const std::vector<std::string> *txlog_ips = nullptr,
         const std::vector<uint16_t> *txlog_ports = nullptr,
         LocalCcShards *local_shards = nullptr,
-        std::unique_ptr<TxLog> log_agent = nullptr)
+        std::unique_ptr<TxLog> log_agent = nullptr,
+        const std::string *local_path = nullptr)
     {
         static Sharder instance_(node_id,
                                  ng_configs,
+                                 config_version,
                                  txlog_ips,
                                  txlog_ports,
                                  *local_shards,
-                                 std::move(log_agent));
+                                 std::move(log_agent),
+                                 *local_path);
         return instance_;
     }
 
@@ -80,9 +146,9 @@ public:
      * @param cc_ng_id The cc node group ID.
      * @return uint32_t The ID of the leader node.
      */
-    uint32_t LeaderNodeId(uint32_t cc_ng_id) const
+    uint32_t LeaderNodeId(uint32_t cc_ng_id)
     {
-        return ng_leader_cache_.at(cc_ng_id).load(std::memory_order_acquire);
+        return ng_leader_cache_[cc_ng_id].load(std::memory_order_release);
     }
 
     uint32_t ShardCode(uint64_t hash_code) const
@@ -93,7 +159,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
         uint32_t node_group_id = hash_code >> 10;
 #else
-        uint32_t node_group_id = (hash_code >> 10) % ng_leader_cache_.size();
+        auto cpy = cluster_config_;
+        uint32_t node_group_id = (hash_code >> 10) % cpy->ng_configs_.size();
 #endif
         return (node_group_id << 10) | residual;
     }
@@ -103,7 +170,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
         return sharding_code >> 10;
 #else
-        return (sharding_code >> 10) % ng_leader_cache_.size();
+        auto cpy = cluster_config_;
+        return (sharding_code >> 10) % cpy->ng_configs_.size();
 #endif
     }
 
@@ -115,7 +183,8 @@ public:
 
     uint32_t NodeGroupCount()
     {
-        return ng_configs_.size();
+        auto cpy = cluster_config_;
+        return cpy->ng_configs_.size();
     }
 
     void GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port);
@@ -129,7 +198,7 @@ public:
      * @param path The local path where raft meta data is stored.
      * @return int Error code.
      */
-    int Init(const std::string &path);
+    int Init();
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the
@@ -151,6 +220,12 @@ public:
     int64_t LeaderTerm(uint32_t ng_id) const;
 
     int64_t CandidateLeaderTerm(uint32_t ng_id) const;
+
+    uint64_t ClusterConfigVersion() const
+    {
+        auto cpy = cluster_config_;
+        return cpy->version_;
+    }
 
     /**
      * @brief Updates the leader cache of all cc node groups.
@@ -272,7 +347,8 @@ public:
 
     uint32_t GetNodeCount()
     {
-        return ng_configs_.size();
+        auto cpy = cluster_config_;
+        return cpy->ng_configs_.size();
     }
 
     uint32_t NodeId() const
@@ -332,7 +408,7 @@ public:
      * cluster.
      * @return New cluster node group configs.
      */
-    std::map<uint32_t, std::vector<NodeConfig>> AddNodeToCluster(
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> AddNodeToCluster(
         std::vector<std::pair<std::string, uint16_t>> &new_nodes);
 
     /**
@@ -342,17 +418,34 @@ public:
      * this func.
      * @return New cluster node group configs.
      */
-    std::map<uint32_t, std::vector<NodeConfig>> RemoveNodeFromCluster(
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> RemoveNodeFromCluster(
         uint16_t removed_node_count,
         std::vector<std::pair<std::string, uint16_t>> &removed_nodes);
 
+    /**
+     * @brief Update current cluster config to the new_ng_configs. The config
+     * will only be updated if current config version is older than given
+     * version.
+     *
+     * @return If async braft api is called. If so caller cc_req will be put
+     * back in queue once the braft call is done.
+     */
+    bool UpdateClusterConfig(
+        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+            &new_ng_configs,
+        uint64_t version,
+        CcRequestBase *cc_req,
+        CcShard *cc_shard);
+
 private:
     Sharder(uint32_t node_id,
-            const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
+            const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs,
+            uint64_t config_version,
             const std::vector<std::string> *txlog_ips,
             const std::vector<uint16_t> *txlog_ports,
             LocalCcShards &local_shards,
-            std::unique_ptr<TxLog> log_agent);
+            std::unique_ptr<TxLog> log_agent,
+            const std::string &local_path);
 
     ~Sharder();
 
@@ -363,19 +456,24 @@ private:
      * cache.
      *
      */
-    void ConfigRouteTable();
+    void ConfigRouteTable(
+        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+            &ng_configs);
 
 private:
     uint32_t node_id_;
-    // Map from node group id to member ip list and port list. The first item in
-    // vector is the preferred leader of the node group.
-    std::map<NodeGroupId, std::vector<NodeConfig>> ng_configs_;
 
+    // Stores the current cluster config. It contains the mapping relation
+    // between node group id and node group members, current node group leader
+    // etc. We use copy on write to update cluster_config_ so that we don't need
+    // mutex protection when reading it.
+    std::shared_ptr<ClusterConfig> cluster_config_;
+
+    // Ng leader cache. We preallocate it to the max cluster size so that we
+    // don't need to modify the size of it.
+    std::atomic<uint32_t> ng_leader_cache_[1000];
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
-    // We have one raft group for each logical shard(specified by ip & port)
-    // each group's current leader is stored in ng_leader_cache_.
-    std::unordered_map<uint32_t, std::atomic<uint32_t>> ng_leader_cache_;
 
     // Used to protect Sharder::UpdateLeader.
     std::mutex mux_;
@@ -389,7 +487,6 @@ private:
     // normal retry logic for each operation will handle it.
     std::unordered_set<uint32_t> recovered_leader_set_;
 
-    std::unordered_map<uint32_t, std::unique_ptr<fault::CcNode>> cc_nodes_;
     /**
      * @brief Acts as a memory barrier such that initialized cc nodes are synced
      * with following reads of cc nodes at all cores.
@@ -433,5 +530,7 @@ private:
 
     LocalCcShards &local_shards_;
     std::unique_ptr<TxLog> log_agent_;
+
+    std::string raft_local_path_{""};
 };
 }  // namespace txservice

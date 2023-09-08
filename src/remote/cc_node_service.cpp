@@ -400,5 +400,46 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     response->set_error_code(static_cast<google::protobuf::int32>(error_code));
 }
 
+void CcNodeService::NotifyNewNodeReady(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::NotifyNewNodeReadyRequest *request,
+    ::txservice::remote::NotifyNewNodeReadyResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto shards = Sharder::Instance().GetLocalCcShards();
+    TxNumber txn = request->tx_number();
+    std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
+    auto scale_op = shards->cluster_scale_op_.get();
+    if (scale_op->GetStatus(txn) ==
+        remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE)
+    {
+        assert(scale_op->op_ == &scale_op->wait_for_new_node_ready_op_);
+        scale_op->wait_for_new_node_ready_op_.hd_result_.SetFinished();
+        // TODO{liunyl}: Wait until we write log to confirm new nodes are ready.
+        response->set_error(false);
+    }
+    else
+    {
+        // Invalid state for notify new node ready
+        response->set_error(true);
+    }
+}
+
+void CcNodeService::CheckClusterScaleStatus(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::ClusterScaleStatusRequest *request,
+    ::txservice::remote::ClusterScaleStatusResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_gaurd(done);
+    auto shards = Sharder::Instance().GetLocalCcShards();
+    TxNumber txn = request->tx_number();
+    std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
+    auto scale_op = shards->cluster_scale_op_.get();
+    // TODO{liunyl}: redirect request to tx coordinator ng if current node
+    // is not tx owner.
+    response->set_status(scale_op->GetStatus(txn));
+}
 }  // namespace remote
 }  // namespace txservice

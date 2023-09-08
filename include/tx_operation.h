@@ -9,6 +9,7 @@
 #include "catalog_key_record.h"
 #include "cc_entry.h"
 #include "cc_handler.h"
+#include "cluster_config_record.h"
 #include "log_closure.h"
 #include "metrics.h"
 #include "range_record.h"
@@ -680,7 +681,7 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp clean_log_op_;
 
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
-    VoidRecord cluster_conf_rec_;
+    ClusterConfigRecord cluster_conf_rec_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
@@ -802,7 +803,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     TableName range_table_name_;  // References table_name_.
     NodeGroupId node_group_;
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
-    VoidRecord cluster_conf_rec_;
+    ClusterConfigRecord cluster_conf_rec_;
 
     RangeInfo range_info_;
     std::unique_ptr<RangeRecord> range_record_;
@@ -1022,14 +1023,16 @@ public:
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-    remote::ClusterScaleStatus GetStatus();
+    remote::ClusterScaleStatus GetStatus(TxNumber txn);
 
+    TxNumber txn_;
     ClusterScaleOpType event_type_;
     // New node info when adding nodes or deleted node info when removing nodes.
     std::vector<std::pair<std::string, uint16_t>> delta_nodes_;
     // Used when removing node, to indicate how many nodes to be removed
     uint16_t remove_node_count_{0};
-    std::map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
+    ClusterConfigRecord cluster_config_rec_;
     // Passed in by caller, need to notify caller once log has been written.
     std::mutex *prepare_log_mux_;
     std::condition_variable *prepare_log_cv_;
@@ -1037,16 +1040,42 @@ public:
     CcErrorCode *err_;
     std::vector<std::pair<std::string, uint16_t>> *removed_nodes_;
 
-    CcHandlerResult<ReadKeyResult> read_cluster_result_;
-    VoidRecord cluster_conf_rec_;
-
-    ReadLocalOperation lock_cluster_config_op_;
-
-    AcquireAllOp prepare_acquire_cluster_config_op_;
+    /**
+     * Acquire write intent on cluster config ccm. This is to prevent other
+     * cluster scale tx is already in progress.
+     * TODO{liunyl}: Do we need this phase if cp can guarantee there's only
+     * 1 scale tx at a time?
+     */
+    AcquireAllOp acquire_cluster_config_intent_op_;
 
     WriteToLogOp prepare_log_op_;
 
-    AsyncOp<Void> update_cluster_configs_;
+    /**
+     * Flush the new cluster config to kv storage. When the new nodes are
+     * started, they be starting with the new cluster config.
+     */
+    AsyncOp<Void> flush_new_cluster_config_op_;
+
+    /**
+     * Control plane will start new nodes once the op status reaches
+     * CLUSTER_UPDATE. It will send a rpc request to finish this async op once
+     * the new nodes are ready.
+     */
+    AsyncOp<Void> wait_for_new_node_ready_op_;
+
+    /**
+     * Upgrade the cluster config lock to write lock as we're now going to
+     * update the cluster config.
+     */
+    AcquireAllOp acquire_cluster_config_write_op_;
+
+    WriteToLogOp update_cluster_config_log_op_;
+
+    /**
+     * Release the cluster config lock. Install the new cluster config on all
+     * ngs. This will establish new cc streams and raft nodes.
+     */
+    PostWriteAllOp install_cluster_config_op_;
 
     AsyncOp<Void> data_migration_op_;
 
@@ -1056,6 +1085,7 @@ public:
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
+    void FillUpdateClusterConfigLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
     void SetStatus(remote::ClusterScaleStatus);
 
@@ -1272,7 +1302,7 @@ struct UpsertTableIndexOp : public SchemaOp
     WriteToLogOp clean_log_op_;
 
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
-    VoidRecord cluster_conf_rec_;
+    ClusterConfigRecord cluster_conf_rec_;
 
 private:
     // This variable have two roles:

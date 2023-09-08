@@ -125,6 +125,15 @@ message AcquireNodeGroupTermResponse{
 	uint64 command_id = 5;
 	uint64 handler_addr = 6;
 }
+message NotifyNewNodeReadyRequest
+{
+	uint64 tx_number = 1;
+}
+
+message NotifyNewNodeReadyResponse
+{
+	bool error = 1;
+}
 
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
@@ -138,6 +147,7 @@ service CcRpcService {
 	rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
 	rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
 	rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
+	rpc NotifyNewNodeReady(NotifyNewNodeReadyRequest) returns (NotifyNewNodeReadyResponse);
 	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
 	rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
 }

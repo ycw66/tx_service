@@ -296,6 +296,10 @@ public:
 
     virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
 
+    virtual bool UpdateClusterConfig(
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
+        uint64_t version) = 0;
+
 protected:
     TxService *tx_service_{nullptr};
 };

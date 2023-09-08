@@ -4,6 +4,7 @@
 #include <braft/util.h>  // braft::AsyncClosureGuard
 #include <brpc/channel.h>
 
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -11,6 +12,7 @@
 
 #include "log_replay_service.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 
 namespace txservice::fault
 {
@@ -94,6 +96,19 @@ public:
         return last_ckpt_ts_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * Update the node group config in cc_node. If the config changed and
+     * current node is the preferred leader of the ng, update braft node group.
+     * The braft ng update will be an async call, it will put cc_req back in
+     * queue once it is finished.
+     *
+     * @return If async call to update braft group is made.
+     */
+    bool UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
+                               const std::vector<uint16_t> &ng_ports,
+                               CcRequestBase *cc_req,
+                               CcShard *cc_shard);
+
 private:
     static braft::NodeOptions BaseNodeOptions()
     {
@@ -135,7 +150,9 @@ private:
 
     void on_start_following(const ::braft::LeaderChangeContext &ctx) override;
 
-    // CcNode belongs to node group: ng_id_.
+    // protects ng_ips_, ng_ports_ and node_idx_
+    std::shared_mutex config_mux_;
+    //  CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;
     // CcNode is located on node: node_id_.
     const uint32_t node_id_;
@@ -145,8 +162,8 @@ private:
     // node in the cc node group acts as the leader.
     uint32_t node_idx_;
     // The addresses of the nodes in the cc node group.
-    const std::vector<std::string> ng_ips_;
-    const std::vector<uint16_t> ng_ports_;
+    std::vector<std::string> ng_ips_;
+    std::vector<uint16_t> ng_ports_;
     // The local path where the Raft configurations are stored.
     const std::string storage_path_;
 
@@ -175,5 +192,28 @@ private:
     std::mutex recovery_mux_;
 
     uint32_t log_group_cnt_;
+};
+
+class ChangePeerClosure : public braft::Closure
+{
+public:
+    explicit ChangePeerClosure(CcRequestBase *req,
+                               CcShard *shard,
+                               braft::Configuration &config,
+                               braft::Node *node)
+        : cc_req_(req), shard_(shard)
+    {
+    }
+    ~ChangePeerClosure()
+    {
+    }
+
+    void Run() override;
+
+private:
+    CcRequestBase *cc_req_;
+    CcShard *shard_;
+    braft::Configuration new_config_;
+    braft::Node *node_;
 };
 }  // namespace txservice::fault

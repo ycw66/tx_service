@@ -2508,6 +2508,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
 
     // reset op
     read_cluster_result_.Reset();
+    cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
     lock_cluster_config_op_.table_name_ =
@@ -3043,6 +3044,7 @@ void SplitFlushRangeOp::Reset(
                                                        : old_start_key;
 
     read_cluster_result_.Reset();
+    cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
     lock_cluster_config_op_.table_name_ =
@@ -4518,17 +4520,20 @@ ClusterScaleOp::ClusterScaleOp(
     CcErrorCode &err,
     TransactionExecution *txm)
     : CompositeTransactionOperation(),
+      txn_(txm->TxNumber()),
       event_type_(event_type),
       prepare_log_mux_(&prepare_log_mux),
       prepare_log_cv_(&prepare_log_cv),
       prepare_log_finished_(&prepare_log_finished),
       err_(&err),
       removed_nodes_(removed_nodes),
-      read_cluster_result_(txm),
-      lock_cluster_config_op_(),
-      prepare_acquire_cluster_config_op_(txm),
+      acquire_cluster_config_intent_op_(txm),
       prepare_log_op_(txm),
-      update_cluster_configs_(txm),
+      flush_new_cluster_config_op_(txm),
+      wait_for_new_node_ready_op_(txm),
+      acquire_cluster_config_write_op_(txm),
+      update_cluster_config_log_op_(txm),
+      install_cluster_config_op_(txm),
       data_migration_op_(txm),
       clean_log_op_(txm),
       post_all_lock_op_(txm),
@@ -4544,17 +4549,24 @@ ClusterScaleOp::ClusterScaleOp(
         remove_node_count_ = *remove_node_count;
     }
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
-    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
-    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
-
-    prepare_acquire_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
-    prepare_acquire_cluster_config_op_.key_ =
+    acquire_cluster_config_intent_op_.table_name_ = &cluster_config_ccm_name;
+    acquire_cluster_config_intent_op_.key_ =
         NegativeInfinity<VoidKey>::Instance();
-    prepare_acquire_cluster_config_op_.cc_op_ = CcOperation::ReadForWrite;
-    prepare_acquire_cluster_config_op_.protocol_ = CcProtocol::OCC;
+    acquire_cluster_config_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_cluster_config_intent_op_.protocol_ = CcProtocol::OCC;
+
+    acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
+    acquire_cluster_config_write_op_.key_ =
+        NegativeInfinity<VoidKey>::Instance();
+    acquire_cluster_config_write_op_.cc_op_ = CcOperation::Write;
+    acquire_cluster_config_write_op_.protocol_ = CcProtocol::Locking;
+
+    install_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
+    install_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    install_cluster_config_op_.rec_ = &cluster_config_rec_;
+    install_cluster_config_op_.op_type_ = OperationType::Update;
+    // cluster update is a 1pc. There is no dirty state.
+    install_cluster_config_op_.write_type_ = PostWriteType::PostCommit;
 }
 
 void ClusterScaleOp::Reset(
@@ -4587,11 +4599,15 @@ void ClusterScaleOp::Reset(
     prepare_log_finished_ = &prepare_log_finished;
     err_ = &err;
     status_ = remote::ClusterScaleStatus::NOT_IN_PROGRESS;
-    read_cluster_result_.Reset();
-    lock_cluster_config_op_.Reset();
-    prepare_acquire_cluster_config_op_.ResetHandlerTxm(txm);
+    txn_ = txm->TxNumber();
+
+    acquire_cluster_config_intent_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
-    update_cluster_configs_.ResetHandlerTxm(txm);
+    flush_new_cluster_config_op_.ResetHandlerTxm(txm);
+    wait_for_new_node_ready_op_.ResetHandlerTxm(txm);
+    acquire_cluster_config_write_op_.ResetHandlerTxm(txm);
+    update_cluster_config_log_op_.ResetHandlerTxm(txm);
+    install_cluster_config_op_.ResetHandlerTxm(txm);
     data_migration_op_.ResetHandlerTxm(txm);
 
     clean_log_op_.ResetHandlerTxm(txm);
@@ -4599,17 +4615,23 @@ void ClusterScaleOp::Reset(
     new_ng_config_.clear();
     bucket_migrate_infos_.clear();
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
-    lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
-    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
-    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
-
-    prepare_acquire_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
-    prepare_acquire_cluster_config_op_.key_ =
+    acquire_cluster_config_intent_op_.table_name_ = &cluster_config_ccm_name;
+    acquire_cluster_config_intent_op_.key_ =
         NegativeInfinity<VoidKey>::Instance();
-    prepare_acquire_cluster_config_op_.cc_op_ = CcOperation::ReadForWrite;
-    prepare_acquire_cluster_config_op_.protocol_ = CcProtocol::OCC;
+    acquire_cluster_config_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_cluster_config_intent_op_.protocol_ = CcProtocol::OCC;
+
+    acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
+    acquire_cluster_config_write_op_.key_ =
+        NegativeInfinity<VoidKey>::Instance();
+    acquire_cluster_config_write_op_.cc_op_ = CcOperation::Write;
+    acquire_cluster_config_write_op_.protocol_ = CcProtocol::Locking;
+
+    install_cluster_config_op_.table_name_ = &cluster_config_ccm_name;
+    install_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
+    install_cluster_config_op_.rec_ = &cluster_config_rec_;
+    install_cluster_config_op_.op_type_ = OperationType::Update;
+    install_cluster_config_op_.write_type_ = PostWriteType::PrepareCommit;
 }
 
 void ClusterScaleOp::SetStatus(remote::ClusterScaleStatus status)
@@ -4618,46 +4640,32 @@ void ClusterScaleOp::SetStatus(remote::ClusterScaleStatus status)
     status_ = status;
 }
 
-remote::ClusterScaleStatus ClusterScaleOp::GetStatus()
+remote::ClusterScaleStatus ClusterScaleOp::GetStatus(TxNumber txn)
 {
     std::unique_lock<std::mutex> lock(status_mux_);
-    return status_;
+    if (txn == txn_)
+    {
+        return status_;
+    }
+    else
+    {
+        return remote::ClusterScaleStatus::NOT_IN_PROGRESS;
+    }
 }
 
 void ClusterScaleOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
     {
-        op_ = &lock_cluster_config_op_;
-        ForwardToSubOperation(txm, &lock_cluster_config_op_);
-    }
-    else if (op_ == &lock_cluster_config_op_)
-    {
-        if (lock_cluster_config_op_.hd_result_->IsError())
-        {
-            DLOG(ERROR)
-                << "Cluster scale read cluster config failed, tx_number:"
-                << txm->TxNumber();
-            // Fails to acquire read lock on cluster config map. There must be
-            // an ongoing cluster scale transaction. Stop
-            // the current operation. Set the commit ts to 0 to signal that
-            // the following post write operation releases all write
-            // intents.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            ForwardToSubOperation(txm, &post_all_lock_op_);
-            return;
-        }
         LOG(INFO) << "Cluster Scale transaction prepare acquire write all on "
                      "cluster scale table, txn: "
                   << txm->TxNumber();
-        op_ = &prepare_acquire_cluster_config_op_;
-        ForwardToSubOperation(txm, &prepare_acquire_cluster_config_op_);
+        op_ = &acquire_cluster_config_intent_op_;
+        ForwardToSubOperation(txm, &acquire_cluster_config_intent_op_);
     }
-    else if (op_ == &prepare_acquire_cluster_config_op_)
+    else if (op_ == &acquire_cluster_config_intent_op_)
     {
-        if (prepare_acquire_cluster_config_op_.fail_cnt_.load(
+        if (acquire_cluster_config_intent_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
             LOG(ERROR) << "Cluster scale transaction failed to obtain write "
@@ -4690,9 +4698,22 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         }
         bucket_migrate_infos_ =
             Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
-                new_ng_config_, 9001);
+                new_ng_config_.size(), 9001);
+        txm->commit_ts_ = txm->commit_ts_bound_ + 1;
 
-        op_ = &prepare_log_op_;
+        // TODO{liunyl}: what ts should we use as the commit ts of the cluster
+        // scale tx?
+        for (size_t idx = 0;
+             idx < acquire_cluster_config_intent_op_.upload_cnt_;
+             ++idx)
+        {
+            const AcquireAllResult &acq_all_res =
+                acquire_cluster_config_intent_op_.hd_results_[idx].Value();
+            uint64_t ts = std::max(acq_all_res.commit_ts_ + 1,
+                                   acq_all_res.last_vali_ts_ + 1);
+            txm->commit_ts_ = std::max(txm->commit_ts_, ts);
+        }
+
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Cluster Scale transaction write prepare log, txn: "
                   << txm->TxNumber();
@@ -4781,13 +4802,154 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             // If we're adding new nodes, connect to new nodes first
             // before starting migration.
-            ForwardToSubOperation(txm, &update_cluster_configs_);
+            // First flush the new cluster config to kv storage so that
+            // when the new node starts, it will know the latest config.
+            flush_new_cluster_config_op_.op_func_ =
+                [&ng_config = new_ng_config_,
+                 version = txm->commit_ts_,
+                 &hd_res = flush_new_cluster_config_op_.hd_result_]
+            {
+                std::thread worker = std::thread(
+                    [&ng_config, version, &hd_res]
+                    {
+                        store::DataStoreHandler *const store_hd =
+                            Sharder::Instance().GetLocalCcShards()->store_hd_;
+                        bool succ =
+                            store_hd->UpdateClusterConfig(ng_config, version);
+                        if (succ)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
+                        }
+                    });
+                worker.detach();
+            };
+            LOG(INFO) << "Cluster Scale transaction updating cluster config in "
+                         "data store, txn: "
+                      << txm->TxNumber();
+            ForwardToSubOperation(txm, &flush_new_cluster_config_op_);
         }
         else
         {
             // For remove nodes, just start migration right away. We will
             // update cluster config and remove nodes when migration is done.
             ForwardToSubOperation(txm, &data_migration_op_);
+        }
+    }
+    else if (op_ == &flush_new_cluster_config_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            ForceToFinish(txm);
+            return;
+        }
+
+        if (flush_new_cluster_config_op_.hd_result_.IsError())
+        {
+            RetrySubOperation(txm, &flush_new_cluster_config_op_);
+        }
+
+        // Send rpc to notify cp to start new nodes.
+        LOG(INFO) << "Cluster scale transaction waiting for new nodes to be "
+                     "started, txn "
+                  << txm->TxNumber();
+        SetStatus(remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
+        ForwardToSubOperation(txm, &wait_for_new_node_ready_op_);
+    }
+    else if (op_ == &wait_for_new_node_ready_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            ForceToFinish(txm);
+            return;
+        }
+        // This should never fail.
+        assert(!wait_for_new_node_ready_op_.hd_result_.IsError());
+        LOG(INFO)
+            << "Cluster scale transaction acquire write lock on all nodes, txn "
+            << txm->TxNumber();
+        ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
+    }
+    else if (op_ == &acquire_cluster_config_write_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            ForceToFinish(txm);
+            return;
+        }
+        if (acquire_cluster_config_write_op_.fail_cnt_.load(
+                std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Cluster scale transaction failed to obtain write "
+                          "lock on all node groups "
+                          ", tx_number:"
+                       << txm->TxNumber();
+
+            // We need to roll forward after prepare log is written. Retry
+            // until succeed.
+            RetrySubOperation(txm, &acquire_cluster_config_write_op_);
+            return;
+        }
+
+        FillUpdateClusterConfigLogRequest(txm);
+        LOG(INFO) << "Cluster Scale transaction write update cluster config "
+                     "log, txn: "
+                  << txm->TxNumber();
+        ForwardToSubOperation(txm, &update_cluster_config_log_op_);
+    }
+    else if (op_ == &update_cluster_config_log_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            ForceToFinish(txm);
+            return;
+        }
+        if (update_cluster_config_log_op_.hd_result_.IsError())
+        {
+            // error & retry
+            ::txlog::WriteLogRequest *log_req =
+                update_cluster_config_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
+            RetrySubOperation(txm, &update_cluster_config_log_op_);
+            return;
+        }
+
+        // Broadcast the new cluster config to all nodes through post write all.
+        cluster_config_rec_.SetVersion(txm->commit_ts_);
+        cluster_config_rec_.SetNodeGroupConfigs(&new_ng_config_);
+
+        LOG(INFO) << "Cluster Scale transaction update cluster config, txn "
+                  << txm->TxNumber();
+        ForwardToSubOperation(txm, &install_cluster_config_op_);
+    }
+    else if (op_ == &install_cluster_config_op_)
+    {
+        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        {
+            ForceToFinish(txm);
+            return;
+        }
+
+        if (install_cluster_config_op_.hd_result_.IsError())
+        {
+            RetrySubOperation(txm, &install_cluster_config_op_);
+            return;
+        }
+
+        if (event_type_ == ClusterScaleOpType::AddNode)
+        {
+            // We should not start the data migration process.
+            SetStatus(remote::ClusterScaleStatus::DATA_MIGRATION);
+            // TODO{liunyl}: implement data migration.
+        }
+        else
+        {
+            // Now the deleted nodes are removed from cluster. We can not write
+            // clean log and finish the tx.
         }
     }
 }
@@ -4858,6 +5020,25 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
         // This will set when the real migrate starts.
         migrate_process->set_migrate_ts(0);
     }
+}
+
+void ClusterScaleOp::FillUpdateClusterConfigLogRequest(
+    TransactionExecution *txm)
+{
+    update_cluster_config_log_op_.log_type_ = TxLogType::COMMIT;
+    update_cluster_config_log_op_.log_closure_.LogRequest().Clear();
+    ::txlog::WriteLogRequest *log_rec =
+        update_cluster_config_log_op_.log_closure_.LogRequest()
+            .mutable_write_log_request();
+
+    log_rec->set_tx_term(txm->tx_term_);
+    log_rec->set_txn_number(txm->TxNumber());
+    log_rec->set_commit_timestamp(txm->commit_ts_);
+    ::txlog::ClusterScaleOpMessage *cluster_scale_msg =
+        log_rec->mutable_log_content()->mutable_cluster_scale_log();
+    cluster_scale_msg->set_stage(
+        ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate);
+    log_rec->mutable_node_terms()->clear();
 }
 
 FlushDataAllOp::FlushDataAllOp(TransactionExecution *txm) : hd_result_(txm)
@@ -6351,6 +6532,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     op_ = nullptr;
 
     read_cluster_result_.Reset();
+    cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
     lock_cluster_config_op_.table_name_ =

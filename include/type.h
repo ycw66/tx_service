@@ -65,20 +65,6 @@ enum class ClusterScaleOpType
     RemoveNode
 };
 
-struct NodeConfig
-{
-public:
-    NodeConfig() = default;
-    NodeConfig(uint32_t node_id, const std::string &host_name, uint16_t port)
-        : node_id_(node_id), host_name_(host_name), port_(port)
-    {
-    }
-
-    uint32_t node_id_{UINT32_MAX};
-    std::string host_name_{""};
-    uint16_t port_{0};
-};
-
 enum class TxnStatus
 {
     Ongoing = 0,

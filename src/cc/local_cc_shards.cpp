@@ -422,7 +422,7 @@ void LocalCcShards::CreateSchemaRecoveryTx(
          commit_ts = replay_log_cc.CommitTs()]
         {
             TransactionExecution *txm = tx_service_->NewTx();
-            VoidRecord rec;
+            ClusterConfigRecord rec;
             txm->SetRecoverTxState(txn, tx_term, commit_ts);
             ReadTxRequest read_req(&cluster_config_ccm_name,
                                    NegativeInfinity<VoidKey>::Instance(),
@@ -521,7 +521,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                 SetDataSyncOngoing(base_table_name, node_group_id, true);
             }
             TransactionExecution *txm = tx_service_->NewTx();
-            VoidRecord rec;
+            ClusterConfigRecord rec;
             txm->SetRecoverTxState(txn, tx_term, commit_ts);
             ReadTxRequest read_req(&cluster_config_ccm_name,
                                    NegativeInfinity<VoidKey>::Instance(),
@@ -1482,8 +1482,7 @@ void LocalCcShards::InitRangeBuckets(
 }
 
 std::unordered_map<uint16_t, BucketMigrateInfo>
-LocalCcShards::GenerateBucketMigrationPlan(
-    std::map<NodeGroupId, std::vector<NodeConfig>> &new_ng_config, int32_t seed)
+LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
 {
     // Construct bucket info map on startup
     // Generate 5 random numbers for each node group as virtual nodes on hashing
@@ -1492,7 +1491,7 @@ LocalCcShards::GenerateBucketMigrationPlan(
     std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
     srand(seed);
-    for (auto config : new_ng_config)
+    for (uint32_t ng = 0; ng < new_ng_count; ng++)
     {
         size_t generated = 0;
         while (generated < 5)
@@ -1501,7 +1500,7 @@ LocalCcShards::GenerateBucketMigrationPlan(
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
-                rand_num_to_ng.emplace(rand_num, config.first);
+                rand_num_to_ng.emplace(rand_num, ng);
             }
         }
     }

@@ -390,6 +390,13 @@ public:
         return nullptr;
     }
 
+    bool UpdateClusterConfig(
+        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
+        uint64_t version)
+    {
+        return false;
+    }
+
 private:
     std::map<int, int> int_store_;
     std::map<std::pair<int, int>, Void> int_index_;

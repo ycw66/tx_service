@@ -7,11 +7,13 @@
 #include <deque>
 #include <memory>  // std::unique_ptr
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 
 #include "cc/cc_handler_result.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 
 namespace txservice
 {
@@ -70,7 +72,9 @@ public:
                             const ScanSliceResponse &msg,
                             CcHandlerResultBase *res = nullptr,
                             bool resend = false);
-    void AddRemoteNode(uint32_t node_id, const std::string &ip, uint16_t port);
+    void UpdateRemoteNodes(
+        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+            &ng_config);
 
     /**
      * @brief Used by cc_stream_receiver. Nofity to setup stream to peer when
@@ -80,15 +84,20 @@ public:
 
 private:
     void ConnectStreams();
+
+    // Need to wrap these functions calls with lk on outbound_mux_ to prevent
+    // other thread trying to delete node id from cluster while connect_thd_ is
+    // still trying to connect to node id.
     int ConnectStream(uint32_t node_id, int64_t version);
+    int ConnectLongMsgStream(uint32_t node_id, int64_t version);
 
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
 
-    std::mutex outbound_mux_;
-    std::condition_variable out_cv_;
+    // Protects outbound_channels_ and outbound streams
+    std::shared_mutex outbound_mux_;
 
-    std::unordered_map<uint32_t, std::pair<brpc::Channel, std::string>>
-        outbound_channels_;
+    std::unordered_map<uint32_t, std::string> outbound_channels_;
+
     // A map mapping the destination node ID to the stream connecting to it.
     // Each stream is associated with a version number, to prevent two users
     // from re-connecting the stream simultaneously.
@@ -100,7 +109,13 @@ private:
     std::unordered_map<uint32_t,
                        std::pair<brpc::StreamId, std::atomic<int64_t>>>
         long_msg_outbound_streams_;
-    std::unordered_map<uint32_t, int64_t> to_connect_nodes_;
+
+    // Protects to connect streams and resend message lists.
+    std::mutex to_connect_mux_;
+    std::condition_variable to_connect_cv_;
+    std::unordered_map<uint32_t, int64_t> to_connect_regular_streams_;
+    std::unordered_map<uint32_t, int64_t> to_connect_long_msg_streams_;
+
     // <node_id, resend_queue_to_node_id>
     std::unordered_map<uint32_t,
                        moodycamel::ConcurrentQueue<ResendMessage::Uptr>>

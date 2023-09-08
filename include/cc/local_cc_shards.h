@@ -594,8 +594,7 @@ public:
      * @brief Generate bucket migration plan based on the new node group config.
      */
     std::unordered_map<uint16_t, BucketMigrateInfo> GenerateBucketMigrationPlan(
-        std::map<NodeGroupId, std::vector<NodeConfig>> &new_ng_config,
-        int32_t seed);
+        uint32_t new_ng_count, int32_t seed);
 
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;

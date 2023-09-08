@@ -653,10 +653,12 @@ public:
 
         Sharder::Instance(node_id,
                           ng_configs,
+                          cluster_config_version,
                           txlog_ips,
                           txlog_ports,
                           &local_cc_shards_,
-                          std::move(log_hd));
+                          std::move(log_hd),
+                          &local_path);
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
             if (metrics::enable_collect_metrics)
@@ -676,7 +678,7 @@ public:
             }
         }
 
-        Sharder::Instance().Init(local_path);
+        Sharder::Instance().Init();
         TxStartTsCollector::Instance(
             &local_cc_shards_,
             conf.find("collect_active_tx_ts_interval_seconds")->second);
