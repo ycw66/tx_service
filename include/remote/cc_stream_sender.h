@@ -93,6 +93,8 @@ private:
 
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
 
+    brpc::StreamWriteOptions stream_write_options_;
+
     // Protects outbound_channels_ and outbound streams
     std::shared_mutex outbound_mux_;
 

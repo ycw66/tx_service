@@ -25,6 +25,7 @@ CcStreamSender::CcStreamSender(
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
     : msg_pool_(msg_pool), terminate_(false)
 {
+    stream_write_options_.write_in_background = true;
     connect_thd_ = std::thread([this] { ConnectStreams(); });
 }
 
@@ -101,12 +102,14 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
     msg.SerializeToZeroCopyStream(&wrapper);
 
-    int error_code = brpc::StreamWrite(stream_id, iobuf);
+    int error_code =
+        brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
     while (error_code != 0)
     {
         if (error_code == EAGAIN)
         {
-            error_code = brpc::StreamWrite(stream_id, iobuf);
+            error_code =
+                brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
         }
         else
         {
@@ -211,12 +214,14 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
     msg.SerializeToZeroCopyStream(&wrapper);
 
-    int error_code = brpc::StreamWrite(stream_id, iobuf);
+    int error_code =
+        brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
     while (error_code != 0)
     {
         if (error_code == EAGAIN)
         {
-            error_code = brpc::StreamWrite(stream_id, iobuf);
+            error_code =
+                brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
         }
         else
         {
