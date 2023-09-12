@@ -114,12 +114,11 @@ public:
         auto iter = rset_.find(*table_name);
         if (iter == rset_.end())
         {
-            auto insert_it = rset_.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(table_name->StringView(),
-                                      table_name->Type()),
-                std::forward_as_tuple(
-                    std::unordered_map<CcEntryAddr, ReadSetEntry>()));
+            auto insert_it =
+                rset_.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(table_name->StringView(),
+                                                    table_name->Type()),
+                              std::forward_as_tuple());
             iter = insert_it.first;
         }
 

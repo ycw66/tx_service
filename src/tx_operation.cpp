@@ -5316,7 +5316,7 @@ void UploadOp::AddRangeEntry(const TableName &table_name,
         auto insert_it = range_entries_.emplace(
             std::piecewise_construct,
             std::forward_as_tuple(table_name.StringView(), table_name.Type()),
-            std::forward_as_tuple(std::unordered_set<CcEntryAddr>()));
+            std::forward_as_tuple());
         cce_iter = insert_it.first;
     }
 

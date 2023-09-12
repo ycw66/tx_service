@@ -3383,7 +3383,7 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 std::piecewise_construct,
                 std::forward_as_tuple(table_name.StringView(),
                                       table_name.Type()),
-                std::forward_as_tuple(std::vector<const WriteSetEntry *>()));
+                std::forward_as_tuple());
 
             rec_vec_it.first->second.emplace_back(&wset_entry);
 

@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "schema.h"
 #include "tx_serialize.h"
@@ -250,14 +251,16 @@ public:
     {
     }
 
-    CompositeKey(Types &&...val) : fields_(val...)
+    CompositeKey(Types &&...val)
+        : fields_(std::forward<Types>(val)...),
+          field_cnt_(std::tuple_size<decltype(fields_)>::value)
     {
-        field_cnt_ = std::tuple_size<decltype(fields_)>::value;
     }
 
-    CompositeKey(std::tuple<Types...> &&t) : fields_(t)
+    CompositeKey(std::tuple<Types...> &&t)
+        : fields_(std::forward<std::tuple<Types...>>(t)),
+          field_cnt_(std::tuple_size<decltype(fields_)>::value)
     {
-        field_cnt_ = std::tuple_size<decltype(fields_)>::value;
     }
 
     CompositeKey(const CompositeKey &other)
@@ -279,7 +282,9 @@ public:
 
     void Reset(Types &&...vals)
     {
-        TupleResetHelper(fields_, std::index_sequence_for<Types...>{}, vals...);
+        TupleResetHelper(fields_,
+                         std::index_sequence_for<Types...>{},
+                         std::forward<Types>(vals)...);
     }
 
     void Reset(const Types &...vals)
