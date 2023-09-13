@@ -1513,6 +1513,11 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
+        if (worker_thread_.joinable())
+        {
+            worker_thread_.join();
+        }
+
         if (hd_result_.IsError())
         {
             assert(hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR);
@@ -1922,13 +1927,14 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                  table_schema = upsert_kv_table_op_.table_schema_,
                  op_type = upsert_kv_table_op_.op_type_,
                  alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                 &hd_res = upsert_kv_table_op_.hd_result_]
+                 &hd_res = upsert_kv_table_op_.hd_result_,
+                 &worker_thd = upsert_kv_table_op_.worker_thread_]
             {
-                TxWorkerPool *tx_worker_pool =
-                    Sharder::Instance().GetTxWorkerPool();
+                // Use seperate thread instead of the tx_worker_pool to avoid
+                // potential deadlocks.
                 store::DataStoreHandler *const store_hd =
                     Sharder::Instance().GetLocalCcShards()->store_hd_;
-                tx_worker_pool->SubmitWork(
+                worker_thd = std::thread(
                     [tx_ts,
                      table_schema,
                      &hd_res,
@@ -1978,13 +1984,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                          op_type = upsert_kv_table_op_.op_type_,
                          alter_table_info =
                              upsert_kv_table_op_.alter_table_info_,
-                         &hd_res = upsert_kv_table_op_.hd_result_]
+                         &hd_res = upsert_kv_table_op_.hd_result_,
+                         &worker_thd = upsert_kv_table_op_.worker_thread_]
                     {
-                        TxWorkerPool *tx_worker_pool =
-                            Sharder::Instance().GetTxWorkerPool();
                         store::DataStoreHandler *const store_hd =
                             Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        tx_worker_pool->SubmitWork(
+                        worker_thd = std::thread(
                             [tx_ts,
                              table_schema,
                              &hd_res,
@@ -2314,13 +2319,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                      table_schema = upsert_kv_table_op_.table_schema_,
                      op_type = upsert_kv_table_op_.op_type_,
                      alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                     &hd_res = upsert_kv_table_op_.hd_result_]
+                     &hd_res = upsert_kv_table_op_.hd_result_,
+                     &worker_thd = upsert_kv_table_op_.worker_thread_]
                 {
-                    TxWorkerPool *tx_worker_pool =
-                        Sharder::Instance().GetTxWorkerPool();
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    tx_worker_pool->SubmitWork(
+                    worker_thd = std::thread(
                         [tx_ts,
                          table_schema,
                          &hd_res,
@@ -5761,13 +5765,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                  table_schema = upsert_kv_table_op_.table_schema_,
                  op_type = upsert_kv_table_op_.op_type_,
                  alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                 &hd_res = upsert_kv_table_op_.hd_result_]
+                 &hd_res = upsert_kv_table_op_.hd_result_,
+                 &worker_thd = upsert_kv_table_op_.worker_thread_]
             {
-                TxWorkerPool *tx_worker_pool =
-                    Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
                     Sharder::Instance().GetLocalCcShards()->store_hd_;
-                tx_worker_pool->SubmitWork(
+                worker_thd = std::thread(
                     [tx_ts,
                      table_schema,
                      &hd_res,
@@ -5819,13 +5822,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                          op_type = upsert_kv_table_op_.op_type_,
                          alter_table_info =
                              upsert_kv_table_op_.alter_table_info_,
-                         &hd_res = upsert_kv_table_op_.hd_result_]
+                         &hd_res = upsert_kv_table_op_.hd_result_,
+                         &worker_thd = upsert_kv_table_op_.worker_thread_]
                     {
-                        TxWorkerPool *tx_worker_pool =
-                            Sharder::Instance().GetTxWorkerPool();
                         store::DataStoreHandler *const store_hd =
                             Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        tx_worker_pool->SubmitWork(
+                        worker_thd = std::thread(
                             [tx_ts,
                              table_schema,
                              &hd_res,
@@ -6323,13 +6325,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                  table_schema = upsert_kv_table_op_.table_schema_,
                  op_type = upsert_kv_table_op_.op_type_,
                  alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                 &hd_res = upsert_kv_table_op_.hd_result_]
+                 &hd_res = upsert_kv_table_op_.hd_result_,
+                 &worker_thd = upsert_kv_table_op_.worker_thread_]
             {
-                TxWorkerPool *tx_worker_pool =
-                    Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
                     Sharder::Instance().GetLocalCcShards()->store_hd_;
-                tx_worker_pool->SubmitWork(
+                worker_thd = std::thread(
                     [tx_ts,
                      table_schema,
                      &hd_res,

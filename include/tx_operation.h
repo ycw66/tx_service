@@ -548,6 +548,7 @@ struct DsUpsertTableOp : public TransactionOperation
     const TableSchema *table_schema_{nullptr};
     OperationType op_type_{OperationType::Upsert};
     std::function<void()> op_func_;
+    std::thread worker_thread_;
     CcHandlerResult<Void> hd_result_;
     txservice::AlterTableInfo *alter_table_info_{nullptr};
 };
