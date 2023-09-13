@@ -3320,6 +3320,7 @@ public:
         end_key_ = end_key;
         unfinished_cnt_ = core_cnt;
         clean_type_ = clean_type;
+        resume_key_.clear();
         for (uint16_t i = 0; i < core_cnt; ++i)
         {
             resume_key_.emplace_back(nullptr);
