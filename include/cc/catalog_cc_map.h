@@ -290,6 +290,28 @@ public:
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
+                // Flush kv failed, should drop new sk ccmap which created
+                // during PrepareCommit. But, if the dirty schema is nullptr,
+                // that is mean, this is the recovering transaction, and there
+                // is no need to drop the new sk ccmap.
+                if (req.OpType() == OperationType::AddIndex &&
+                    catalog_entry->dirty_schema_ != nullptr)
+                {
+                    std::vector<TableName> new_index_names =
+                        catalog_entry->dirty_schema_->IndexNames();
+                    std::vector<TableName> old_index_names =
+                        catalog_entry->schema_->IndexNames();
+                    for (const TableName &new_index_name : new_index_names)
+                    {
+                        if (std::find(old_index_names.begin(),
+                                      old_index_names.end(),
+                                      new_index_name) == old_index_names.end())
+                        {
+                            shard_->DropCcm(new_index_name, req.NodeGroupId());
+                        }
+                    }
+                }
+
                 // Flush kv fails, need to clear dirty CatalogEntry, dirty
                 // CatalogRecord and TableStatistics.
                 catalog_entry->RejectDirtySchema();
@@ -821,6 +843,7 @@ public:
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
         TableName table_name{table_name_sv, table_type};
 
+        // 1. Replay the table catalog and table schema.
         // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)
         {
@@ -830,7 +853,10 @@ public:
                 (schema_op_msg.stage() ==
                      ::txlog::SchemaOpMessage_Stage::
                          SchemaOpMessage_Stage_CommitSchema &&
-                 is_coordinator))
+                 is_coordinator) ||
+                schema_op_msg.stage() ==
+                    ::txlog::SchemaOpMessage_Stage::
+                        SchemaOpMessage_Stage_PrepareIndexTable)
             {
                 // If we are coordinator, we need to recover to the state
                 // right after commit log is flushed since the
@@ -930,9 +956,60 @@ public:
             assert(catalog_entry != nullptr);
         }
 
+        // 2. Replay the table ccmap.
         if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
-                                         SchemaOpMessage_Stage_CommitSchema &&
-            !is_coordinator)
+                                         SchemaOpMessage_Stage_PrepareSchema ||
+            schema_op_msg.stage() ==
+                ::txlog::SchemaOpMessage_Stage::
+                    SchemaOpMessage_Stage_PrepareIndexTable ||
+            (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
+                                          SchemaOpMessage_Stage_CommitSchema &&
+             is_coordinator))
+        {
+            const TableSchema *old_schema = catalog_entry->schema_.get();
+            const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
+            if (old_schema != nullptr && new_schema != nullptr)
+            {
+                // Alter table index operation.
+                // Pk table ccmap using old schema.
+                shard_->CreateOrUpdatePkCcMap(table_name,
+                                              old_schema,
+                                              req.NodeGroupId(),
+                                              catalog_entry->Version());
+
+                // Old sk table ccmap using old schema.
+                std::vector<TableName> old_index_names =
+                    old_schema->IndexNames();
+                for (const auto &old_index_name : old_index_names)
+                {
+                    shard_->CreateOrUpdateSkCcMap(old_index_name,
+                                                  old_schema,
+                                                  req.NodeGroupId(),
+                                                  catalog_entry->Version());
+                }
+
+                // New sk table ccmap using new schema
+                std::vector<TableName> new_index_names =
+                    new_schema->IndexNames();
+                for (const auto &new_index_name : new_index_names)
+                {
+                    if (std::find(old_index_names.cbegin(),
+                                  old_index_names.cend(),
+                                  new_index_name) == old_index_names.cend())
+                    {
+                        shard_->CreateOrUpdateSkCcMap(
+                            new_index_name,
+                            new_schema,
+                            req.NodeGroupId(),
+                            catalog_entry->DirtyVersion());
+                    }
+                }
+            }
+        }
+        else if (schema_op_msg.stage() ==
+                     ::txlog::SchemaOpMessage_Stage::
+                         SchemaOpMessage_Stage_CommitSchema &&
+                 !is_coordinator)
         {
             // Create ccmap for participants
             const TableSchema *committed_schema = catalog_entry->schema_.get();
@@ -954,6 +1031,7 @@ public:
                 }
             }
         }
+
         CatalogKey table_key(table_name);
         Iterator it = FindEmplace(table_key);
         CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
@@ -964,11 +1042,16 @@ public:
             return false;
         }
 
-        if (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
-                                         SchemaOpMessage_Stage_PrepareSchema ||
-            (schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CommitSchema &&
-             is_coordinator))
+        // 3. Replay the table write intent/lock.
+        LockType lock_type = LockType::NoLock;
+        TableName base_table_name(table_name.GetBaseTableNameSV(),
+                                  TableType::Primary);
+        OperationType op_type =
+            static_cast<OperationType>(schema_op_msg.table_op().op_type());
+        switch (schema_op_msg.stage())
+        {
+        case ::txlog::SchemaOpMessage_Stage::
+            SchemaOpMessage_Stage_PrepareSchema:
         {
             // If the prepare log has been flushed, the recovered cc ng leader
             // replays all steps between the prepare log and the commit log,
@@ -979,50 +1062,79 @@ public:
             // guaranteed to be recovered upon failures. The tx's term is not
             // necessary here to mark whether or not if the coordinating tx has
             // failed or not.
-            // When coordinator is recovering from commit log, we need to
-            // restore the state right after commit log is flushed, so we need
-            // to acquire write lock as well.
-            TableName base_table_name(table_name.GetBaseTableNameSV(),
-                                      TableType::Primary);
-            if (req.RangeSplitting(base_table_name))
+            if (req.RangeSplitting(base_table_name) ||
+                op_type == OperationType::AddIndex)
             {
                 // If range splitting is also happening on this table, which
                 // must have acquired a read lock on the catalog entry, that
                 // means we only need to recover a write intent.
-                auto lock_pair =
-                    AcquireCceKeyLock(cce,
-                                      cce->payload_status_,
-                                      &req,
-                                      req.NodeGroupId(),
-                                      ng_term,
-                                      0,
-                                      CcOperation::ReadForWrite,
-                                      IsolationLevel::RepeatableRead,
-                                      CcProtocol::OCC,
-                                      0,
-                                      false);
-                assert(lock_pair.first == LockType::WriteIntent &&
-                       lock_pair.second == CcErrorCode::NO_ERROR);
+                // For add index operation, between the prepare log and the
+                // prepare index table log, the recovered cc ng leader should
+                // recover the write intent on the schema.
+                lock_type = LockType::WriteIntent;
             }
             else
             {
-                auto lock_pair =
-                    AcquireCceKeyLock(cce,
-                                      cce->payload_status_,
-                                      &req,
-                                      req.NodeGroupId(),
-                                      ng_term,
-                                      0,
-                                      CcOperation::Write,
-                                      IsolationLevel::RepeatableRead,
-                                      CcProtocol::Locking,
-                                      0,
-                                      false);
-                // When a cc node recovers, no one should be holding read locks.
-                // So, the acquire operation should always succeed.
-                assert(lock_pair.first == LockType::WriteLock &&
-                       lock_pair.second == CcErrorCode::NO_ERROR);
+                lock_type = LockType::WriteLock;
             }
+            break;
+        }
+        case ::txlog::SchemaOpMessage_Stage::
+            SchemaOpMessage_Stage_PrepareIndexTable:
+        {
+            lock_type = LockType::WriteLock;
+            break;
+        }
+        case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:
+        {
+            if (is_coordinator)
+            {
+                // When coordinator is recovering from commit log, we need to
+                // restore the state right after commit log is flushed, so we
+                // need to acquire write lock as well.
+                lock_type = req.RangeSplitting(base_table_name)
+                                ? LockType::WriteIntent
+                                : LockType::WriteLock;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        if (lock_type == LockType::WriteIntent)
+        {
+            auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->payload_status_,
+                                               &req,
+                                               req.NodeGroupId(),
+                                               ng_term,
+                                               0,
+                                               CcOperation::ReadForWrite,
+                                               IsolationLevel::RepeatableRead,
+                                               CcProtocol::OCC,
+                                               0,
+                                               false);
+            assert(lock_pair.first == LockType::WriteIntent &&
+                   lock_pair.second == CcErrorCode::NO_ERROR);
+        }
+        else if (lock_type == LockType::WriteLock)
+        {
+            auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->payload_status_,
+                                               &req,
+                                               req.NodeGroupId(),
+                                               ng_term,
+                                               0,
+                                               CcOperation::Write,
+                                               IsolationLevel::RepeatableRead,
+                                               CcProtocol::Locking,
+                                               0,
+                                               false);
+            // When a cc node recovers, no one should be holding read locks.
+            // So, the acquire operation should always succeed.
+            assert(lock_pair.first == LockType::WriteLock &&
+                   lock_pair.second == CcErrorCode::NO_ERROR);
         }
 
         if (cce->payload_ == nullptr)

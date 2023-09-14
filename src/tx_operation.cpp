@@ -5116,6 +5116,9 @@ void FlushDataAllOp::Forward(TransactionExecution *txm)
         txm->Process(*this);
     }
 
+    uint32_t timeout = 600;
+    CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout", { timeout = 10; });
+
     if (hd_result_.IsFinished())
     {
         if (hd_result_.IsError() &&
@@ -5131,9 +5134,10 @@ void FlushDataAllOp::Forward(TransactionExecution *txm)
 
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut(600))
+    else if (txm->IsTimeOut(timeout))
     {
-        LOG(INFO) << "Flush data all operation timeout 60s, force to failed.";
+        LOG(INFO) << "Flush data all operation timeout " << timeout
+                  << "s, force to failed.";
         bool force_error = hd_result_.ForceError();
         // If force_error is false, means this operaiton finished normal.
         if (force_error)
@@ -5691,6 +5695,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_PrepareCommitAllWLOp");
             LOG(INFO) << "Alter Table Index transaction install dirty table"
                       << " schema, txn: " << txm->TxNumber();
             op_ = &downgrade_all_lock_to_intent_op_;
@@ -5896,7 +5901,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         else
         {
 #if WITH_KV_STORAGE == KV_CASS
-            // #ifndef RANGE_PARTITION_ENABLED
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushPkDataOp");
             LOG(INFO) << "Alter Table Index transaction flush all old base"
                       << " table data into data store, txn: " << txm->TxNumber()
                       << ", and commit ts: " << txm->commit_ts_;
@@ -6025,6 +6030,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 return;
             });
+        ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushNewPackedSKOp");
 
         assert(op_type_ == OperationType::AddIndex);
         assert(alter_table_info_.index_add_count_ ==
@@ -6125,6 +6131,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_KickoutAllOp");
             LOG(INFO) << "Alter Table Index transaction kickout all sk data"
                       << " from new added index ccmap, txn: "
                       << txm->TxNumber();
@@ -6183,6 +6190,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR(
+                "term_AlterTableIndex_FlushPrepareIndexTableLogOp");
             LOG(INFO) << "Alter Table Index transaction write prepare index"
                       << " log, txn: " << txm->TxNumber();
             op_ = &prepare_log_for_sk_op_;
@@ -6211,7 +6220,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 (txm->tx_status_ == TxnStatus::Recovering &&
                  tx_node_candid_term >= 0))
             {
-                // set retry flag and retry commit log
+                // set retry flag and retry log
                 ::txlog::WriteLogRequest *log_req =
                     prepare_log_for_sk_op_.log_closure_.LogRequest()
                         .mutable_write_log_request();
@@ -6350,6 +6359,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
             LOG(INFO) << "Alter Table Index transaction commit dirty table"
                       << " schema, txn: " << txm->TxNumber();
             op_ = &post_all_lock_op_;
@@ -6359,10 +6369,25 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
-        bool failed = post_all_lock_op_.hd_result_.IsError();
-
-        if (txm->commit_ts_ == tx_op_failed_ts_ &&
-            post_all_lock_op_.write_type_ == PostWriteType::PrepareCommit)
+        // When a cc node leader begins recovery, the candidate term is
+        // set to the Raft term. When recovery finishes, the candidate
+        // term is set to -1 after the leader term. So, obtains the
+        // candidate term before the leader term.
+        int64_t tx_node_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
+        int64_t tx_node_term =
+            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
+        bool is_leader =
+            tx_node_term >= 0 || (txm->tx_status_ == TxnStatus::Recovering &&
+                                  tx_node_candid_term >= 0);
+        if (!is_leader)
+        {
+            // The tx node is no longer the leader or leader candidate(during
+            // recovery), ForceToFinish.
+            ForceToFinish(txm);
+        }
+        else if (acquire_all_intent_op_.fail_cnt_.load(
+                     std::memory_order_relaxed) > 0)
         {
             // The schema operation failed without flushing the prepare log.
             // Do not retry post-processing (release write intents) even if
@@ -6379,53 +6404,47 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             local_cc_shards->table_index_op_pool_.emplace_back(
                 std::move(txm->index_op_));
         }
-        else if (failed)
+        else if (post_all_lock_op_.hd_result_.IsError())
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
-            // After the prepare log is flushed, if flush kv succeeds, the
-            // schema op is guaranteed to succeed and can only roll forward.
-            // Retry this step to install the committed schema and remove write
-            // locks, if the tx node is still the leader or the tx is in the
-            // recovery mode and the cc node is a leader candidate. However, if
-            // flush kv fails, this schema op has already been rolled back while
-            // processing this post_all_lock_op_, so here we only need to
-            // ForceToFinish.
-            if ((tx_node_term >= 0 ||
-                 (txm->tx_status_ == TxnStatus::Recovering &&
-                  tx_node_candid_term >= 0)) &&
-                txm->commit_ts_ != tx_op_failed_ts_)
-            {
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // post_all_lock_op_ returns an error:
+            // 1. if flush kv succeeds, the schema op is guaranteed to succeed
+            // and can only roll forward. Retry this step to install the
+            // committed schema and remove write locks;
+            // 2. if flush kx fails, the schema op has to roll backward. Retry
+            // this step to reject dirty schema and remove write locks.
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
         }
         else
         {
+            // post_all_lock_op_ has finished without an error.
+            assert(!post_all_lock_op_.IsFailed());
+
+            if (txm->commit_ts_ != tx_op_failed_ts_)
+            {
+                // The tx's modification of the schema has succeeded. If the tx
+                // has previously read the same schema and keeps a pointer in
+                // the read set to the cc entry of the schema, removes it from
+                // the read set. As a result, the tx will not try to release the
+                // read lock of the schema when committing.
+                const CcEntryAddr &schema_entry_addr =
+                    acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
+                        .Value()
+                        .local_cce_addr_;
+                txm->rw_set_.DedupRead(schema_entry_addr);
+            }
+            else
+            {
+                // Flush kv failed, or it is recovering from a flush kv failure.
+                // This schema op has already been rolled back by now, only need
+                // to flush clean log here.
+                // Also, flush kv failure does not require lock upgrade(write
+                // intent to write lock). So the CcEntryAddr needs to be kept in
+                // rset in order to release the read lock when committing.
+            }
+
             LOG(INFO) << "Alter Table Index transaction write clean log"
                       << ", txn: " << txm->TxNumber();
-            // The tx's modification of the schema has succeeded. If the tx
-            // has previously read the same schema and keeps a pointer in
-            // the read set to the cc entry of the schema, removes it from
-            // the read set. As a result, the tx will not try to release the
-            // read lock of the schema when committing.
-            const CcEntryAddr &schema_entry_addr =
-                acquire_all_lock_op_.hd_results_[txm->TxCcNodeId()]
-                    .Value()
-                    .local_cce_addr_;
-            txm->rw_set_.DedupRead(schema_entry_addr);
-
             op_ = &clean_log_op_;
             FillCleanLogRequestCommon(txm, clean_log_op_);
             txm->PushOperation(&clean_log_op_);
@@ -6454,24 +6473,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             log_req->set_retry(true);
             txm->PushOperation(&clean_log_op_);
             txm->Process(clean_log_op_);
-        }
-        else if (txm->tx_status_ == TxnStatus::Recovering)
-        {
-            // When the tx is in the recovery state, no external caller is
-            // waiting for the response. So, txm->bool_resp_ is null.
-
-            LocalCcShards *local_cc_shards =
-                Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                local_cc_shards->table_index_op_pool_mux_);
-            local_cc_shards->table_index_op_pool_.emplace_back(
-                std::move(txm->index_op_));
-            lk.unlock();
-            txm->Reset();
-            // Setting the tx's status to finished signals that this tx
-            // state machine can be recycled for a new tx.
-            txm->tx_status_.store(TxnStatus::Finished,
-                                  std::memory_order_release);
         }
         else
         {
@@ -6712,8 +6713,14 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 
     uint64_t commit_ts = txm->commit_ts_;
     const TableName &base_table_name = table_key_.Name();
+    // Read table schema from local cc shard. This is because we could be
+    // recovering from prepare flush pk stage, in which case we have skipped
+    // post_all_intent_op_ and the schema in catalog_rec_ would be empty.
+    auto catalog_entry =
+        local_cc_shards->GetCatalog(table_key_.Name(), txm->TxCcNodeId());
     TableSchema *table_schema =
-        const_cast<TableSchema *>(catalog_rec_.DirtySchema());
+        const_cast<TableSchema *>(catalog_entry->dirty_schema_.get());
+    assert(table_schema != nullptr);
 
     // Set the upload txm's commit_ts
     upload_txm->commit_ts_ = commit_ts;

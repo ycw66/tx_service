@@ -1508,15 +1508,6 @@ void txservice::LocalCcHandler::FlushDataAll(const TableName &table_name,
 
     if (dest_node_id == cc_shards_.node_id_)
     {
-        if (table_name.Type() == TableType::Primary)
-        {
-            ACTION_FAULT_INJECTOR("term_FlushDataAll_PK_crashed");
-        }
-        else if (table_name.Type() == TableType::Secondary)
-        {
-            ACTION_FAULT_INJECTOR("term_FlushDataAll_SK_crashed");
-        }
-
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
         if (ng_term < 0 || (expected_term > 0 && ng_term != expected_term))
         {

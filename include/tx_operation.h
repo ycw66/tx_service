@@ -1272,6 +1272,8 @@ struct UpsertTableIndexOp : public SchemaOp
     FlushDataAllOp flush_all_old_tuples_sk_op_;
     /**
      * @brief Kickout the old packed sk tuples from sk ccmap that new created.
+     * NOTE: If tx coordinate node failover during this phase, will redo all
+     * operations between prepare log and prepare index log during recovery.
      */
     KickoutDataAllOp kickout_data_all_op_;
     /**
@@ -1286,9 +1288,7 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     AcquireAllOp acquire_all_lock_op_;
     /**
-     * @brief Flushes the commit log to the log service. The commit log confirms
-     * that the data store operation succeeds and does not need redo upon
-     * failures.
+     * @brief Flushes the commit log to the log service.
      */
     WriteToLogOp commit_log_op_;
     /**

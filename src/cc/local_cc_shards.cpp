@@ -2505,6 +2505,8 @@ void LocalCcShards::SplitFlushRange(
                 data_sync_task_queue_.push_back(
                     std::move(sync_status.pending_task_.back()));
                 sync_status.pending_task_.pop_back();
+                // Notify the data sync workers.
+                task_worker_cv_.notify_one();
             }
         }
         return;
@@ -2548,6 +2550,8 @@ void LocalCcShards::SplitFlushRange(
                 data_sync_task_queue_.push_back(
                     std::move(sync_status.pending_task_.back()));
                 sync_status.pending_task_.pop_back();
+                // Notify the data sync workers.
+                task_worker_cv_.notify_one();
             }
         }
         return;
@@ -2622,6 +2626,8 @@ void LocalCcShards::SplitFlushRange(
                 data_sync_task_queue_.push_back(
                     std::move(sync_status.pending_task_.back()));
                 sync_status.pending_task_.pop_back();
+                // Notify the data sync workers.
+                task_worker_cv_.notify_one();
             }
         }
         return;
@@ -2654,6 +2660,8 @@ void LocalCcShards::SplitFlushRange(
             data_sync_task_queue_.push_back(
                 std::move(sync_status.pending_task_.back()));
             sync_status.pending_task_.pop_back();
+            // Notify the data sync workers.
+            task_worker_cv_.notify_one();
         }
     }
 }
