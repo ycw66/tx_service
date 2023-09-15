@@ -146,6 +146,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
     ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/src/metrics.cc
     ${TX_SERVICE_SOURCE_DIR}/src/tx_service.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/tx_index_operation.cpp
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})

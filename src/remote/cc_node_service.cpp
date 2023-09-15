@@ -313,6 +313,9 @@ void CcNodeService::AcquireNodeGroupLeaderTerm(
 
     if (term < 0)
     {
+        LOG(WARNING)
+            << "!!!WARNING!!! The non-leader node receives the request for ng#"
+            << ng_id;
         response->set_node_group_term(INIT_TERM);
     }
     else

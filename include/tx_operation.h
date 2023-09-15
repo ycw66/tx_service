@@ -40,6 +40,12 @@ enum class TxLogType
     CLEAN
 };
 
+void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
+                                 TableWriteSet &table_write_set,
+                                 TableWriteSet::iterator &write_key_it,
+                                 const TableWriteSet::iterator &write_key_end,
+                                 ReadWriteSet &rw_set);
+
 struct TransactionOperation
 {
     TransactionOperation()
@@ -219,7 +225,6 @@ public:
     {
         init_ = false;
         is_running_ = false;
-        is_sub_commit_ = true;
         lock_range_result_.Reset();
     }
 
@@ -239,12 +244,6 @@ public:
     TableWriteSet::iterator write_key_it_;
     TableWriteSet::iterator write_key_end_;
     bool init_;
-    // Whether this op is the sub-operation of the commit. In default, this
-    // value is true, that is to say, this operation is one of the phases of the
-    // commit operation. In some special cases(such as add index), where we
-    // acquire the range read lock and postwrite records without acquiring the
-    // record write lock or write data log, set this flag is false.
-    bool is_sub_commit_{true};
 };
 
 struct FaultInjectOp : TransactionOperation
@@ -565,6 +564,9 @@ struct AsyncOp : public TransactionOperation
 
     std::function<void()> op_func_;
     CcHandlerResult<ResultType> hd_result_;
+    std::thread worker_thread_;
+    bool handle_timeout_{false};
+    uint32_t wait_secs_{10};
 };
 
 struct SchemaOp : public TransactionOperation
@@ -1095,251 +1097,6 @@ private:
     std::mutex status_mux_;
     remote::ClusterScaleStatus status_;
     std::unordered_map<uint16_t, BucketMigrateInfo> bucket_migrate_infos_;
-};
-
-/**
- * @brief Flush data from ccmap for specified table on all node group into data
- * store.
- */
-struct FlushDataAllOp : public TransactionOperation
-{
-    FlushDataAllOp() = delete;
-    explicit FlushDataAllOp(TransactionExecution *txm);
-    FlushDataAllOp(const TableName *table_name, TransactionExecution *txm);
-    void Reset(size_t ng_cnt, size_t table_cnt);
-    void Clear();
-    void Resize();
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<Void> hd_result_;
-    /**
-     * @brief Cache the destination node group term.
-     * In some case, should be sure that the leader of the node group did not
-     * changed between this operation and the former operation. For example:
-     * post write dirty sk operation and flush the dirty sk table, the
-     * expected_ng_terms_ were passed from the former operation.
-     */
-    std::vector<int64_t> expected_ng_terms_;
-    /**
-     * @brief The number of node groups to execute flush data operation.
-     */
-    uint32_t node_group_cnt_{0};
-    // To handle multi tables
-    std::vector<const TableName *> table_names_;
-    uint64_t commit_ts_{0};
-    bool is_dirty_{false};
-};
-
-struct AcquireLeaderTermOp : TransactionOperation
-{
-    explicit AcquireLeaderTermOp(TransactionExecution *txm);
-    void Reset(size_t ng_cnt);
-    void Clear();
-    void Forward(TransactionExecution *txm) override;
-
-    // Acquire the target node group term and store in the result.Value().
-    CcHandlerResult<std::vector<int64_t>> hd_result_;
-};
-
-struct UploadOp : TransactionOperation
-{
-    explicit UploadOp(TransactionExecution *txm);
-    void Reset(size_t write_cnt, size_t catalog_range_read_cnt);
-    void Reset();
-    void Forward(TransactionExecution *txm) override;
-    void AddRangeEntry(const TableName &table_name,
-                       const CcEntryAddr &cce_addr);
-    void RemoveRangeEntry(TransactionExecution *txm);
-
-    // Point to the AcquireLeaderTermOp::hd_result_.
-    std::vector<int64_t> *expected_ng_terms_{nullptr};
-    CcHandlerResult<PostProcessResult> hd_result_;
-
-    enum struct UploadStatus
-    {
-        Ongoing = 0,
-        ReleaseRangeLock,
-        Finished
-    };
-
-    UploadStatus upload_status_{UploadStatus::Ongoing};
-
-#ifdef RANGE_PARTITION_ENABLED
-    CcHandlerResult<PostProcessResult> catalog_range_hd_result_;
-    bool releasing_range_lock_;
-    std::unordered_map<TableName, std::unordered_set<CcEntryAddr>>
-        range_entries_;
-#endif
-};
-
-struct KickoutDataAllOp : public TransactionOperation
-{
-    explicit KickoutDataAllOp(TransactionExecution *txm);
-    void Reset(uint32_t ng_cnt, size_t table_cnt);
-    void Clear();
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-
-    // To handle multi tables.
-    std::vector<const TableName *> table_names_;
-    uint64_t commit_ts_{0};
-    CcHandlerResult<Void> hd_result_;
-};
-
-struct UpsertTableIndexOp : public SchemaOp
-{
-    UpsertTableIndexOp() = delete;
-    UpsertTableIndexOp(const std::string_view table_name_sv,
-                       const std::string &current_image,
-                       uint64_t curr_schema_ts,
-                       const std::string &dirty_image,
-                       const std::string &alter_table_image,
-                       OperationType op_type,
-                       TransactionExecution *txm);
-
-    void Forward(TransactionExecution *txm) override;
-
-    void Reset(const std::string_view table_name_str,
-               const std::string &current_image,
-               uint64_t curr_schema_ts,
-               const std::string &dirty_image,
-               const std::string &alter_table_image,
-               OperationType op_type,
-               TransactionExecution *txm);
-
-    /**
-     * @brief The current stage of this multi-stage schema operation.
-     */
-    TransactionOperation *op_{nullptr};
-    /**
-     * @brief Acquire read lock on local cluster config ccmap to block cluster
-     * config update during upsert table op. We cannot allow config update
-     * between acquire write all and post write all.
-     */
-    ReadLocalOperation lock_cluster_config_op_;
-    /**
-     * @brief Acquires write intents on the table's catalog in all nodes to
-     * prevent concurrent schema modifications.
-     */
-    AcquireAllOp acquire_all_intent_op_;
-    /**
-     * @brief Upgrade write intent to write lock on all nodes. To prevent
-     * concurrent DDL and DML on the table. Then get a boundary between new
-     * and old tuples.
-     */
-    AcquireAllOp upgrade_all_intent_to_lock_op_;
-    /**
-     * @brief Flushes the prepare log to the log service. The schema operation
-     * is guaranteed to succeed after this stage.
-     */
-    WriteToLogOp prepare_log_op_;
-    /**
-     * @brief Installs the dirty schema in the tx service and returns a local
-     * view (pointer) of it, and downgrade all write lock to write intent.
-     */
-    PostWriteAllOp downgrade_all_lock_to_intent_op_;
-    /**
-     * @brief Creates/deletes the data store table and persists/removes the
-     * binary representation of the catalog in the data store.
-     */
-    DsUpsertTableOp upsert_kv_table_op_;
-    /**
-     * @brief Flush the old tuples whose commit timestamp less than the new
-     * table schema's version of the base table ccmap on all nodes into data
-     * store. Consist of scan, flush.
-     */
-    FlushDataAllOp flush_all_old_tuples_pk_op_;
-    /**
-     * @brief Generate index data for old tuples, and upload them to sk ccmap.
-     * Consist of fetching from data store, constructing packed index data, and
-     * upload to the sk ccmap.
-     *
-     * NOTE: Store the expected node group term into result value, using it to
-     * check whether has failover during upload sk and flush sk operation.
-     */
-    AsyncOp<std::vector<int64_t>>
-        fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
-    /**
-     * @brief Flush the index data of the old tuples into data store, and kick
-     * out them from the memory. Consist of scan, flush.
-     *
-     * NOTE: table_name is the index table name.
-     * NOTE: Currently, because of no data log during the operation of
-     * @@fetch_old_tuples_from_kv_gen_sk_data_upload_op_, should re-execute from
-     * the former stage if leader-transfer happened during this step.
-     */
-    FlushDataAllOp flush_all_old_tuples_sk_op_;
-    /**
-     * @brief Kickout the old packed sk tuples from sk ccmap that new created.
-     * NOTE: If tx coordinate node failover during this phase, will redo all
-     * operations between prepare log and prepare index log during recovery.
-     */
-    KickoutDataAllOp kickout_data_all_op_;
-    /**
-     * @brief Flushes the log to the log service. This log confirms that the
-     * index data operation of the old tuples succeeds. In term of recovery,
-     * this log ensure that write intent is hold before this log, rather than
-     * write lock which will block checkpointer(acquire read lock).
-     */
-    WriteToLogOp prepare_log_for_sk_op_;
-    /**
-     * @brief Upgrades acquired write intents to write locks in all nodes.
-     */
-    AcquireAllOp acquire_all_lock_op_;
-    /**
-     * @brief Flushes the commit log to the log service.
-     */
-    WriteToLogOp commit_log_op_;
-    /**
-     * @brief Removes write locks in all nodes. If the schema operation
-     * succeeds, also installs the new schema in all nodes.
-     */
-    PostWriteAllOp post_all_lock_op_;
-    /**
-     * @brief The last log operation that removes the schema record from the log
-     * state machine.
-     */
-    WriteToLogOp clean_log_op_;
-
-    CcHandlerResult<ReadKeyResult> read_cluster_result_;
-    ClusterConfigRecord cluster_conf_rec_;
-
-private:
-    // This variable have two roles:
-    // 1) deserialize as AlterTableInfo object. 2) save into log.
-    std::string alter_table_info_image_str_{""};
-
-    AlterTableInfo alter_table_info_;
-
-    void FillPrepareLogRequest(TransactionExecution *txm);
-    void FillPrepareIndexTableLogRequest(TransactionExecution *txm);
-    void FillCommitLogRequest(TransactionExecution *txm);
-    void ForceToFinish(TransactionExecution *txm);
-    /**
-     * @param ng_terms OUT
-     */
-    void FetchTuplesAndUploadPackedKey(TransactionExecution *txm,
-                                       std::vector<int64_t> &ng_terms);
-#ifdef RANGE_PARTITION_ENABLED
-    uint8_t PrefetchSize()
-    {
-        std::array<uint32_t, 5> boundaries = {1, 4, 16, 64, 256};
-
-        size_t idx = 0;
-        for (; idx < boundaries.size(); ++idx)
-        {
-            if (scan_batch_cnt_ < boundaries[idx])
-            {
-                break;
-            }
-        }
-
-        return idx < boundaries.size() ? boundaries[idx] - 1 : 255;
-    }
-
-    uint8_t scan_batch_cnt_;
-#endif
 };
 
 }  // namespace txservice

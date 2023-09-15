@@ -73,9 +73,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       analyze_table_all_op_(this),
       fault_inject_op_(this),
       clean_entry_op_(this),
-      abundant_lock_op_(this),
-      acquire_term_op_(this),
-      upload_op_(this)
+      abundant_lock_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, cc_handler_);
 
@@ -112,8 +110,6 @@ void TransactionExecution::Reset(CcProtocol proto)
     index_op_ = nullptr;
     drain_batch_.clear();
     scan_alias_cnt_ = 0;
-    acquire_term_op_.Clear();
-    upload_op_.Reset();
 
     // drain out tx_req_queue_ (if any request left)
     TxRequest *req = nullptr;
@@ -1180,43 +1176,6 @@ void TransactionExecution::ProcessTxRequest(
     split_flush_op_ = std::move(split_range_op);
     PushOperation(split_flush_op_.get());
     Forward();
-}
-
-void TransactionExecution::ProcessTxRequest(UploadTxRequest &req)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &req,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    int64_vec_resp_ = &req.tx_result_;
-
-    if (rw_set_.WriteSetSize() <= 0)
-    {
-        upload_op_.upload_status_ = UploadOp::UploadStatus::Finished;
-        int64_vec_resp_->Finish(acquire_term_op_.hd_result_.Value());
-        return;
-    }
-    upload_op_.upload_status_ = UploadOp::UploadStatus::Ongoing;
-
-#ifdef RANGE_PARTITION_ENABLED
-    // For range partition, need acquire range lock before post write.
-    upload_op_.range_entries_.clear();
-    lock_write_ranges_.Reset();
-    lock_write_ranges_.is_sub_commit_ = false;
-    PushOperation(&lock_write_ranges_);
-    Process(lock_write_ranges_);
-#else
-    upload_op_.Reset(rw_set_.WriteSetSize(), 0);
-    PushOperation(&upload_op_);
-    Process(upload_op_);
-#endif
 }
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
@@ -2858,21 +2817,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     {
         DLOG(ERROR) << "LockWriteRangesOp failed for cc error:"
                     << lock_write_ranges.lock_range_result_.ErrorMsg();
-        if (lock_write_ranges.is_sub_commit_)
-        {
-            Abort();
-        }
-        else
-        {
-            // Set the Upload request status, and release the ranges lock.
-            upload_op_.Reset(0, rw_set_.CatalogRangeSetSize());
-            upload_op_.upload_status_ =
-                UploadOp::UploadStatus::ReleaseRangeLock;
-            upload_op_.hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
-
-            PushOperation(&upload_op_);
-            Process(upload_op_);
-        }
+        Abort();
         return;
     }
 
@@ -2885,12 +2830,6 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     rw_set_.AddRead(
         read_res.cce_addr_, read_res.ts_, &lock_write_ranges.range_table_name_);
 
-    if (!lock_write_ranges.is_sub_commit_)
-    {
-        upload_op_.AddRangeEntry(lock_write_ranges.range_table_name_,
-                                 read_res.cce_addr_);
-    }
-
     const TxKey *write_key = lock_write_ranges.write_key_it_->first;
     assert(range_start_key == nullptr || !(*write_key < *range_start_key));
     assert(range_end_key == nullptr || *write_key < *range_end_key);
@@ -2902,16 +2841,8 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         state_stack_.pop_back();
         assert(state_stack_.empty());
 
-        if (lock_write_ranges.is_sub_commit_)
-        {
-            PushOperation(&acquire_write_);
-            Process(acquire_write_);
-        }
-        else
-        {
-            PushOperation(&acquire_term_op_);
-            Process(acquire_term_op_);
-        }
+        PushOperation(&acquire_write_);
+        Process(acquire_write_);
     }
     else
     {
@@ -4507,8 +4438,6 @@ void TransactionExecution::Process(AsyncOp<ResultType> &ds_op)
 }
 
 template void TransactionExecution::Process(AsyncOp<Void> &ds_op);
-template void TransactionExecution::Process(
-    AsyncOp<std::vector<int64_t>> &ds_op);
 template void TransactionExecution::Process(AsyncOp<PostProcessResult> &ds_op);
 
 template <typename ResultType>
@@ -4529,8 +4458,6 @@ void TransactionExecution::PostProcess(AsyncOp<ResultType> &ds_op)
 }
 
 template void TransactionExecution::PostProcess(AsyncOp<Void> &ds_op);
-template void TransactionExecution::PostProcess(
-    AsyncOp<std::vector<int64_t>> &ds_op);
 template void TransactionExecution::PostProcess(
     AsyncOp<PostProcessResult> &ds_op);
 
@@ -4901,283 +4828,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             Commit();
         }
-    }
-}
-
-void TransactionExecution::Process(FlushDataAllOp &flush_data_all_op)
-{
-    uint32_t node_group_cnt = Sharder::Instance().NodeGroupCount();
-    size_t table_cnt = flush_data_all_op.table_names_.size();
-    flush_data_all_op.Reset(node_group_cnt, table_cnt);
-    flush_data_all_op.is_running_ = true;
-
-    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
-    {
-        int64_t &expected_term = flush_data_all_op.expected_ng_terms_.at(nid);
-        for (size_t table_idx = 0; table_idx < table_cnt; ++table_idx)
-        {
-            cc_handler_->FlushDataAll(
-                *flush_data_all_op.table_names_.at(table_idx),
-                nid,
-                tx_number_.load(std::memory_order_relaxed),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                flush_data_all_op.commit_ts_,
-                flush_data_all_op.is_dirty_,
-                expected_term,
-                flush_data_all_op.hd_result_);
-        }
-    }
-
-    StartTiming();
-}
-
-void TransactionExecution::PostProcess(FlushDataAllOp &flush_data_all_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &flush_data_all_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    Forward();
-}
-
-void TransactionExecution::Process(AcquireLeaderTermOp &acquire_leader_term_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &acquire_leader_term_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    assert(rw_set_.WriteSetSize() > 0);
-    uint32_t ng_count = Sharder::Instance().NodeGroupCount();
-    acquire_leader_term_op.Reset(ng_count);
-
-    acquire_leader_term_op.is_running_ = true;
-
-    auto &ng_terms = acquire_leader_term_op.hd_result_.Value();
-
-    // Find the node group id that need to acquire the leader term.
-    uint32_t request_count = 0;
-    std::vector<NodeGroupId> target_ng_ids;
-    for (size_t idx = 0; idx < ng_terms.size(); ++idx)
-    {
-        if (ng_terms.at(idx) == INIT_TERM)
-        {
-            ++request_count;
-            target_ng_ids.push_back(idx);
-        }
-    }
-    acquire_leader_term_op.hd_result_.SetRefCnt(request_count);
-
-    // Acquire node group leader term if we have not get yet.
-    bool waiting_result = false;
-    for (size_t ng_idx = 0; ng_idx < target_ng_ids.size(); ++ng_idx)
-    {
-        int64_t term = cc_handler_->NodeGroupLeaderTerm(
-            target_ng_ids.at(ng_idx),
-            tx_number_.load(std::memory_order_relaxed),
-            tx_term_,
-            command_id_.load(std::memory_order_relaxed),
-            acquire_leader_term_op.hd_result_);
-
-        if (term == INIT_TERM || term == UNKNOWN_TERM)
-        {
-            waiting_result = true;
-        }
-    }
-    if (waiting_result)
-    {
-        acquire_leader_term_op.Forward(this);
-    }
-    else
-    {
-        PostProcess(acquire_leader_term_op);
-    }
-}
-
-void TransactionExecution::PostProcess(
-    AcquireLeaderTermOp &acquire_leader_term_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &acquire_leader_term_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    assert(state_stack_.empty());
-
-    if (acquire_leader_term_op.hd_result_.IsError())
-    {
-        LOG(ERROR) << "AcquireLeaderTermOp failed for cc error:"
-                   << acquire_leader_term_op.hd_result_.ErrorMsg();
-
-        // Set the Upload request status, and release the ranges lock.
-        upload_op_.Reset(0, rw_set_.CatalogRangeSetSize());
-        upload_op_.upload_status_ = UploadOp::UploadStatus::ReleaseRangeLock;
-        upload_op_.hd_result_.SetError(CcErrorCode::ACQUIRE_LEADER_TERM_ERR);
-
-        PushOperation(&upload_op_);
-        Process(upload_op_);
-        return;
-    }
-
-    // Add the double write size.
-    upload_op_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
-                     rw_set_.CatalogRangeSetSize());
-
-    upload_op_.expected_ng_terms_ = &acquire_leader_term_op.hd_result_.Value();
-    PushOperation(&upload_op_);
-    Process(upload_op_);
-}
-
-void TransactionExecution::Process(UploadOp &upload_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &upload_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    assert(rw_set_.WriteSetSize() > 0);
-    upload_op.is_running_ = true;
-    // The process for UploadTxRequest normally includes three
-    // stages:LockWriteRangesOp(for range), AcquireLeaderTermOp, and
-    // UploadOp(includint release ranges read lock). If an error occurs during
-    // the first two stages, the `upload_status_` will be set to
-    // `ReleaseRangeLock`, then, it will jump directly to the stage of release
-    // ranges read lock.
-    if (upload_op.upload_status_ == UploadOp::UploadStatus::ReleaseRangeLock)
-    {
-        upload_op.Forward(this);
-        return;
-    }
-
-    // Handle the write set
-    std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
-    for (auto &[table_name, entries] : wset)
-    {
-        for (auto &[key, write_entry] : entries)
-        {
-#ifndef RANGE_PARTITION_ENABLED
-            write_entry.key_shard_code_ =
-                Sharder::Instance().ShardCode(key->Hash());
-#endif
-
-            uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(
-                write_entry.key_shard_code_);
-            int64_t &expected_term = upload_op.expected_ng_terms_->at(ng_id);
-
-            cc_handler_->ForwardPostWrite(
-                tx_number_.load(std::memory_order_relaxed),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                commit_ts_,
-                table_name,
-                key,
-                write_entry.rec_.get(),
-                write_entry.op_,
-                write_entry.key_shard_code_,
-                upload_op.hd_result_,
-                false,
-                expected_term);
-
-#ifdef RANGE_PARTITION_ENABLED
-            // Double write if the target range is splitting.
-            if (write_entry.forward_key_shard_code_ != UINT32_MAX)
-            {
-                uint32_t forward_ng_id = Sharder::Instance().ShardToCcNodeGroup(
-                    write_entry.forward_key_shard_code_);
-                int64_t &forward_expected_term =
-                    upload_op.expected_ng_terms_->at(forward_ng_id);
-
-                cc_handler_->ForwardPostWrite(
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    command_id_.load(std::memory_order_relaxed),
-                    commit_ts_,
-                    table_name,
-                    key,
-                    write_entry.rec_.get(),
-                    write_entry.op_,
-                    write_entry.forward_key_shard_code_,
-                    upload_op.hd_result_,
-                    false,
-                    forward_expected_term);
-            }
-#endif
-        }
-    }
-
-    StartTiming();
-}
-
-void TransactionExecution::PostProcess(UploadOp &upload_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &upload_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append("\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-    state_stack_.pop_back();
-    assert(state_stack_.empty());
-
-    // Clear range table read set
-    upload_op.RemoveRangeEntry(this);
-
-    if (upload_op.hd_result_.IsError())
-    {
-        LOG(ERROR) << "Upload operation failed for cc error:"
-                   << upload_op.hd_result_.ErrorMsg();
-        // For non-leader-transferred error, such as OUT_OF_MEMORY, we will
-        // re-run this request later, so can not clear the write set.
-        if (upload_op.hd_result_.ErrorCode() ==
-                CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
-            upload_op.hd_result_.ErrorCode() == CcErrorCode::TX_NODE_NOT_LEADER)
-        {
-            // Clear the write set.
-            rw_set_.ClearWriteSet();
-        }
-
-        // When Re-run this request, we will re-acquire range lock, then the
-        // forward write count will be re-counted, so should clear forward
-        // write count anyway.
-        rw_set_.ResetForwardWriteCount();
-        int64_vec_resp_->FinishError(
-            ConvertCcError(upload_op.hd_result_.ErrorCode()));
-    }
-    else
-    {
-        // Clear the write set.
-        rw_set_.ClearWriteSet();
-        int64_vec_resp_->Finish(*(upload_op.expected_ng_terms_));
     }
 }
 

@@ -18,7 +18,7 @@
 #include "metrics.h"
 #include "read_write_set.h"
 #include "readerwriterqueue.h"
-#include "tx_operation.h"
+#include "tx_index_operation.h"
 #include "tx_req_result.h"
 #include "txlog.h"
 
@@ -46,7 +46,6 @@ struct ClusterScaleTxRequest;
 struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
-struct UploadTxRequest;
 
 class TxProcessor;
 
@@ -132,7 +131,6 @@ public:
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
-    void ProcessTxRequest(UploadTxRequest &upload_req);
 
     /**
      * Interface for storage engine runtime.
@@ -330,15 +328,6 @@ private:
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);
 
-    void Process(FlushDataAllOp &flush_data_all_op);
-    void PostProcess(FlushDataAllOp &flush_data_all_op);
-
-    void Process(AcquireLeaderTermOp &acquire_leader_term_op);
-    void PostProcess(AcquireLeaderTermOp &acquire_leader_term_op);
-
-    void Process(UploadOp &upload_op);
-    void PostProcess(UploadOp &upload_op);
-
     void Process(KickoutDataAllOp &kickout_data_all_op);
     void PostProcess(KickoutDataAllOp &kickout_data_all_op);
 
@@ -529,10 +518,6 @@ private:
 
     ReleaseScanExtraLockOp abundant_lock_op_;
 
-    AcquireLeaderTermOp acquire_term_op_;
-    // Upload the data from local write set into ccmap.
-    UploadOp upload_op_;
-
     metrics::TimePoint tx_duration_start_;
 
     friend struct TransactionOperation;
@@ -573,9 +558,6 @@ private:
     friend struct AsyncOp;
     friend struct PostReadOperation;
     friend struct ObjectCommandOp;
-    friend struct FlushDataAllOp;
-    friend struct AcquireLeaderTermOp;
-    friend struct UploadOp;
     friend struct KickoutDataAllOp;
     friend struct UpsertTableIndexOp;
     friend class TxProcessor;
