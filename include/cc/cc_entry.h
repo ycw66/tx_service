@@ -803,6 +803,8 @@ public:
      * @param ckpt_vec - store the version records to flush into "base table".
      * @param akv_vec - store the version records to flush into "archives
      * table".
+     * @param from_ts - Previous round scan timestamp. We scan the data between
+     * (from_ts, to_ts].
      * @param to_ts - Current round checkpoint timestamp.
      * @return the number of exported version records.
      */
@@ -810,6 +812,7 @@ public:
                          std::vector<FlushRecord> &ckpt_vec,
                          std::vector<FlushRecord> &akv_vec,
                          std::vector<size_t> &mv_base_vec,
+                         uint64_t from_ts,
                          uint64_t to_ts,
                          uint64_t oldest_active_tx_ts,
                          TableType tbl_type,
@@ -823,7 +826,7 @@ public:
         }
 
         size_t ckpt_idx = ckpt_vec_size;
-        if (commit_ts_ <= to_ts)
+        if (from_ts < commit_ts_ && commit_ts_ <= to_ts)
         {
             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
             ref.CloneOrCopyKey(key);
@@ -868,7 +871,7 @@ public:
         {
             for (auto it = archives_->begin(); it != archives_->end(); it++)
             {
-                if (it->commit_ts_ <= to_ts)
+                if (from_ts < it->commit_ts_ && it->commit_ts_ <= to_ts)
                 {
                     if (it->commit_ts_ < ckpt_ts_ || it->commit_ts_ == 1U)
                     {
@@ -942,6 +945,12 @@ public:
                         exported_count++;
                     }
                 }
+                else if (from_ts >= it->commit_ts_)
+                {
+                    assert(from_ts > 0);
+                    break;
+                }
+                // else: it->commit_ts_ > to_ts
             }
         }
 

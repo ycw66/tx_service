@@ -829,15 +829,19 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         local_shards->split_flush_range_op_pool_mux_);
     if (local_shards->split_flush_range_op_pool_.empty())
     {
-        split_flush_op_ =
-            std::make_unique<SplitFlushRangeOp>(*req.table_name_,
-                                                req.schema_,
-                                                req.node_group_,
-                                                req.old_start_key_,
-                                                req.old_end_key_,
-                                                req.old_range_info_,
-                                                std::move(req.new_range_info_),
-                                                this);
+        split_flush_op_ = std::make_unique<SplitFlushRangeOp>(
+            *req.table_name_,
+            req.schema_,
+            req.node_group_,
+            req.old_start_key_,
+            req.old_end_key_,
+            req.old_range_info_,
+            std::move(req.new_range_info_),
+            req.previous_scan_ts_,
+            std::move(req.previous_data_sync_vec_),
+            std::move(req.previous_archive_vec_),
+            std::move(req.previous_mv_base_vec_),
+            this);
     }
     else
     {
@@ -852,6 +856,10 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                req.old_end_key_,
                                req.old_range_info_,
                                std::move(req.new_range_info_),
+                               req.previous_scan_ts_,
+                               std::move(req.previous_data_sync_vec_),
+                               std::move(req.previous_archive_vec_),
+                               std::move(req.previous_mv_base_vec_),
                                this);
     }
     lk.unlock();
@@ -1103,21 +1111,30 @@ void TransactionExecution::ProcessTxRequest(
                                     recover_req.new_partition_ids_[i]);
     }
 
+    uint64_t previous_scan_ts = 0;
+    std::vector<FlushRecord> previous_data_sync_vec;
+    std::vector<FlushRecord> previous_archive_vec;
+    std::vector<const TxKey *> previous_mv_base_vec;
+
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
     std::unique_lock<std::mutex> lk(
         local_shards->split_flush_range_op_pool_mux_);
     if (local_shards->split_flush_range_op_pool_.empty())
     {
-        split_range_op =
-            std::make_unique<SplitFlushRangeOp>(table_name,
-                                                recover_req.table_schema_,
-                                                recover_req.node_group_id_,
-                                                recover_req.start_key_,
-                                                recover_req.end_key_,
-                                                recover_req.range_info_,
-                                                std::move(new_range_info),
-                                                this);
+        split_range_op = std::make_unique<SplitFlushRangeOp>(
+            table_name,
+            recover_req.table_schema_,
+            recover_req.node_group_id_,
+            recover_req.start_key_,
+            recover_req.end_key_,
+            recover_req.range_info_,
+            std::move(new_range_info),
+            previous_scan_ts,
+            std::move(previous_data_sync_vec),
+            std::move(previous_archive_vec),
+            std::move(previous_mv_base_vec),
+            this);
     }
     else
     {
@@ -1132,6 +1149,10 @@ void TransactionExecution::ProcessTxRequest(
                               recover_req.end_key_,
                               recover_req.range_info_,
                               std::move(new_range_info),
+                              previous_scan_ts,
+                              std::move(previous_data_sync_vec),
+                              std::move(previous_archive_vec),
+                              std::move(previous_mv_base_vec),
                               this);
     }
     lk.unlock();

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 #include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
@@ -2903,6 +2904,10 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     const TxKey *old_end_key,
     const RangeInfo *old_range_info,
     std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+    uint64_t previous_scan_ts,
+    std::vector<FlushRecord> &&previous_data_sync_vec,
+    std::vector<FlushRecord> &&previous_archive_vec,
+    std::vector<const TxKey *> &&previous_mv_base_vec,
     TransactionExecution *txm)
     : CompositeTransactionOperation(),
       table_schema_(table_schema),
@@ -2913,6 +2918,11 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       range_info_(*old_range_info),
       old_end_key_(old_end_key),
       new_range_info_(std::move(new_range_info)),
+      previous_scan_ts_(previous_scan_ts),
+      previous_data_sync_vec_(std::move(previous_data_sync_vec)),
+      previous_archive_vec_(std::move(previous_archive_vec)),
+      previous_mv_base_vec_(std::move(previous_mv_base_vec)),
+      scan_finished_(false),
       lock_cluster_config_op_(),
       prepare_acquire_all_write_op_(txm),
       prepare_log_op_(txm),
@@ -2994,6 +3004,10 @@ void SplitFlushRangeOp::Reset(
     const TxKey *old_end_key,
     const RangeInfo *old_range_info,
     std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+    uint64_t previous_scan_ts,
+    std::vector<FlushRecord> &&previous_data_sync_vec,
+    std::vector<FlushRecord> &&previous_archive_vec,
+    std::vector<const TxKey *> &&previous_mv_base_vec,
     TransactionExecution *txm)
 {
     // Reset TransactionOperation
@@ -3027,6 +3041,15 @@ void SplitFlushRangeOp::Reset(
     assert(archive_vec_.empty());
     assert(mv_base_vec_.empty());
     assert(new_range_info_.empty());
+    assert(previous_data_sync_vec_.empty());
+    assert(previous_archive_vec_.empty());
+    assert(previous_mv_base_vec_.empty());
+
+    previous_scan_ts_ = previous_scan_ts;
+    previous_data_sync_vec_ = std::move(previous_data_sync_vec);
+    previous_archive_vec_ = std::move(previous_archive_vec);
+    previous_mv_base_vec_ = std::move(previous_mv_base_vec);
+    scan_finished_ = false;
 
     new_range_info_ = std::move(new_range_info);
 
@@ -3142,6 +3165,15 @@ void SplitFlushRangeOp::ClearDataSyncVec()
     archive_vec_.shrink_to_fit();
     mv_base_vec_.clear();
     mv_base_vec_.shrink_to_fit();
+
+    previous_data_sync_vec_.clear();
+    previous_data_sync_vec_.shrink_to_fit();
+    previous_archive_vec_.clear();
+    previous_archive_vec_.shrink_to_fit();
+    previous_mv_base_vec_.clear();
+    previous_mv_base_vec_.shrink_to_fit();
+    old_delta_sizes_.clear();
+    scan_finished_ = false;
 }
 
 void SplitFlushRangeOp::ClearInfos()
@@ -3409,171 +3441,217 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
         data_sync_scan_op_.op_func_ =
-            [&table_name = table_name_,
+            [this,
+             &table_name = table_name_,
              table_schema = table_schema_,
              start_key = old_start_key_,
              end_key = old_end_key_,
+             previous_data_sync_vec = &previous_data_sync_vec_,
+             previous_archive_vec = &previous_archive_vec_,
+             previous_mv_base_vec = &previous_mv_base_vec_,
              data_sync_vec = &data_sync_vec_,
              archive_vec = &archive_vec_,
              mv_base_vec = &mv_base_vec_,
              node_group = node_group_,
              tx_term = txm->tx_term_,
+             previous_scan_ts = previous_scan_ts_,
              ckpt_ts = txm->commit_ts_,
              &local_cc_shards = txm->GetTxProcessor()->local_cc_shards_,
-             &hd_res = data_sync_scan_op_.hd_result_]
+             &hd_res = data_sync_scan_op_.hd_result_]() mutable
         {
             TxWorkerPool *tx_worker_pool =
                 Sharder::Instance().GetTxWorkerPool();
             tx_worker_pool->SubmitWork(
-                [table_name,
+                [this,
+                 table_name,
                  table_schema,
                  start_key,
                  end_key,
+                 previous_data_sync_vec,
+                 previous_archive_vec,
+                 previous_mv_base_vec,
                  data_sync_vec,
                  archive_vec,
                  mv_base_vec,
                  node_group,
                  tx_term,
+                 previous_scan_ts,
                  ckpt_ts,
                  &local_cc_shards,
-                 &hd_res]
+                 &hd_res]() mutable
                 {
-                    std::vector<std::vector<FlushRecord>> data_sync_vecs;
-                    std::vector<std::vector<FlushRecord>> archive_vecs;
-                    std::vector<std::vector<const TxKey *>> mv_base_vecs;
-
-                    std::vector<std::pair<TxKey::Uptr, bool>> resume_pos;
-
-                    for (size_t i = 0;
-                         i < Sharder::Instance().GetLocalCcShardsCount();
-                         i++)
+                    if (!scan_finished_)
                     {
-                        data_sync_vecs.emplace_back();
-                        archive_vecs.emplace_back();
-                        mv_base_vecs.emplace_back();
-                        resume_pos.emplace_back(nullptr, false);
-                    }
+                        std::vector<std::vector<FlushRecord>> data_sync_vecs;
+                        std::vector<std::vector<FlushRecord>> archive_vecs;
+                        std::vector<std::vector<const TxKey *>> mv_base_vecs;
 
-                    bool scan_data_drained = false;
-                    DataSyncScanCc scan_cc(
-                        table_name,
-                        ckpt_ts,
-                        node_group,
-                        tx_term,
-                        Sharder::Instance().GetLocalCcShardsCount(),
-                        std::move(resume_pos),
-                        LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
-                        start_key,
-                        end_key);
-                    while (!scan_data_drained)
-                    {
+                        std::vector<std::pair<TxKey::Uptr, bool>> resume_pos;
+
                         for (size_t i = 0;
                              i < Sharder::Instance().GetLocalCcShardsCount();
                              i++)
                         {
-                            local_cc_shards.EnqueueToCcShard(i, &scan_cc);
+                            data_sync_vecs.emplace_back();
+                            archive_vecs.emplace_back();
+                            mv_base_vecs.emplace_back();
+                            resume_pos.emplace_back(nullptr, false);
                         }
-                        scan_cc.Wait();
 
-                        if (scan_cc.IsError())
+                        bool scan_data_drained = false;
+                        // Note: `DataSyncScanCc` needs to ensure that no two
+                        // ckpt_rec with the same TxKey can be generated. Our
+                        // subsequent algorithms are based on this assumption.
+                        DataSyncScanCc scan_cc(
+                            table_name,
+                            previous_scan_ts,
+                            ckpt_ts,
+                            node_group,
+                            tx_term,
+                            Sharder::Instance().GetLocalCcShardsCount(),
+                            std::move(resume_pos),
+                            LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE,
+                            start_key,
+                            end_key);
+                        while (!scan_data_drained)
                         {
-                            LOG(INFO) << "DataSync scan failed on table "
-                                      << table_name.StringView();
-                            hd_res.SetError(scan_cc.ErrorCode());
-                            return;
-                        }
-                        else
-                        {
-                            auto &res = scan_cc.Result();
-                            scan_data_drained = true;
-
                             for (size_t i = 0;
                                  i <
                                  Sharder::Instance().GetLocalCcShardsCount();
                                  i++)
                             {
-                                size_t offset = data_sync_vecs[i].size();
-
-                                for (size_t j = 0;
-                                     j < scan_cc.accumulated_scan_cnt_[i];
-                                     ++j)
-                                {
-                                    auto &rec = scan_cc.DataSyncVec(i)[j];
-                                    // Clone key
-                                    data_sync_vecs[i].emplace_back(
-                                        rec.Key()->Clone(),
-                                        rec.GetPayload(),
-                                        rec.payload_status_,
-                                        rec.commit_ts_,
-                                        rec.cce_,
-                                        rec.delta_size_);
-                                }
-
-                                for (size_t j = 0;
-                                     j < scan_cc.ArchiveVec(i).size();
-                                     ++j)
-                                {
-                                    auto &rec = scan_cc.ArchiveVec(i)[j];
-                                    rec.SetKey(
-                                        data_sync_vecs[i][rec.GetKeyIndex() +
-                                                          offset]
-                                            .Key());
-                                }
-
-                                for (size_t j = 0;
-                                     j < scan_cc.MoveBaseIdxVec(i).size();
-                                     ++j)
-                                {
-                                    size_t key_idx =
-                                        scan_cc.MoveBaseIdxVec(i)[j];
-                                    const TxKey *key_raw_ptr =
-                                        data_sync_vecs[i][key_idx + offset]
-                                            .Key();
-                                    mv_base_vecs[i].push_back(key_raw_ptr);
-                                }
-
-                                // if the data is drained
-                                scan_data_drained =
-                                    res.at(i).second && scan_data_drained;
-                                // move the bucket into the tank
-
-                                std::move(
-                                    scan_cc.ArchiveVec(i).begin(),
-                                    scan_cc.ArchiveVec(i).end(),
-                                    std::back_inserter(archive_vecs.at(i)));
+                                local_cc_shards.EnqueueToCcShard(i, &scan_cc);
                             }
-                            scan_cc.Reset(std::move(res));
+                            scan_cc.Wait();
+
+                            if (scan_cc.IsError())
+                            {
+                                LOG(INFO) << "DataSync scan failed on table "
+                                          << table_name.StringView();
+                                hd_res.SetError(scan_cc.ErrorCode());
+                                return;
+                            }
+                            else
+                            {
+                                auto &res = scan_cc.Result();
+                                scan_data_drained = true;
+
+                                for (size_t i = 0;
+                                     i < Sharder::Instance()
+                                             .GetLocalCcShardsCount();
+                                     i++)
+                                {
+                                    size_t offset = data_sync_vecs[i].size();
+
+                                    for (size_t j = 0;
+                                         j < scan_cc.accumulated_scan_cnt_[i];
+                                         ++j)
+                                    {
+                                        auto &rec = scan_cc.DataSyncVec(i)[j];
+                                        // Clone key
+                                        data_sync_vecs[i].emplace_back(
+                                            rec.Key()->Clone(),
+                                            rec.GetPayload(),
+                                            rec.payload_status_,
+                                            rec.commit_ts_,
+                                            rec.cce_,
+                                            rec.delta_size_);
+                                    }
+
+                                    for (size_t j = 0;
+                                         j < scan_cc.ArchiveVec(i).size();
+                                         ++j)
+                                    {
+                                        auto &rec = scan_cc.ArchiveVec(i)[j];
+                                        rec.SetKey(
+                                            data_sync_vecs[i]
+                                                          [rec.GetKeyIndex() +
+                                                           offset]
+                                                              .Key());
+                                    }
+
+                                    for (size_t j = 0;
+                                         j < scan_cc.MoveBaseIdxVec(i).size();
+                                         ++j)
+                                    {
+                                        size_t key_idx =
+                                            scan_cc.MoveBaseIdxVec(i)[j];
+                                        const TxKey *key_raw_ptr =
+                                            data_sync_vecs[i][key_idx + offset]
+                                                .Key();
+                                        mv_base_vecs[i].push_back(key_raw_ptr);
+                                    }
+
+                                    // if the data is drained
+                                    scan_data_drained =
+                                        res.at(i).second && scan_data_drained;
+                                    // move the bucket into the tank
+
+                                    std::move(
+                                        scan_cc.ArchiveVec(i).begin(),
+                                        scan_cc.ArchiveVec(i).end(),
+                                        std::back_inserter(archive_vecs.at(i)));
+                                }
+                                scan_cc.Reset(std::move(res));
+                            }
                         }
+
+                        // Sort output vectors in key sorting order.
+                        auto key_greater = [](const TxKey *r1,
+                                              const TxKey *r2) -> bool
+                        { return *r2 < *r1; };
+
+                        auto rec_greater = [](const FlushRecord &r1,
+                                              const FlushRecord &r2) -> bool
+                        { return *r2.Key() < *r1.Key(); };
+
+                        // It's possible to have flush records with the same
+                        // TxKey but different commit_ts. One from previous data
+                        // scan, the other from current data scan. Note that
+                        // `new_archive_vec` has ownership of TxKey.
+                        assert(data_sync_vec->empty());
+                        std::vector<FlushRecord> new_archive_vec;
+                        bool enable_mvcc = local_cc_shards.EnableMvcc();
+                        MergeFlushRecord(std::move(*previous_data_sync_vec),
+                                         std::move(data_sync_vecs),
+                                         *data_sync_vec,
+                                         new_archive_vec,
+                                         old_delta_sizes_,
+                                         enable_mvcc);
+
+                        assert(mv_base_vec->empty());
+                        mv_base_vecs.push_back(
+                            std::move(*previous_mv_base_vec));
+                        // It's possible to have same TxKey, So we need to set
+                        // `dedup` flag.
+                        MergeSortedVectors(std::move(mv_base_vecs),
+                                           *mv_base_vec,
+                                           key_greater,
+                                           true);
+
+                        // For archive vec we don't need to worry about
+                        // duplicate causing issue since we're not visiting
+                        // their cc entry. Also we cannot rely on key compare to
+                        // dedup archive vec since a key could have multiple
+                        // version of archive versions.
+                        assert(archive_vec->empty());
+                        archive_vecs.push_back(
+                            std::move(*previous_archive_vec));
+                        archive_vecs.push_back(std::move(new_archive_vec));
+
+                        // Note: We can guarantee that the keys are ordered, but
+                        // we can't guarantee that the timestamps of the same
+                        // keys are ordered. We can compare timestamps if we
+                        // need to order them.
+                        MergeSortedVectors(std::move(archive_vecs),
+                                           *archive_vec,
+                                           rec_greater,
+                                           false);
+
+                        scan_finished_ = true;
                     }
 
-                    // Sort output vectors in key sorting order.
-                    auto key_greater = [](const TxKey *r1,
-                                          const TxKey *r2) -> bool
-                    { return *r2 < *r1; };
-                    MergeSortedVectors(std::move(mv_base_vecs),
-                                       *mv_base_vec,
-                                       key_greater,
-                                       true);
-                    auto rec_greater = [](const FlushRecord &r1,
-                                          const FlushRecord &r2) -> bool
-                    { return *r2.Key() < *r1.Key(); };
-                    // To avoid repeatedly set the ckpt_ts_ of a cc entry, which
-                    // might cause the ccentry become invalid in between, remove
-                    // duplicate flush record from ckpt_vec.
-                    MergeSortedVectors(std::move(data_sync_vecs),
-                                       *data_sync_vec,
-                                       rec_greater,
-                                       true);
-
-                    // For archive vec we don't need to worry about
-                    // duplicate causing issue since we're not visiting
-                    // their cc entry. Also we cannot rely on key compare to
-                    // dedup archive vec since a key could have multiple
-                    // version of archive versions.
-                    MergeSortedVectors(std::move(archive_vecs),
-                                       *archive_vec,
-                                       rec_greater,
-                                       false);
+                    assert(scan_finished_ == true);
 
                     auto lower_bound_cmp =
                         [](const FlushRecord &rec, const TxKey &key)
@@ -3603,12 +3681,56 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         int32_t slice_delta_size = 0;
                         uint32_t slice_size = 0;
 
-                        for (; batch_it != slice_end_it; ++batch_it)
+                        for (size_t offset = 0; batch_it != slice_end_it;
+                             ++batch_it, ++offset)
                         {
-                            slice_delta_size += batch_it->delta_size_;
+                            if (batch_it->commit_ts_ > previous_scan_ts)
+                            {
+                                assert(batch_it->commit_ts_ <= ckpt_ts);
+
+                                // There are two cases for delta_size of
+                                // FlushRecord caculation.
+                                auto iter = old_delta_sizes_.find(
+                                    slice_start_idx + offset);
+                                if (iter != old_delta_sizes_.end())
+                                {
+                                    // There are two data with the same key
+                                    // but different timestamp. We have updated
+                                    // RangeSlice with the previous scan data.
+                                    // So we need to ajust the delta_size.
+                                    // delta_size = (new_record->delta_size -
+                                    // old_record->delta_size).
+                                    slice_delta_size +=
+                                        (batch_it->delta_size_ - iter->second);
+                                }
+                                else
+                                {
+                                    slice_delta_size += batch_it->delta_size_;
+                                }
+                            }
+                            else
+                            {
+                                // We have updated RangeSlice with the previous
+                                // scan data. We don't need to update RangeSlice
+                                // again.
+
+                                // Double check the timestamp of cc_entry.
+                                assert(batch_it->commit_ts_ <=
+                                       previous_scan_ts);
+                            }
                         }
 
-                        int32_t sum = curr_slice->Size() + slice_delta_size;
+                        int32_t sum = curr_slice->Size();
+                        if (curr_slice->PostCkptSize() != UINT32_MAX)
+                        {
+                            // If the post_ckpt_size of slice isn't UINT32_MAX,
+                            // it means we have already updated the
+                            // post_ckpt_size with the data of previous scan.
+                            assert(previous_scan_ts != 0);
+                            sum = curr_slice->PostCkptSize();
+                        }
+
+                        sum += slice_delta_size;
                         slice_size = sum >= 0 ? sum : 0;
                         curr_slice->SetPostCkptSize(slice_size);
 
@@ -3648,15 +3770,28 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
             return;
         }
+
         if (data_sync_scan_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to scan for "
                           "data sync, tx number "
                        << txm->TxNumber();
-            ClearDataSyncVec();
+
+            // Errors are come from two places.
+            // 1. DataSyncScanCc. We don't need to clear previous_data_sync_vec.
+            // 2. UpdateSliceSpec. We don't need to clear any vector.
+            if (!scan_finished_)
+            {
+                // DataSyncScanCc was failed
+                data_sync_vec_.clear();
+                archive_vec_.clear();
+                mv_base_vec_.clear();
+            }
+
             RetrySubOperation(txm, &data_sync_scan_op_);
             return;
         }
+
         flush_op_.data_sync_ts_ = txm->commit_ts_;
         flush_op_.tx_term_ = txm->tx_term_;
 
@@ -4225,11 +4360,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             {
                 txm->bool_resp_->Finish(true);
             }
+
+            ClearInfos();
+            ClearDataSyncVec();
+
             txm->state_stack_.pop_back();
             Sharder::Instance().UnpinNodeGroupData(node_group_);
             assert(txm->state_stack_.empty());
-
-            ClearInfos();
 
             assert(this == txm->split_flush_op_.get());
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
@@ -4238,6 +4375,96 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             shards->split_flush_range_op_pool_.emplace_back(
                 std::move(txm->split_flush_op_));
             assert(txm->split_flush_op_ == nullptr);
+        }
+    }
+}
+
+void SplitFlushRangeOp::MergeFlushRecord(
+    std::vector<FlushRecord> &&additional_datas,
+    std::vector<std::vector<FlushRecord>> &&datas,
+    std::vector<FlushRecord> &output,
+    std::vector<FlushRecord> &new_archive_records,
+    std::unordered_map<size_t, int32_t> &old_delta_sizes,
+    bool enable_mvcc)
+{
+    std::vector<std::vector<FlushRecord>> vecs(std::move(datas));
+    vecs.push_back(std::move(additional_datas));
+    size_t additional_data_vec_idx = vecs.size() - 1;
+
+    auto greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
+    { return *r2.Key() < *r1.Key(); };
+
+    // We need to build a priority queue with pair elements. Each element
+    // will contain which subvec the element comes from and the actual value T.
+    // Build a new cmp function for the pair object with the passed in cmp.
+    auto greater_pair = [greater](std::pair<FlushRecord, size_t> &p1,
+                                  std::pair<FlushRecord, size_t> &p2) -> bool
+    { return greater(p1.first, p2.first); };
+    std::priority_queue<std::pair<FlushRecord, size_t>,
+                        std::vector<std::pair<FlushRecord, size_t>>,
+                        decltype(greater_pair)>
+        pq(greater_pair);
+
+    size_t total_size = 0;
+    // Record pos in each sub vec.
+    std::vector<size_t> idxs;
+    for (size_t i = 0; i < vecs.size(); ++i)
+    {
+        total_size += vecs.at(i).size();
+        idxs.push_back(1);
+        if (!vecs.at(i).empty())
+        {
+            pq.emplace(std::move(vecs.at(i).front()), i);
+        }
+    }
+    output.reserve(total_size);
+    while (pq.size())
+    {
+        // Move the top object to output vec before popping it.
+        const auto &top = pq.top();
+        if (output.empty() || greater(output.back(), top.first) ||
+            greater(top.first, output.back()))
+        {
+            // We don't need to ajust the delta size of flush record.
+            output.push_back(std::move(const_cast<FlushRecord &>(top.first)));
+        }
+        else
+        {
+            size_t vecs_idx = top.second;
+            if (vecs_idx != additional_data_vec_idx)
+            {
+                FlushRecord &additional_rec = output.back();
+                auto &new_flush_rec = const_cast<FlushRecord &>(top.first);
+                old_delta_sizes[output.size() - 1] = additional_rec.delta_size_;
+                if (enable_mvcc)
+                {
+                    new_archive_records.push_back(std::move(additional_rec));
+                }
+                output.pop_back();
+                output.push_back(std::move(new_flush_rec));
+            }
+            else
+            {
+                FlushRecord &additional_rec =
+                    const_cast<FlushRecord &>(top.first);
+                old_delta_sizes[output.size() - 1] = additional_rec.delta_size_;
+
+                if (enable_mvcc)
+                {
+                    new_archive_records.push_back(std::move(additional_rec));
+                }
+            }
+        }
+
+        size_t grp = top.second;
+        pq.pop();
+        // Add the next object from the same sub vec if it has not
+        // reached the end.
+        if (idxs.at(grp) < vecs.at(grp).size())
+        {
+            FlushRecord &next = vecs.at(grp).at(idxs.at(grp));
+            pq.emplace(std::move(next), grp);
+            idxs.at(grp)++;
         }
     }
 }

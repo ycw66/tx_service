@@ -738,17 +738,12 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
     std::vector<FlushRecord>::const_iterator range_end_it,
     const std::vector<FlushRecord> &flush_vec)
 {
-    auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
-    { return *rec.Key() < key; };
-
     std::vector<const TxKey *> new_range_keys;
     uint32_t slice_idx = 0;
     uint32_t subrange_slice_idx = 0;
     size_t subrange_cnt =
         std::ceil(post_ckpt_size / (StoreRange::range_max_size * 0.7));
     size_t avg_subrange_size = post_ckpt_size / subrange_cnt;
-    auto slice_it = range_start_it;
-    auto slice_end_it = range_start_it;
 
     while (slice_idx < slices_.size())
     {
@@ -766,64 +761,6 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                 curr_subrange_size += slices_.at(slice_idx)->Size();
             }
         }
-
-        // This should be the last slice in the previous range. Check if
-        // the slice needs to be splitted, if so, split it here. This is
-        // to avoid a single hot slice being very big and putting it
-        // into the previous range will cause the range go way beyond
-        // range max limit.
-        if (slices_.at(slice_idx - 1)->PostCkptSize() != UINT32_MAX &&
-            slices_.at(slice_idx - 1)->PostCkptSize() >
-                StoreSlice::slice_upper_bound)
-        {
-            // New slice_it will be between last slice_end_it and
-            // range_end_it.
-            slice_it =
-                slices_.at(slice_idx - 1)->StartKey() == nullptr
-                    ? range_start_it
-                    : std::lower_bound(range_start_it,
-                                       range_end_it,
-                                       *slices_.at(slice_idx - 1)->StartKey(),
-                                       lower_bound_cmp);
-
-            // New slice_end_it will be between current slice_it and
-            // range_end_it.
-            slice_end_it =
-                slices_.at(slice_idx - 1)->EndKey() == nullptr
-                    ? range_end_it
-                    : std::lower_bound(slice_it,
-                                       range_end_it,
-                                       *slices_.at(slice_idx - 1)->EndKey(),
-                                       lower_bound_cmp);
-            curr_subrange_size -= slices_.at(slice_idx - 1)->PostCkptSize();
-            UpdateSliceSpec(slices_.at(slice_idx - 1).get(),
-                            table_name,
-                            schema,
-                            ng_id,
-                            ng_term,
-                            flush_ts,
-                            flush_vec,
-                            std::distance(flush_vec.begin(), slice_it),
-                            std::distance(flush_vec.begin(), slice_end_it),
-                            true);
-
-            // Now that the slice has been splitted, find the new slice
-            // that will be the first slice in the new subrange.
-            for (; curr_subrange_size < avg_subrange_size &&
-                   slice_idx < slices_.size();
-                 slice_idx++)
-            {
-                if (slices_.at(slice_idx)->PostCkptSize() != UINT32_MAX)
-                {
-                    curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
-                }
-                else
-                {
-                    curr_subrange_size += slices_.at(slice_idx)->Size();
-                }
-            }
-        }
-
         // Skip the first subrange since it will reuse the
         // current range entry
         if (subrange_slice_idx != 0)

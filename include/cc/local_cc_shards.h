@@ -908,24 +908,30 @@ private:
         NodeGroupId node_group,
         bool is_dirty,
         std::pair<const StoreRange *, std::vector<const TxKey *>> split_info,
-        std::shared_ptr<DataSyncTask> data_sync_task);
+        std::shared_ptr<DataSyncTask> data_sync_task,
+        std::vector<FlushRecord> &&previous_data_sync_vec,
+        std::vector<FlushRecord> &&previous_archive_vec,
+        std::vector<const TxKey *> &&previous_mv_base_vec);
 
     /**
-     * @brief Given a vector of checkpoint records and splitting ranges, moves
-     * the checkpoint records not in the splitting ranges into a new vector.
+     * @brief Given a vector of checkpoint records and splitting range, moves
+     * the checkpoint records not in the splitting range into a new vector.
      *
      * @param flush_vec A vector of checkpoint records
      * @param non_split_vec The new vector for checkpoint records not falling
-     * into splitting ranges
-     * @param split_ranges Ranges to be split
+     * into splitting range
+     * @param vec_idx The next element index to be proccessed
+     * @param split_range_key The key of the Range to be split
      * @param lower_bound_cmp comapre func of type T and const TxKey *
+     * @return The new vector for checkpoint records falling
+     * into splitting range
      */
     template <typename T, class Compare>
-    void MoveNonSplittingRecords(
+    std::vector<T> MoveNonSplittingRecords(
         std::vector<T> &flush_vec,
         std::vector<T> &non_split_vec,
-        const std::vector<std::pair<const TxKey *, const TxKey *>>
-            &split_ranges,
+        size_t &vec_idx,
+        std::pair<const TxKey *, const TxKey *> split_range_key,
         Compare lower_bound_cmp);
 
     struct UpdateSliceSpecWork

@@ -2239,9 +2239,10 @@ public:
     // todo: limit scan by scanned size
     static constexpr size_t DataSyncScanBatchSize = 128;
 
-    DataSyncScanCc() = default;
+    DataSyncScanCc() = delete;
 
     DataSyncScanCc(const TableName &table_name,
+                   uint64_t previous_scan_ts,
                    uint64_t data_sync_ts,
                    uint64_t node_group_id,
                    int64_t node_group_term,
@@ -2254,6 +2255,7 @@ public:
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
+          previous_scan_ts_(previous_scan_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
@@ -2400,6 +2402,7 @@ private:
     uint32_t node_group_id_;
     int64_t node_group_term_;
     uint16_t core_cnt_;
+    uint64_t previous_scan_ts_;
     uint64_t data_sync_ts_;
     std::vector<std::vector<FlushRecord>> data_sync_vec_;
     std::vector<std::vector<FlushRecord>> archive_vec_;

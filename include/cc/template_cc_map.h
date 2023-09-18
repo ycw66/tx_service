@@ -3,6 +3,7 @@
 #include <algorithm>  // std::max
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <string>
@@ -4530,6 +4531,7 @@ public:
                                    req.DataSyncVec(shard_->core_id_),
                                    req.ArchiveVec(shard_->core_id_),
                                    req.MoveBaseIdxVec(shard_->core_id_),
+                                   req.previous_scan_ts_,
                                    req.data_sync_ts_,
                                    recycle_ts,
                                    Type(),
@@ -4539,12 +4541,19 @@ public:
             scan_cnt++;
         }
 
+        TxKey::Uptr next_pause_key = nullptr;
+        bool no_more_data = (it == end_it);
+        if (!no_more_data)
+        {
+            next_pause_key = it->first->Clone();
+        }
+
         for (LruEntry *cce : remove_entries)
         {
             Clean(cce);
         }
 
-        if (it == end_it)
+        if (no_more_data)
         {
             // scan data drained
             std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
@@ -4558,14 +4567,15 @@ public:
             if (req.accumulated_scan_cnt_.at(shard_->core_id_) <
                 req.scan_batch_size_)
             {
-                req.pause_key_.at(shard_->core_id_).first = it->first->Clone();
+                req.pause_key_.at(shard_->core_id_).first =
+                    std::move(next_pause_key);
                 shard_->Enqueue(&req);
             }
             else
             {
                 // scan data is not drained
                 std::pair<TxKey::Uptr, bool> ckpt_scan_result{
-                    it->first->Clone(), false};
+                    std::move(next_pause_key), false};
                 req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
                 return false;
             }
@@ -4983,6 +4993,7 @@ public:
                                        tmp_ckpt_vec,
                                        tmp_akv_vec,
                                        tmp_mv_base_idx_vec,
+                                       0,
                                        cce->commit_ts_,
                                        1U,
                                        Type(),

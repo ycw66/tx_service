@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -788,6 +789,10 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
         const TxKey *old_end_key,
         const RangeInfo *old_range_info,
         std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+        uint64_t previous_scan_ts,
+        std::vector<FlushRecord> &&previous_data_sync_vec,
+        std::vector<FlushRecord> &&previous_archive_vec,
+        std::vector<const TxKey *> &&previous_mv_base_vec,
         TransactionExecution *txm);
 
     void Reset(const TableName &table_name,
@@ -797,6 +802,10 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
                const TxKey *old_end_key,
                const RangeInfo *old_range_info,
                std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+               uint64_t previous_scan_ts,
+               std::vector<FlushRecord> &&previous_data_sync_vec,
+               std::vector<FlushRecord> &&previous_archive_vec,
+               std::vector<const TxKey *> &&previous_mv_base_vec,
                TransactionExecution *txm);
 
     void Forward(TransactionExecution *txm) override;
@@ -826,6 +835,13 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::vector<FlushRecord> data_sync_vec_;
     std::vector<FlushRecord> archive_vec_;
     std::vector<const TxKey *> mv_base_vec_;
+
+    uint64_t previous_scan_ts_{0};
+    std::vector<FlushRecord> previous_data_sync_vec_;
+    std::vector<FlushRecord> previous_archive_vec_;
+    std::vector<const TxKey *> previous_mv_base_vec_;
+    bool scan_finished_{false};
+    std::unordered_map<size_t, int32_t> old_delta_sizes_;
 
     std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
         kickout_data_it_;
@@ -927,6 +943,18 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     WriteToLogOp clean_log_op_;
 
 private:
+    /**
+     * Merge multi sorted ascending vectors into a single one. Remove the data
+     * from previous_datas. Note that We need to make sure the element of input
+     * vector has not duplication.
+     */
+    void MergeFlushRecord(std::vector<FlushRecord> &&previous_datas,
+                          std::vector<std::vector<FlushRecord>> &&datas,
+                          std::vector<FlushRecord> &output,
+                          std::vector<FlushRecord> &new_archive_records,
+                          std::unordered_map<size_t, int32_t> &old_delta_sizes,
+                          bool enable_mvcc);
+
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void FillCleanLogRequest(TransactionExecution *txm);

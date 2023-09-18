@@ -1842,7 +1842,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
 
     bool scan_data_drained = false;
+    // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
+    // same Key can be generated. Our subsequent algorithms are based on this
+    // assumption.
     DataSyncScanCc scan_cc(table_name,
+                           0,
                            target_data_sync_ts,
                            ng_id,
                            ng_term,
@@ -1933,15 +1937,17 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // Sort output vectors in key sorting order.
     auto key_greater = [](const TxKey *r1, const TxKey *r2) -> bool
     { return *r2 < *r1; };
-    MergeSortedVectors(
-        std::move(mv_base_vecs), *mv_base_vec, key_greater, true);
     auto rec_greater = [](const FlushRecord &r1, const FlushRecord &r2) -> bool
     { return *r2.Key() < *r1.Key(); };
-    // To avoid repeatedly set the ckpt_ts_ of a cc entry, which might
-    // cause the ccentry become invalid in between, remove duplicate
-    // flush record from ckpt_vec.
+
     MergeSortedVectors(
-        std::move(data_sync_vecs), *data_sync_vec, rec_greater, true);
+        std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
+
+    // Set the ckpt_ts_ of a cc entry repeatedly, which might cause the ccentry
+    // become invalid in between. But, there should be no duplication here. we
+    // don't need to remove duplicate record.
+    MergeSortedVectors(
+        std::move(data_sync_vecs), *data_sync_vec, rec_greater, false);
 
     // For archive vec we don't need to worry about duplicate causing
     // issue since we're not visiting their cc entry. Also we cannot
@@ -1962,8 +1968,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 #ifdef RANGE_PARTITION_ENABLED
     // 4.1 For range partition, execute range split if necessary using
     // seperate thread per range.
-    std::vector<std::pair<const TxKey *, const TxKey *>> split_ranges;
     size_t batch_idx = 0;
+    size_t data_sync_vec_idx = 0;
+    size_t archive_vec_idx = 0;
+    size_t mv_base_vec_idx = 0;
+    auto new_mv_base_vec = std::make_unique<std::vector<const TxKey *>>();
+    auto new_data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
+    auto new_archive_vec = std::make_unique<std::vector<FlushRecord>>();
+
     while (batch_idx < data_sync_vec->size())
     {
         std::pair<const StoreRange *, std::vector<const TxKey *>> split_pair;
@@ -2006,60 +2018,88 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         if (split_pair.first != nullptr)
         {
             const StoreRange *split_range = split_pair.first;
-            split_ranges.emplace_back(split_range->RangeStartKey(),
-                                      split_range->RangeEndKey());
 
-            // Create a new thread to execute range split.
+            auto key_lower_bound_cmp = [](const TxKey *key1, const TxKey &key2)
+            { return *key1 < key2; };
+
+            auto range_mv_base_vec = MoveNonSplittingRecords(
+                *mv_base_vec,
+                *new_mv_base_vec,
+                mv_base_vec_idx,
+                {split_range->RangeStartKey(), split_range->RangeEndKey()},
+                key_lower_bound_cmp);
+
+            auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
+            { return *rec.Key() < key; };
+
+            auto range_archive_vec = MoveNonSplittingRecords(
+                *archive_vec,
+                *new_archive_vec,
+                archive_vec_idx,
+                {split_range->RangeStartKey(), split_range->RangeEndKey()},
+                lower_bound_cmp);
+
+            auto range_data_sync_vec = MoveNonSplittingRecords(
+                *data_sync_vec,
+                *new_data_sync_vec,
+                data_sync_vec_idx,
+                {split_range->RangeStartKey(), split_range->RangeEndKey()},
+                lower_bound_cmp);
+
             data_sync_task->unfinished_worker_.fetch_add(
                 1, std::memory_order_relaxed);
+
             auto range_split_worker = std::thread(
                 [this,
                  &table_name,
                  split_info = std::move(split_pair),
                  &ng_id,
                  is_dirty,
-                 data_sync_task] {
+                 data_sync_task,
+                 previous_data_sync_vec = std::move(range_data_sync_vec),
+                 previous_archive_vec = std::move(range_archive_vec),
+                 previous_mv_base_vec = std::move(range_mv_base_vec)]() mutable
+                {
                     SplitFlushRange(table_name,
                                     ng_id,
                                     is_dirty,
                                     split_info,
-                                    data_sync_task);
+                                    data_sync_task,
+                                    std::move(previous_data_sync_vec),
+                                    std::move(previous_archive_vec),
+                                    std::move(previous_mv_base_vec));
                 });
             range_split_worker.detach();
         }
     }
 
-    if (!split_ranges.empty())
-    {
-        // Remove the records that are in the splitting ranges.
-        // They will  be handled by the splitting  worker.
+    assert(data_sync_vec_idx <= data_sync_vec->size());
+    assert(archive_vec_idx <= archive_vec->size());
+    assert(mv_base_vec_idx <= mv_base_vec->size());
 
-        // Remove mv base vec first since it contains raw pointers
-        // to the records in ckpt_vec and archive_vec
-        auto key_lower_bound_cmp = [](const TxKey *key1, const TxKey &key2)
-        { return *key1 < key2; };
-        std::unique_ptr<std::vector<const TxKey *>> flush_mv_base_vec =
-            std::make_unique<std::vector<const TxKey *>>();
-        MoveNonSplittingRecords(*mv_base_vec,
-                                *flush_mv_base_vec,
-                                split_ranges,
-                                key_lower_bound_cmp);
-        mv_base_vec = std::move(flush_mv_base_vec);
+    new_data_sync_vec->reserve(new_data_sync_vec->size() +
+                               (data_sync_vec->size() - data_sync_vec_idx));
+    new_archive_vec->reserve(new_archive_vec->size() +
+                             (archive_vec->size() - archive_vec_idx));
+    new_mv_base_vec->reserve(new_mv_base_vec->size() +
+                             (mv_base_vec->size() - mv_base_vec_idx));
 
-        auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
-        { return *rec.Key() < key; };
-        std::unique_ptr<std::vector<FlushRecord>> flush_ckpt_vec =
-            std::make_unique<std::vector<FlushRecord>>();
-        MoveNonSplittingRecords(
-            *data_sync_vec, *flush_ckpt_vec, split_ranges, lower_bound_cmp);
-        data_sync_vec = std::move(flush_ckpt_vec);
+    std::move(data_sync_vec->begin() + data_sync_vec_idx,
+              data_sync_vec->end(),
+              std::back_inserter(*new_data_sync_vec));
 
-        std::unique_ptr<std::vector<FlushRecord>> flush_archive_vec =
-            std::make_unique<std::vector<FlushRecord>>();
-        MoveNonSplittingRecords(
-            *archive_vec, *flush_archive_vec, split_ranges, lower_bound_cmp);
-        archive_vec = std::move(flush_archive_vec);
-    }
+    std::move(archive_vec->begin() + archive_vec_idx,
+              archive_vec->end(),
+              std::back_inserter(*new_archive_vec));
+
+    std::move(mv_base_vec->begin() + mv_base_vec_idx,
+              mv_base_vec->end(),
+              std::back_inserter(*new_mv_base_vec));
+
+    data_sync_vec = std::move(new_data_sync_vec);
+    archive_vec = std::move(new_archive_vec);
+    mv_base_vec = std::move(new_mv_base_vec);
+
 #endif
 
     // 4.2 Flush records into data store if the range in which the records
@@ -2249,34 +2289,81 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                                                    *curr_range->RangeEndKey(),
                                                    lower_bound_cmp);
 
-        while (batch_it != range_end_it)
+        batch_idx = std::distance(flush_batch.begin(), range_end_it);
+
+        // Range does not need to be splitted, to through the slices and
+        // update their specs if necessary.
+        auto range_batch_it = range_start_it;
+        size_t slice_start_idx =
+            std::distance(flush_batch.begin(), range_start_it);
+        while (range_batch_it != range_end_it)
         {
-            const TxKey &slice_start_key = *batch_it->Key();
+            const TxKey &slice_start_key = *range_batch_it->Key();
             StoreSlice *curr_slice = curr_range->FindSlice(slice_start_key);
 
             auto slice_end_it =
                 curr_slice->EndKey() == curr_range->RangeEndKey()
                     ? range_end_it
-                    : std::lower_bound(batch_it,
+                    : std::lower_bound(range_batch_it,
                                        range_end_it,
                                        *curr_slice->EndKey(),
                                        lower_bound_cmp);
 
+            size_t slice_end_idx =
+                std::distance(flush_batch.begin(), slice_end_it);
             int32_t slice_delta_size = 0;
             uint32_t slice_size = 0;
 
-            for (; batch_it != slice_end_it; ++batch_it)
+            for (; range_batch_it != slice_end_it; ++range_batch_it)
             {
-                slice_delta_size += batch_it->delta_size_;
+                slice_delta_size += range_batch_it->delta_size_;
             }
 
             int32_t sum = curr_slice->Size() + slice_delta_size;
             slice_size = sum >= 0 ? sum : 0;
             curr_slice->SetPostCkptSize(slice_size);
-            batch_it = slice_end_it;
+            if (slice_size > StoreSlice::slice_upper_bound)
+            {
+                // Since update slice specs might need loading from
+                // data store, hand it off to the worker and move on
+                // to the next slice.
+                slice_load_cnt++;
+                {
+                    std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
+                    pending_slice_work_.emplace_back(node_group_id,
+                                                     node_group_term,
+                                                     data_sync_ts,
+                                                     table_name,
+                                                     schema,
+                                                     flush_batch,
+                                                     curr_range,
+                                                     curr_slice,
+                                                     slice_start_idx,
+                                                     slice_end_idx,
+                                                     work_sender_mux,
+                                                     work_sender_cv,
+                                                     slice_update_done,
+                                                     fail);
+                    slice_update_cv_.notify_one();
+                }
+            }
+            range_batch_it = slice_end_it;
+            slice_start_idx = slice_end_idx;
         }
 
-        batch_idx = std::distance(flush_batch.begin(), range_end_it);
+        {
+            // Wait for all slice specs in this range are updated before moving
+            // on to the next range.
+            std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
+            work_sender_cv.wait(work_sender_lk,
+                                [&slice_update_done, &slice_load_cnt] {
+                                    return slice_load_cnt == slice_update_done;
+                                });
+            if (fail)
+            {
+                return false;
+            }
+        }
 
         size_t post_ckpt_size = curr_range->PostCkptSize();
         if (post_ckpt_size > StoreRange::range_max_size)
@@ -2301,83 +2388,6 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                 return true;
             }
         }
-        else
-        {
-            // Range does not need to be splitted, to through the slices and
-            // update their specs if necessary.
-            auto range_batch_it = range_start_it;
-            size_t slice_start_idx =
-                std::distance(flush_batch.begin(), range_start_it);
-            while (range_batch_it != range_end_it)
-            {
-                const TxKey &slice_start_key = *range_batch_it->Key();
-                StoreSlice *curr_slice = curr_range->FindSlice(slice_start_key);
-
-                auto slice_end_it =
-                    curr_slice->EndKey() == curr_range->RangeEndKey()
-                        ? range_end_it
-                        : std::lower_bound(range_batch_it,
-                                           range_end_it,
-                                           *curr_slice->EndKey(),
-                                           lower_bound_cmp);
-
-                size_t slice_end_idx =
-                    std::distance(flush_batch.begin(), slice_end_it);
-                int32_t slice_delta_size = 0;
-                uint32_t slice_size = 0;
-
-                for (; range_batch_it != slice_end_it; ++range_batch_it)
-                {
-                    slice_delta_size += range_batch_it->delta_size_;
-                }
-
-                int32_t sum = curr_slice->Size() + slice_delta_size;
-                slice_size = sum >= 0 ? sum : 0;
-                curr_slice->SetPostCkptSize(slice_size);
-                if (slice_size > StoreSlice::slice_upper_bound)
-                {
-                    // Since update slice specs might need loading from
-                    // data store, hand it off to the worker and move on
-                    // to the next slice.
-                    slice_load_cnt++;
-                    {
-                        std::unique_lock<std::mutex> worker_lk(
-                            slice_update_mux_);
-                        pending_slice_work_.emplace_back(node_group_id,
-                                                         node_group_term,
-                                                         data_sync_ts,
-                                                         table_name,
-                                                         schema,
-                                                         flush_batch,
-                                                         curr_range,
-                                                         curr_slice,
-                                                         slice_start_idx,
-                                                         slice_end_idx,
-                                                         work_sender_mux,
-                                                         work_sender_cv,
-                                                         slice_update_done,
-                                                         fail);
-                        slice_update_cv_.notify_one();
-                    }
-                }
-                range_batch_it = slice_end_it;
-                slice_start_idx = slice_end_idx;
-            }
-        }
-
-        {
-            // Wait for all slice specs in this range are updated before moving
-            // on to the next range.
-            std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
-            work_sender_cv.wait(work_sender_lk,
-                                [&slice_update_done, &slice_load_cnt] {
-                                    return slice_load_cnt == slice_update_done;
-                                });
-            if (fail)
-            {
-                return false;
-            }
-        }
 
         slice_load_cnt = 0;
         slice_update_done = 0;
@@ -2387,44 +2397,46 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
 }
 
 template <typename T, class Compare>
-void LocalCcShards::MoveNonSplittingRecords(
+std::vector<T> LocalCcShards::MoveNonSplittingRecords(
     std::vector<T> &flush_vec,
     std::vector<T> &non_split_vec,
-    const std::vector<std::pair<const TxKey *, const TxKey *>> &split_ranges,
+    size_t &flush_vec_idx,
+    std::pair<const TxKey *, const TxKey *> split_range_key,
     Compare lower_bound_cmp)
 {
-    auto flush_vec_it = flush_vec.begin();
+    std::vector<T> split_vec;
+    auto flush_vec_it = flush_vec.begin() + flush_vec_idx;
+    const TxKey *start_key = split_range_key.first;
+    const TxKey *end_key = split_range_key.second;
 
-    for (const auto &[start_key, end_key] : split_ranges)
-    {
-        // The inclusive start of the splitting range is the
-        // exclusive end of the gap preceding of the splitting
-        // range.
-        auto range_start_it = std::lower_bound(
-            flush_vec_it, flush_vec.end(), *start_key, lower_bound_cmp);
-
-        size_t copy_size = std::distance(flush_vec_it, range_start_it);
-        non_split_vec.reserve(non_split_vec.size() + copy_size);
-
-        // Moves the records in the gap preceding the splitting
-        // range.
-        std::move(
-            flush_vec_it, range_start_it, std::back_inserter(non_split_vec));
-
-        // Jumps to the exclusive end of the splitting range, which
-        // is the inclusive start of the gap succeeding the
-        // splitting range.
-        flush_vec_it = end_key == nullptr ? flush_vec.end()
-                                          : std::lower_bound(range_start_it,
-                                                             flush_vec.end(),
-                                                             *end_key,
-                                                             lower_bound_cmp);
-    }
-    // Moves the records in the gap succeeding the last splitting
+    // The inclusive start of the splitting range is the
+    // exclusive end of the gap preceding of the splitting
     // range.
-    size_t copy_size = std::distance(flush_vec_it, flush_vec.end());
+    auto range_start_it = std::lower_bound(
+        flush_vec_it, flush_vec.end(), *start_key, lower_bound_cmp);
+
+    size_t copy_size = std::distance(flush_vec_it, range_start_it);
     non_split_vec.reserve(non_split_vec.size() + copy_size);
-    std::move(flush_vec_it, flush_vec.end(), std::back_inserter(non_split_vec));
+    flush_vec_idx += copy_size;
+
+    // Moves the records in the gap preceding the splitting
+    // range.
+    std::move(flush_vec_it, range_start_it, std::back_inserter(non_split_vec));
+
+    // Jumps to the exclusive end of the splitting range, which
+    // is the inclusive start of the gap succeeding the
+    // splitting range.
+    flush_vec_it =
+        end_key == nullptr
+            ? flush_vec.end()
+            : std::lower_bound(
+                  range_start_it, flush_vec.end(), *end_key, lower_bound_cmp);
+
+    copy_size = std::distance(range_start_it, flush_vec_it);
+    split_vec.reserve(copy_size);
+    std::move(range_start_it, flush_vec_it, std::back_inserter(split_vec));
+    flush_vec_idx += copy_size;
+    return split_vec;
 }
 
 void LocalCcShards::SplitFlushRange(
@@ -2432,7 +2444,10 @@ void LocalCcShards::SplitFlushRange(
     NodeGroupId node_group,
     bool is_dirty,
     std::pair<const StoreRange *, std::vector<const TxKey *>> split_info,
-    std::shared_ptr<DataSyncTask> data_sync_task)
+    std::shared_ptr<DataSyncTask> data_sync_task,
+    std::vector<FlushRecord> &&previous_data_sync_vec,
+    std::vector<FlushRecord> &&previous_archive_vec,
+    std::vector<const TxKey *> &&previous_mv_base_vec)
 {
     std::string log_output(
         "Splitting table " + table_name.String() + " range " +
@@ -2470,7 +2485,7 @@ void LocalCcShards::SplitFlushRange(
             return;
         }
         log_output.append(std::to_string(new_part_id) + ",");
-        new_range_ids.emplace_back(std::move(new_key->Clone()), new_part_id);
+        new_range_ids.emplace_back(new_key->Clone(), new_part_id);
     }
     // Issue read catalog tx_request to acquire read lock on catalog
     // cc_entry using base table name, and acquire read lock in one
@@ -2598,7 +2613,11 @@ void LocalCcShards::SplitFlushRange(
                                   old_start_key,
                                   old_end_key,
                                   entry->GetRangeInfo(),
-                                  std::move(new_range_ids));
+                                  std::move(new_range_ids),
+                                  data_sync_task->data_sync_ts_,
+                                  std::move(previous_data_sync_vec),
+                                  std::move(previous_archive_vec),
+                                  std::move(previous_mv_base_vec));
     split_txm->Execute(&split_req);
     split_req.Wait();
     if (split_req.IsError() || !split_req.Result())

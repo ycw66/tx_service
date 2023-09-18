@@ -565,7 +565,11 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
         const TxKey *old_start_key,
         const TxKey *old_end_key,
         const RangeInfo *old_info,
-        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info)
+        std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
+        uint64_t previous_scan_ts,
+        std::vector<FlushRecord> &&previous_data_sync_vec,
+        std::vector<FlushRecord> &&previous_archive_vec,
+        std::vector<const TxKey *> &&previous_mv_base_vec)
         : TemplateTxRequest(nullptr, nullptr, nullptr),
           table_name_(&table_name),
           schema_(schema),
@@ -573,7 +577,11 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
           old_start_key_(old_start_key),
           old_end_key_(old_end_key),
           old_range_info_(old_info),
-          new_range_info_(std::move(new_range_info))
+          new_range_info_(std::move(new_range_info)),
+          previous_scan_ts_(previous_scan_ts),
+          previous_data_sync_vec_(std::move(previous_data_sync_vec)),
+          previous_archive_vec_(std::move(previous_archive_vec)),
+          previous_mv_base_vec_(std::move(previous_mv_base_vec))
     {
     }
     const TableName *table_name_{nullptr};
@@ -583,6 +591,10 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     const TxKey *old_end_key_{nullptr};
     const RangeInfo *old_range_info_{nullptr};
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
+    uint64_t previous_scan_ts_;
+    std::vector<FlushRecord> previous_data_sync_vec_;
+    std::vector<FlushRecord> previous_archive_vec_;
+    std::vector<const TxKey *> previous_mv_base_vec_;
 };
 
 struct AnalyzeTableTxRequest
