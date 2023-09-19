@@ -3339,12 +3339,13 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
             rec_vec_it.first->second.emplace_back(&wset_entry);
 
-            if (wset_entry.forward_key_shard_code_ != UINT32_MAX)
+            for (uint32_t forward_shard_code :
+                 wset_entry.forward_key_shard_code_)
             {
                 // If the wset entry needs to be double written into different
                 // ngs, write log for both ngs.
-                uint32_t forward_ng_id = Sharder::Instance().ShardToCcNodeGroup(
-                    wset_entry.forward_key_shard_code_);
+                uint32_t forward_ng_id =
+                    Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
                 auto table_rec_it = ng_table_rec_set.try_emplace(forward_ng_id);
                 std::unordered_map<TableName,
                                    std::vector<const WriteSetEntry *>>
@@ -3813,7 +3814,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                        write_entry.op_,
                                        write_entry.key_shard_code_,
                                        post_process.hd_result_);
-                if (write_entry.forward_key_shard_code_ != UINT32_MAX)
+                for (uint32_t forward_code :
+                     write_entry.forward_key_shard_code_)
                 {
                     cc_handler_->ForwardPostWrite(
                         tx_number_.load(std::memory_order_relaxed),
@@ -3824,7 +3826,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                         key,
                         write_entry.rec_.get(),
                         write_entry.op_,
-                        write_entry.forward_key_shard_code_,
+                        forward_code,
                         post_process.hd_result_);
                 }
                 ++idx;

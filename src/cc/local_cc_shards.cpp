@@ -544,7 +544,9 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             read_req.Wait();
             // Only case we fail here is that leader gone before replay
             // finished.
-            bool lock_meta_failed = read_req.IsError();
+            bool lock_meta_failed =
+                read_req.IsError() ||
+                read_req.Result().first != RecordStatus::Normal;
 
             if (!lock_meta_failed)
             {
@@ -563,7 +565,31 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                              true);
                 txm->Execute(&read_req);
                 read_req.Wait();
-                lock_meta_failed = read_req.IsError();
+                lock_meta_failed =
+                    read_req.IsError() ||
+                    read_req.Result().first != RecordStatus::Normal;
+            }
+
+            if (!lock_meta_failed)
+            {
+                RangeBucketRecord bucket_rec;
+                RangeBucketKey bucket_key(
+                    Sharder::Instance().MapRangeIdToBucketId(partition_id));
+                read_req.Reset();
+                read_req.Set(&range_bucket_ccm_name,
+                             &bucket_key,
+                             &bucket_rec,
+                             false,
+                             false,
+                             true,
+                             0,
+                             false,
+                             true);
+                txm->Execute(&read_req);
+                read_req.Wait();
+                lock_meta_failed =
+                    read_req.IsError() ||
+                    read_req.Result().first != RecordStatus::Normal;
             }
             if (lock_meta_failed)
             {
@@ -1906,13 +1932,45 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         return;
     }
 
-    // Now that we have acquired read lock on catalog, there won't be any ddl on
-    // this table. Update store_range here since if table_name is an index it
-    // might be dropped before we acquired read lock on its catalog. After
-    // acquiring read lock on catalog on range, we know for sure that the store
-    // range will be valid until the data sync tx commits.
-    // TODO{liunyl}: need to add read lock on range to make sure it's not
-    // migrated away during data sync.
+    // Lock bucket so that bucket cannot be migrated away during data sync.
+    RangeBucketRecord bucket_rec;
+    RangeBucketKey bucket_key(
+        Sharder::Instance().MapRangeIdToBucketId(range_id));
+    read_req.Reset();
+    read_req.Set(
+        &range_bucket_ccm_name, &bucket_key, &bucket_rec, false, false, true);
+    data_sync_txm->Execute(&read_req);
+    read_req.Wait();
+
+    if (read_req.IsError())
+    {
+        // Use AbortTxRequest to release read lock.
+        LOG(ERROR) << "DataSync add read lock on bucket failed, "
+                      "bucket id: "
+                   << Sharder::Instance().MapRangeIdToBucketId(range_id);
+
+        AbortTxRequest abort_req;
+        abort_req.Reset();
+        data_sync_txm->Execute(&abort_req);
+        abort_req.Wait();
+        assert(abort_req.Result() == false);
+        // If read lock acquire failed, retry next time.
+        // Put back into the beginning.
+        task_worker_lk.lock();
+        data_sync_task_queue_.emplace_front(std::move(data_sync_task));
+        meta_lk.lock();
+        store_range = FindRange(table_name, ng_id, range_id);
+        if (store_range)
+        {
+            store_range->TrySetDataSync(false);
+        }
+
+        return;
+    }
+
+    // Now that we have acquired read lock on catalog and bucket, there won't be
+    // any ddl on this range. Update store_range and check if this range is
+    // still owned by this node group.
     store_range = FindRange(table_name, ng_id, range_id);
     if (store_range == nullptr)
     {
@@ -1924,6 +1982,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         assert(abort_req.Result() == false);
         data_sync_task->SetError();
         return;
+    }
+    else
+    {
+        assert(bucket_rec.GetBucketInfo()->BucketOwner() == ng_id);
     }
 
     // 3. Scan records.
@@ -2319,11 +2381,6 @@ void LocalCcShards::SplitFlushRange(
         log_output.append(std::to_string(new_part_id) + ",");
         new_range_ids.emplace_back(new_key->Clone(), new_part_id);
     }
-    // Issue read catalog tx_request to acquire read lock on catalog
-    // cc_entry using base table name, and acquire read lock in one
-    // shard is good enough to block schema change.
-    const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
 
     const TxKey *old_start_key = store_range->RangeStartKey();
     if (old_start_key == nullptr)

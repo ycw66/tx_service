@@ -1969,11 +1969,12 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Double write if the target range is splitting.
-                if (write_entry.forward_key_shard_code_ != UINT32_MAX)
+                for (uint32_t forward_shard_code :
+                     write_entry.forward_key_shard_code_)
                 {
                     uint32_t forward_ng_id =
                         Sharder::Instance().ShardToCcNodeGroup(
-                            write_entry.forward_key_shard_code_);
+                            forward_shard_code);
                     int64_t forward_expected_term =
                         expected_ng_terms.at(forward_ng_id);
                     assert(forward_expected_term > 0);
@@ -1987,7 +1988,7 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
                         key,
                         write_entry.rec_.get(),
                         write_entry.op_,
-                        write_entry.forward_key_shard_code_,
+                        forward_shard_code,
                         post_write_result_,
                         false,
                         forward_expected_term);

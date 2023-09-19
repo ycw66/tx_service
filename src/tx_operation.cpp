@@ -46,12 +46,16 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
     }
 
     NodeGroupId range_owner = range_record.GetRangeOwnerNg()->BucketOwner();
+    NodeGroupId new_bucket_owner =
+        range_record.GetRangeOwnerNg()->DirtyBucketOwner();
+
     const std::vector<const BucketInfo *> *splitting_range_owners =
         range_record.GetNewRangeOwnerNgs();
 
     // Updates the sharding codes of the write-set keys belonging to this
     // range. The higher 22 bits represent the range ID.
     NodeGroupId new_range_owner = UINT32_MAX;
+    NodeGroupId new_range_new_bucket_owner = UINT32_MAX;
     size_t new_range_idx = 0;
 
     auto *range_info = range_record.GetRangeInfo();
@@ -60,6 +64,11 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
         WriteSetEntry &write_entry = write_key_it->second;
         size_t hash = write_entry.key_->Hash();
         write_entry.key_shard_code_ = (range_owner << 10) | (hash & 0x3FF);
+        if (new_bucket_owner != UINT32_MAX)
+        {
+            write_entry.forward_key_shard_code_.insert(
+                (new_bucket_owner << 10) | (hash & 0x3FF));
+        }
 
         // If range is splitting and the key will fall on a new range after
         // split is finished, register forward_key_shard_code_ to indicate
@@ -69,16 +78,26 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
                !(*write_entry.key_ < *range_info->NewKey()->at(new_range_idx)))
         {
             new_range_owner =
-                splitting_range_owners->at(new_range_idx++)->BucketOwner();
+                splitting_range_owners->at(new_range_idx)->BucketOwner();
+            new_range_new_bucket_owner =
+                splitting_range_owners->at(new_range_idx++)->DirtyBucketOwner();
         }
-        if (new_range_owner != UINT32_MAX && new_range_owner != range_owner)
+        if (new_range_owner != UINT32_MAX)
         {
-            write_entry.forward_key_shard_code_ =
-                (new_range_owner << 10) | (hash & 0x3FF);
-
-            assert(write_entry.forward_key_shard_code_ != UINT32_MAX);
-            rw_set.IncreaseFowardWriteCnt();
+            if (new_range_owner != range_owner)
+            {
+                write_entry.forward_key_shard_code_.insert(
+                    (new_range_owner << 10) | (hash & 0x3FF));
+            }
+            if (new_range_new_bucket_owner != range_owner)
+            {
+                write_entry.forward_key_shard_code_.insert(
+                    (new_range_new_bucket_owner << 10) | (hash & 0x3FF));
+            }
         }
+
+        rw_set.IncreaseFowardWriteCnt(
+            write_entry.forward_key_shard_code_.size());
         ++write_key_it;
     }
 }

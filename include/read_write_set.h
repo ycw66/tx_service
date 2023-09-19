@@ -87,9 +87,9 @@ public:
         return forward_write_cnt_;
     }
 
-    void IncreaseFowardWriteCnt()
+    void IncreaseFowardWriteCnt(size_t cnt)
     {
-        forward_write_cnt_++;
+        forward_write_cnt_ += cnt;
     }
 
     const std::unordered_map<TableName,
@@ -414,11 +414,8 @@ public:
                 wset_bytes_cnt_ -= key_it.second.rec_ != nullptr
                                        ? key_it.second.rec_->SerializedLength()
                                        : 0;
-
-                if (key_it.second.forward_key_shard_code_ != UINT32_MAX)
-                {
-                    forward_write_cnt_--;
-                }
+                forward_write_cnt_ -=
+                    key_it.second.forward_key_shard_code_.size();
             }
             wset_.erase(tab_it);
         }
