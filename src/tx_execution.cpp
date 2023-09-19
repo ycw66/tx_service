@@ -4714,7 +4714,6 @@ ScanCloseTxRequest *TransactionExecution::NextScanCloseTxReq(
 void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
 {
     obj_cmd_op.is_running_ = true;
-    const TableName &table_name = *obj_cmd_op.table_name_;
     const TxKey &key = *obj_cmd_op.key_;
     uint32_t key_shard_code = 0;
 
@@ -4743,8 +4742,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         obj_cmd_op.lock_range_result_.Reset();
 
         lock_range_op_.key_ = &key;
-        lock_range_op_.table_name_ =
-            TableName(table_name.StringView(), TableType::RangePartition);
+        lock_range_op_.table_name_ = TableName(
+            obj_cmd_op.table_name_->StringView(), TableType::RangePartition);
         lock_range_op_.rec_ = &obj_cmd_op.range_rec_;
         lock_range_op_.hd_result_ = &obj_cmd_op.lock_range_result_;
 

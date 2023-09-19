@@ -12,7 +12,7 @@ namespace txservice
 struct BucketInfo
 {
 public:
-    BucketInfo() = default;
+    BucketInfo() = delete;
     BucketInfo(const NodeGroupId bucket_owner, uint64_t version)
         : bucket_owner_(bucket_owner), version_(version)
     {

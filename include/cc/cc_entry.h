@@ -1183,18 +1183,22 @@ struct CcPage : public LruPage
 
     void Split(
         std::vector<KeyT> &new_page_keys,
-        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &new_page_entries)
+        std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> &new_page_entries,
+        uint64_t &new_last_commit_ts)
     {
         new_page_keys.reserve(split_threshold_);
         new_page_entries.reserve(split_threshold_);
+        new_last_commit_ts = 0;
         size_t split_pos = keys_.size() / 2;
         new_page_keys.insert(new_page_keys.end(),
                              std::make_move_iterator(keys_.begin() + split_pos),
                              std::make_move_iterator(keys_.end()));
-        new_page_entries.insert(
-            new_page_entries.end(),
-            std::make_move_iterator(entries_.begin() + split_pos),
-            std::make_move_iterator(entries_.end()));
+        for (size_t idx = split_pos; idx < entries_.size(); idx++)
+        {
+            new_last_commit_ts =
+                std::max(new_last_commit_ts, entries_[idx]->commit_ts_);
+            new_page_entries.push_back(std::move(entries_[idx]));
+        }
         keys_.erase(keys_.begin() + split_pos, keys_.end());
         entries_.erase(entries_.begin() + split_pos, entries_.end());
     }
@@ -1364,12 +1368,18 @@ struct CcPage : public LruPage
     CcPage<KeyT, ValueT> *prev_page_{nullptr};
     CcPage<KeyT, ValueT> *next_page_{nullptr};
 
+    // The largest commit ts of dirty cc entries on this page. This value might
+    // be larger than the actual max commit ts of cc entries. Currently used to
+    // decide if this page has dirty data after a given ts.
+    uint64_t last_dirty_commit_ts_{0};
+
     // CcPage is contained in std::_Rb_tree_node with node key and RBT node
     // pointers (32 bytes)
     inline static size_t basic_mem_overhead_ =
         sizeof(KeyT) + sizeof(CcPage<KeyT, ValueT>) + 32 +
         sizeof(KeyT) * split_threshold_ +
-        sizeof(std::unique_ptr<CcEntry<KeyT, ValueT>>) * split_threshold_;
+        sizeof(std::unique_ptr<CcEntry<KeyT, ValueT>>) * split_threshold_ +
+        sizeof(uint64_t);
 };
 
 template <typename KeyT, typename ValueT>

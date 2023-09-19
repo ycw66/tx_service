@@ -666,12 +666,17 @@ bool CcShard::FlushEntryForTest(LruEntry *entry,
     }
 }
 
-void CcShard::NotifyCkpt()
+void CcShard::NotifyCkpt(bool request_ckpt)
 {
     if (ckpter_ != nullptr)
     {
-        ckpter_->Notify();
+        ckpter_->Notify(request_ckpt);
     }
+}
+
+void CcShard::SetWaitingCkpt(bool is_waiting)
+{
+    local_shards_.SetWaitingCkpt(is_waiting);
 }
 
 std::pair<bool, const CatalogEntry *> CcShard::CreateCatalog(

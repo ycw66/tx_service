@@ -563,19 +563,19 @@ public:
         RunOnBindingCcShard(task);
     }
 
-    // This method is called in checkpointer thread.
-    bool PostCheckpoint(store::DataStoreHandler *store_hd,
-                        const TableName &table_or_index_name,
-                        const TableSchema *table_schema,
-                        NodeGroupId ng_id,
-                        uint64_t ckpt_ts,
-                        bool ckpt_empty) const override
+    // This method is called in table stats sync worker thread.
+    bool SyncTableStatistics(store::DataStoreHandler *store_hd,
+                             const TableName &table_or_index_name,
+                             const TableSchema *table_schema,
+                             NodeGroupId ng_id,
+                             uint64_t version,
+                             bool updated) const override
     {
         bool ok = true;
 
         int32_t need_save_counter =
             need_save_counter_.load(std::memory_order_acquire);
-        if (!ckpt_empty || need_save_counter > 0)
+        if (updated || need_save_counter > 0)
         {
             std::unordered_map<TableName,
                                std::pair<uint64_t, std::vector<TxKey::Uptr>>>
@@ -584,12 +584,12 @@ public:
                          &table_or_index_name,
                          ng_id,
                          table_schema,
-                         ckpt_empty,
+                         updated,
                          &sample_pool_map](CcShard &ccs)
             {
                 To(sample_pool_map);
 
-                if (!ckpt_empty)
+                if (updated)
                 {
                     const auto iter =
                         index_sample_pool_map_.find(table_or_index_name);
@@ -612,7 +612,7 @@ public:
 
             if (DoStore(ng_id))
             {
-                ok = Store(store_hd, sample_pool_map, ckpt_ts);
+                ok = Store(store_hd, sample_pool_map, version);
             }
 
             need_save_counter_.fetch_sub(need_save_counter,
@@ -858,21 +858,21 @@ private:
                     broadcast_stat_req->set_node_group_id(ng_id);
                     stream_sender->SendMessageToNode(dest_node_id, send_msg);
                 }
-                else
-                {
-                    Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                        [table_or_index_name,
-                         schema_version = table_schema->Version(),
-                         remote_sample_pool = *remote_sample_pool]() mutable
-                        {
-                            Sharder::Instance()
-                                .GetLocalCcShards()
-                                ->CreateRemoteStatisticsTx(
-                                    std::move(table_or_index_name),
-                                    schema_version,
-                                    std::move(remote_sample_pool));
-                        });
-                }
+                // else
+                //{
+                //     Sharder::Instance().GetTxWorkerPool()->SubmitWork(
+                //         [table_or_index_name,
+                //          schema_version = table_schema->Version(),
+                //          remote_sample_pool = *remote_sample_pool]() mutable
+                //         {
+                //             Sharder::Instance()
+                //                 .GetLocalCcShards()
+                //                 ->CreateRemoteStatisticsTx(
+                //                     std::move(table_or_index_name),
+                //                     schema_version,
+                //                     std::move(remote_sample_pool));
+                //         });
+                // }
             }
         }
     }

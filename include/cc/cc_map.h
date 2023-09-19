@@ -181,6 +181,10 @@ public:
     // no LRU kickout happens on this ccm. In future, we should make it at range
     // level: the kv access unit is range.
     bool ccm_has_full_entries_{false};
+    // The largest commit ts of dirty cc entries in this cc map. This value
+    // might be larger than the actual max commit ts of cc entries. Currently
+    // used to decide if this cc map has dirty data after a given ts.
+    uint64_t last_dirty_commit_ts_{0};
 
 protected:
     /**

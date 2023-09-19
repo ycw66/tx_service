@@ -214,7 +214,9 @@ public:
                            std::vector<FlushRecord> &archives,
                            bool only_archives);
 
-    void NotifyCkpt();
+    void NotifyCkpt(bool request_ckpt = true);
+
+    void SetWaitingCkpt(bool is_waiting);
 
     /**
      * @brief Get the number of ccentries in this ccshard

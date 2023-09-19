@@ -106,6 +106,40 @@ StoreRange::StoreRange(const TxKey *start_key,
     slices_.emplace_back(std::move(slice));
 }
 
+bool StoreRange::TrySetDataSync(bool ongoing,
+                                std::shared_ptr<DataSyncTask> task,
+                                uint64_t last_sync_ts)
+{
+    std::unique_lock<std::shared_mutex> lk(mux_);
+    if (ongoing && sync_ongoing_)
+    {
+        // Another task is processing this range.
+        // To avoid the possible busy loop when there are fewer tasks, put
+        // this task into `pending_task` instead of put back into
+        // `data_sync_task_queue_`.
+        pending_sync_task_.push(task);
+        return false;
+    }
+    if (!ongoing && last_sync_ts > last_sync_ts_)
+    {
+        // data sync succeeded, update last sync ts
+        last_sync_ts_ = last_sync_ts;
+    }
+    sync_ongoing_ = ongoing;
+    return true;
+}
+
+void StoreRange::PopPendingSyncTask()
+{
+    std::unique_lock<std::shared_mutex> lk(mux_);
+    if (!pending_sync_task_.empty())
+    {
+        pending_sync_task_.front()->on_remove_pending_queue_lambda_(
+            pending_sync_task_.front());
+        pending_sync_task_.pop();
+    }
+}
+
 RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   int64_t ng_term,
                                   const TxKey &search_key,

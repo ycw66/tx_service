@@ -18,6 +18,7 @@ class CcMap;
 class LocalCcShards;
 struct FillStoreSliceCc;
 class StoreRange;
+struct DataSyncTask;
 struct LoadRangeSliceRequest;
 
 namespace store
@@ -591,6 +592,18 @@ public:
         slices_.back()->end_key_ = end_key;
     }
 
+    bool TrySetDataSync(bool ongoing,
+                        std::shared_ptr<DataSyncTask> task = nullptr,
+                        uint64_t last_sync_ts = 0);
+
+    void PopPendingSyncTask();
+
+    uint64_t GetLastSyncTs()
+    {
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        return last_sync_ts_;
+    }
+
 private:
     static size_t LowerBound(
         const std::vector<std::unique_ptr<TxKey>> &slice_key_,
@@ -642,6 +655,12 @@ private:
     std::vector<std::unique_ptr<TxKey>> boundary_keys_;
 
     std::vector<std::unique_ptr<StoreSlice>> slices_;
+
+    bool sync_ongoing_{false};
+    uint64_t last_sync_ts_{0};
+    // Multiple tasks on the same range are executed sequentially, so the
+    // subsequence tasks for this range should wait here.
+    std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
 
     /**
      * @brief A collection of slices the checkpointer intends to alter. The

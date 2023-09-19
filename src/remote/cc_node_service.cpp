@@ -378,25 +378,20 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
                << ", and flush table:" << table_name.String();
 
-    std::mutex sender_mux;
-    std::condition_variable sender_cv;
-    uint16_t finished_cnt = 0;
-    std::atomic_bool failed = false;
+    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
+
     local_shards_.EnqueueDataSyncTask(table_name,
                                       ng_id,
                                       current_ng_term,
                                       data_sync_ts,
-                                      &sender_mux,
-                                      &sender_cv,
-                                      &finished_cnt,
-                                      &failed,
+                                      status,
+                                      false,
                                       is_dirty);
-    std::unique_lock<std::mutex> lk(sender_mux);
-    sender_cv.wait(lk, [&finished_cnt] { return finished_cnt == 1; });
+    std::unique_lock<std::mutex> lk(status->mux_);
+    status->all_task_started_ = true;
+    status->cv_.wait(lk, [&status] { return status->unfinished_tasks_ == 0; });
 
-    CcErrorCode error_code = !failed.load(std::memory_order_relaxed)
-                                 ? CcErrorCode::NO_ERROR
-                                 : CcErrorCode::DATA_STORE_ERR;
+    CcErrorCode error_code = status->err_code_;
 
     DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
                << " finished with error: " << (int32_t) error_code;

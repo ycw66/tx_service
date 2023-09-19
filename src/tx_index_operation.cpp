@@ -1438,17 +1438,29 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
                        << ng_id;
             return;
         }
-
+        std::shared_ptr<DataSyncStatus> status =
+            std::make_shared<DataSyncStatus>();
         local_cc_shards->EnqueueDataSyncTask(table_name,
                                              ng_id,
                                              ng_term,
                                              data_sync_ts,
-                                             nullptr,
-                                             nullptr,
-                                             nullptr,
-                                             nullptr,
+                                             status,
+                                             false,
                                              is_dirty,
                                              &hres);
+        std::unique_lock<std::mutex> lk(status->mux_);
+        status->all_task_started_ = true;
+        if (status->unfinished_tasks_ == 0)
+        {
+            if (status->task_failed_)
+            {
+                hres.SetError(status->err_code_);
+            }
+            else
+            {
+                hres.SetFinished();
+            }
+        }
     }
     else
     {

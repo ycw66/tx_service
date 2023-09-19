@@ -517,6 +517,14 @@ public:
                 {
                     sample_pool_->OnInsert(*key_ptr, table_schema_);
                 }
+                if (commit_ts > last_dirty_commit_ts_)
+                {
+                    last_dirty_commit_ts_ = commit_ts;
+                }
+                if (commit_ts > new_cce->parent_page_->last_dirty_commit_ts_)
+                {
+                    new_cce->parent_page_->last_dirty_commit_ts_ = commit_ts;
+                }
             }
 
             // The insert places a write lock on the prior cc entry's gap.
@@ -701,6 +709,14 @@ public:
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
                     << " ,commit_ts: " << commit_ts;
 
+                if (commit_ts > last_dirty_commit_ts_)
+                {
+                    last_dirty_commit_ts_ = commit_ts;
+                }
+                if (commit_ts > cce->parent_page_->last_dirty_commit_ts_)
+                {
+                    cce->parent_page_->last_dirty_commit_ts_ = commit_ts;
+                }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
                     if (op_type == OperationType::Insert)
@@ -4417,6 +4433,25 @@ public:
             }
         }
 
+        // Since we might skip the page that end_it is on if it's not updated
+        // since last ckpt, it might skip end_it. If the last page is skipped it
+        // will be set as the first entry on the next page. Also check if (it ==
+        // end_it_next_page_it).
+        Iterator end_it_next_page_it = end_it;
+        if (end_it_next_page_it != End())
+        {
+            assert(end_it_next_page_it->second->parent_page_ != nullptr);
+            if (end_it->second->parent_page_->next_page_ == PagePosInf())
+            {
+                end_it_next_page_it = End();
+            }
+            else
+            {
+                end_it_next_page_it = Iterator(
+                    end_it->second->parent_page_->next_page_, 0, &neg_inf_);
+            }
+        }
+
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0)
         {
@@ -4432,6 +4467,12 @@ public:
 
         std::vector<LruEntry *> remove_entries;
 
+        // Only scan for updates after given from ts. previous_ckpt_ts_ is
+        // used during regular ckpt, and previous_scan_ts_ is used during range
+        // split explicitly.
+        uint64_t from_ts =
+            std::max(req.previous_ckpt_ts_, req.previous_scan_ts_);
+
         // DataSyncScanCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
@@ -4440,11 +4481,25 @@ public:
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_ &&
-             it != end_it;
-             ++it)
+             it != end_it && it != end_it_next_page_it;
+             scan_cnt++)
         {
             const KeyT *key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
+            assert(cce->parent_page_);
+            if (cce->parent_page_->last_dirty_commit_ts_ <= from_ts)
+            {
+                // Skip the pages that have no updates since last data sync.
+                if (cce->parent_page_->next_page_ == PagePosInf())
+                {
+                    it = End();
+                }
+                else
+                {
+                    it = Iterator(cce->parent_page_->next_page_, 0, &neg_inf_);
+                }
+                continue;
+            }
 
             if (shard_->EnableMvcc())
             {
@@ -4511,6 +4566,7 @@ public:
                         // still be replayed on the old ng on recover. Skip the
                         // cc entry and remove it at the end.
                         remove_entries.push_back(cce);
+                        it++;
                         continue;
                     }
                     else
@@ -4538,11 +4594,11 @@ public:
                                    shard_->EnableMvcc(),
                                    req.accumulated_scan_cnt_[shard_->core_id_]);
             }
-            scan_cnt++;
+            it++;
         }
 
         TxKey::Uptr next_pause_key = nullptr;
-        bool no_more_data = (it == end_it);
+        bool no_more_data = (it == end_it) || (it == end_it_next_page_it);
         if (!no_more_data)
         {
             next_pause_key = it->first->Clone();
@@ -4925,7 +4981,14 @@ public:
                     cce->payload_status_ = RecordStatus::Deleted;
                 }
                 cce->commit_ts_ = req.CommitTs();
-
+                if (cce->commit_ts_ > last_dirty_commit_ts_)
+                {
+                    last_dirty_commit_ts_ = cce->commit_ts_;
+                }
+                if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+                {
+                    cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+                }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
                     if (op_type == OperationType::Insert)
@@ -5716,6 +5779,8 @@ public:
             // randomly set ckpt_ts and commit_ts
             cce->ckpt_ts_ = distribution(generator);
             cce->commit_ts_ = distribution(generator);
+            cce->parent_page_->last_dirty_commit_ts_ = std::max(
+                cce->commit_ts_, cce->parent_page_->last_dirty_commit_ts_);
         }
         return true;
     }
@@ -6131,7 +6196,9 @@ protected:
             std::vector<KeyT> new_page_keys;
             std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
                 new_page_entries;
-            target_page->Split(new_page_keys, new_page_entries);
+            uint64_t new_last_commit_ts = 0;
+            target_page->Split(
+                new_page_keys, new_page_entries, new_last_commit_ts);
 
             const KeyT &key_of_new_page = *new_page_keys.begin();
             auto new_page_it = ccmp_.try_emplace(target_it,
@@ -6142,6 +6209,7 @@ protected:
                                                  target_page,
                                                  target_page->next_page_);
             CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
+            new_page->last_dirty_commit_ts_ = new_last_commit_ts;
             mem_increased += new_page->MemUsage();
 
             // insert new page into lru list right after old
@@ -6896,6 +6964,8 @@ protected:
         auto key_insert_it = keys.begin();
         auto entry_insert_it = entries.begin();
 
+        uint64_t last_commit_ts = 0;
+
         // Whether all ccentries whose commit_ts < @ckpt_ts have been cleaned.
         bool clean_success = true;
         auto key_it = keys.begin();
@@ -6944,6 +7014,8 @@ protected:
                     *entry_insert_it = std::move(*entry_it);
                     key_insert_it++;
                     entry_insert_it++;
+                    // record the commit_ts if the entry cannot be cleaned.
+                    last_commit_ts = std::max(last_commit_ts, cce->commit_ts_);
                     // The ccentry that expect to clean cannot be kick out.
                     // In this branch, only when clean_type is
                     // CleanForSplitRange or CleanForAlterTable care this clean
@@ -6987,10 +7059,17 @@ protected:
                 *entry_insert_it = std::move(*entry_it);
                 key_insert_it++;
                 entry_insert_it++;
+
+                // record the commit_ts if the entry cannot be cleaned.
+                last_commit_ts = std::max(last_commit_ts, cce->commit_ts_);
             }
         }
         keys.erase(key_insert_it, keys.end());
         entries.erase(entry_insert_it, entries.end());
+        // During range split kickout, we might clean cc entries that are still
+        // dirty from page. So the max dirty ts might decrease.
+        page->last_dirty_commit_ts_ =
+            std::min(last_commit_ts, page->last_dirty_commit_ts_);
 
         return {clean_success, last_read_ts};
     }
@@ -7038,6 +7117,8 @@ protected:
                 std::make_move_iterator(page1.entries_.end()));
             page1.entries_.erase(page1.entries_.begin() + move_pos,
                                  page1.entries_.end());
+            page2.last_dirty_commit_ts_ = std::max(page1.last_dirty_commit_ts_,
+                                                   page2.last_dirty_commit_ts_);
         }
         else
         {
@@ -7062,6 +7143,8 @@ protected:
                 std::make_move_iterator(page2.entries_.begin() + move_idx));
             page2.entries_.erase(page2.entries_.begin(),
                                  page2.entries_.begin() + move_idx);
+            page1.last_dirty_commit_ts_ = std::max(page1.last_dirty_commit_ts_,
+                                                   page2.last_dirty_commit_ts_);
         }
 
         // update page key in the map
@@ -7176,6 +7259,11 @@ protected:
             lru_prev->lru_next_ = merged_page;
             lru_next->lru_prev_ = merged_page;
         }
+
+        // last_dirty_commit_ts_ of merged page will inherit the larger one.
+        merged_page->last_dirty_commit_ts_ =
+            std::max(merged_page->last_dirty_commit_ts_,
+                     discarded_page->last_dirty_commit_ts_);
         // remove discarded page from the map
         ccmp_.erase(discarded_page_it);
         // modify merged page's key in the map

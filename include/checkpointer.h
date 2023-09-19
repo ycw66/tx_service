@@ -28,7 +28,7 @@ public:
                  TxLog *log_agent,
                  uint32_t ckpt_delay_seconds);
 
-    ~Checkpointer();
+    ~Checkpointer() = default;
 
     void Ckpt(bool is_last_ckpt = false);
 
@@ -45,9 +45,11 @@ public:
     /**
      * @brief Called by TxProcessor thread to notify checkpointer thread
      * to do checkpoint if there is no freeable entries to be kicked out
-     * from ccmap.
+     * from ccmap. This will also be called by data sync worker thread when
+     * it runs out of task.
+     * @param  request_ckpt  If true, will request checkpoint immediately.
      */
-    void Notify();
+    void Notify(bool request_ckpt = true);
 
     bool IsTerminated();
 
@@ -77,7 +79,7 @@ private:
     std::thread thd_;
     Status ckpt_thd_status_;
     const uint32_t checkpoint_interval_;
-    // ckpt_ts = {min_being_held_locks_ts} - {ckpt_delay_time_}
+    std::chrono::system_clock::time_point last_checkpoint_ts_;
     uint32_t ckpt_delay_time_;  // unit: Microsecond
     TxService *tx_service_;
     TxLog *log_agent_;

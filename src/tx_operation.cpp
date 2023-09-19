@@ -3440,6 +3440,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &ds_migrate_old_partition_op_);
             return;
         }
+        auto local_cc_shards = Sharder::Instance().GetLocalCcShards();
         data_sync_scan_op_.op_func_ =
             [this,
              &table_name = table_name_,
@@ -3456,7 +3457,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
              tx_term = txm->tx_term_,
              previous_scan_ts = previous_scan_ts_,
              ckpt_ts = txm->commit_ts_,
-             &local_cc_shards = txm->GetTxProcessor()->local_cc_shards_,
+             &local_cc_shards = *local_cc_shards,
              &hd_res = data_sync_scan_op_.hd_result_]() mutable
         {
             TxWorkerPool *tx_worker_pool =
@@ -3505,6 +3506,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         DataSyncScanCc scan_cc(
                             table_name,
                             previous_scan_ts,
+                            0,
                             ckpt_ts,
                             node_group,
                             tx_term,

@@ -174,6 +174,7 @@ public:
         CatalogRecord *schema_rec = nullptr;
         CatalogEntry *catalog_entry = nullptr;
 
+        // First setup the schema_rec that will replace the current catalog rec.
         switch (req.CommitType())
         {
         case PostWriteType::PrepareCommit:
@@ -222,45 +223,93 @@ public:
                                                schema_rec->DirtySchemaImage(),
                                                req.CommitTs());
 
-                // For alter table, in some case, the current schema may not
-                // exists yet, so should create the current schema. For example,
-                // this node is the participant node of the alter table
-                // transaction, and does not execute any transaction about this
-                // table before this alter table tx since server start.
-                if (catalog_entry->schema_.get() == nullptr &&
-                    (req.OpType() == OperationType::AddIndex ||
+                // For alter index, we need to initialize meta data for the
+                // new indexes at prepare stage since the new indexes may
+                // receive cc requests during the 2 phase commit DDL tx..
+                if ((req.OpType() == OperationType::AddIndex ||
                      req.OpType() == OperationType::DropIndex))
                 {
-                    shard_->CreateCatalog(table_key->Name(),
-                                          req.NodeGroupId(),
-                                          schema_rec->SchemaImage(),
-                                          schema_rec->SchemaTs());
+                    if (catalog_entry->schema_ == nullptr)
+                    {
+                        // For alter table, in some case, the current schema may
+                        // not exists yet, so should create the current schema.
+                        // For example, this node is the participant node of the
+                        // alter table transaction, and does not execute any
+                        // transaction about this table before this alter table
+                        // tx since server start.
+                        shard_->CreateCatalog(table_key->Name(),
+                                              req.NodeGroupId(),
+                                              schema_rec->SchemaImage(),
+                                              schema_rec->SchemaTs());
 
 #ifdef RANGE_PARTITION_ENABLED
-                    // Initialize table ranges.
-                    TableName base_range_table_name{
-                        table_key->Name().StringView(),
-                        TableType::RangePartition};
-                    auto ranges = shard_->GetTableRangesForATable(
-                        base_range_table_name, req.NodeGroupId());
-                    if (ranges == nullptr)
-                    {
-                        shard_->FetchTableRanges(
-                            base_range_table_name,
-                            catalog_entry->schema_->GetKVCatalogInfo(),
-                            &req,
-                            req.NodeGroupId(),
-                            ng_term);
-                        return false;
-                    }
+                        // Initialize table ranges.
+                        TableName base_range_table_name{
+                            table_key->Name().StringView(),
+                            TableType::RangePartition};
+                        auto ranges = shard_->GetTableRangesForATable(
+                            base_range_table_name, req.NodeGroupId());
+                        if (ranges == nullptr)
+                        {
+                            shard_->FetchTableRanges(
+                                base_range_table_name,
+                                catalog_entry->schema_->GetKVCatalogInfo(),
+                                &req,
+                                req.NodeGroupId(),
+                                ng_term);
+                            return false;
+                        }
 #endif
-                }
-
-                if (catalog_entry->schema_ && catalog_entry->dirty_schema_)
-                {
-                    // Alter table
+                    }
+                    // Bind statistics for the dirty schema.
                     catalog_entry->dirty_schema_->BindStatistics(
                         catalog_entry->schema_->StatisticsObject());
+#ifdef RANGE_PARTITION_ENABLED
+                    // Load ranges for the new added indexes. We cannot
+                    // simply initialize it with empty range table since we
+                    // might have pre-defined range table based on the data
+                    // distribution offered by caller.
+                    if (req.OpType() == OperationType::AddIndex)
+                    {
+                        std::vector<TableName> new_index_names =
+                            catalog_entry->dirty_schema_->IndexNames();
+                        std::vector<TableName> old_index_names =
+                            catalog_entry->schema_->IndexNames();
+                        bool found = false;
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            found = false;
+                            for (const auto &old_index_name : old_index_names)
+                            {
+                                if (!new_index_name.String().compare(
+                                        old_index_name.String()))
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found)
+                            {
+                                TableName index_range_name{
+                                    new_index_name.StringView(),
+                                    TableType::RangePartition};
+                                auto ranges = shard_->GetTableRangesForATable(
+                                    index_range_name, req.NodeGroupId());
+                                if (ranges == nullptr)
+                                {
+                                    shard_->FetchTableRanges(
+                                        index_range_name,
+                                        catalog_entry->dirty_schema_
+                                            ->GetKVCatalogInfo(),
+                                        &req,
+                                        req.NodeGroupId(),
+                                        ng_term);
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+#endif
                 }
 
                 schema_rec->Set(catalog_entry->schema_,
@@ -352,8 +401,49 @@ public:
                     req.SetDecodedPayload(std::move(empty_rec));
                 }
 
-                if (!catalog_entry->schema_ && catalog_entry->dirty_schema_)
+                if (req.OpType() == OperationType::CreateTable)
                 {
+                    std::vector<InitRangeEntry> range_init_vec;
+                    std::string_view table_name_view =
+                        table_key->Name().StringView();
+                    int init_partition_id = 0;
+                    if (table_name_view != "./mysql/sequences")
+                    {
+                        size_t tbl_name_hash =
+                            std::hash<std::string_view>()(table_name_view);
+                        init_partition_id = tbl_name_hash & 0xFFF;
+                    }
+
+                    // Use nullptr to represent negative infinity key here.
+                    range_init_vec.emplace_back(
+                        nullptr, init_partition_id, req.CommitTs());
+
+                    TableName range_table_name(table_name_view,
+                                               TableType::RangePartition);
+                    shard_->InitTableRanges(range_table_name,
+                                            range_init_vec,
+                                            req.NodeGroupId(),
+                                            true);
+
+                    std::vector<TableName> index_names =
+                        catalog_entry->dirty_schema_->IndexNames();
+                    for (const TableName &index_name : index_names)
+                    {
+                        // Create range table for each sk index
+                        TableName index_range_table_name{
+                            index_name.StringView(), TableType::RangePartition};
+
+                        size_t tbl_name_hash = std::hash<std::string_view>()(
+                            index_name.StringView());
+                        init_partition_id = tbl_name_hash & 0xFFF;
+                        range_init_vec.clear();
+                        range_init_vec.emplace_back(
+                            nullptr, init_partition_id, req.CommitTs());
+                        shard_->InitTableRanges(index_range_table_name,
+                                                range_init_vec,
+                                                req.NodeGroupId(),
+                                                true);
+                    }
                     shard_->InitTableStatistics(
                         catalog_entry->dirty_schema_.get(), cc_ng_id_);
                 }
@@ -386,7 +476,7 @@ public:
         if (req.CommitType() == PostWriteType::PostCommit &&
             catalog_entry->DirtyVersion() > 0)
         {
-            if (new_schema == nullptr)
+            if (req.OpType() == OperationType::DropTable)
             {
                 // A remote tx is allowed to acquire write intents/locks and
                 // drop a table, even if the table's schema has not been
@@ -424,7 +514,7 @@ public:
                     }
                 }
             }
-            else if (old_schema == nullptr)
+            else if (req.OpType() == OperationType::CreateTable)
             {
                 assert(catalog_entry->DirtyVersion() > 0 &&
                        new_schema != nullptr);
@@ -540,8 +630,7 @@ public:
             // secondary index, the cc map is modified in the prepare commit
             // step.
             // ALTER TABLE statement (include CREATE/DROP INDEX)
-            if (new_schema != nullptr && old_schema != nullptr &&
-                req.OpType() == OperationType::AddIndex)
+            if (req.OpType() == OperationType::AddIndex)
             {
                 std::vector<TableName> new_index_names =
                     new_schema->IndexNames();
@@ -580,9 +669,10 @@ public:
         {
             // If this is a drop table req, drop the range table also
             // Drop table range before drop catalog
-#ifdef RANGE_PARTITION_ENABLED
-            if (new_schema == nullptr)
+            if (req.OpType() == OperationType::DropTable)
             {
+                shard_->CleanTableStatistics(table_key->Name());
+#ifdef RANGE_PARTITION_ENABLED
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
                 shard_->CleanTableRange(range_table_name, req.NodeGroupId());
@@ -599,84 +689,11 @@ public:
                                                 req.NodeGroupId());
                     }
                 }
-            }
-            else if (old_schema == nullptr && new_schema != nullptr)
-            {
-                std::vector<InitRangeEntry> range_init_vec;
-                std::string_view table_name_view =
-                    table_key->Name().StringView();
-                int init_partition_id = 0;
-                if (table_name_view != "./mysql/sequences")
-                {
-                    size_t tbl_name_hash =
-                        std::hash<std::string_view>()(table_name_view);
-                    init_partition_id = tbl_name_hash & 0xFFF;
-                }
-
-                // Use nullptr to represent negative infinity key here.
-                range_init_vec.emplace_back(
-                    nullptr, init_partition_id, req.CommitTs());
-
-                TableName range_table_name(table_name_view,
-                                           TableType::RangePartition);
-                shard_->InitTableRanges(
-                    range_table_name, range_init_vec, req.NodeGroupId(), true);
-
-                std::vector<TableName> index_names = new_schema->IndexNames();
-                for (const TableName &index_name : index_names)
-                {
-                    // Create range table for each sk index
-                    TableName index_range_table_name{index_name.StringView(),
-                                                     TableType::RangePartition};
-
-                    size_t tbl_name_hash =
-                        std::hash<std::string_view>()(index_name.StringView());
-                    init_partition_id = tbl_name_hash & 0xFFF;
-                    range_init_vec.clear();
-                    range_init_vec.emplace_back(
-                        nullptr, init_partition_id, req.CommitTs());
-                    shard_->InitTableRanges(index_range_table_name,
-                                            range_init_vec,
-                                            req.NodeGroupId(),
-                                            true);
-                }
-            }
-            else if (old_schema != nullptr && new_schema != nullptr)
-            {
-                if (req.OpType() == OperationType::AddIndex ||
-                    req.OpType() == OperationType::DropIndex)
-                {
-                    std::vector<TableName> new_index_names =
-                        new_schema->IndexNames();
-                    std::vector<TableName> old_index_names =
-                        old_schema->IndexNames();
-                    for (const TableName &old_index_name : old_index_names)
-                    {
-                        // Drop old index range table if not exist any more
-                        if (std::find(new_index_names.begin(),
-                                      new_index_names.end(),
-                                      old_index_name) == new_index_names.end())
-                        {
-                            TableName old_index_range_table_name{
-                                old_index_name.StringView(),
-                                TableType::RangePartition};
-                            shard_->CleanTableRange(old_index_range_table_name,
-                                                    req.NodeGroupId());
-
-                            Statistics *statistics =
-                                old_schema->StatisticsObject().get();
-                            statistics->DropIndex(old_index_name);
-                        }
-                    }
-                }
-            }
 #endif
-
-            if (req.OpType() == OperationType::DropTable)
-            {
-                shard_->CleanTableStatistics(table_key->Name());
             }
-            else if (req.OpType() == OperationType::DropIndex)
+
+            else if (req.OpType() == OperationType::AddIndex ||
+                     req.OpType() == OperationType::DropIndex)
             {
                 std::vector<TableName> new_index_names =
                     new_schema->IndexNames();
@@ -689,6 +706,13 @@ public:
                                   new_index_names.end(),
                                   old_index_name) == new_index_names.end())
                     {
+#ifdef RANGE_PARTITION_ENABLED
+                        TableName old_index_range_table_name{
+                            old_index_name.StringView(),
+                            TableType::RangePartition};
+                        shard_->CleanTableRange(old_index_range_table_name,
+                                                req.NodeGroupId());
+#endif
                         Statistics *statistics =
                             old_schema->StatisticsObject().get();
                         statistics->DropIndex(old_index_name);
@@ -938,6 +962,48 @@ public:
                         &req))
                 {
                     return false;
+                }
+
+                // Load range and stats for the new added indexes.
+                if (catalog_entry->dirty_schema_)
+                {
+                    std::vector<TableName> new_index_names =
+                        catalog_entry->dirty_schema_->IndexNames();
+                    std::vector<TableName> old_index_names =
+                        catalog_entry->schema_->IndexNames();
+                    bool found = false;
+                    for (const TableName &new_index_name : new_index_names)
+                    {
+                        found = false;
+                        for (const auto &old_index_name : old_index_names)
+                        {
+                            if (!new_index_name.String().compare(
+                                    old_index_name.String()))
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found)
+                        {
+                            TableName index_range_name{
+                                new_index_name.StringView(),
+                                TableType::RangePartition};
+                            auto ranges = shard_->GetTableRangesForATable(
+                                index_range_name, req.NodeGroupId());
+                            if (ranges == nullptr)
+                            {
+                                shard_->FetchTableRanges(
+                                    index_range_name,
+                                    catalog_entry->dirty_schema_
+                                        ->GetKVCatalogInfo(),
+                                    &req,
+                                    req.NodeGroupId(),
+                                    ng_term);
+                                return false;
+                            }
+                        }
+                    }
                 }
             }
             else

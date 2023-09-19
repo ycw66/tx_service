@@ -2243,6 +2243,7 @@ public:
 
     DataSyncScanCc(const TableName &table_name,
                    uint64_t previous_scan_ts,
+                   uint64_t previous_ckpt_ts,
                    uint64_t data_sync_ts,
                    uint64_t node_group_id,
                    int64_t node_group_term,
@@ -2256,6 +2257,7 @@ public:
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
           previous_scan_ts_(previous_scan_ts),
+          previous_ckpt_ts_(previous_ckpt_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
@@ -2402,7 +2404,18 @@ private:
     uint32_t node_group_id_;
     int64_t node_group_term_;
     uint16_t core_cnt_;
+    // Used during range split. We only want new data changes after this given
+    // ts, despite there might be older version that is still not synced into
+    // data sotre yet (for mvcc only). It can be used as a hint to decide if a
+    // page has dirty data that need to be put into data sync vec. However it is
+    // not guaranteed that all entries committed before this ts are synced.
     uint64_t previous_scan_ts_;
+    // Used during regular data sync scan. It is used as a hint to decide if a
+    // page has dirty data since last round of checkpoint. It is guaranteed that
+    // all entries committed before this ts are synced into data store.
+    uint64_t previous_ckpt_ts_;
+    // Target ts. Collect all data changes committed before this ts into data
+    // sync vec.
     uint64_t data_sync_ts_;
     std::vector<std::vector<FlushRecord>> data_sync_vec_;
     std::vector<std::vector<FlushRecord>> archive_vec_;
@@ -3330,18 +3343,6 @@ public:
         }
     }
 
-    void Reset(uint32_t ng_id, uint16_t core_cnt)
-    {
-        node_group_id_ = ng_id;
-        ccm_ = nullptr;
-        unfinished_cnt_ = core_cnt;
-        resume_key_.resize(core_cnt);
-        for (uint16_t i = 0; i < core_cnt; ++i)
-        {
-            resume_key_.at(i) = nullptr;
-        }
-    }
-
     bool Execute(CcShard &ccs) override
     {
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -3425,6 +3426,10 @@ public:
             if (--pending_shard_ == 0)
             {
                 cv_.notify_one();
+                // Reset waiting ckpt flag. Shards should be
+                // able to request ckpt again if no cc entries
+                // can be kicked out.
+                ccs.SetWaitingCkpt(false);
             }
         }
         return false;
@@ -3439,6 +3444,63 @@ public:
     std::mutex mux_;
     std::condition_variable cv_;
     size_t pending_shard_;
+};
+
+struct GetTableLastCommitTsCc : public CcRequestBase
+{
+    GetTableLastCommitTsCc() = delete;
+    explicit GetTableLastCommitTsCc(const TableName &table_name,
+                                    const uint32_t ng_id,
+                                    uint16_t core_cnt)
+        : table_name_(table_name),
+          node_group_id_(ng_id),
+          unfinished_cnt_(core_cnt),
+          last_dirty_commit_ts_(0),
+          mux_(),
+          cv_()
+    {
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+        assert(!table_name_.IsMeta());
+        uint64_t last_commit_ts = 0;
+
+        if (ccm != nullptr)
+        {
+            last_commit_ts = ccm->last_dirty_commit_ts_;
+        }
+
+        std::unique_lock<std::mutex> lk(mux_);
+        last_dirty_commit_ts_ = std::max(last_commit_ts, last_dirty_commit_ts_);
+        if (--unfinished_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+        return false;
+    }
+
+    // Should only be called when all cores finish.
+    uint64_t LastCommitTs() const
+    {
+        assert(unfinished_cnt_ == 0);
+        return last_dirty_commit_ts_;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+    }
+
+private:
+    const TableName &table_name_;
+    NodeGroupId node_group_id_;
+    uint16_t unfinished_cnt_;
+    uint64_t last_dirty_commit_ts_;
+    std::mutex mux_;
+    std::condition_variable cv_;
 };
 
 /**

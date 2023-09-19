@@ -37,24 +37,6 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
-Checkpointer::~Checkpointer()
-{
-    /*std::unique_lock<std::mutex> lk(ckpt_mux_);
-    if (status_ == Status::Active)
-    {
-        lk.unlock();
-        Exit();
-        thd_.join();
-        status_ = Status::Terminated;
-    }
-    else
-    {
-        lk.unlock();
-        thd_.join();
-        status_ = Status::Terminated;
-    }*/
-}
-
 void Checkpointer::Ckpt(bool is_last_ckpt)
 {
     if (local_shards_.Count() == 0 || store_hd_ == nullptr)
@@ -115,15 +97,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
         std::unordered_map<TableName, bool> tables =
-            local_shards_.GetCatalogTableNamesForCkpt(node_group);
+            local_shards_.GetCatalogTableNameSnapshot(node_group);
 
-        std::mutex task_sender_mux;
-        std::condition_variable task_sender_cv;
-        uint16_t finished_task_cnt = 0;
-        uint16_t task_started = 0;
-
-        // Reset result bool
-        std::atomic_bool tasks_failed{false};
+        std::shared_ptr<DataSyncStatus> status =
+            std::make_shared<DataSyncStatus>();
 
         // Iterate all the tables and execute CkptScanCc requests on this node
         // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
@@ -138,21 +115,32 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             const TableName &table_name = it->first;
             bool is_dirty = it->second;
             // This should correspond to CcShard::ActiveTxMinTs.
-            if (table_name.IsMeta())
+            if (!table_name.IsMeta())
             {
-                continue;
-            }
+                if (!is_dirty)
+                {
+                    // Skip the table if it's not updated since last sync ts.
+                    GetTableLastCommitTsCc get_commit_ts_cc(
+                        table_name, node_group, local_shards_.Count());
+                    for (size_t core = 0; core < local_shards_.Count(); core++)
+                    {
+                        local_shards_.EnqueueCcRequest(core, &get_commit_ts_cc);
+                    }
+                    get_commit_ts_cc.Wait();
 
-            local_shards_.EnqueueDataSyncTask(table_name,
-                                              node_group,
-                                              leader_term,
-                                              ckpt_ts,
-                                              &task_sender_mux,
-                                              &task_sender_cv,
-                                              &finished_task_cnt,
-                                              &tasks_failed,
-                                              is_dirty);
-            ++task_started;
+                    if (get_commit_ts_cc.LastCommitTs() < last_ckpt_ts)
+                    {
+                        continue;
+                    }
+                }
+                local_shards_.EnqueueDataSyncTask(table_name,
+                                                  node_group,
+                                                  leader_term,
+                                                  ckpt_ts,
+                                                  status,
+                                                  true,
+                                                  is_dirty);
+            }
         }
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
@@ -162,58 +150,76 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         }
 
         {
-            std::unique_lock<std::mutex> task_sender_lk(task_sender_mux);
-            task_sender_cv.wait(task_sender_lk,
-                                [&finished_task_cnt, &task_started]
-                                { return finished_task_cnt == task_started; });
+            std::unique_lock<std::mutex> task_sender_lk(status->mux_);
+            status->all_task_started_ = true;
+            if (is_last_ckpt)
+            {
+                // Wait for all tasks to be done if this is last checkpoint
+                // before graceful shutdown.
+                status->cv_.wait(task_sender_lk,
+                                 [&status]
+                                 { return status->unfinished_tasks_ == 0; });
+            }
+            if (status->unfinished_tasks_ == 0 && !status->task_failed_)
+            {
+                // Truncate redo log
+                LOG(INFO) << "Checkpoint of node group #" << node_group
+                          << " succeeded with timestamp: " << ckpt_ts;
+                Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
+                NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
+            }
         }
 
         // finish checkpoint on this node group, unpin its data and clear its
         // ccmaps and catalogs if it is no longer leader
         Sharder::Instance().UnpinNodeGroupData(node_group);
-
-        if (!tasks_failed.load(std::memory_order_relaxed) &&
-            Sharder::Instance().LeaderTerm(node_group) == leader_term)
-        {
-            LOG(INFO) << "Checkpoint of node group #" << node_group
-                      << " succeeded with timestamp: " << ckpt_ts;
-            Sharder::Instance().UpdateNodeGroupCkptTs(node_group, ckpt_ts);
-            NotifyLogOfCkptTs(node_group, leader_term, ckpt_ts);
-        }
-        else
-        {
-            LOG(INFO) << "Checkpoint of node group #" << node_group
-                      << " failed, redo log not truncated.";
-        }
     }
-    // notify ccshard ckpt has finished and can re-check freeable ccentries.
-    local_shards_.SetWaitingCkpt(false);
 }
 
 void Checkpointer::Run()
 {
     std::unique_lock<std::mutex> lk(ckpt_mux_);
+    last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
     while (ckpt_thd_status_ == Status::Active)
     {
-        ckpt_cv_.wait_for(
+        while (!ckpt_cv_.wait_for(
             lk,
             std::chrono::seconds(checkpoint_interval_),
-            [this]
-            { return ckpt_thd_status_ != Status::Active || request_ckpt_; });
+            [this, &lk]
+            {
+                if (ckpt_thd_status_ != Status::Active)
+                {
+                    return true;
+                }
+
+                // Either cc shards are full and have requested a checkpoint, or
+                // we've sleeped for at least checkpoint_interval_ seconds.
+                // Only enqueue new checkpoint task if there's idle worker.
+                return (request_ckpt_ ||
+                        std::chrono::high_resolution_clock::now() >=
+                            last_checkpoint_ts_ +
+                                std::chrono::seconds(checkpoint_interval_)) &&
+                       local_shards_.IsDataSyncQueueEmpty();
+            }))
+        {
+            // go back to sleep if there's no idle worker.
+        }
 
         CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
             request_ckpt_ = false;
+            last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
             continue;
         });
-
-        if (ckpt_thd_status_ == Status::Active)
+        if (ckpt_thd_status_ != Status::Active)
         {
-            lk.unlock();
-            Ckpt();
-            lk.lock();
-
-            request_ckpt_ = false;
+            break;
         }
+
+        last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
+        lk.unlock();
+        Ckpt();
+        lk.lock();
+        request_ckpt_ = false;
     }
 
     // ensure normal shutdown execute checkpoint since we could receive
@@ -230,10 +236,13 @@ void Checkpointer::Run()
  * to do checkpoint if there is no freeable entries to be kicked out
  * from ccmap.
  */
-void Checkpointer::Notify()
+void Checkpointer::Notify(bool request_ckpt)
 {
-    std::unique_lock<std::mutex> lk(ckpt_mux_);
-    request_ckpt_ = true;
+    if (request_ckpt)
+    {
+        std::unique_lock<std::mutex> lk(ckpt_mux_);
+        request_ckpt_ = true;
+    }
     ckpt_cv_.notify_one();
 }
 
@@ -276,9 +285,8 @@ bool Checkpointer::CkptEntryForTest(LruEntry *entry,
     TableName table_name{ccm->table_name_.StringView(),
                          ccm->table_name_.Type()};
     uint32_t ng = Sharder::Instance().NodeId();
-    std::unordered_set<uint32_t> skipped_record;
     ckpt_ret = store_hd_->PutAll(
-        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng, skipped_record);
+        ckpt_vec, ccm->table_name_, ccm->GetTableSchema(), ng);
 
     return ckpt_ret;
 }
