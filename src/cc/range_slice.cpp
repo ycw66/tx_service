@@ -140,6 +140,12 @@ void StoreRange::PopPendingSyncTask()
     }
 }
 
+void StoreRange::PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
+{
+    std::unique_lock<std::shared_mutex> lk(mux_);
+    pending_sync_task_.emplace(task);
+}
+
 RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   int64_t ng_term,
                                   const TxKey &search_key,

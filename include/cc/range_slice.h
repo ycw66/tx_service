@@ -598,6 +598,8 @@ public:
 
     void PopPendingSyncTask();
 
+    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task);
+
     uint64_t GetLastSyncTs()
     {
         std::shared_lock<std::shared_mutex> lk(mux_);

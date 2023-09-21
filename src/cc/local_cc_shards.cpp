@@ -1629,7 +1629,7 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                 status,
                 need_truncate_log,
                 is_dirty,
-                [this, &table_name, ng_id](std::shared_ptr<DataSyncTask> task)
+                [this](std::shared_ptr<DataSyncTask> task)
                 {
                     std::lock_guard<std::mutex> lk(task_worker_mux_);
                     data_sync_task_queue_.push_back(task);
@@ -1638,23 +1638,64 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                 },
                 hres));
         }
-        else
+
+        auto new_range_ids = range_info->NewPartitionId();
+        if (new_range_ids && range_info->DirtyTs() <= data_sync_ts)
         {
-            // If range is splitting and the new range falls on current node
-            // group, we might receive forwarded messages. These messages cannot
-            // be flushed into data store yet since we cannot update their slice
-            // specs. Thus the log cannot be truncated for this round of
-            // checkpoint.
-            auto new_range_ids = range_info->NewPartitionId();
-            if (new_range_ids && range_info->DirtyTs() <= data_sync_ts)
+            assert(range_info->IsDirty());
+            StoreRange *store_range = nullptr;
+            for (int32_t new_range : *new_range_ids)
             {
-                assert(range_info->IsDirty());
-                for (int32_t new_range : *new_range_ids)
+                NodeGroupId new_range_owner =
+                    GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
+                if (new_range_owner == ng_id)
                 {
-                    NodeGroupId range_owner =
-                        GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
                     if (range_owner == ng_id)
                     {
+                        // If range is splitting, there might be dirty data
+                        // before data_sync_ts written into new ranges. If
+                        // the new ranges still fall on current ng, they
+                        // need to be synced before we truncate redo log
+                        // till data_sync_ts. However the new ranges have to
+                        // be processed after the current range split is
+                        // done, otherwise the StoreRange for new range won't be
+                        // available. Put the task into pending queue for
+                        // the splitting range for now so that it can be
+                        // executed after current range split is done.
+                        if (store_range == nullptr)
+                        {
+                            store_range = FindRange(range_table_name,
+                                                    ng_id,
+                                                    range_info->PartitionId());
+                        }
+                        store_range->PushPendingSyncTask(
+                            std::make_shared<DataSyncTask>(
+                                table_name,
+                                new_range,
+                                ng_id,
+                                ng_term,
+                                data_sync_ts,
+                                status,
+                                need_truncate_log,
+                                is_dirty,
+                                [this](std::shared_ptr<DataSyncTask> task)
+                                {
+                                    std::lock_guard<std::mutex> lk(
+                                        task_worker_mux_);
+                                    data_sync_task_queue_.push_back(task);
+                                    // Notify the data sync workers.
+                                    task_worker_cv_.notify_one();
+                                },
+                                hres));
+                    }
+                    else
+                    {
+                        // If range is splitting and the new range falls on
+                        // current node group, we might receive forwarded
+                        // messages. These messages cannot be flushed into
+                        // data store yet since we cannot update their slice
+                        // specs. Thus the log cannot be truncated for this
+                        // round of checkpoint.
                         LOG(INFO) << "Unable to truncate log since "
                                   << table_name.Trace() << ", range "
                                   << range_info->PartitionId()
