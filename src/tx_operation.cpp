@@ -89,7 +89,8 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
                 write_entry.forward_key_shard_code_.insert(
                     (new_range_owner << 10) | (hash & 0x3FF));
             }
-            if (new_range_new_bucket_owner != range_owner)
+            if (new_range_new_bucket_owner != UINT32_MAX &&
+                new_range_new_bucket_owner != range_owner)
             {
                 write_entry.forward_key_shard_code_.insert(
                     (new_range_new_bucket_owner << 10) | (hash & 0x3FF));
