@@ -260,7 +260,7 @@ void txservice::LocalCcHandler::PostWrite(
     }
 }
 
-void txservice::LocalCcHandler::ForwardPostWrite(
+void txservice::LocalCcHandler::UploadRecord(
     TxNumber tx_number,
     int64_t tx_term,
     uint16_t command_id,
@@ -271,7 +271,6 @@ void txservice::LocalCcHandler::ForwardPostWrite(
     OperationType operation_type,
     uint32_t key_shard_code,
     CcHandlerResult<PostProcessResult> &hres,
-    bool blocked,
     int64_t expected_term)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
@@ -304,7 +303,7 @@ void txservice::LocalCcHandler::ForwardPostWrite(
                 // Leader transferred. For example, a remote node group
                 // transferred to local node.
                 hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                LOG(ERROR) << "LocalCcHandler::ForwardPostWrite: The leader of "
+                LOG(ERROR) << "LocalCcHandler::UploadRecord: The leader of "
                               "the destinate node group transferred for ng#"
                            << ng_id;
                 return;
@@ -322,8 +321,7 @@ void txservice::LocalCcHandler::ForwardPostWrite(
                    operation_type,
                    key_shard_code,
                    &hres,
-                   (operation_type == OperationType::Insert),
-                   blocked);
+                   (operation_type == OperationType::Insert));
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -334,19 +332,18 @@ void txservice::LocalCcHandler::ForwardPostWrite(
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
 
-        remote_hd_.ForwardPostWrite(cc_shards_.node_id_,
-                                    tx_number,
-                                    tx_term,
-                                    command_id,
-                                    commit_ts,
-                                    expected_term,
-                                    key,
-                                    table_name,
-                                    record,
-                                    operation_type,
-                                    key_shard_code,
-                                    hres,
-                                    blocked);
+        remote_hd_.UploadRecord(cc_shards_.node_id_,
+                                tx_number,
+                                tx_term,
+                                command_id,
+                                commit_ts,
+                                expected_term,
+                                key,
+                                table_name,
+                                record,
+                                operation_type,
+                                key_shard_code,
+                                hres);
     }
 }
 

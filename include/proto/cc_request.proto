@@ -373,7 +373,6 @@ message ForwardPostCommitRequest {
 	bytes record = 8;
 	uint32 operation_type = 9;
 	uint32 key_shard_code = 10;
-	bool blocked = 11;
 }
 
 message PostWriteAllRequest {

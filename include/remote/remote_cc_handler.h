@@ -61,19 +61,18 @@ public:
                    uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres);
 
-    void ForwardPostWrite(uint32_t src_node_id,
-                          uint64_t tx_number,
-                          int64_t tx_term,
-                          uint16_t command_id,
-                          uint64_t commit_ts,
-                          int64_t ng_term,
-                          const TxKey *key,
-                          const TableName &table_name,
-                          const TxRecord *record,
-                          OperationType operation_type,
-                          uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres,
-                          bool blocked = true);
+    void UploadRecord(uint32_t src_node_id,
+                      uint64_t tx_number,
+                      int64_t tx_term,
+                      uint16_t command_id,
+                      uint64_t commit_ts,
+                      int64_t ng_term,
+                      const TxKey *key,
+                      const TableName &table_name,
+                      const TxRecord *record,
+                      OperationType operation_type,
+                      uint32_t key_shard_code,
+                      CcHandlerResult<PostProcessResult> &hres);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,
@@ -179,14 +178,6 @@ public:
                    bool inclusive,
                    CcProtocol proto = CcProtocol::OCC,
                    LockType lock_type = LockType::ReadLock)
-    {
-    }
-
-    void UploadRecord(const TableName &table_name,
-                      const TxKey &key,
-                      TxRecord *record,
-                      const CcEntryAddr &cce_addr,
-                      CcHandlerResult<Void> &)
     {
     }
 

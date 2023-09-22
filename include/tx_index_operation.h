@@ -172,7 +172,7 @@ private:
     static void HandleAcquireNodeGroupLeaderTermResponse(
         brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response);
     // Upload sk record from local write set into sk ccmap
-    void ForwardPostWriteSk(TransactionExecution *txm, ReadWriteSet &rw_set);
+    void UploadSkData(TransactionExecution *txm, ReadWriteSet &rw_set);
     bool UploadWithoutDataLog(TransactionExecution *upload_txm);
     // Scan pk from data store
     std::unique_ptr<store::DataStoreScanner> PrepareScanFromDataStore(

@@ -64,14 +64,15 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
         WriteSetEntry &write_entry = write_key_it->second;
         size_t hash = write_entry.key_->Hash();
         write_entry.key_shard_code_ = (range_owner << 10) | (hash & 0x3FF);
+        // If current range is migrating, forward to new range owner.
         if (new_bucket_owner != UINT32_MAX)
         {
-            write_entry.forward_key_shard_code_.insert(
-                (new_bucket_owner << 10) | (hash & 0x3FF));
+            write_entry.forward_addr_.try_emplace((new_bucket_owner << 10) |
+                                                  (hash & 0x3FF));
         }
 
         // If range is splitting and the key will fall on a new range after
-        // split is finished, register forward_key_shard_code_ to indicate
+        // split is finished, register forward_addr_ to indicate
         // entry needs to be double written.
         while (range_info->IsDirty() &&
                new_range_idx < range_info->NewKey()->size() &&
@@ -86,19 +87,20 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
         {
             if (new_range_owner != range_owner)
             {
-                write_entry.forward_key_shard_code_.insert(
-                    (new_range_owner << 10) | (hash & 0x3FF));
+                write_entry.forward_addr_.try_emplace((new_range_owner << 10) |
+                                                      (hash & 0x3FF));
             }
+            // If the new range is migrating, forward to the new owner of new
+            // range.
             if (new_range_new_bucket_owner != UINT32_MAX &&
                 new_range_new_bucket_owner != range_owner)
             {
-                write_entry.forward_key_shard_code_.insert(
+                write_entry.forward_addr_.try_emplace(
                     (new_range_new_bucket_owner << 10) | (hash & 0x3FF));
             }
         }
 
-        rw_set.IncreaseFowardWriteCnt(
-            write_entry.forward_key_shard_code_.size());
+        rw_set.IncreaseFowardWriteCnt(write_entry.forward_addr_.size());
         ++write_key_it;
     }
 }
@@ -406,7 +408,7 @@ AcquireWriteOperation::AcquireWriteOperation(TransactionExecution *txm)
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
-void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
+void AcquireWriteOperation::Reset(size_t acquire_write_cnt, size_t wentry_cnt)
 {
     hd_result_.Reset();
     hd_result_.SetRefCnt(acquire_write_cnt);
@@ -420,7 +422,7 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt)
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
-    acquire_write_entries_.resize(acquire_write_cnt);
+    acquire_write_entries_.resize(wentry_cnt);
 
     rset_has_expired_ = false;
     op_start_ = metrics::TimePoint::max();
@@ -440,34 +442,54 @@ void AcquireWriteOperation::Reset()
 void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
 {
     std::vector<AcquireKeyResult> &acquire_key_vec = hd_result_.Value();
-    for (size_t idx = 0; idx < acquire_key_vec.size(); ++idx)
+    size_t res_idx = 0;
+    for (WriteSetEntry *write_entry : acquire_write_entries_)
     {
-        const AcquireKeyResult &acquire_key_res = acquire_key_vec[idx];
+        const AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
         const CcEntryAddr &addr = acquire_key_res.cce_addr_;
-        WriteSetEntry &write_entry = *acquire_write_entries_[idx];
 
         int64_t term = addr.Term();
         if (term < 0)
         {
-            write_entry.cce_addr_.SetCce(0, -1, 0);
+            write_entry->cce_addr_.SetCce(0, -1, 0);
             continue;
         }
         else
         {
             // Assigns to the write entry the cc entry address obtained
             // in the acquire phase.
-            write_entry.cce_addr_ = addr;
+            write_entry->cce_addr_ = addr;
+            uint64_t read_version = txm->rw_set_.DedupRead(addr);
+            if (read_version > 0 && read_version != acquire_key_res.commit_ts_)
+            {
+                // Each write-set key acquires a write lock and gets the
+                // key's last validation ts and commit ts. If the write
+                // key has been read before and the key's commit ts
+                // mismatches the prior version, this is not a
+                // repeatable read.
+                rset_has_expired_ = true;
+            }
         }
 
-        uint64_t read_version = txm->rw_set_.DedupRead(addr);
-        if (read_version > 0 && read_version != acquire_key_res.commit_ts_)
+        for (auto &[forward_shard_code, cce_addr] : write_entry->forward_addr_)
         {
-            // Each write-set key acquires a write lock and gets the
-            // key's last validation ts and commit ts. If the write
-            // key has been read before and the key's commit ts
-            // mismatches the prior version, this is not a
-            // repeatable read.
-            rset_has_expired_ = true;
+            const AcquireKeyResult &acquire_key_res =
+                acquire_key_vec[res_idx++];
+            const CcEntryAddr &addr = acquire_key_res.cce_addr_;
+            term = addr.Term();
+            if (term < 0)
+            {
+                cce_addr.SetCce(0, -1, 0);
+            }
+            else
+            {
+                // Assigns to the write entry the cc entry address obtained
+                // in the acquire phase.
+                cce_addr = addr;
+            }
+
+            // No need to dedup forwarded req since they are not visible to read
+            // op.
         }
     }
 }
@@ -2222,7 +2244,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                  &write_entry,
                  &hd_res = reset_sequence_record_op_.hd_result_]
             {
-                txm->cc_handler_->ForwardPostWrite(
+                txm->cc_handler_->UploadRecord(
                     txm->tx_number_.load(std::memory_order_relaxed),
                     txm->tx_term_,
                     txm->command_id_.load(std::memory_order_relaxed),

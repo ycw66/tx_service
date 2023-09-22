@@ -556,8 +556,7 @@ public:
           is_remote_(false),
           is_initial_insert_(false),
           payload_(nullptr),
-          key_(nullptr),
-          blocked_after_lack_mem_(true)
+          key_(nullptr)
     {
     }
 
@@ -614,8 +613,7 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res,
-               bool blocked = true)
+               CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number);
@@ -629,7 +627,6 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
-        blocked_after_lack_mem_ = blocked;
     }
 
     void Reset(const TxKey *key,
@@ -656,7 +653,6 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
-        blocked_after_lack_mem_ = blocked;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -665,8 +661,7 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res,
-               bool blocked = true)
+               CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number);
@@ -680,7 +675,6 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
-        blocked_after_lack_mem_ = blocked;
     }
 
     void Reset(const TableName *table_name,
@@ -692,8 +686,7 @@ public:
                OperationType operation_type,
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
-               bool initial_insertion = false,
-               bool blocked = true)
+               bool initial_insertion = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name, res, node_group_id, tx_number);
@@ -706,7 +699,6 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
-        blocked_after_lack_mem_ = blocked;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -754,11 +746,6 @@ public:
         return is_initial_insert_;
     }
 
-    bool BeBlocked() const
-    {
-        return blocked_after_lack_mem_;
-    }
-
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
@@ -776,12 +763,6 @@ private:
         const TxKey *key_;
         const std::string *key_str_;
     };
-    // Set this flag to false if it is forwarding generated sk record during
-    // create index. The caller does not write log for this request and has
-    // acquired range read lock. We need to inform the caller that we have run
-    // out of memory and the caller will need to release range read lock and
-    // retry the post write req later.
-    bool blocked_after_lack_mem_;
 };
 
 struct PostWriteAllCc

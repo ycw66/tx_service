@@ -414,8 +414,7 @@ public:
                 wset_bytes_cnt_ -= key_it.second.rec_ != nullptr
                                        ? key_it.second.rec_->SerializedLength()
                                        : 0;
-                forward_write_cnt_ -=
-                    key_it.second.forward_key_shard_code_.size();
+                forward_write_cnt_ -= key_it.second.forward_addr_.size();
             }
             wset_.erase(tab_it);
         }

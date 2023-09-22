@@ -94,18 +94,17 @@ public:
     /// <param name="expected_term">If this value is SKIP_CHECK_TERM, it means
     /// that the caller does not care the term, and there is no need to check
     /// the term</param>
-    void ForwardPostWrite(TxNumber tx_number,
-                          int64_t tx_term,
-                          uint16_t command_id,
-                          uint64_t commit_ts,
-                          const TableName &table_name,
-                          const TxKey *key,
-                          const TxRecord *record,
-                          OperationType operation_type,
-                          uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres,
-                          bool blocked = true,
-                          int64_t expected_term = SKIP_CHECK_TERM) override;
+    void UploadRecord(TxNumber tx_number,
+                      int64_t tx_term,
+                      uint16_t command_id,
+                      uint64_t commit_ts,
+                      const TableName &table_name,
+                      const TxKey *key,
+                      const TxRecord *record,
+                      OperationType operation_type,
+                      uint32_t key_shard_code,
+                      CcHandlerResult<PostProcessResult> &hres,
+                      int64_t expected_term = SKIP_CHECK_TERM) override;
 
     /// <summary>
     /// For OCC, validates whether or not the key has changed since the
@@ -241,14 +240,6 @@ public:
     void ScanClose(const TableName &table_name,
                    ScanDirection direction,
                    std::unique_ptr<CcScanner> scanner) override;
-
-    void UploadRecord(const TableName &table_name,
-                      const TxKey &key,
-                      TxRecord *record,
-                      const CcEntryAddr &ccentry_addr,
-                      CcHandlerResult<Void> &) override
-    {
-    }
 
     /// <summary>
     /// Starts a new tx and returns the tx ID.

@@ -1911,8 +1911,8 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
     return true;
 }
 
-void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
-                                            ReadWriteSet &rw_set)
+void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
+                                      ReadWriteSet &rw_set)
 {
     std::mutex post_write_mutex;
     std::condition_variable post_write_cv;
@@ -1953,7 +1953,7 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
                 int64_t expected_term = expected_ng_terms.at(ng_id);
                 assert(expected_term > 0);
 
-                txm->cc_handler_->ForwardPostWrite(
+                txm->cc_handler_->UploadRecord(
                     txm->tx_number_.load(std::memory_order_relaxed),
                     txm->tx_term_,
                     txm->command_id_.load(std::memory_order_relaxed),
@@ -1964,13 +1964,12 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
                     write_entry.op_,
                     write_entry.key_shard_code_,
                     post_write_result_,
-                    false,
                     expected_term);
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Double write if the target range is splitting.
-                for (uint32_t forward_shard_code :
-                     write_entry.forward_key_shard_code_)
+                for (const auto &[forward_shard_code, cce_addr] :
+                     write_entry.forward_addr_)
                 {
                     uint32_t forward_ng_id =
                         Sharder::Instance().ShardToCcNodeGroup(
@@ -1979,7 +1978,7 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
                         expected_ng_terms.at(forward_ng_id);
                     assert(forward_expected_term > 0);
 
-                    txm->cc_handler_->ForwardPostWrite(
+                    txm->cc_handler_->UploadRecord(
                         txm->tx_number_.load(std::memory_order_relaxed),
                         txm->tx_term_,
                         txm->command_id_.load(std::memory_order_relaxed),
@@ -1990,7 +1989,6 @@ void UpsertTableIndexOp::ForwardPostWriteSk(TransactionExecution *txm,
                         write_entry.op_,
                         forward_shard_code,
                         post_write_result_,
-                        false,
                         forward_expected_term);
                 }
 #endif
@@ -2069,7 +2067,7 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     }
 
     // 3. post write packed sk
-    ForwardPostWriteSk(upload_txm, upload_txm->rw_set_);
+    UploadSkData(upload_txm, upload_txm->rw_set_);
     // If OOM, will re-run this batch records, so can not clear the write
     // set here.
     if (post_write_result_.ErrorCode() != CcErrorCode::OUT_OF_MEMORY)

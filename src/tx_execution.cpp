@@ -2889,14 +2889,14 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
-    size_t wset_size = rw_set_.WriteSetSize();
-    acquire_write.Reset(wset_size);
+    acquire_write.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt(),
+                        rw_set_.WriteSetSize());
     acquire_write.is_running_ = true;
 
     uint64_t current_ts =
         static_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
 
-    size_t idx = 0;
+    size_t res_idx = 0, entry_idx = 0;
     std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
     for (auto &[table_name, table_write_set] : wset)
     {
@@ -2906,7 +2906,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
             size_t hash = write_entry.key_->Hash();
             write_entry.key_shard_code_ = Sharder::Instance().ShardCode(hash);
 #endif
-            acquire_write.acquire_write_entries_[idx] = &write_entry;
+            acquire_write.acquire_write_entries_[entry_idx++] = &write_entry;
 
             // TODO: enable is_insert after Serializable Isolation is
             // supported.
@@ -2920,10 +2920,26 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 current_ts,
                 false,
                 acquire_write.hd_result_,
-                idx,
+                res_idx++,
                 protocol_,
                 iso_level_);
-            ++idx;
+            for (auto &[forward_shard_code, cce_addr] :
+                 write_entry.forward_addr_)
+            {
+                cc_handler_->AcquireWrite(
+                    table_name,
+                    *write_entry.key_,
+                    forward_shard_code,
+                    TxNumber(),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    current_ts,
+                    false,
+                    acquire_write.hd_result_,
+                    res_idx++,
+                    protocol_,
+                    iso_level_);
+            }
         }
     }
 
@@ -3339,8 +3355,8 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 
             rec_vec_it.first->second.emplace_back(&wset_entry);
 
-            for (uint32_t forward_shard_code :
-                 wset_entry.forward_key_shard_code_)
+            for (const auto &[forward_shard_code, addr] :
+                 wset_entry.forward_addr_)
             {
                 // If the wset entry needs to be double written into different
                 // ngs, write log for both ngs.
@@ -3732,7 +3748,8 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         });
     state_stack_.pop_back();
 
-    uint32_t acquire_write_cnt = rw_set_.WriteSetSize();
+    uint32_t acquire_write_cnt =
+        rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
     if (rw_set_.WriteSetSize() > 0 && acquire_write_.hd_result_.IsError())
     {
         std::vector<AcquireKeyResult> &acquire_key_vec =
@@ -3754,8 +3771,7 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         // The tx is committed. The tx must have finished validation.
         // Post-processing includes both primary keys that have locks and
         // secondary keys without locks.
-        post_process_.Reset(rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt() +
-                                rw_set_.ObjectCommandSize(),
+        post_process_.Reset(acquire_write_cnt + rw_set_.ObjectCommandSize(),
                             0,
                             rw_set_.CatalogRangeSetSize());
     }
@@ -3814,22 +3830,21 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                        write_entry.op_,
                                        write_entry.key_shard_code_,
                                        post_process.hd_result_);
-                for (uint32_t forward_code :
-                     write_entry.forward_key_shard_code_)
-                {
-                    cc_handler_->ForwardPostWrite(
-                        tx_number_.load(std::memory_order_relaxed),
-                        tx_term_,
-                        command_id,
-                        commit_ts_,
-                        table_name,
-                        key,
-                        write_entry.rec_.get(),
-                        write_entry.op_,
-                        forward_code,
-                        post_process.hd_result_);
-                }
                 ++idx;
+                for (auto &[forward_shard_code, cce_addr] :
+                     write_entry.forward_addr_)
+                {
+                    cc_handler_->PostWrite(tx_number,
+                                           tx_term_,
+                                           command_id,
+                                           commit_ts_,
+                                           cce_addr,
+                                           write_entry.rec_.get(),
+                                           write_entry.op_,
+                                           forward_shard_code,
+                                           post_process.hd_result_);
+                    ++idx;
+                }
             }
         }
 
@@ -3879,29 +3894,46 @@ void TransactionExecution::Process(PostProcessOp &post_process)
             {
                 for (const auto &[key, write_entry] : table_write_set)
                 {
-                    if (write_entry.cce_addr_.Term() < 0)
+                    if (write_entry.cce_addr_.Term() >= 0)
                     {
-                        // Keys that were not successfully locked in the cc
-                        // map do not need post-processing.
+                        assert(!write_entry.cce_addr_.Empty());
+
+                        // Abort doesn't care the OperationType, since PostWrite
+                        // is just used to release the lock.
+                        cc_handler_->PostWrite(
+                            tx_number_.load(std::memory_order_relaxed),
+                            tx_term_,
+                            command_id_.load(std::memory_order_relaxed),
+                            0,
+                            write_entry.cce_addr_,
+                            nullptr,
+                            write_entry.op_,
+                            write_entry.key_shard_code_,
+                            post_process.hd_result_);
                         ++idx;
-                        continue;
                     }
-                    assert(!write_entry.cce_addr_.Empty());
+                    // Keys that were not successfully locked in the cc
+                    // map do not need post-processing.
 
-                    // Abort doesn't care the OperationType, since PostWrite is
-                    // just used to release the lock.
-                    cc_handler_->PostWrite(
-                        tx_number_.load(std::memory_order_relaxed),
-                        tx_term_,
-                        command_id_.load(std::memory_order_relaxed),
-                        0,
-                        write_entry.cce_addr_,
-                        nullptr,
-                        write_entry.op_,
-                        write_entry.key_shard_code_,
-                        post_process.hd_result_);
-
-                    ++idx;
+                    for (const auto &[forward_shard_code, cce_addr] :
+                         write_entry.forward_addr_)
+                    {
+                        if (cce_addr.Term() >= 0)
+                        {
+                            assert(!cce_addr.Empty());
+                            cc_handler_->PostWrite(
+                                tx_number_.load(std::memory_order_relaxed),
+                                tx_term_,
+                                command_id_.load(std::memory_order_relaxed),
+                                0,
+                                cce_addr,
+                                nullptr,
+                                write_entry.op_,
+                                forward_shard_code,
+                                post_process.hd_result_);
+                            ++idx;
+                        }
+                    }
                 }
             }
         }

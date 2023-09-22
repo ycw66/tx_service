@@ -33,7 +33,7 @@ struct WriteSetEntry
           op_(other.op_),
           cce_addr_(other.cce_addr_),
           key_shard_code_(other.key_shard_code_),
-          forward_key_shard_code_(std::move(other.forward_key_shard_code_))
+          forward_addr_(std::move(other.forward_addr_))
     {
     }
 
@@ -44,7 +44,7 @@ struct WriteSetEntry
         op_ = other.op_;
         cce_addr_ = other.cce_addr_;
         key_shard_code_ = other.key_shard_code_;
-        forward_key_shard_code_ = std::move(other.forward_key_shard_code_);
+        forward_addr_ = std::move(other.forward_addr_);
 
         return *this;
     }
@@ -55,7 +55,7 @@ struct WriteSetEntry
     CcEntryAddr cce_addr_;
     uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
-    std::unordered_set<uint32_t> forward_key_shard_code_;
+    std::map<uint32_t, CcEntryAddr> forward_addr_;
 };
 
 struct ReadSetEntry

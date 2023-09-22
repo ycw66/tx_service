@@ -172,7 +172,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
-void txservice::remote::RemoteCcHandler::ForwardPostWrite(
+void txservice::remote::RemoteCcHandler::UploadRecord(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
@@ -184,8 +184,7 @@ void txservice::remote::RemoteCcHandler::ForwardPostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    bool blocked)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     CcMessage send_msg;
 
@@ -220,7 +219,6 @@ void txservice::remote::RemoteCcHandler::ForwardPostWrite(
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
     post_commit->set_key_shard_code(key_shard_code);
-    post_commit->set_blocked(blocked);
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }

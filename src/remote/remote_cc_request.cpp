@@ -571,8 +571,7 @@ void txservice::remote::RemotePostWrite::Reset(
                            op_type,
                            post_commit.key_shard_code(),
                            &cc_res_,
-                           op_type == OperationType::Insert,
-                           post_commit.blocked());
+                           op_type == OperationType::Insert);
     }
     input_msg_ = std::move(input_msg);
 
