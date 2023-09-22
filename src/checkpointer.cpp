@@ -97,7 +97,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // Get table names in this node group, checkpointer should be TableName
         // string owner.
         std::unordered_map<TableName, bool> tables =
-            local_shards_.GetCatalogTableNameSnapshot(node_group);
+            local_shards_.GetCatalogTableNameSnapshot(node_group, ckpt_ts);
 
         std::shared_ptr<DataSyncStatus> status =
             std::make_shared<DataSyncStatus>();

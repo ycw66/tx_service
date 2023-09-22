@@ -418,7 +418,7 @@ public:
      * whether this table is dirty table(such as dirty index table).
      */
     std::unordered_map<TableName, bool> GetCatalogTableNameSnapshot(
-        NodeGroupId cc_ng_id);
+        NodeGroupId cc_ng_id, uint64_t snapshot_ts);
 
     void CreateSchemaRecoveryTx(ReplayLogCc &replay_log_cc,
                                 const ::txlog::SchemaOpMessage &schema_op_msg,

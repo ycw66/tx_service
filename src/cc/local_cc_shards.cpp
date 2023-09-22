@@ -353,7 +353,7 @@ CatalogEntry *LocalCcShards::GetCatalog(const TableName &table_name,
 }
 
 std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
-    NodeGroupId cc_ng_id)
+    NodeGroupId cc_ng_id, uint64_t snapshot_ts)
 {
     std::unordered_map<TableName, bool> tables;
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -386,7 +386,12 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                 }
 
                 // For alter table, should include new index tables.
-                if (catalog_entry.dirty_schema_ != nullptr)
+                // For dirty index tables, if the dirty schema version is larger
+                // than the `snapshot_ts`, it means there is no data in the
+                // dirty index table before the `snapshot_ts`, then, there is no
+                // need to do checkpoint or table stats sync.
+                if (catalog_entry.dirty_schema_ != nullptr &&
+                    catalog_entry.DirtyVersion() <= snapshot_ts)
                 {
                     // Only search new index table name, because the base table
                     // and the old index have been obtained via above.
@@ -1973,6 +1978,35 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         return;
     }
 
+    // Get the table schema. The basic strategy is that, 1) for pk table, must
+    // use the current table schema, 2) for the [Unique]secondary table, only
+    // in the case that there is no key schema corresponding to the index table
+    // in the current table schema, should use the dirty table schema.
+    const TableSchema *table_schema = catalog_rec.Schema();
+    if (is_dirty && catalog_rec.DirtySchema() &&
+        !table_schema->IndexKeySchema(table_name))
+    {
+        assert(table_name.Type() == TableType::Secondary ||
+               table_name.Type() == TableType::UniqueSecondary);
+        table_schema = catalog_rec.DirtySchema();
+    }
+    // For index table, if this table has been dropped, skip it.
+    if ((table_name.Type() == TableType::Secondary ||
+         table_name.Type() == TableType::UniqueSecondary) &&
+        !table_schema->IndexKeySchema(table_name))
+    {
+        // Use CommitTxRequest to release read lock.
+        CommitTxRequest commit_req;
+        data_sync_txm->Execute(&commit_req);
+        commit_req.Wait();
+        LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
+                  << ". Return finish directly.";
+
+        task_worker_lk.lock();
+        data_sync_task->SetFinish();
+        return;
+    }
+
     // Lock bucket so that bucket cannot be migrated away during data sync.
     RangeBucketRecord bucket_rec;
     RangeBucketKey bucket_key(
@@ -2163,11 +2197,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         std::move(archive_vecs), *archive_vec, rec_greater, false);
 
     // 4. Process the data sync vec
-    const TableSchema *table_schema = catalog_rec.Schema();
-    if (is_dirty && catalog_rec.DirtySchema())
-    {
-        table_schema = catalog_rec.DirtySchema();
-    }
 #ifdef RANGE_PARTITION_ENABLED
     // 4.1 For range partition, execute range split if necessary using
     // seperate thread per range.
@@ -2912,7 +2941,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
             // Get table names in this node group, stats sync worker should be
             // TableName string owner.
             std::unordered_map<TableName, bool> tables =
-                GetCatalogTableNameSnapshot(node_group);
+                GetCatalogTableNameSnapshot(node_group, sync_ts);
 
             // Loop over all tables and sync stats.
             for (auto it = tables.begin(); it != tables.end(); ++it)
