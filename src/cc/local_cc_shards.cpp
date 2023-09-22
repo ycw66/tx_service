@@ -2879,6 +2879,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
         {
             break;
         }
+        CODE_FAULT_INJECTOR("skip_sync_table_statistics", { continue; });
 
         worker_lk.unlock();
 
