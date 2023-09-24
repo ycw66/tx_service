@@ -1920,6 +1920,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR("upsert_table_crash_after_prepare_log");
             op_ = &post_all_intent_op_;
 
             txm->PushOperation(&post_all_intent_op_);
