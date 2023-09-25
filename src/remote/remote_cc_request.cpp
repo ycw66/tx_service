@@ -1415,13 +1415,8 @@ void txservice::remote::RemoteAbortTransactionCc::Reset(
     output_msg_.clear_acquire_resp();
     const AbortTransactionRequest &req = input_msg->abort_tran_req();
 
-    std::vector<TxNumber> vct;
-    for (int i = 0; i < req.lock_txids_size(); i++)
-    {
-        vct.push_back(req.lock_txids(i));
-    }
-
-    AbortTransactionCc::Reset(req.entry(), vct, req.wait_txid());
+    AbortTransactionCc::Reset(
+        req.entry(), req.lock_txid(), req.wait_txid(), req.node_id());
     input_msg_ = std::move(input_msg);
 
     if (hd_ == nullptr)
@@ -1437,28 +1432,18 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
         &ltxs = ccs.GetLockHoldingTxs();
     int32_t err = 1;
 
-    for (TxNumber tx : tx_id_lock_vct_)
+    auto it_ng = ltxs.find(node_id_);
+    if (it_ng != ltxs.end())
     {
-        bool bfind = false;
-        for (auto it_ng = ltxs.begin(); it_ng != ltxs.end(); it_ng++)
-        {
-            auto it_info = it_ng->second.find(tx);
-            if (it_info->second.cce_list_.find(lru_entry) !=
+        auto it_info = it_ng->second.find(tx_id_lock_);
+        if (it_info != it_ng->second.end() &&
+            it_info->second.cce_list_.find(lru_entry) !=
                 it_info->second.cce_list_.end())
-            {
-                bfind = true;
-                break;
-            }
-        }
-        if (!bfind)
         {
-            continue;
+            NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
+            key_lock->AbortQueueRequest(tx_id_wait_);
+            err = 0;
         }
-
-        NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
-        key_lock->AbortQueueRequest(tx_id_wait_);
-        err = 0;
-        break;
     }
 
     output_msg_.set_type(tr::CcMessage::MessageType::

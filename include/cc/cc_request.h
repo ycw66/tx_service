@@ -3193,44 +3193,41 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
+        // Can not sure the entry is in memory, so here verify by
+        // ccs.GetLockHoldingTxs
         LruEntry *lru_entry = reinterpret_cast<LruEntry *>(entry_addr_);
         std::unordered_map<NodeGroupId,
                            std::unordered_map<TxNumber, TxLockInfo>> &ltxs =
             ccs.GetLockHoldingTxs();
 
-        for (TxNumber tx : tx_id_lock_vct_)
+        auto it_ng = ltxs.find(node_id_);
+        // Maybe the ng leader has transfer to other node.
+        if (it_ng != ltxs.end())
         {
-            bool bfind = false;
-            for (auto it_ng = ltxs.begin(); it_ng != ltxs.end(); it_ng++)
-            {
-                auto it_info = it_ng->second.find(tx);
-                if (it_info->second.cce_list_.find(lru_entry) !=
+            auto it_info = it_ng->second.find(tx_id_lock_);
+            // Maybethe tx has taken part in more than dead lock cycles, and it
+            // has been release in other cycle.
+            if (it_info != it_ng->second.end() &&
+                it_info->second.cce_list_.find(lru_entry) !=
                     it_info->second.cce_list_.end())
-                {
-                    bfind = true;
-                    break;
-                }
-            }
-            if (!bfind)
             {
-                continue;
+                NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
+                key_lock->AbortQueueRequest(tx_id_wait_);
             }
-
-            NonBlockingLock *key_lock = lru_entry->key_lock_ptr_;
-            key_lock->AbortQueueRequest(tx_id_wait_);
-            break;
         }
 
         return true;
     }
 
     void Reset(uint64_t entry_addr,
-               std::vector<TxNumber> &tx_id_lock_vct,
-               TxNumber tx_id_wait)
+               TxNumber tx_id_lock,
+               TxNumber tx_id_wait,
+               uint32_t node_id)
     {
         entry_addr_ = entry_addr;
-        tx_id_lock_vct_.swap(tx_id_lock_vct);
+        tx_id_lock_ = tx_id_lock;
         tx_id_wait_ = tx_id_wait;
+        node_id_ = node_id;
     }
 
     uint64_t GetEntryAddr()
@@ -3241,15 +3238,20 @@ public:
     {
         return tx_id_wait_;
     }
-    const std::vector<TxNumber> &GetTxIdLock()
+    TxNumber GetTxIdLock()
     {
-        return tx_id_lock_vct_;
+        return tx_id_lock_;
+    }
+    uint32_t GetNodeId()
+    {
+        return node_id_;
     }
 
 protected:
     uint64_t entry_addr_;
-    std::vector<TxNumber> tx_id_lock_vct_;
+    TxNumber tx_id_lock_;
     TxNumber tx_id_wait_;
+    uint32_t node_id_;
 };
 
 /**
@@ -3684,10 +3686,10 @@ public:
     uint64_t tx_ts_{1};
 
     // The pointer of the cc entry to which this request is directed. The
-    // pointer is set, when the request locates the cc entry but is blocked due
-    // to conflicts in 2PL. After the request is unblocked and acquires the
-    // lock, the request's execution resumes without further lookup of the cc
-    // entry.
+    // pointer is set, when the request locates the cc entry but is blocked
+    // due to conflicts in 2PL. After the request is unblocked and acquires
+    // the lock, the request's execution resumes without further lookup of
+    // the cc entry.
     LruEntry *cce_ptr_{};
 
     // Execute the command and directly commit it on the object, skipping

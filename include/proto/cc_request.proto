@@ -599,10 +599,11 @@ message DeadLockResponse {
 
 message AbortTransactionRequest {
   uint32 src_node_id = 1;
-  uint32 core_id = 2;
-  uint64 entry = 3;
-  uint64 wait_txid = 4;
-  repeated uint64 lock_txids = 5;
+  uint32 node_id = 2;
+  uint32 core_id = 3;
+  uint64 entry = 4;
+  uint64 wait_txid = 5;
+  uint64 lock_txid = 6;
 }
 
 

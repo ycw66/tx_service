@@ -30,13 +30,6 @@ DeadLockCheck::DeadLockCheck(LocalCcShards &local_shards)
 
 DeadLockCheck::~DeadLockCheck()
 {
-    {
-        std::unique_lock<std::mutex> lk(mutex_);
-        stop_.store(true, std::memory_order_release);
-        con_var_.notify_one();
-    }
-
-    thd_.join();
 }
 
 void DeadLockCheck::MergeRemoteWaitingLockInfo(const tr::DeadLockResponse *rsp)
@@ -407,14 +400,12 @@ void DeadLockCheck::RemoveDeadTransaction(
             if (lent.node_id == Sharder::Instance().NodeId())
             {
                 AbortTransactionCc *atcc = abort_tran_pool.NextRequest();
-                std::vector<TxNumber> vct;
-                for (auto &iter :
-                     entry_locked_txid_map_.find(lent)->second.lock_node_set)
-                {
-                    vct.push_back(iter.tx_id);
-                }
-
-                atcc->Reset(lent.ety_addr, vct, tx_id);
+                atcc->Reset(lent.ety_addr,
+                            entry_locked_txid_map_.find(lent)
+                                ->second.lock_node_set.begin()
+                                ->tx_id,
+                            tx_id,
+                            lent.node_id);
                 local_shards_.EnqueueCcRequest(lent.core_id, atcc);
             }
             else
@@ -432,14 +423,14 @@ void DeadLockCheck::RemoveDeadTransaction(
                 tr::AbortTransactionRequest *atreq =
                     send_msg.mutable_abort_tran_req();
                 atreq->set_src_node_id(Sharder::Instance().NodeId());
+                atreq->set_node_id(lent.node_id);
                 atreq->set_core_id(lent.core_id);
                 atreq->set_entry(lent.ety_addr);
                 atreq->set_wait_txid(tx_id);
-                for (auto &iter :
-                     entry_locked_txid_map_.find(lent)->second.lock_node_set)
-                {
-                    atreq->add_lock_txids(iter.tx_id);
-                }
+                atreq->set_lock_txid(entry_locked_txid_map_.find(lent)
+                                         ->second.lock_node_set.begin()
+                                         ->tx_id);
+
                 Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
                     lent.node_id, send_msg);
             }
