@@ -1416,9 +1416,14 @@ public:
         TX_TRACE_DUMP(&req);
 
         CODE_FAULT_INJECTOR("before_post_read", {
-            LOG(INFO) << "FaultInject before_post_read: skip executing "
-                         "PostReadCc to timeout transaction";
-            return true;
+            NodeGroupId ng = (req.Txn() >> 32L) >> 10;
+            if (ng != cc_ng_id_)
+            {
+                LOG(INFO) << "FaultInject before_post_read: skip executing "
+                             "PostReadCc to timeout transaction  tx: "
+                          << req.Txn();
+                return true;
+            }
         });
 
         auto hd_res = req.Result();
