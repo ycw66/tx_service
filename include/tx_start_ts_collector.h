@@ -13,14 +13,13 @@ namespace txservice
 class TxStartTsCollector
 {
 public:
-    static TxStartTsCollector &Instance(LocalCcShards *shards = nullptr,
-                                        uint32_t delay_seconds = 60)
+    static TxStartTsCollector &Instance()
     {
-        static TxStartTsCollector instance_(shards, delay_seconds);
+        static TxStartTsCollector instance_;
         return instance_;
     }
 
-    ~TxStartTsCollector() = default;
+    void Init(LocalCcShards *shards, uint32_t delay_seconds = 60);
 
     void Start();
     void Shutdown();
@@ -41,7 +40,8 @@ public:
     }
 
 private:
-    TxStartTsCollector(LocalCcShards *shards, uint32_t delay_seconds = 10);
+    TxStartTsCollector() = default;
+    ~TxStartTsCollector() = default;
 
     void Run();
     uint64_t CollectMinTxStartTs();

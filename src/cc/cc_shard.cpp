@@ -944,6 +944,7 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         return statistics_entry;
     }
 
+#ifdef RANGE_PARTITION_ENABLED
     // Initialize table ranges before create table
     // statistics.
     TableName base_range_table_name(
@@ -978,6 +979,7 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
             return nullptr;
         }
     }
+#endif
 
     statistics_entry =
         GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);

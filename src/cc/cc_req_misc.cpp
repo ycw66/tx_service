@@ -255,6 +255,11 @@ void FetchTableRangesCc::AppendTableRange(InitRangeEntry &&range)
     ranges_vec_.push_back(std::move(range));
 }
 
+bool FetchTableRangesCc::EmptyRanges() const
+{
+    return ranges_vec_.empty();
+}
+
 void FetchTableRangesCc::SetFinish(int err)
 {
     error_code_ = err;

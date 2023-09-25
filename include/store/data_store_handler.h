@@ -61,6 +61,8 @@ public:
 
     virtual bool Connect() = 0;
 
+    virtual void ScheduleTimerTasks(){};
+
     /**
      * Initialize cluster config based on the based in ips and ports. This
      * should only be called during bootstrap.
@@ -125,7 +127,11 @@ public:
 
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
-                    bool &found) const;
+                    bool &found) const
+    {
+        uint64_t version_ts;
+        return FetchTable(table_name, schema_image, found, version_ts);
+    }
 
     virtual void FetchCurrentTableStatistics(
         const TableName &ccm_table_name, FetchTableStatisticsCc *fetch_cc) = 0;
@@ -184,17 +190,9 @@ public:
                                bool &found) const = 0;
     virtual bool FetchAllDatabase(std::vector<std::string> &dbnames) const = 0;
 
-    void CleanDefunctKvTable() const;
-
     virtual bool DropKvTable(const std::string &kv_table_name) const = 0;
 
     virtual void DropKvTableAsync(const std::string &kv_table_name) const = 0;
-
-    virtual bool ListKvTableCTimeMore1d(
-        std::set<std::string> &kv_table_names) const = 0;
-
-    virtual bool ListVisibleKvTable(
-        std::set<std::string> &kv_table_names) const = 0;
 
     virtual std::unique_ptr<DataStoreScanner> ScanForward(
         const TableName &table_name,
@@ -291,11 +289,11 @@ public:
         const std::vector<DataStoreSearchCond> &search_conds,
         const std::vector<TableName> &new_indexes_name) = 0;
 
-    virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
-
     virtual bool UpdateClusterConfig(
         const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
         uint64_t version) = 0;
+
+    virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
 
 protected:
     TxService *tx_service_{nullptr};

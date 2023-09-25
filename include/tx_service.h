@@ -651,35 +651,29 @@ public:
         pool_.reserve(core_cnt);
         thd_pool_.reserve(core_cnt);
 
-        Sharder::Instance(node_id,
-                          ng_configs,
-                          cluster_config_version,
-                          txlog_ips,
-                          txlog_ports,
-                          &local_cc_shards_,
-                          std::move(log_hd),
-                          &local_path);
         for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
         {
             if (metrics::enable_collect_metrics)
             {
                 pool_.emplace_back(std::make_unique<TxProcessor>(
-                    metrics_registry,
-                    thd_idx,
-                    local_cc_shards_,
-                    Sharder::Instance().GetLogAgent()));
+                    metrics_registry, thd_idx, local_cc_shards_, log_hd.get()));
             }
             else
             {
                 pool_.emplace_back(std::make_unique<TxProcessor>(
-                    thd_idx,
-                    local_cc_shards_,
-                    Sharder::Instance().GetLogAgent()));
+                    thd_idx, local_cc_shards_, log_hd.get()));
             }
         }
 
-        Sharder::Instance().Init();
-        TxStartTsCollector::Instance(
+        Sharder::Instance().Init(node_id,
+                                 ng_configs,
+                                 cluster_config_version,
+                                 txlog_ips,
+                                 txlog_ports,
+                                 &local_cc_shards_,
+                                 std::move(log_hd),
+                                 local_path);
+        TxStartTsCollector::Instance().Init(
             &local_cc_shards_,
             conf.find("collect_active_tx_ts_interval_seconds")->second);
         DeadLockCheck::Init(local_cc_shards_);

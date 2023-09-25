@@ -36,16 +36,16 @@ class CcNode : public braft::StateMachine
 public:
     static const uint16_t rep_group_cnt = 3;
 
-    explicit CcNode(const uint32_t ng_id,
-                    const uint32_t node_id,
-                    const std::string &ip,
-                    const uint16_t port,
-                    const std::vector<std::string> &ng_ips,
-                    const std::vector<uint16_t> &ng_ports,
-                    std::string storage_path,
-                    LocalCcShards &local_shards,
-                    fault::ReplayService *replay_service,
-                    uint32_t log_group_cnt);
+    CcNode(const uint32_t ng_id,
+           const uint32_t node_id,
+           const std::string &ip,
+           const uint16_t port,
+           const std::vector<std::string> &ng_ips,
+           const std::vector<uint16_t> &ng_ports,
+           std::string storage_path,
+           LocalCcShards &local_shards,
+           fault::ReplayService *replay_service,
+           uint32_t log_group_cnt);
 
     ~CcNode();
 

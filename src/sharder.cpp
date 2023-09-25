@@ -18,63 +18,7 @@ namespace GFLAGS_NAMESPACE = gflags;
 
 namespace txservice
 {
-Sharder::Sharder(uint32_t node_id,
-                 const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
-                 uint64_t config_version,
-                 const std::vector<std::string> *txlog_ips,
-                 const std::vector<uint16_t> *txlog_ports,
-                 LocalCcShards &local_shards,
-                 std::unique_ptr<TxLog> log_agent,
-                 const std::string &local_path)
-    : node_id_(node_id),
-      mux_(),
-      recovery_state_mux_(),
-      cc_stream_sender_(nullptr),
-      cc_stream_receiver_(nullptr),
-      cc_node_service_(nullptr),
-      log_replay_service_(nullptr),
-      tx_worker_pool_(nullptr),
-      local_shards_(local_shards),
-      log_agent_(std::move(log_agent)),
-      raft_local_path_(local_path)
-{
-    cluster_config_ = std::make_shared<ClusterConfig>();
-    for (uint32_t nid = 0; nid < 1000; nid++)
-    {
-        ng_leader_cache_[nid].store(nid);
-    }
-    if (ng_configs != nullptr)
-    {
-        for (auto &pair : *ng_configs)
-        {
-            std::vector<NodeConfig> group_config;
-            for (auto &config : pair.second)
-            {
-                group_config.emplace_back(config);
-            }
-            cluster_config_->ng_configs_.try_emplace(pair.first,
-                                                     std::move(group_config));
-        }
-        cluster_config_->version_ = config_version;
-    }
-    else
-    {
-        cluster_config_->ng_configs_.try_emplace(0);
-        cluster_config_->version_ = config_version;
-    }
-
-    if (txlog_ips != nullptr)
-    {
-        txlog_ips_ = *txlog_ips;
-        txlog_ports_ = *txlog_ports;
-    }
-
-    if (log_agent_ != nullptr)
-    {
-        log_agent_->Init(txlog_ips_, txlog_ports_, 0);
-    }
-}
-
+Sharder::Sharder() = default;
 Sharder::~Sharder() = default;
 
 void Sharder::Shutdown()
@@ -154,14 +98,62 @@ void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
     port = cluster_config->ng_configs_.at(node_id).front().port_;
 }
 
-int Sharder::Init()
+int Sharder::Init(uint32_t node_id,
+                  const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
+                  uint64_t config_version,
+                  const std::vector<std::string> *txlog_ips,
+                  const std::vector<uint16_t> *txlog_ports,
+                  LocalCcShards *local_shards,
+                  std::unique_ptr<TxLog> log_agent,
+                  const std::string &local_path)
 {
-    tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_.Count());
+    node_id_ = node_id;
+    local_shards_ = local_shards;
+    log_agent_ = std::move(log_agent);
+    raft_local_path_ = local_path;
+
+    cluster_config_ = std::make_shared<ClusterConfig>();
+    for (uint32_t nid = 0; nid < 1000; nid++)
+    {
+        ng_leader_cache_[nid].store(nid);
+    }
+    if (ng_configs != nullptr)
+    {
+        for (const auto &pair : *ng_configs)
+        {
+            std::vector<NodeConfig> group_config;
+            for (const auto &config : pair.second)
+            {
+                group_config.emplace_back(config);
+            }
+            cluster_config_->ng_configs_.try_emplace(pair.first,
+                                                     std::move(group_config));
+        }
+        cluster_config_->version_ = config_version;
+    }
+    else
+    {
+        cluster_config_->ng_configs_.try_emplace(0);
+        cluster_config_->version_ = config_version;
+    }
+
+    if (txlog_ips != nullptr)
+    {
+        txlog_ips_ = *txlog_ips;
+        txlog_ports_ = *txlog_ports;
+    }
+
+    if (log_agent_ != nullptr)
+    {
+        log_agent_->Init(txlog_ips_, txlog_ports_, 0);
+    }
+
+    tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_->Count());
     // there shouldn't be any concurrent visit before Init retruns so we
     // can directly modify ng_configs_ without doing copy on write.
     // construct log_replay_service_ before cc_nodes_
     log_replay_service_ = std::make_unique<fault::ReplayService>(
-        local_shards_,
+        *local_shards_,
         GetLogAgent(),
         cluster_config_->ng_configs_.at(node_id_).front().host_name_,
         GET_LOG_REPLAY_RPC_PORT(
@@ -191,7 +183,8 @@ int Sharder::Init()
                 // Use cc node port + 1 for cc node raft port
                 std::vector<uint16_t> group_ports;
                 std::vector<std::string> group_ips;
-                for (auto &config : cluster_config_->ng_configs_.at(ng_id))
+                for (const auto &config :
+                     cluster_config_->ng_configs_.at(ng_id))
                 {
                     group_ports.emplace_back(config.port_ + 1);
                     group_ips.emplace_back(config.host_name_);
@@ -211,7 +204,7 @@ int Sharder::Init()
                         group_ips,
                         group_ports,
                         store_path,
-                        local_shards_,
+                        *local_shards_,
                         log_replay_service_.get(),
                         log_agent_->LogGroupCount()));
             }
@@ -224,7 +217,7 @@ int Sharder::Init()
     // is running in single node mode, the cluster might scale into multi-node
     // state later.
     cc_stream_receiver_ =
-        std::make_unique<remote::CcStreamReceiver>(local_shards_, msg_pool_);
+        std::make_unique<remote::CcStreamReceiver>(*local_shards_, msg_pool_);
     if (cc_stream_server_.AddService(cc_stream_receiver_.get(),
                                      brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
@@ -248,7 +241,7 @@ int Sharder::Init()
 
     SetCommandLineOptions();
 
-    cc_node_service_ = std::make_unique<remote::CcNodeService>(local_shards_);
+    cc_node_service_ = std::make_unique<remote::CcNodeService>(*local_shards_);
     if (cc_node_server_.AddService(cc_node_service_.get(),
                                    brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
@@ -422,7 +415,7 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
 
     find_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
-    local_shards_.UpdateTsBase(last_ckpt_ts);
+    local_shards_->UpdateTsBase(last_ckpt_ts);
 }
 
 void Sharder::WaitClusterReady()
@@ -536,21 +529,24 @@ void Sharder::LogTransferLeader(uint32_t log_group_id, uint32_t leader_idx)
 
 void Sharder::CleanCcTable(const TableName &tabname)
 {
-    return local_shards_.CleanCcTable(tabname);
+    return local_shards_->CleanCcTable(tabname);
 }
 
 void Sharder::NotifyCheckPointer()
 {
-    return local_shards_.NotifyCheckPointer();
+    return local_shards_->NotifyCheckPointer();
 }
 
 std::vector<uint32_t> Sharder::LocalNodeGroups()
 {
     std::vector<uint32_t> ngs;
-    auto cluster_config = cluster_config_;
-    for (auto &pair : cluster_config->cc_nodes_)
+    if (cluster_config_)
     {
-        ngs.push_back(pair.first);
+        auto cluster_config = cluster_config_;
+        for (auto &pair : cluster_config->cc_nodes_)
+        {
+            ngs.push_back(pair.first);
+        }
     }
     return ngs;
 }
@@ -613,7 +609,7 @@ void Sharder::SetCommandLineOptions()
 
 size_t Sharder::GetLocalCcShardsCount()
 {
-    return local_shards_.Count();
+    return local_shards_->Count();
 }
 
 std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
@@ -881,7 +877,7 @@ bool Sharder::UpdateClusterConfig(
                             group_ips,
                             group_ports,
                             store_path,
-                            local_shards_,
+                            *local_shards_,
                             log_replay_service_.get(),
                             log_agent_->LogGroupCount()));
                     ins_pair.first->second->Start();
@@ -915,7 +911,7 @@ bool Sharder::UpdateClusterConfig(
                         group_ips,
                         group_ports,
                         store_path,
-                        local_shards_,
+                        *local_shards_,
                         log_replay_service_.get(),
                         log_agent_->LogGroupCount()));
                 ins_pair.first->second->Start();

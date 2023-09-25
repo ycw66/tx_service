@@ -125,14 +125,7 @@ public:
         std::unique_ptr<TxLog> log_agent = nullptr,
         const std::string *local_path = nullptr)
     {
-        static Sharder instance_(node_id,
-                                 ng_configs,
-                                 config_version,
-                                 txlog_ips,
-                                 txlog_ports,
-                                 *local_shards,
-                                 std::move(log_agent),
-                                 *local_path);
+        static Sharder instance_;
         return instance_;
     }
 
@@ -198,7 +191,14 @@ public:
      * @param path The local path where raft meta data is stored.
      * @return int Error code.
      */
-    int Init();
+    int Init(uint32_t node_id,
+             const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs,
+             uint64_t config_version,
+             const std::vector<std::string> *txlog_ips,
+             const std::vector<uint16_t> *txlog_ports,
+             LocalCcShards *local_shards,
+             std::unique_ptr<TxLog> log_agent,
+             const std::string &local_path);
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the
@@ -366,7 +366,7 @@ public:
 
     LocalCcShards *GetLocalCcShards()
     {
-        return &local_shards_;
+        return local_shards_;
     }
 
     void CleanCcTable(const TableName &tabname);
@@ -438,14 +438,7 @@ public:
         CcShard *cc_shard);
 
 private:
-    Sharder(uint32_t node_id,
-            const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs,
-            uint64_t config_version,
-            const std::vector<std::string> *txlog_ips,
-            const std::vector<uint16_t> *txlog_ports,
-            LocalCcShards &local_shards,
-            std::unique_ptr<TxLog> log_agent,
-            const std::string &local_path);
+    Sharder();
 
     ~Sharder();
 
@@ -528,7 +521,7 @@ private:
     // Worker pool for doing various aync works
     std::unique_ptr<TxWorkerPool> tx_worker_pool_;
 
-    LocalCcShards &local_shards_;
+    LocalCcShards *local_shards_;
     std::unique_ptr<TxLog> log_agent_;
 
     std::string raft_local_path_{""};

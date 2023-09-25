@@ -14,7 +14,6 @@ struct ClusterConfigRecord : public TxRecord
 {
 public:
     ClusterConfigRecord() = default;
-    ClusterConfigRecord(ClusterConfigRecord &&rhs) = default;
     ClusterConfigRecord(const ClusterConfigRecord &rhs)
         : is_config_owner_(rhs.is_config_owner_), version_(rhs.version_)
     {
@@ -22,7 +21,7 @@ public:
         {
             node_group_configs_uptr_ = std::make_unique<
                 std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
-            for (auto &pair : *rhs.node_group_configs_uptr_)
+            for (const auto &pair : *rhs.node_group_configs_uptr_)
             {
                 node_group_configs_uptr_->emplace(pair.first, pair.second);
             }
@@ -49,7 +48,7 @@ public:
         {
             node_group_configs_uptr_ = std::make_unique<
                 std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
-            for (auto &pair : *rhs.node_group_configs_uptr_)
+            for (const auto &pair : *rhs.node_group_configs_uptr_)
             {
                 node_group_configs_uptr_->emplace(pair.first, pair.second);
             }

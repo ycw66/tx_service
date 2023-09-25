@@ -8,10 +8,11 @@
 
 namespace txservice
 {
-TxStartTsCollector::TxStartTsCollector(LocalCcShards *shards,
-                                       uint32_t delay_seconds)
-    : active_(false), min_start_ts_(1UL), local_shards_(shards)
+void TxStartTsCollector::Init(LocalCcShards *shards, uint32_t delay_seconds)
 {
+    active_ = false;
+    min_start_ts_ = 1UL;
+    local_shards_ = shards;
     delay_seconds_ = std::max(1U, delay_seconds);
     uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
     for (uint32_t ng_id = 0; ng_id < ng_cnt; ++ng_id)

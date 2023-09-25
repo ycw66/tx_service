@@ -179,18 +179,6 @@ public:
     {
     }
 
-    bool ListKvTableCTimeMore1d(
-        std::set<std::string> &kv_table_names) const override
-    {
-        return true;
-    }
-
-    bool ListVisibleKvTable(
-        std::set<std::string> &kv_table_names) const override
-    {
-        return true;
-    }
-
     std::unique_ptr<DataStoreScanner> ScanForward(
         const txservice::TableName &table_name,
         const txservice::TxKey &start_key,
@@ -389,7 +377,7 @@ public:
 
     bool UpdateClusterConfig(
         const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
-        uint64_t version)
+        uint64_t version) override
     {
         return false;
     }
