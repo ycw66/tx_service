@@ -219,6 +219,8 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
                   << " with the term " << candidate_leader_term_
                   << " has been recovered.";
         candidate_leader_term_.store(-1, std::memory_order_release);
+
+        Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
     }
 }
 

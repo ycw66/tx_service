@@ -423,8 +423,6 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
     find_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
     local_shards_.UpdateTsBase(last_ckpt_ts);
-
-    NodeGroupFinishRecovery(cc_ng_id);
 }
 
 void Sharder::WaitClusterReady()
