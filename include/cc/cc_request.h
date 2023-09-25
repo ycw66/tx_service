@@ -3205,8 +3205,8 @@ public:
         if (it_ng != ltxs.end())
         {
             auto it_info = it_ng->second.find(tx_id_lock_);
-            // Maybethe tx has taken part in more than dead lock cycles, and it
-            // has been release in other cycle.
+            // Maybe the tx has taken part in more than dead lock cycles, and
+            // it has been release in other cycle.
             if (it_info != it_ng->second.end() &&
                 it_info->second.cce_list_.find(lru_entry) !=
                     it_info->second.cce_list_.end())

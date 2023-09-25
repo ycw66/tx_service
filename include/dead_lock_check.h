@@ -98,12 +98,12 @@ public:
     static void SetStop()
     {
         {
-            std::unique_lock<std::mutex> lk(mutex_);
-            stop_.store(true, std::memory_order_release);
-            con_var_.notify_one();
+            std::unique_lock<std::mutex> lk(inst_->mutex_);
+            inst_->stop_.store(true, std::memory_order_release);
+            inst_->con_var_.notify_one();
         }
 
-        thd_.join();
+        inst_->thd_.join();
     }
     static void Free()
     {
