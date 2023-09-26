@@ -3183,8 +3183,6 @@ void SplitFlushRangeOp::Reset(
 
     kickout_data_it_ = {};
 
-    pending_pin_data_ = false;
-
     TX_TRACE_ASSOCIATE(
         this, &prepare_acquire_all_write_op_, "prepare_acquire_all_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
@@ -3239,15 +3237,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         // Initialize commit ts as the start time of tx. This value will
         // be updated after prepaire_acquire_all_write_op_.
         txm->commit_ts_ = txm->start_ts_ + 1;
-        // Pin node group data during split flush tx.
-        int64_t leader_term =
-            Sharder::Instance().TryPinNodeGroupData(node_group_);
-        if (leader_term < 0)
-        {
-            // No longer leader.
-            ForceToFinish(txm);
-            return;
-        }
         op_ = &lock_cluster_config_op_;
         txm->PushOperation(&lock_cluster_config_op_);
         txm->Process(lock_cluster_config_op_);
@@ -3397,17 +3386,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
             return;
         }
-        if (txm->tx_status_ == TxnStatus::Recovering && pending_pin_data_)
-        {
-            int64_t leader_term =
-                Sharder::Instance().TryPinNodeGroupData(node_group_);
-            if (leader_term < 0)
-            {
-                // Not leader yet, keep trying.
-                return;
-            }
-            pending_pin_data_ = false;
-        }
+
         if (install_new_range_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to install dirty "
@@ -4146,17 +4125,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
             return;
         }
-        if (txm->tx_status_ == TxnStatus::Recovering && pending_pin_data_)
-        {
-            int64_t leader_term =
-                Sharder::Instance().TryPinNodeGroupData(node_group_);
-            if (leader_term < 0)
-            {
-                // Not leader yet, keep trying.
-                return;
-            }
-            pending_pin_data_ = false;
-        }
+
         if (ds_upsert_range_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4316,9 +4285,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         if (txm->commit_ts_ == tx_op_failed_ts_)
         {
-            // If tx failed before writing prepare log, skip delete out
-            // of range op.
-            ForwardToSubOperation(txm, &clean_log_op_);
+            // If tx failed before writing prepare log, exit
+            // after releasing orphaned lock.
+            ForceToFinish(txm);
             return;
         }
 
@@ -4410,7 +4379,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ClearDataSyncVec();
 
             txm->state_stack_.pop_back();
-            Sharder::Instance().UnpinNodeGroupData(node_group_);
             assert(txm->state_stack_.empty());
 
             assert(this == txm->split_flush_op_.get());

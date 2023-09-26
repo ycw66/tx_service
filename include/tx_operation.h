@@ -846,12 +846,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     std::vector<std::pair<TxKey::Uptr, int32_t>>::const_iterator
         kickout_data_it_;
 
-    // If still need to pin the ng in recovery mode. Normally we'll pin the ng
-    // at the start of the op, but during recovery we're not the ng leader when
-    // this op is created. We need to keep trying to pin data until replay
-    // finishes and we become the leader of the ng.
-    bool pending_pin_data_{false};
-
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster
      * config update during upsert table op. We cannot allow config update

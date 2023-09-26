@@ -520,6 +520,17 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
          node_group_id,
          split_tx_started = replay_log_cc.RangeSplitStarted()]() mutable
         {
+            if (Sharder::Instance().TryPinNodeGroupData(node_group_id) < 0)
+            {
+                replay_log_cc.AbortCcRequest(
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                return;
+            }
+            // guard to unpin node group on finish.
+            std::shared_ptr<void> defer_unpin(
+                nullptr,
+                [node_group_id](void *)
+                { Sharder::Instance().UnpinNodeGroupData(node_group_id); });
             // Mark the table as sync in progress to avoid concurrent data sync
             // before range split tx finishes if this is the first started range
             // split.
@@ -598,7 +609,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             }
             if (lock_meta_failed)
             {
-                replay_log_cc.AbortCcRequest(CcErrorCode::TX_NODE_NOT_LEADER);
+                replay_log_cc.AbortCcRequest(
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return;
             }
             replay_log_cc.SetFinish();

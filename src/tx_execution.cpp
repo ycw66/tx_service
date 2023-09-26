@@ -1157,7 +1157,6 @@ void TransactionExecution::ProcessTxRequest(
     }
     lk.unlock();
     assert(split_range_op != nullptr);
-    split_range_op->pending_pin_data_ = true;
 
     const ::txlog::SplitRangeOpMessage::Stage stage =
         recover_req.ds_split_range_op_msg_.stage();
