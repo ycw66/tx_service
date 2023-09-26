@@ -1549,6 +1549,14 @@ DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
+DsUpsertTableOp::~DsUpsertTableOp()
+{
+    if (worker_thread_.joinable())
+    {
+        worker_thread_.join();
+    }
+}
+
 void DsUpsertTableOp::Reset()
 {
     hd_result_.Reset();
@@ -1571,6 +1579,7 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (worker_thread_.joinable())
         {
+            // The worker thread must terminate after the hd_result.SetFinished.
             worker_thread_.join();
         }
 
@@ -2762,6 +2771,15 @@ AsyncOp<ResultType>::AsyncOp(TransactionExecution *txm) : hd_result_(txm)
 }
 
 template <typename ResultType>
+AsyncOp<ResultType>::~AsyncOp()
+{
+    if (worker_thread_.joinable())
+    {
+        worker_thread_.join();
+    }
+}
+
+template <typename ResultType>
 void AsyncOp<ResultType>::ResetHandlerTxm(TransactionExecution *txm)
 {
     hd_result_.ResetTxm(txm);
@@ -2780,9 +2798,9 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
     {
         if (worker_thread_.joinable())
         {
+            // The worker thread must terminate after the hd_result.SetFinished.
             worker_thread_.join();
         }
-
         txm->PostProcess(*this);
     }
     else if (handle_timeout_ && txm->IsTimeOut(wait_secs_))
@@ -2806,11 +2824,9 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         bool succ = hd_result_.ForceError();
         if (succ)
         {
-            if (worker_thread_.joinable())
-            {
-                worker_thread_.join();
-            }
-
+            // Can not use the worker thread if the async operation will deal
+            // with the timeout.
+            assert(!worker_thread_.joinable());
             txm->PostProcess(*this);
         }
     }
@@ -4080,17 +4096,19 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         // Insert new ranges into data store range table. Update
         // range slice size of the old range.
+        ds_upsert_range_op_.handle_timeout_ = false;
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
              old_range = old_range,
              range_info = std::move(splitted_range_info),
              tx_ts = txm->commit_ts_,
              table_schema = table_schema_,
-             &hd_res = ds_upsert_range_op_.hd_result_]
+             &hd_res = ds_upsert_range_op_.hd_result_,
+             &worker = ds_upsert_range_op_.worker_thread_]
         {
             // Launch a new thread instead of sending it to workerpool to
             // avoid being blocked during write lock is held.
-            std::thread worker = std::thread(
+            worker = std::thread(
                 [table_name,
                  old_range,
                  range_info = std::move(range_info),
@@ -4111,7 +4129,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                     }
                 });
-            worker.detach();
         };
 
         LOG(INFO) << "Split Flush transaction upsert new range spec, range id "
@@ -5076,12 +5093,14 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             // before starting migration.
             // First flush the new cluster config to kv storage so that
             // when the new node starts, it will know the latest config.
+            flush_new_cluster_config_op_.handle_timeout_ = false;
             flush_new_cluster_config_op_.op_func_ =
                 [&ng_config = new_ng_config_,
                  version = txm->commit_ts_,
-                 &hd_res = flush_new_cluster_config_op_.hd_result_]
+                 &hd_res = flush_new_cluster_config_op_.hd_result_,
+                 &worker = flush_new_cluster_config_op_.worker_thread_]
             {
-                std::thread worker = std::thread(
+                worker = std::thread(
                     [&ng_config, version, &hd_res]
                     {
                         store::DataStoreHandler *const store_hd =
@@ -5097,7 +5116,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                             hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                         }
                     });
-                worker.detach();
             };
             LOG(INFO) << "Cluster Scale transaction updating cluster config in "
                          "data store, txn: "

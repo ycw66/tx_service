@@ -539,6 +539,7 @@ struct DsUpsertTableOp : public TransactionOperation
     DsUpsertTableOp(const TableName *table_name,
                     OperationType op_type,
                     TransactionExecution *txm);
+    ~DsUpsertTableOp();
 
     void Reset();
     void ResetHandlerTxm(TransactionExecution *txm);
@@ -557,6 +558,7 @@ template <typename ResultType>
 struct AsyncOp : public TransactionOperation
 {
     AsyncOp() = delete;
+    ~AsyncOp();
     explicit AsyncOp(TransactionExecution *txm);
     void ResetHandlerTxm(TransactionExecution *txm);
 

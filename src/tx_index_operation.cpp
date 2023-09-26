@@ -575,34 +575,28 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                                 { flush_data_timeout_ = 10; });
             flush_all_old_tuples_pk_op_.handle_timeout_ = true;
             flush_all_old_tuples_pk_op_.wait_secs_ = flush_data_timeout_;
-            flush_all_old_tuples_pk_op_.op_func_ = [this, txm]
+            flush_all_old_tuples_pk_op_.op_func_ =
+                [this, txm, &hd_res = flush_all_old_tuples_pk_op_.hd_result_]
             {
-                this->flush_all_old_tuples_pk_op_.worker_thread_ = std::thread(
-                    [this,
-                     txm,
-                     &hd_res = this->flush_all_old_tuples_pk_op_.hd_result_]
-                    {
-                        uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
-                        hd_res.Reset();
-                        hd_res.SetRefCnt(ng_cnt);
-                        for (uint32_t nid = 0; nid < ng_cnt; ++nid)
-                        {
-                            this->FlushDataIntoDataStore(
-                                this->table_key_.Name(),
-                                nid,
-                                txm->tx_number_.load(std::memory_order_relaxed),
-                                txm->tx_term_,
-                                txm->command_id_.load(
-                                    std::memory_order_relaxed),
-                                txm->commit_ts_,
-                                false,
-                                SKIP_CHECK_TERM,
-                                hd_res);
-                        }
+                uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+                hd_res.Reset();
+                hd_res.SetRefCnt(ng_cnt);
+                for (uint32_t nid = 0; nid < ng_cnt; ++nid)
+                {
+                    this->FlushDataIntoDataStore(
+                        this->table_key_.Name(),
+                        nid,
+                        txm->tx_number_.load(std::memory_order_relaxed),
+                        txm->tx_term_,
+                        txm->command_id_.load(std::memory_order_relaxed),
+                        txm->commit_ts_,
+                        false,
+                        SKIP_CHECK_TERM,
+                        hd_res);
+                }
 
-                        // Start timing.
-                        txm->StartTiming();
-                    });
+                // Start timing.
+                txm->StartTiming();
             };
 
             op_ = &flush_all_old_tuples_pk_op_;
@@ -656,6 +650,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 
             // To sleep 4s if failed.
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.retry_num_ = 3;
+            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.handle_timeout_ =
+                false;
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.op_func_ =
                 [this, txm]
             {
@@ -745,53 +741,46 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                             { flush_data_timeout_ = 10; });
         flush_all_old_tuples_sk_op_.handle_timeout_ = true;
         flush_all_old_tuples_sk_op_.wait_secs_ = flush_data_timeout_;
-        flush_all_old_tuples_sk_op_.op_func_ = [this, txm]
+        flush_all_old_tuples_sk_op_.op_func_ =
+            [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
         {
-            this->flush_all_old_tuples_sk_op_.worker_thread_ = std::thread(
-                [this,
-                 txm,
-                 &hd_res = this->flush_all_old_tuples_sk_op_.hd_result_]
+            std::vector<int64_t> &expected_ng_terms =
+                this->acquire_terms_result_.Value();
+            // Send the flush data request to the node groups to which
+            // the new packed sk data sharding, so obtain the node group
+            // count from the @@expected_ng_terms.
+            uint32_t ng_cnt = expected_ng_terms.size();
+
+            auto &new_index_names = this->alter_table_info_.index_add_names_;
+            size_t table_cnt = new_index_names.size();
+            auto add_index_it = new_index_names.cbegin();
+            assert(add_index_it != new_index_names.cend());
+
+            hd_res.Reset();
+            hd_res.SetRefCnt(ng_cnt * table_cnt);
+
+            for (uint32_t nid = 0; nid < ng_cnt; ++nid)
+            {
+                int64_t expected_term = expected_ng_terms.at(nid);
+                for (add_index_it = new_index_names.cbegin();
+                     add_index_it != new_index_names.cend();
+                     ++add_index_it)
                 {
-                    std::vector<int64_t> &expected_ng_terms =
-                        this->acquire_terms_result_.Value();
-                    // Send the flush data request to the node groups to which
-                    // the new packed sk data sharding, so obtain the node group
-                    // count from the @@expected_ng_terms.
-                    uint32_t ng_cnt = expected_ng_terms.size();
+                    this->FlushDataIntoDataStore(
+                        add_index_it->first,
+                        nid,
+                        txm->tx_number_.load(std::memory_order_relaxed),
+                        txm->tx_term_,
+                        txm->command_id_.load(std::memory_order_relaxed),
+                        txm->commit_ts_,
+                        true,
+                        expected_term,
+                        hd_res);
+                }
+            }
 
-                    auto &new_index_names =
-                        this->alter_table_info_.index_add_names_;
-                    size_t table_cnt = new_index_names.size();
-                    auto add_index_it = new_index_names.cbegin();
-                    assert(add_index_it != new_index_names.cend());
-
-                    hd_res.Reset();
-                    hd_res.SetRefCnt(ng_cnt * table_cnt);
-
-                    for (uint32_t nid = 0; nid < ng_cnt; ++nid)
-                    {
-                        int64_t expected_term = expected_ng_terms.at(nid);
-                        for (add_index_it = new_index_names.cbegin();
-                             add_index_it != new_index_names.cend();
-                             ++add_index_it)
-                        {
-                            this->FlushDataIntoDataStore(
-                                add_index_it->first,
-                                nid,
-                                txm->tx_number_.load(std::memory_order_relaxed),
-                                txm->tx_term_,
-                                txm->command_id_.load(
-                                    std::memory_order_relaxed),
-                                txm->commit_ts_,
-                                true,
-                                expected_term,
-                                hd_res);
-                        }
-                    }
-
-                    // Start timing.
-                    txm->StartTiming();
-                });
+            // Start timing.
+            txm->StartTiming();
         };
 
         op_ = &flush_all_old_tuples_sk_op_;
