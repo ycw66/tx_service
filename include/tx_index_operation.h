@@ -237,6 +237,10 @@ private:
     // Store the node group leader terms after acquired them.
     CcHandlerResult<std::vector<int64_t>> acquire_terms_result_;
     CcHandlerResult<PostProcessResult> post_write_result_;
+
+    // Due to term or other error, called ForceToFinish to terminate this
+    // operation
+    bool is_force_finished;
 };
 
 }  // namespace txservice

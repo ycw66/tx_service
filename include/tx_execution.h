@@ -463,6 +463,8 @@ private:
     TxResult<size_t> *uint64_resp_;
     // Response whose returned result is vector<int64_t>
     TxResult<std::vector<int64_t>> *int64_vec_resp_;
+    // Response for UpsertTableTxRequest or UpsertTableIndexOp
+    TxResult<UpsertResult> *upsert_resp_;
 
     // detailed error message which indicates why does the transaction failed.
     // For example, during write log phase or validation phase.

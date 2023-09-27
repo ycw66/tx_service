@@ -695,7 +695,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                 .append("\"table_name\":")
                 .append(req.table_name_->String());
         });
-    bool_resp_ = &req.tx_result_;
+    upsert_resp_ = &req.tx_result_;
 
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     if (req.op_type_ == OperationType::CreateTable ||
@@ -943,7 +943,7 @@ void TransactionExecution::ProcessTxRequest(
     SchemaRecoveryTxRequest &recover_req)
 {
     tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
-    bool_resp_ = &recover_req.tx_result_;
+    upsert_resp_ = &recover_req.tx_result_;
     auto &schema_op = recover_req.schema_op_msg_;
     switch (schema_op.schema_op_case())
     {

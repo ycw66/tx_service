@@ -693,6 +693,9 @@ private:
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
+    // Due to term or other error, called ForceToFinish to terminate this
+    // operation
+    bool is_force_finished;
 };
 
 struct SleepOperation : TransactionOperation

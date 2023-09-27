@@ -527,7 +527,7 @@ struct CommitTxRequest : public TemplateTxRequest<CommitTxRequest, bool>
 };
 
 struct UpsertTableTxRequest
-    : public TemplateTxRequest<UpsertTableTxRequest, bool>
+    : public TemplateTxRequest<UpsertTableTxRequest, UpsertResult>
 {
     UpsertTableTxRequest(const TableName *table_name,
                          const std::string *curr_image,
@@ -680,7 +680,7 @@ struct ClusterScaleTxRequest
 };
 
 struct SchemaRecoveryTxRequest
-    : public TemplateTxRequest<SchemaRecoveryTxRequest, bool>
+    : public TemplateTxRequest<SchemaRecoveryTxRequest, UpsertResult>
 {
     SchemaRecoveryTxRequest(const ::txlog::SchemaOpMessage &schema_op_msg)
         : TemplateTxRequest(nullptr, nullptr, nullptr),

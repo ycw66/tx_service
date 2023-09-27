@@ -17,6 +17,14 @@ enum struct TxResultStatus
     Error
 };
 
+enum class UpsertResult
+{
+    Succeeded = 0,  // The request has finished and passed
+    Failed,         // The request failed in running
+    Unverified  // The request returned without finish and will continue to run
+                // from log recover
+};
+
 /**
  * @brief The result of a transaction request, i.e., begin, read, write,
  * scan_begin, scan_next, scan_end, commit and abort. The sender of the request
