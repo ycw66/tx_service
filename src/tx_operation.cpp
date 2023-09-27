@@ -160,6 +160,19 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     txm->StartTiming();
 }
 
+bool TransactionOperation::CheckLeaderTerm(TransactionExecution *txm) const
+{
+    NodeGroupId ng_id = txm->TxCcNodeId();
+    if (Sharder::Instance().CheckLeaderTerm(ng_id, txm->TxTerm()) ||
+        (txm->TxStatus() == TxnStatus::Recovering &&
+         Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
+    {
+        return true;
+    }
+
+    return false;
+}
+
 ReadOperation::ReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
@@ -184,6 +197,13 @@ void ReadOperation::Reset()
 
 void ReadOperation::Forward(TransactionExecution *txm)
 {
+    if (!CheckLeaderTerm(txm))
+    {
+        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+        return;
+    }
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -575,6 +595,13 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
 void LockWriteRangesOp::Forward(TransactionExecution *txm)
 {
+    if (!CheckLeaderTerm(txm))
+    {
+        lock_range_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        lock_range_result_.ForceError();
+        txm->PostProcess(*this);
+        return;
+    }
     if (!is_running_)
     {
         txm->Process(*this);
@@ -1038,6 +1065,18 @@ void ScanNextOperation::ResetResult()
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
 {
+    if (!CheckLeaderTerm(txm))
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        slice_hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        slice_hd_result_.ForceError();
+#else
+        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        hd_result_.ForceError();
+#endif
+        txm->PostProcess(*this);
+        return;
+    }
     CcScanner &scanner = *scan_state_->scanner_;
 
     // start the state machine if not running.
@@ -1779,6 +1818,35 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 
 void UpsertTableOp::Forward(TransactionExecution *txm)
 {
+    // If leader is gone during operation, force finish the operation.
+    if (!CheckLeaderTerm(txm))
+    {
+        if (op_ == nullptr || op_ == &lock_cluster_config_op_ ||
+            op_ == &acquire_all_intent_op_)
+        {
+            // Before prepare log is written, mark the op as failed
+            txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
+            ForceToFinish(txm);
+            return;
+        }
+        else if (op_ == &prepare_log_op_)
+        {
+            // If log write succeeded before leader is gone, still mark the tx
+            // as unverified
+            if (prepare_log_op_.hd_result_.IsError())
+            {
+                txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
+            }
+            ForceToFinish(txm);
+            return;
+        }
+        else if (op_ != &clean_log_op_)
+        {
+            // Force to finish
+            ForceToFinish(txm);
+            return;
+        }
+    }
     if (op_ == nullptr)
     {
         op_ = &lock_cluster_config_op_;
@@ -1867,47 +1935,17 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the
                 // coordinator itself is no longer leader
-                int64_t tx_node_term =
-                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-                if (tx_node_term == txm->TxTerm())
-                {
-                    DLOG(WARNING)
-                        << "Upsert table write prepare log result unknown, "
-                           "tx_number:"
-                        << txm->TxNumber() << ", keep retrying";
-                    // set retry flag and retry prepare log
-                    ::txlog::WriteLogRequest *log_req =
-                        prepare_log_op_.log_closure_.LogRequest()
-                            .mutable_write_log_request();
-                    log_req->set_retry(true);
-                    txm->PushOperation(&prepare_log_op_);
-                    txm->Process(prepare_log_op_);
-                }
-                else
-                {
-                    DLOG(ERROR) << "Upsert table write prepare log result "
-                                   "unknown, tx_number:"
-                                << txm->TxNumber()
-                                << ", not leader any more, stop retrying";
-                    // Not leader anymore, just quit. New leader will know
-                    // whether prepare log succeeds and continue the rest if
-                    // it does. Should not release the write intents. If
-                    // prepare log is not written, the write intents will be
-                    // released individually via orphan lock recovery
-                    // mechanism.
-                    txm->upsert_resp_->SetErrorCode(
-                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
-
-                    txm->upsert_resp_->Finish(UpsertResult::Failed);
-                    txm->state_stack_.pop_back();
-                    assert(txm->state_stack_.empty());
-                    LocalCcShards *local_shards =
-                        Sharder::Instance().GetLocalCcShards();
-                    std::unique_lock<std::mutex> lk(
-                        local_shards->table_schema_op_pool_mux_);
-                    local_shards->table_schema_op_pool_.emplace_back(
-                        std::move(txm->schema_op_));
-                }
+                DLOG(WARNING)
+                    << "Upsert table write prepare log result unknown, "
+                       "tx_number:"
+                    << txm->TxNumber() << ", keep retrying";
+                // set retry flag and retry prepare log
+                ::txlog::WriteLogRequest *log_req =
+                    prepare_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&prepare_log_op_);
+                txm->Process(prepare_log_op_);
             }
             else
             {
@@ -2026,94 +2064,70 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
-            // The candidate term is set when the cc node becomes the Raft
-            // leader of the cc node group. It is set to -1 after the cc
-            // node leader has replayed the log and the leader term is set.
-            // Since the candidate term is set to -1 after the leader term ,
-            // obtains the candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
-            // The data store operation failed. Retries the operation if the
-            // tx node is the leader or the tx is in the recovery mode and
-            // the cc node is a leader candidate.
-
-            if (tx_node_term == txm->TxTerm() ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
+            // Keep retrying if it is DropTable or DropIndex.
+            if (op_type_ == OperationType::DropTable)
             {
-                // Keep retrying if it is DropTable or DropIndex.
-                if (op_type_ == OperationType::DropTable)
+                upsert_kv_table_op_.op_func_ =
+                    [tx_ts = txm->commit_ts_,
+                     table_schema = upsert_kv_table_op_.table_schema_,
+                     op_type = upsert_kv_table_op_.op_type_,
+                     alter_table_info = upsert_kv_table_op_.alter_table_info_,
+                     &hd_res = upsert_kv_table_op_.hd_result_,
+                     &worker_thd = upsert_kv_table_op_.worker_thread_]
                 {
-                    upsert_kv_table_op_.op_func_ =
-                        [tx_ts = txm->commit_ts_,
-                         table_schema = upsert_kv_table_op_.table_schema_,
-                         op_type = upsert_kv_table_op_.op_type_,
-                         alter_table_info =
-                             upsert_kv_table_op_.alter_table_info_,
-                         &hd_res = upsert_kv_table_op_.hd_result_,
-                         &worker_thd = upsert_kv_table_op_.worker_thread_]
-                    {
-                        store::DataStoreHandler *const store_hd =
-                            Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        worker_thd = std::thread(
-                            [tx_ts,
-                             table_schema,
-                             &hd_res,
-                             op_type,
-                             alter_table_info,
-                             store_hd]
-                            {
-                                store_hd->UpsertTable(table_schema,
-                                                      op_type,
-                                                      tx_ts,
-                                                      &hd_res,
-                                                      alter_table_info);
-                            });
-                    };
-                    txm->PushOperation(&upsert_kv_table_op_);
-                    txm->Process(upsert_kv_table_op_);
-                }
-                else
-                {
-                    /*
-
-                    After upsert kv fails, we need to flush a commit log to
-                    indicate this error.
-
-                    If we skip this commit log and jump to post_all_lock_op_
-                    directly, once the participant crashes at the point between
-                    it releases write intent and the coordinator flushes
-                    clean_log, then during recovery, the participant sees a
-                    prepare_log(whose commit_ts is not 0) and recovers write
-                    lock and dirty_catalog.
-
-                    Since the coordinator has finished its job, the write
-                    lock recovered by participant becomes orphan lock, and the
-                    dirty catalog can not be rejected either.
-
-                    Also, in the current design, post_all_intent_op_ does not
-                    release the write intent, which means the write intent is
-                    still being held after upsert_kv_table_op_(during
-                    CreateTable or AddIndex). If create table or add index in kv
-                    fails, the only thing we should do after writing commit_log
-                    is to reject dirty schema. So there is no need to upgrade
-                    write intent to write lock, and it is safe to skip
-                    acquire_all_lock_op_ and jump directly to commit_log_op_.
-
-                    */
-
-                    op_ = &commit_log_op_;
-                    FillCommitLogRequest(txm);
-                    txm->PushOperation(&commit_log_op_);
-                    txm->Process(commit_log_op_);
-                }
+                    store::DataStoreHandler *const store_hd =
+                        Sharder::Instance().GetLocalCcShards()->store_hd_;
+                    worker_thd = std::thread(
+                        [tx_ts,
+                         table_schema,
+                         &hd_res,
+                         op_type,
+                         alter_table_info,
+                         store_hd]
+                        {
+                            store_hd->UpsertTable(table_schema,
+                                                  op_type,
+                                                  tx_ts,
+                                                  &hd_res,
+                                                  alter_table_info);
+                        });
+                };
+                txm->PushOperation(&upsert_kv_table_op_);
+                txm->Process(upsert_kv_table_op_);
             }
             else
             {
-                ForceToFinish(txm);
+                /*
+
+                After upsert kv fails, we need to flush a commit log to
+                indicate this error.
+
+                If we skip this commit log and jump to post_all_lock_op_
+                directly, once the participant crashes at the point between
+                it releases write intent and the coordinator flushes
+                clean_log, then during recovery, the participant sees a
+                prepare_log(whose commit_ts is not 0) and recovers write
+                lock and dirty_catalog.
+
+                Since the coordinator has finished its job, the write
+                lock recovered by participant becomes orphan lock, and the
+                dirty catalog can not be rejected either.
+
+                Also, in the current design, post_all_intent_op_ does not
+                release the write intent, which means the write intent is
+                still being held after upsert_kv_table_op_(during
+                CreateTable or AddIndex). If create table or add index in kv
+                fails, the only thing we should do after writing commit_log
+                is to reject dirty schema. So there is no need to upgrade
+                write intent to write lock, and it is safe to skip
+                acquire_all_lock_op_ and jump directly to commit_log_op_.
+
+                */
+
+                op_ = &commit_log_op_;
+                FillCommitLogRequest(txm);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
             }
         }
         else if (op_type_ == OperationType::DropTable)
@@ -2205,37 +2219,19 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         assert(op_type_ == OperationType::CreateTable);
         if (sequence_data_log_op_.hd_result_.IsError())
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
             // Fails to flush the data log. Retries the operation if the
             // tx node is still the leader or the tx is in the  recovery
             // mode and the cc node is a leader candidate.
-            if (tx_node_term == txm->TxTerm() ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
-            {
-                // set retry flag and retry data log
-                LOG(WARNING) << "Upsert table schema transaction retry to write"
-                                " sequence data log, tx_number:"
-                             << txm->TxNumber();
-                ::txlog::WriteLogRequest *log_req =
-                    sequence_data_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&sequence_data_log_op_);
-                txm->Process(sequence_data_log_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // set retry flag and retry data log
+            LOG(WARNING) << "Upsert table schema transaction retry to write"
+                            " sequence data log, tx_number:"
+                         << txm->TxNumber();
+            ::txlog::WriteLogRequest *log_req =
+                sequence_data_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
+            txm->PushOperation(&sequence_data_log_op_);
+            txm->Process(sequence_data_log_op_);
         }
         else
         {
@@ -2302,30 +2298,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
             // Fails to acquire the write lock. The schema operation can
             // only roll forward after flushing the prepare log. Retries the
             // request if the tx node is still the leader or the tx is in
             // the recovery mode and the cc node is a leader candidate.
-            if (tx_node_term == txm->TxTerm() ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
-            {
-                txm->PushOperation(&acquire_all_lock_op_);
-                txm->Process(acquire_all_lock_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
         }
         else
         {
@@ -2339,34 +2317,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
             // Fails to flush the commit log. Retries the operation if the
             // tx node is still the leader or the tx is in the  recovery
             // mode and the cc node is a leader candidate.
-            if (tx_node_term == txm->TxTerm() ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
-            {
-                // set retry flag and retry commit log
-                ::txlog::WriteLogRequest *log_req =
-                    commit_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&commit_log_op_);
-                txm->Process(commit_log_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // set retry flag and retry commit log
+            ::txlog::WriteLogRequest *log_req =
+                commit_log_op_.log_closure_.LogRequest()
+                    .mutable_write_log_request();
+            log_req->set_retry(true);
+            txm->PushOperation(&commit_log_op_);
+            txm->Process(commit_log_op_);
         }
         else
         {
@@ -2422,26 +2382,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
-        // When a cc node leader begins recovery, the candidate term is
-        // set to the Raft term. When recovery finishes, the candidate
-        // term is set to -1 after the leader term. So, obtains the
-        // candidate term before the leader term.
-        int64_t tx_node_candid_term =
-            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-        int64_t tx_node_term =
-            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-        bool is_leader = tx_node_term == txm->TxTerm() ||
-                         (txm->tx_status_ == TxnStatus::Recovering &&
-                          tx_node_candid_term >= 0);
-
-        if (!is_leader)
-        {
-            // The tx node is no longer the leader or leader candidate(during
-            // recovery), ForceToFinish.
-            ForceToFinish(txm);
-        }
-        else if (acquire_all_intent_op_.fail_cnt_.load(
-                     std::memory_order_relaxed) > 0)
+        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
+            0)
         {
             // The schema operation failed at acquire_all_intent_op_, without
             // flushing the prepare log. Do not retry post-processing (release
@@ -2507,20 +2449,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &clean_log_op_)
     {
-        // When a cc node leader begins recovery, the candidate term is set
-        // to the Raft term. When recovery finishes, the candidate term is
-        // set to -1 after the leader term. So, obtains the candidate term
-        // before the leader term.
-        int64_t tx_node_candid_term =
-            Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-        int64_t tx_node_term =
-            Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        if (clean_log_op_.hd_result_.IsError() &&
-            (tx_node_term == txm->TxTerm() ||
-             (txm->tx_status_ == TxnStatus::Recovering &&
-              tx_node_candid_term >= 0)))
+        if (clean_log_op_.hd_result_.IsError() && CheckLeaderTerm(txm))
         {
             // set retry flag and retry clean log
             ::txlog::WriteLogRequest *log_req =
@@ -2880,20 +2810,6 @@ void CompositeTransactionOperation::RetrySubOperation(TransactionExecution *txm,
                                                       Op *last_sub_op)
 {
     ForwardToSubOperation(txm, last_sub_op);
-}
-
-bool CompositeTransactionOperation::CheckLeaderTerm(uint32_t ng_id,
-                                                    int64_t term,
-                                                    TxnStatus txn_status) const
-{
-    if (Sharder::Instance().CheckLeaderTerm(ng_id, term) ||
-        (txn_status == TxnStatus::Recovering &&
-         Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
-    {
-        return true;
-    }
-
-    return false;
 }
 
 FlushDataOp::FlushDataOp(TransactionExecution *txm) : hd_result_(txm)
@@ -3267,6 +3183,18 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
+    // If current node is no longer leader of tx owner ng, should abort
+    // immediately.
+    if (op_ != &clean_log_op_ && !CheckLeaderTerm(txm))
+    {
+        // Should mark the tx as failed so that data sync worker cannot
+        // truncate redo log.
+        LOG(ERROR) << "Split Flush transaction no longer leader of node group "
+                   << txm->TxCcNodeId() << ", tx_number: " << txm->TxNumber();
+        txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
+        ForceToFinish(txm);
+        return;
+    }
     if (op_ == nullptr)
     {
         // Initialize commit ts as the start time of tx. This value will
@@ -3280,8 +3208,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (lock_cluster_config_op_.hd_result_->IsError())
         {
-            DLOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
-                        << txm->TxNumber();
+            LOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
+                       << txm->TxNumber();
             txm->commit_ts_ = tx_op_failed_ts_;
             // Moves to the last operation that removes all write
             // intents/locks.
@@ -3299,11 +3227,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &prepare_acquire_all_write_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (prepare_acquire_all_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
@@ -3344,11 +3267,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     else if (op_ == &prepare_log_op_)
     {
         assert(txm->rw_set_.WriteSetSize() == 0);
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (prepare_log_op_.hd_result_.IsError())
         {
             if (prepare_log_op_.hd_result_.ErrorCode() ==
@@ -3357,35 +3275,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the
                 // coordinator itself is no longer leader
-                int64_t tx_node_term =
-                    Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-                if (tx_node_term == txm->TxTerm())
-                {
-                    DLOG(WARNING)
-                        << "Split range write prepare log result unknown, "
-                           "tx_number:"
-                        << txm->TxNumber() << ", keep retrying";
-                    // set retry flag and retry prepare log
-                    ::txlog::WriteLogRequest *log_req =
-                        prepare_log_op_.log_closure_.LogRequest()
-                            .mutable_write_log_request();
-                    log_req->set_retry(true);
-                    RetrySubOperation(txm, &prepare_log_op_);
-                }
-                else
-                {
-                    DLOG(ERROR) << "Split range write prepare log result "
-                                   "unknown, tx_number:"
-                                << txm->TxNumber()
-                                << ", not leader any more, stop retrying";
-                    // Not leader anymore, just quit. New leader will know
-                    // whether prepare log succeeds and continue the rest if
-                    // it does. Should not release the write intents. If
-                    // prepare log is not written, the write intents will be
-                    // released individually via orphan lock recovery
-                    // mechanism.
-                    ForceToFinish(txm);
-                }
+                DLOG(WARNING)
+                    << "Split range write prepare log result unknown, "
+                       "tx_number:"
+                    << txm->TxNumber() << ", keep retrying";
+                // set retry flag and retry prepare log
+                ::txlog::WriteLogRequest *log_req =
+                    prepare_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                RetrySubOperation(txm, &prepare_log_op_);
             }
             else
             {
@@ -3416,12 +3315,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &install_new_range_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
-
         if (install_new_range_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to install dirty "
@@ -3482,11 +3375,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &ds_migrate_old_partition_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (ds_migrate_old_partition_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to migrate old "
@@ -3823,13 +3711,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &data_sync_scan_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ClearDataSyncVec();
-            ForceToFinish(txm);
-            return;
-        }
-
         if (data_sync_scan_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to scan for "
@@ -3860,12 +3741,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &flush_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ClearDataSyncVec();
-            ForceToFinish(txm);
-            return;
-        }
         if (flush_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Split Flush transaction failed to flush data, "
@@ -3908,12 +3783,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &commit_acquire_all_write_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ClearDataSyncVec();
-            ForceToFinish(txm);
-            return;
-        }
         if (commit_acquire_all_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
@@ -4040,13 +3909,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &update_ckpt_ts_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ClearDataSyncVec();
-            ForceToFinish(txm);
-            return;
-        }
-
         // Should never fail.
         assert(!update_ckpt_ts_op_.hd_result_.IsError());
 
@@ -4060,11 +3922,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &commit_log_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (commit_log_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4156,12 +4013,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &ds_upsert_range_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
-
         if (ds_upsert_range_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4234,11 +4085,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &kickout_old_range_data_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (kickout_old_range_data_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4300,11 +4146,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (post_all_lock_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4368,11 +4209,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &ds_clean_old_range_op_)
     {
-        if (!CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
-        {
-            ForceToFinish(txm);
-            return;
-        }
         if (ds_clean_old_range_op_.hd_result_.IsError())
         {
             // error & retry
@@ -4391,8 +4227,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &clean_log_op_)
     {
-        if (clean_log_op_.hd_result_.IsError() &&
-            CheckLeaderTerm(node_group_, txm->tx_term_, txm->tx_status_))
+        if (clean_log_op_.hd_result_.IsError() && CheckLeaderTerm(txm))
         {
             // set retry flag and retry clean log
             ::txlog::WriteLogRequest *log_req =
@@ -4753,6 +4588,13 @@ void ObjectCommandOp::Reset(const TableName *table_name,
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
+    if (!CheckLeaderTerm(txm))
+    {
+        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        hd_result_.ForceError();
+        txm->PostProcess(*this);
+        return;
+    }
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -5031,7 +4873,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &prepare_log_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             // Failed before write log succeed due to leader transfer. Notify
             // caller.
@@ -5152,7 +4994,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &flush_new_cluster_config_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             ForceToFinish(txm);
             return;
@@ -5172,7 +5014,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &wait_for_new_node_ready_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             ForceToFinish(txm);
             return;
@@ -5186,7 +5028,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &acquire_cluster_config_write_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             ForceToFinish(txm);
             return;
@@ -5213,7 +5055,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &update_cluster_config_log_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             ForceToFinish(txm);
             return;
@@ -5239,7 +5081,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &install_cluster_config_op_)
     {
-        if (!CheckLeaderTerm(txm->TxCcNodeId(), txm->tx_term_, txm->tx_status_))
+        if (!CheckLeaderTerm(txm))
         {
             ForceToFinish(txm);
             return;
