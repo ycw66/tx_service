@@ -22,26 +22,11 @@ static inline void AbortTx(txservice::TransactionExecution *tx,
     }
 }
 
-static inline bool InitTx(txservice::TransactionExecution *txm,
-                          txservice::InitTxRequest *init_txn_ptr,
-                          txservice::IsolationLevel level,
-                          txservice::CcProtocol proto)
-{
-    init_txn_ptr->iso_level_ = level;
-    init_txn_ptr->protocol_ = proto;
-    txm->Execute(init_txn_ptr);
-    init_txn_ptr->Wait();
-    if (init_txn_ptr->IsError())
-    {
-        return false;
-    }
-    return true;
-}
-
 static inline TransactionExecution *NewTxInit(
     txservice::TxService *tx_service,
     txservice::IsolationLevel level = txservice::IsolationLevel::ReadCommitted,
     txservice::CcProtocol proto = txservice::CcProtocol::Locking,
+    NodeGroupId tx_owner = UINT32_MAX,
     const std::function<void()> *yield_fptr = nullptr,
     const std::function<void()> *resume_fptr = nullptr,
     int retry_count = 8)
@@ -53,7 +38,7 @@ static inline TransactionExecution *NewTxInit(
         txm = tx_service->NewTx();
         bool init_tx_success = false;
         txservice::InitTxRequest init_tx_req(
-            level, proto, yield_fptr, resume_fptr);
+            level, proto, yield_fptr, resume_fptr, nullptr, tx_owner);
 
         txm->Execute(&init_tx_req);
         init_tx_req.Wait();

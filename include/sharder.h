@@ -141,7 +141,7 @@ public:
      */
     uint32_t LeaderNodeId(uint32_t cc_ng_id)
     {
-        return ng_leader_cache_[cc_ng_id].load(std::memory_order_release);
+        return ng_leader_cache_[cc_ng_id].load(std::memory_order_acquire);
     }
 
     uint32_t ShardCode(uint64_t hash_code) const

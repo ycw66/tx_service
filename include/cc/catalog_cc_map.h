@@ -339,10 +339,11 @@ public:
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
-                // Flush kv failed, should drop new sk ccmap which created
-                // during PrepareCommit. But, if the dirty schema is nullptr,
-                // that is mean, this is the recovering transaction, and there
-                // is no need to drop the new sk ccmap.
+                // For add index op, we create new sk ccmap, table ranges and
+                // table statistics for the new sk during prepare phase. If
+                // flush kv failed, should clean these up. But, if the dirty
+                // schema is nullptr, that is mean, this is the recovering
+                // transaction, and there is no need to drop the new sk ccmap.
                 if (req.OpType() == OperationType::AddIndex &&
                     catalog_entry->dirty_schema_ != nullptr)
                 {
@@ -357,20 +358,32 @@ public:
                                       new_index_name) == old_index_names.end())
                         {
                             shard_->DropCcm(new_index_name, req.NodeGroupId());
+#ifdef RANGE_PARTITION_ENABLED
+                            // Clean up table ranges for new sk.
+                            const TableName index_range_name{
+                                new_index_name.StringView(),
+                                TableType::RangePartition};
+                            shard_->DropCcm(index_range_name,
+                                            req.NodeGroupId());
+#endif
+                            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+                            {
+#ifdef RANGE_PARTITION_ENABLED
+                                shard_->CleanTableRange(index_range_name,
+                                                        req.NodeGroupId());
+#endif
+                                Statistics *statistics =
+                                    catalog_entry->dirty_schema_
+                                        ->StatisticsObject()
+                                        .get();
+                                statistics->DropIndex(new_index_name);
+                            }
                         }
                     }
                 }
 
-                // Flush kv fails, need to clear dirty CatalogEntry, dirty
-                // CatalogRecord and TableStatistics.
+                // Flush kv fails, need to clear dirty CatalogEntry
                 catalog_entry->RejectDirtySchema();
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // If create table fails, also clean table statistics, which
-                    // is created in PrepareCommit phase; if add index fails, do
-                    // not clean table statistics.
-                    shard_->CleanTableStatistics(table_key->Name());
-                }
 
                 if (cce_ptr->payload_)
                 {
@@ -607,6 +620,7 @@ public:
                         }
                         else
                         {
+                            assert(req.OpType() == OperationType::DropIndex);
                             // Remove sk cc map for dropped index.
                             shard_->DropCcm(old_index_name, req.NodeGroupId());
 // range table operation.
@@ -655,6 +669,16 @@ public:
                         // We will update current sk ccmap in PostCommit.
                         shard_->CreateOrUpdateSkCcMap(
                             new_index_name,
+                            new_schema,
+                            req.NodeGroupId(),
+                            catalog_entry->DirtyVersion());
+
+                        // New sk range cc map should use the dirty schema
+                        const TableName new_index_range_name{
+                            new_index_name.StringView(),
+                            TableType::RangePartition};
+                        shard_->CreateOrUpdateRangeCcMap(
+                            new_index_range_name,
                             new_schema,
                             req.NodeGroupId(),
                             catalog_entry->DirtyVersion());
@@ -1006,14 +1030,6 @@ public:
                     }
                 }
             }
-            else
-            {
-                if (catalog_entry->dirty_schema_)
-                {
-                    shard_->InitTableStatistics(
-                        catalog_entry->dirty_schema_.get(), req.NodeGroupId());
-                }
-            }
         }
         else
         {
@@ -1068,32 +1084,17 @@ public:
                             new_schema,
                             req.NodeGroupId(),
                             catalog_entry->DirtyVersion());
-                    }
-                }
-            }
-        }
-        else if (schema_op_msg.stage() ==
-                     ::txlog::SchemaOpMessage_Stage::
-                         SchemaOpMessage_Stage_CommitSchema &&
-                 !is_coordinator)
-        {
-            // Create ccmap for participants
-            const TableSchema *committed_schema = catalog_entry->schema_.get();
-            if (committed_schema != nullptr)
-            {
-                shard_->CreateOrUpdatePkCcMap(table_name,
-                                              committed_schema,
-                                              req.NodeGroupId(),
-                                              catalog_entry->Version());
 
-                std::vector<TableName> index_names =
-                    committed_schema->IndexNames();
-                for (const TableName &index_name : index_names)
-                {
-                    shard_->CreateOrUpdateSkCcMap(index_name,
-                                                  committed_schema,
-                                                  req.NodeGroupId(),
-                                                  catalog_entry->Version());
+                        // New sk range cc maps should use the dirty schema
+                        const TableName new_index_range_name{
+                            new_index_name.StringView(),
+                            TableType::RangePartition};
+                        shard_->CreateOrUpdateRangeCcMap(
+                            new_index_range_name,
+                            new_schema,
+                            req.NodeGroupId(),
+                            catalog_entry->DirtyVersion());
+                    }
                 }
             }
         }

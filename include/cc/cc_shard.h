@@ -188,7 +188,7 @@ public:
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
      */
-    TEntry &NewTx();
+    TEntry &NewTx(NodeGroupId tx_owner);
 
     /**
      * @brief Find an available NonBlockingLock in lock array and initialize it.
@@ -232,11 +232,11 @@ public:
         return core_id_;
     }
 
-    uint32_t GlobalCoreId() const
+    uint32_t GlobalCoreId(NodeGroupId ng_id) const
     {
-        // The global core ID is a combination of node ID and the local core ID.
-        uint32_t global_id = node_id_;
-        return (global_id << 10) | core_id_;
+        // The global core ID is a combination of node group ID and the local
+        // core ID.
+        return (ng_id << 10) | core_id_;
     }
 
     uint64_t Now() const;

@@ -600,6 +600,7 @@ public:
                 // as the slice keys in the new ranges.
                 std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                     new_slice_keys;
+                bool split_range_res;
                 NodeGroupId range_owner =
                     shard_
                         ->GetRangeOwner(
@@ -628,54 +629,85 @@ public:
                             range_owner,
                             *Sharder::Instance().GetLocalCcShards());
                     store_range->InitSlices(range_slices);
-                    new_slice_keys = store_range->SplitRange(
-                        old_info->new_key_.front().get());
+                    split_range_res = store_range->SplitRange(
+                        old_info->new_key_.front().get(), new_slice_keys);
                 }
                 else
                 {
-                    new_slice_keys = old_entry->RangeSlices()->SplitRange(
-                        old_info->new_key_.front().get());
+                    split_range_res = old_entry->RangeSlices()->SplitRange(
+                        old_info->new_key_.front().get(), new_slice_keys);
                 }
-                if (new_slice_keys.empty())
+                if (!split_range_res)
                 {
                     // If split fails due to slice is pinned or is loading
                     // retry later.
                     shard_->Enqueue(shard_->LocalCoreId(), &req);
                     return false;
                 }
-                auto cur_slice = new_slice_keys.begin();
+                if (new_slice_keys.empty())
+                {
+                    // If all current slices should stay in old range, assign
+                    // empty slice for new range
+                    for (auto &new_key : old_info->new_key_)
+                    {
+                        new_slice_keys.emplace_back(
+                            new_key->Clone(), 0, SliceStatus::FullyCached);
+                    }
+                }
 
                 // Create new range entries in local cc shard
-                for (uint idx = 0; idx < old_info->new_partition_id_.size();
-                     idx++)
+                size_t cur_slice_idx = 0;
+                for (uint new_range_idx = 0;
+                     new_range_idx < old_info->new_partition_id_.size();
+                     new_range_idx++)
                 {
                     std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                         cur_range_slices;
-                    // First slice start key will reuse the new range start key,
-                    // so we can just pass in nullptr.
+                    // First slice start key will reuse the new range start
+                    // key, so we can just pass in nullptr.
                     TxKey::Uptr range_start_key =
-                        std::move(std::get<0>(*cur_slice));
-                    std::get<0>(*cur_slice) = nullptr;
-                    cur_range_slices.push_back(std::move(*cur_slice));
-                    cur_slice++;
-
+                        std::move(std::get<0>(new_slice_keys[cur_slice_idx]));
+                    std::get<0>(new_slice_keys[cur_slice_idx]) = nullptr;
+                    cur_range_slices.push_back(
+                        std::move(new_slice_keys.at(cur_slice_idx)));
+                    cur_slice_idx++;
                     // Move the range slices that falls into the new range.
-                    while (cur_slice != new_slice_keys.end() &&
-                           (idx + 1 == old_info->new_key_.size() ||
-                            *std::get<0>(*cur_slice) <
-                                *old_info->new_key_.at(idx + 1)))
+                    while (cur_slice_idx != new_slice_keys.size() &&
+                           (new_range_idx + 1 == old_info->new_key_.size() ||
+                            *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
+                                *old_info->new_key_.at(new_range_idx + 1)))
                     {
-                        cur_range_slices.push_back(std::move(*cur_slice));
-                        cur_slice++;
+                        cur_range_slices.push_back(
+                            std::move(new_slice_keys.at(cur_slice_idx++)));
                     }
+
+                    if (new_range_idx <
+                            old_info->new_partition_id_.size() - 1 &&
+                        cur_slice_idx == new_slice_keys.size())
+                    {
+                        // If we run out of slice before we reach last new
+                        // range, insert an empty slice for the next new
+                        // range
+                        for (size_t idx = new_range_idx + 1;
+                             idx < old_info->new_key_.size();
+                             ++idx)
+                        {
+                            new_slice_keys.emplace_back(
+                                old_info->new_key_.at(idx)->Clone(),
+                                0,
+                                SliceStatus::FullyCached);
+                        }
+                    }
+
                     const TableRangeEntry *new_range = shard_->CreateTableRange(
                         this->table_name_,
                         this->cc_ng_id_,
-                        old_info->new_partition_id_.at(idx),
+                        old_info->new_partition_id_.at(new_range_idx),
                         std::move(range_start_key),
-                        cur_slice == new_slice_keys.end()
+                        cur_slice_idx == new_slice_keys.size()
                             ? old_end_key
-                            : std::get<0>(*cur_slice).get(),
+                            : std::get<0>(new_slice_keys.at(cur_slice_idx))
+                                  .get(),
                         old_info->dirty_ts_,
                         &cur_range_slices);
                     new_range_infos.push_back(new_range->GetRangeInfo());
@@ -968,44 +1000,79 @@ public:
                             *Sharder::Instance().GetLocalCcShards());
                     store_range->InitSlices(range_slices);
                     std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-                        new_slice_keys = store_range->SplitRange(
-                            new_range_keys.front().get());
+                        new_slice_keys;
+                    store_range->SplitRange(new_range_keys.front().get(),
+                                            new_slice_keys);
 
-                    auto cur_slice = new_slice_keys.begin();
+                    if (new_slice_keys.empty())
+                    {
+                        // If all current slices should stay in old range,
+                        // assign empty slice for new range
+                        for (auto &new_key : old_info->new_key_)
+                        {
+                            new_slice_keys.emplace_back(
+                                new_key->Clone(), 0, SliceStatus::FullyCached);
+                        }
+                    }
+
                     // Create new range entries in local cc shard
-                    for (uint idx = 0; idx < new_range_ids.size(); idx++)
+                    size_t cur_slice_idx = 0;
+                    for (uint new_range_idx = 0;
+                         new_range_idx < old_info->new_partition_id_.size();
+                         new_range_idx++)
                     {
                         std::vector<
                             std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                             cur_range_slices;
                         // First slice start key will reuse the new range start
                         // key, so we can just pass in nullptr.
-                        TxKey::Uptr range_start_key =
-                            std::move(std::get<0>(*cur_slice));
-                        std::get<0>(*cur_slice) = nullptr;
-                        cur_range_slices.push_back(std::move(*cur_slice));
-                        cur_slice++;
-
+                        TxKey::Uptr range_start_key = std::move(
+                            std::get<0>(new_slice_keys[cur_slice_idx]));
+                        std::get<0>(new_slice_keys[cur_slice_idx]) = nullptr;
+                        cur_range_slices.push_back(
+                            std::move(new_slice_keys.at(cur_slice_idx)));
+                        cur_slice_idx++;
                         // Move the range slices that falls into the new range.
-                        while (cur_slice != new_slice_keys.end() &&
-                               (idx + 1 == new_range_keys.size() ||
-                                *std::get<0>(*cur_slice) <
-                                    *new_range_keys.at(idx + 1)))
+                        while (
+                            cur_slice_idx != new_slice_keys.size() &&
+                            (new_range_idx + 1 == old_info->new_key_.size() ||
+                             *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
+                                 *old_info->new_key_.at(new_range_idx + 1)))
                         {
-                            cur_range_slices.push_back(std::move(*cur_slice));
-                            cur_slice++;
+                            cur_range_slices.push_back(
+                                std::move(new_slice_keys.at(cur_slice_idx++)));
+                        }
+
+                        if (new_range_idx <
+                                old_info->new_partition_id_.size() - 1 &&
+                            cur_slice_idx == new_slice_keys.size())
+                        {
+                            // If we run out of slice before we reach last new
+                            // range, insert an empty slice for the next new
+                            // range
+                            for (size_t idx = new_range_idx + 1;
+                                 idx < old_info->new_key_.size();
+                                 ++idx)
+                            {
+                                new_slice_keys.emplace_back(
+                                    old_info->new_key_.at(idx)->Clone(),
+                                    0,
+                                    SliceStatus::FullyCached);
+                            }
                         }
 
                         const TableRangeEntry *new_range =
                             shard_->CreateTableRange(
                                 this->table_name_,
                                 this->cc_ng_id_,
-                                new_range_ids.at(idx),
+                                old_info->new_partition_id_.at(new_range_idx),
                                 std::move(range_start_key),
-                                cur_slice == new_slice_keys.end()
+                                cur_slice_idx == new_slice_keys.size()
                                     ? old_end_key
-                                    : std::get<0>(*cur_slice).get(),
-                                req.CommitTs(),
+                                    : std::get<0>(
+                                          new_slice_keys.at(cur_slice_idx))
+                                          .get(),
+                                old_info->dirty_ts_,
                                 &cur_range_slices);
                         new_range_infos.push_back(new_range->GetRangeInfo());
                     }

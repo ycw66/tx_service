@@ -272,11 +272,11 @@ void CcShard::Enqueue(CcRequestBase *req)
     }
 }
 
-TEntry &CcShard::NewTx()
+TEntry &CcShard::NewTx(NodeGroupId tx_owner)
 {
     // allocate start timestamp.
     uint64_t start_ts = Now();
-    int64_t term = Sharder::Instance().LeaderTerm(node_id_);
+    int64_t term = Sharder::Instance().LeaderTerm(tx_owner);
 
     // Cicurlar iteration to find an available transaction entry.
     size_t cnt = 0;

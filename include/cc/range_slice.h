@@ -521,14 +521,17 @@ public:
      * @param new_end
      * @return std::vector<std::pair<TxKey::Uptr, uint32_t, SliceStatus>>
      */
-    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> SplitRange(
-        const TxKey *new_end)
+    bool SplitRange(const TxKey *new_end,
+                    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                        &removed_slices)
     {
         std::unique_lock<std::shared_mutex> range_lk(mux_);
-        std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-            removed_slices;
         size_t remove_offset = SearchSlice(*new_end, true);
-        assert(remove_offset > 0);
+        if (remove_offset == 0)
+        {
+            // All slices are smaller than new end
+            return true;
+        }
         auto boundary = boundary_keys_.begin() + remove_offset - 1;
         auto slice = slices_.begin() + remove_offset;
         while (slice != slices_.end())
@@ -539,19 +542,19 @@ public:
             if ((*slice)->pins_ > 0)
             {
                 DLOG(INFO) << "slice pinned when trying to split range";
-                return removed_slices;
+                return false;
             }
             else if ((*slice)->status_ == SliceStatus::BeingLoaded)
             {
                 DLOG(INFO) << "slice filling into memory when trying to "
                               "split range";
-                return removed_slices;
+                return false;
             }
             else if ((*slice)->FillCcRequest() != nullptr)
             {
                 DLOG(INFO) << "slice loading from data store when trying to "
                               "split range";
-                return removed_slices;
+                return false;
             }
             slice++;
         }
@@ -568,7 +571,7 @@ public:
         boundary_keys_.erase(boundary_keys_.begin() + remove_offset - 1,
                              boundary_keys_.end());
         range_end_key_ = std::get<0>(removed_slices.front()).get();
-        return removed_slices;
+        return true;
     }
 
     void Lock()

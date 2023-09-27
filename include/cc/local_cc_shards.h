@@ -427,7 +427,8 @@ public:
     void CreateRemoteStatisticsTx(
         TableName table_or_index_name,
         uint64_t schema_version,
-        remote::NodeGroupSamplePool remote_sample_pool);
+        remote::NodeGroupSamplePool remote_sample_pool,
+        NodeGroupId ng_id);
 
     /**
      * ---------------------------------

@@ -1292,7 +1292,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                         local_shards_.CreateRemoteStatisticsTx(
                             std::move(table_name),
                             schema_version,
-                            std::move(remote_sample_pool));
+                            std::move(remote_sample_pool),
+                            dest_ng_id);
                         Sharder::Instance().UnpinNodeGroupData(dest_ng_id);
                     });
             }

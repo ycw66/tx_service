@@ -146,6 +146,8 @@ void txservice::LocalCcHandler::PostWriteAll(
     PostWriteType post_write_type)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
     if (dest_node_id == cc_shards_.node_id_)
     {
         PostWriteAllCc *req = postwrite_all_pool_.NextRequest();
@@ -155,7 +157,7 @@ void txservice::LocalCcHandler::PostWriteAll(
         // records. The record of a PostWriteAllCc has two roles: (1) upload a
         // serialized schema image, (2) return a pointer to the schema object
         // cached in the tx service.
-        if (ng_id == cc_shards_.node_id_)
+        if (ng_id == cc_ng_id)
         {
             req->Reset(&table_name,
                        &key,
@@ -562,16 +564,16 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         ccs = cc_shards_.cc_shards_[thd_id_].get();
     }
     int64_t term;
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
     if (is_recovering)
     {
-        term = Sharder::Instance().CandidateLeaderTerm(ccs->node_id_);
+        term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
     }
     else
     {
-        term = Sharder::Instance().LeaderTerm(ccs->node_id_);
+        term = Sharder::Instance().LeaderTerm(cc_ng_id);
     }
-    uint32_t shard_code = tx_number >> 32L;
-    uint32_t cc_ng_id = shard_code >> 10;
     cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, term, 0);
 
@@ -638,6 +640,8 @@ void txservice::LocalCcHandler::ScanOpen(
     bool is_covering_keys)
 {
     CcShard &local_shard = *cc_shards_.cc_shards_[thd_id_];
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
 
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
     if (table_name.Type() == TableType::Secondary ||
@@ -646,7 +650,7 @@ void txservice::LocalCcHandler::ScanOpen(
         const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                         TableType::Primary};
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
+            local_shard.GetCatalog(base_table_name, cc_ng_id);
 
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
@@ -685,7 +689,7 @@ void txservice::LocalCcHandler::ScanOpen(
     else
     {
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(table_name, local_shard.node_id_);
+            local_shard.GetCatalog(table_name, cc_ng_id);
 
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
@@ -849,6 +853,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     }
 
     CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
+    uint32_t shard_code = tx_number >> 32L;
+    uint32_t cc_ng_id = shard_code >> 10;
 
     const Schema *schema = nullptr;
     std::unique_ptr<CcScanner> ccm_scanner = nullptr;
@@ -857,7 +863,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         const TableName base_table_name{table_name.StringView(),
                                         TableType::Primary};
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
+            local_shard.GetCatalog(base_table_name, cc_ng_id);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
         {
             schema = catalog_entry->schema_.get()->KeySchema();
@@ -872,7 +878,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         const TableName base_table_name{table_name.StringView(),
                                         TableType::Primary};
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(base_table_name, local_shard.node_id_);
+            local_shard.GetCatalog(base_table_name, cc_ng_id);
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
         {
             schema = catalog_entry->schema_.get()->IndexKeySchema(table_name);
@@ -883,7 +889,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     else
     {
         const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(table_name, local_shard.node_id_);
+            local_shard.GetCatalog(table_name, cc_ng_id);
 
         if (catalog_entry != nullptr && catalog_entry->schema_ != nullptr)
         {
@@ -914,14 +920,12 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     scanner_ptr->protocol_ = proto;
     scanner_ptr->read_local_ = true;
 
-    uint32_t ng_id = local_shard.node_id_;
-    uint32_t shard_code = (ng_id << 10) + local_shard.core_id_;
     ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
 
     ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
     scan_open_cc_req->Reset(&table_name,
                             index_type,
-                            ng_id,
+                            cc_ng_id,
                             &start_key,
                             inclusive,
                             direction,
@@ -939,7 +943,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
     // Check if the table exists
-    CcMap *ccm = local_shard.GetCcm(table_name, local_shard.node_id_);
+    CcMap *ccm = local_shard.GetCcm(table_name, cc_ng_id);
 
     if (ccm != nullptr)
     {
@@ -1177,11 +1181,12 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 }
 
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
-                                       IsolationLevel iso_level)
+                                       IsolationLevel iso_level,
+                                       NodeGroupId tx_owner)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
 
-    int64_t term = Sharder::Instance().LeaderTerm(ccs.node_id_);
+    int64_t term = Sharder::Instance().LeaderTerm(tx_owner);
 
     // Code injection for test InitTxRequest failure
     CODE_FAULT_INJECTOR("init_tx_error", {
@@ -1194,9 +1199,9 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // NewTx reads each ccshard's next_tx_ident_, which is set concurrently
         // by log replay thread when native cc node finishes log replay. The two
         // events are synchronized by leader_term_.
-        TEntry &tx = ccs.NewTx();
+        TEntry &tx = ccs.NewTx(tx_owner);
         InitTxResult &init_tx_res = hres.Value();
-        init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId());
+        init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId(tx_owner));
         TxNumber txn = init_tx_res.txid_.TxNumber();
         init_tx_res.start_ts_ = tx.lower_bound_;
         init_tx_res.term_ = tx.term_;

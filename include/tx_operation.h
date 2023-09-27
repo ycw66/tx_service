@@ -312,6 +312,7 @@ struct InitTxnOperation : TransactionOperation
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
+    uint32_t tx_owner_;
     CcHandlerResult<InitTxResult> hd_result_;
 };
 

@@ -2045,6 +2045,7 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     InitTxRequest init_req;
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
+    init_req.tx_owner_ = upload_txm->TxCcNodeId();
     init_req.Reset();
     acquire_range_lock_txm->Execute(&init_req);
     init_req.Wait();
@@ -2247,6 +2248,7 @@ void UpsertTableIndexOp::FinishScanFromCcMap(
 std::unique_ptr<store::DataStoreScanner>
 UpsertTableIndexOp::PrepareScanFromDataStore(const TableName &table_name,
                                              const TableSchema *table_schema,
+                                             NodeGroupId ng_id,
                                              uint64_t commit_ts)
 {
     // Construct the search condition.
@@ -2267,7 +2269,7 @@ UpsertTableIndexOp::PrepareScanFromDataStore(const TableName &table_name,
     }
 
     return store_hd->ScanPkAndNewSkColumns(
-        table_name, table_schema, search_conds, new_indexes_name);
+        table_name, table_schema, ng_id, search_conds, new_indexes_name);
 }
 
 void UpsertTableIndexOp::ScanNextFromDataStore(
@@ -2324,14 +2326,25 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     LOG(INFO) << "Generate packed sk and write into sk ccmap, txn: "
               << txm->TxNumber();
 
+    NodeGroupId ng_id = txm->TxCcNodeId();
+    int32_t term = Sharder::Instance().TryPinNodeGroupData(ng_id);
+    if (term < 0)
+    {
+        fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
+            CcErrorCode::TX_NODE_NOT_LEADER);
+        return;
+    }
+    // guard to unpin node group on finish.
+    std::shared_ptr<void> defer_unpin(
+        nullptr,
+        [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
     uint64_t commit_ts = txm->commit_ts_;
     const TableName &base_table_name = table_key_.Name();
     // Read table schema from local cc shard. This is because we could be
     // recovering from prepare flush pk stage, in which case we have skipped
     // post_all_intent_op_ and the schema in catalog_rec_ would be empty.
     LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
-    auto catalog_entry =
-        local_cc_shards->GetCatalog(base_table_name, txm->TxCcNodeId());
+    auto catalog_entry = local_cc_shards->GetCatalog(base_table_name, ng_id);
     TableSchema *table_schema =
         const_cast<TableSchema *>(catalog_entry->dirty_schema_.get());
     assert(table_schema != nullptr);
@@ -2355,7 +2368,8 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     scan_batch_cnt_ = 0;
 #else
     std::unique_ptr<store::DataStoreScanner> ds_scanner =
-        PrepareScanFromDataStore(base_table_name, table_schema, commit_ts);
+        PrepareScanFromDataStore(
+            base_table_name, table_schema, ng_id, commit_ts);
     assert(ds_scanner.get() != nullptr);
     bool is_first_scan = true;
 #endif
@@ -2444,7 +2458,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             err = txm->TxUpsert(index_it->first,
                                 std::move(packed_sk.first),
                                 std::move(packed_sk.second),
-                                OperationType::Insert);
+                                OperationType::Upsert);
 
             // TxUpsert only failed caused by exceed the
             // @@ReadWriteSet::MaxWriteSetBytesCnt of the local write set.
@@ -2458,6 +2472,18 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             }
             need_move_next = true;
         } /* end of foreache add_index_names_ */
+
+        if (upload_batch_cnt % 10000 == 0)
+        {
+            // Check for leader term periodically and abort if leader
+            // has been transferred.
+            if (!Sharder::Instance().CheckLeaderTerm(ng_id, term))
+            {
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                    .SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                return;
+            }
+        }
 
         // Upload this batch write entry depending on the record count or the
         // record bytes.
@@ -2475,7 +2501,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                            "failed caused by OOM. Retry after sleep 150s.";
                     std::this_thread::sleep_for(150s);
                 }
-                else if (error_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                else
                 {
                     LOG(ERROR)
                         << "Upload this batch new packed sk data failed "
@@ -2526,7 +2552,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
                                 "after sleep 150s.";
                 std::this_thread::sleep_for(150s);
             }
-            else if (error_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            else
             {
                 LOG(ERROR) << "Upload the last batch new packed sk data failed "
                               "caused by leader transferred for base table: "

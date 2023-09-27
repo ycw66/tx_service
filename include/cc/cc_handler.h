@@ -355,7 +355,8 @@ public:
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
     virtual void NewTxn(CcHandlerResult<InitTxResult> &hres,
-                        IsolationLevel iso_level) = 0;
+                        IsolationLevel iso_level,
+                        NodeGroupId tx_owner) = 0;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

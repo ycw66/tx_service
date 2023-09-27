@@ -249,7 +249,8 @@ public:
     /// <param name="max_txn_execution_time_ms"></param>
     /// <param name=""></param>
     void NewTxn(CcHandlerResult<InitTxResult> &hres,
-                IsolationLevel iso_level) override;
+                IsolationLevel iso_level,
+                NodeGroupId tx_owner) override;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

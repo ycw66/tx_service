@@ -558,113 +558,30 @@ public:
                     key = &decoded_key;
                 }
 
-                cce = Find(*key).second;
-                // collect metrics: slice cache hits
-                if (metrics::enable_cache_hit_rate)
-                {
-                    auto meter = shard_->meter_.get();
-                    if (cce != nullptr)
-                    {
-                        meter->Collect(
-                            shard_->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
-                    }
-                }
-
+                // Since the uploaded record might not be the latest version
+                // of this record, we need to mark data_store_size_ of cce as
+                // unknown. The operation type for the uploaded records should
+                // be Upsert.
+                Iterator it = FindEmplace(*key);
+                cce = it->second;
                 if (cce == nullptr)
                 {
-                    // Since the uploaded record might not be the latest version
-                    // of this record, we need to make sure the latest versin is
-                    // in memory so that we won't accidentally overwrite newer
-                    // version with old version when flushing into data store.
-                    RangeSliceOpStatus pin_status;
-                    int64_t ng_term =
-                        Sharder::Instance().LeaderTerm(req.NodeGroupId());
-                    if (ng_term < 0)
-                    {
-                        req.Result()->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-                        return true;
-                    }
-                    RangeSliceId slice_id =
-                        shard_->PinRangeSlice(table_name_,
-                                              cc_ng_id_,
-                                              ng_term,
-                                              KeySchema(),
-                                              RecordSchema(),
-                                              schema_ts_,
-                                              table_schema_->GetKVCatalogInfo(),
-                                              *key,
-                                              true,
-                                              &req,
-                                              pin_status,
-                                              false,
-                                              0);
-
-                    if (pin_status == RangeSliceOpStatus::Successful)
-                    {
-                        // The slice is unpinned immediately. This is
-                        // because the prior pin operation brings all
-                        // records in the slice into memory, including the
-                        // target record sharded to this core. Since cache
-                        // cleaning is done by the tx processor associated
-                        // with this core, the target record cannot be
-                        // kicked out before this read request finishes.
-                        slice_id.Unpin();
-
-                        Iterator it = FindEmplace(*key);
-                        cce = it->second;
-                        if (cce == nullptr)
-                        {
-                            LOG(WARNING) << "!!!WARNING!!! PostWriteCc have no"
-                                         << " enough memory. Txn: " << txn
-                                         << ", table name trace: "
-                                         << this->table_name_.Trace();
-                            // This cc shard has reached max memory limit. We
-                            // didn't write data log for this post write req,
-                            // but we have acquired range read lock for this
-                            // key. If we do not return error and release the
-                            // range read lock, it might block range split from
-                            // finishing. We should return error here so that
-                            // coordinator can release range read lock and retry
-                            // later.
-                            req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                            return true;
-                        }
-                    }
-                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
-                    {
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Retry)
-                    {
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        return false;
-                    }
-                    else if (pin_status == RangeSliceOpStatus::Delay)
-                    {
-                        if (slice_id.Range()->HasLock())
-                        {
-                            LOG(WARNING) << "!!!WARNING!!! PostWriteCc have no"
-                                         << " enough memory. Txn: " << txn
-                                         << ", table name trace: "
-                                         << this->table_name_.Trace();
-                            req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                            return true;
-                        }
-                        else
-                        {
-                            shard_->Enqueue(shard_->LocalCoreId(), &req);
-                            return false;
-                        }
-                    }
-                    else
-                    {
-                        // If the pin operation returns an error, the data
-                        // store is inaccessible.
-                        req.Result()->SetError(
-                            CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                        return true;
-                    }
+                    LOG(WARNING)
+                        << "!!!WARNING!!! PostWriteCc have no"
+                        << " enough memory. Txn: " << txn
+                        << ", table name trace: " << this->table_name_.Trace();
+                    // This cc shard has reached max memory limit. We
+                    // didn't write data log for this post write req,
+                    // but we have acquired range read lock for this
+                    // key. If we do not return error and release the
+                    // range read lock, it might block range split from
+                    // finishing. We should return error here so that
+                    // coordinator can release range read lock and retry
+                    // later.
+                    req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
+
                 // Since this is a forward req, we assume this entry is not
                 // visible on this ng yet so no need to check for lock.
 
@@ -693,8 +610,7 @@ public:
             if (commit_ts > 0)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                if (req.GetOperationType() == OperationType::Insert &&
-                    cce->commit_ts_ == 1)
+                if (op_type == OperationType::Insert && cce->commit_ts_ == 1)
                 {
                     // At post write we have already loaded the latest version
                     // of cce into memory. So if commit ts is 1 (entry does not
@@ -796,7 +712,8 @@ public:
                 }
                 if (shard_->realtime_sampling_ && sample_pool_)
                 {
-                    if (op_type == OperationType::Insert)
+                    if (op_type == OperationType::Insert ||
+                        op_type == OperationType::Upsert)
                     {
                         sample_pool_->OnInsert(
                             static_cast<const KeyT &>(*cce->Key()),
@@ -5206,10 +5123,11 @@ public:
             uint32_t rec_store_size =
                 data_item.is_deleted_ ? 0 : cce_key->Size() + record->Size();
 
-            if (cce->commit_ts_ > 1)
+            // If the in-memory version is from a upload request (i.e. generated
+            // sk record from pk), the data store version might be newer. Only
+            // overwrite if in memory version is newer.
+            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
             {
-                assert(data_item.version_ts_ <= cce->commit_ts_);
-
                 // Initialize the data store size if it is unspecified before
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
                     INT32_MAX)
@@ -5436,9 +5354,12 @@ public:
                 Iterator it = Floor(*start_key);
                 if (it->first == NegativeInfinity<KeyT>::Instance())
                 {
-                    it++;
+                    lru_page = pg_ng_inf_.next_page_;
                 }
-                lru_page = it->second->parent_page_;
+                else
+                {
+                    lru_page = it->second->parent_page_;
+                }
             }
         }
 

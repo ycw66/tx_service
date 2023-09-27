@@ -181,6 +181,7 @@ public:
 
     std::unique_ptr<DataStoreScanner> ScanForward(
         const txservice::TableName &table_name,
+        uint32_t ng_id,
         const txservice::TxKey &start_key,
         bool inclusive,
         uint8_t key_parts,
@@ -368,6 +369,7 @@ public:
     std::unique_ptr<DataStoreScanner> ScanPkAndNewSkColumns(
         const TableName &table_name,
         const TableSchema *table_schema,
+        NodeGroupId ng_id,
         const std::vector<DataStoreSearchCond> &search_conds,
         const std::vector<TableName> &new_indexes_name) override
     {

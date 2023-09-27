@@ -450,6 +450,9 @@ void LocalCcShards::CreateSchemaRecoveryTx(
             {
                 // leadership transferred away before replay finish.
                 replay_log_cc.AbortCcRequest(CcErrorCode::TX_NODE_NOT_LEADER);
+                AbortTxRequest abort_req;
+                txm->Execute(&abort_req);
+                abort_req.Wait();
                 return;
             }
             replay_log_cc.SetFinish();
@@ -469,10 +472,11 @@ void LocalCcShards::CreateSchemaRecoveryTx(
 void LocalCcShards::CreateRemoteStatisticsTx(
     TableName table_or_index_name,
     uint64_t schema_version,
-    remote::NodeGroupSamplePool remote_sample_pool)
+    remote::NodeGroupSamplePool remote_sample_pool,
+    NodeGroupId ng_id)
 {
     TransactionExecution *txm = NewTxInit(
-        tx_service_, IsolationLevel::Serializable, CcProtocol::Locking);
+        tx_service_, IsolationLevel::Serializable, CcProtocol::Locking, ng_id);
     if (txm)
     {
         txm->RemoteStatisticsTx(std::move(table_or_index_name),
@@ -611,6 +615,9 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             {
                 replay_log_cc.AbortCcRequest(
                     CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                AbortTxRequest abort_req;
+                txm->Execute(&abort_req);
+                abort_req.Wait();
                 return;
             }
             replay_log_cc.SetFinish();
@@ -1914,6 +1921,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // ReadTxRequest.
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
+    init_req.tx_owner_ = ng_id;
     init_req.Reset();
     data_sync_txm->Execute(&init_req);
     init_req.Wait();
@@ -2992,6 +3000,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
                     // following ReadTxRequest.
                     init_req.iso_level_ = IsolationLevel::RepeatableRead;
                     init_req.protocol_ = CcProtocol::Locking;
+                    init_req.tx_owner_ = node_group;
                     init_req.Reset();
                     txm->Execute(&init_req);
                     init_req.Wait();

@@ -798,7 +798,8 @@ void UpdateTxnStatus::Forward(TransactionExecution *txm)
     }
 }
 
-InitTxnOperation::InitTxnOperation(TransactionExecution *txm) : hd_result_(txm)
+InitTxnOperation::InitTxnOperation(TransactionExecution *txm)
+    : tx_owner_(UINT32_MAX), hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -4309,7 +4310,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // error & retry
             LOG(ERROR) << "Split Flush transaction failed at post all "
                           "lock, tx_number:"
-                       << txm->TxNumber();
+                       << txm->TxNumber() << ", err code "
+                       << (int) (post_all_lock_op_.hd_result_.ErrorCode())
+                       << ", msg " << post_all_lock_op_.hd_result_.ErrorMsg();
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
             range_record_->end_key_ = old_end_key_;

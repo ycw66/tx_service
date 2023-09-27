@@ -129,10 +129,12 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
                   CcProtocol proto = CcProtocol::OCC,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
-                  TransactionExecution *txm = nullptr)
+                  TransactionExecution *txm = nullptr,
+                  uint32_t tx_owner = UINT32_MAX)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           iso_level_(level),
-          protocol_(proto)
+          protocol_(proto),
+          tx_owner_(tx_owner)
     {
     }
 
@@ -140,6 +142,7 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
+    uint32_t tx_owner_{UINT32_MAX};
 };
 
 struct ReadTxRequest

@@ -494,6 +494,9 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
     uint64_resp_ = &init_txn_req.tx_result_;
     iso_level_ = init_txn_req.iso_level_;
     protocol_ = init_txn_req.protocol_;
+    init_txn_.tx_owner_ = init_txn_req.tx_owner_ == UINT32_MAX
+                              ? Sharder::Instance().NodeId()
+                              : init_txn_req.tx_owner_;
 
     PushOperation(&init_txn_);
     Process(init_txn_);
@@ -1222,7 +1225,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
     init_txn.Reset();
 
-    cc_handler_->NewTxn(init_txn.hd_result_, iso_level_);
+    cc_handler_->NewTxn(init_txn.hd_result_, iso_level_, init_txn.tx_owner_);
     init_txn.Forward(this);
 }
 
@@ -1241,7 +1244,8 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     if (init_txn.hd_result_.IsError())
     {
         DLOG(ERROR) << "InitTxnOperation failed for cc error:"
-                    << init_txn.hd_result_.ErrorMsg();
+                    << init_txn.hd_result_.ErrorMsg() << ", tx owner "
+                    << init_txn.tx_owner_;
         state_stack_.clear();
 
         if (uint64_resp_ != &init_tx_req_->tx_result_)
@@ -2783,9 +2787,40 @@ void TransactionExecution::Abort()
         return;
     }
 
+    bool is_recovering = TxStatus() == TxnStatus::Recovering;
     tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
-    PushOperation(&update_txn_);
-    Process(update_txn_);
+
+    if (!is_recovering)
+    {
+        PushOperation(&update_txn_);
+        Process(update_txn_);
+    }
+    else
+    {
+        // No need to update txn status since we did not assign
+        // TEntry for recovering tx.
+        uint32_t acquire_write_cnt =
+            rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
+        if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsError())
+        {
+            std::vector<AcquireKeyResult> &acquire_key_vec =
+                acquire_write_.hd_result_.Value();
+            size_t error_cnt = 0;
+            for (const AcquireKeyResult &acq_key : acquire_key_vec)
+            {
+                if (acq_key.cce_addr_.Term() < 0)
+                {
+                    ++error_cnt;
+                }
+            }
+            acquire_write_cnt -= error_cnt;
+        }
+        post_process_.Reset(acquire_write_cnt,
+                            rw_set_.ReadSetSize(),
+                            rw_set_.CatalogRangeSetSize());
+        PushOperation(&post_process_);
+        Process(post_process_);
+    }
 }
 
 void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
@@ -3106,10 +3141,27 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
             }
             else
             {
+                bool is_recovering = TxStatus() == TxnStatus::Recovering;
                 tx_status_.store(TxnStatus::Committed,
                                  std::memory_order_release);
-                PushOperation(&update_txn_);
-                Process(update_txn_);
+
+                if (!is_recovering)
+                {
+                    PushOperation(&update_txn_);
+                    Process(update_txn_);
+                }
+                else
+                {
+                    // No need to update txn status since we did not assign
+                    // TEntry for recovering tx.
+                    post_process_.Reset(rw_set_.WriteSetSize() +
+                                            rw_set_.ForwardWriteCnt() +
+                                            rw_set_.ObjectCommandSize(),
+                                        0,
+                                        rw_set_.CatalogRangeSetSize());
+                    PushOperation(&post_process_);
+                    Process(post_process_);
+                }
             }
         }
     }
@@ -3210,7 +3262,7 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
             << " ,conflict_tx size:" << validate.hd_result_.Value().Size();
 
         DLOG(ERROR) << "ValidateOperation failed for cc error:"
-                    << validate.hd_result_.ErrorMsg();
+                    << validate.hd_result_.ErrorMsg() << ", txn " << TxNumber();
 
         if (bool_resp_ != nullptr)
         {
@@ -3749,7 +3801,7 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
 
     uint32_t acquire_write_cnt =
         rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
-    if (rw_set_.WriteSetSize() > 0 && acquire_write_.hd_result_.IsError())
+    if (acquire_write_cnt > 0 && acquire_write_.hd_result_.IsError())
     {
         std::vector<AcquireKeyResult> &acquire_key_vec =
             acquire_write_.hd_result_.Value();
@@ -4116,9 +4168,9 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
     post_write_all_op.Reset(node_group_cnt);
     post_write_all_op.is_running_ = true;
 
-    for (uint32_t nid = 0; nid < node_group_cnt; ++nid)
+    for (uint32_t ngid = 0; ngid < node_group_cnt; ++ngid)
     {
-        if (Sharder::Instance().NodeId() == nid)
+        if (TxCcNodeId() == ngid)
         {
             // Send out local request at last to prevent it from
             // modifying rec_ while the handler is still using it.
@@ -4127,7 +4179,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
         cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
                                   *post_write_all_op.key_,
                                   *post_write_all_op.rec_,
-                                  nid,
+                                  ngid,
                                   tx_number_.load(std::memory_order_relaxed),
                                   tx_term_,
                                   command_id_.load(std::memory_order_relaxed),
@@ -4140,7 +4192,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
     cc_handler_->PostWriteAll(*post_write_all_op.table_name_,
                               *post_write_all_op.key_,
                               *post_write_all_op.rec_,
-                              Sharder::Instance().NodeId(),
+                              TxCcNodeId(),
                               tx_number_.load(std::memory_order_relaxed),
                               tx_term_,
                               command_id_.load(std::memory_order_relaxed),

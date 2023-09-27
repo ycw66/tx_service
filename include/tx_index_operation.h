@@ -178,6 +178,7 @@ private:
     std::unique_ptr<store::DataStoreScanner> PrepareScanFromDataStore(
         const TableName &table_name,
         const TableSchema *table_schema,
+        NodeGroupId ng_id,
         uint64_t commit_ts);
     void ScanNextFromDataStore(store::DataStoreScanner *ds_scanner,
                                bool &is_first_scan,
