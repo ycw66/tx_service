@@ -310,6 +310,30 @@ public:
                         }
                     }
 #endif
+
+                    if (catalog_entry->schema_ && catalog_entry->dirty_schema_)
+                    {
+                        // For ALTER TABLE, set the dirty index name, and this
+                        // info should be clean when commit dirty schema. For
+                        // CREATE TABLE, there is no matter that do not set the
+                        // dirty index info, because this table is invisible
+                        // until create table transaction commit.
+                        std::vector<TableName> new_index_names =
+                            catalog_entry->dirty_schema_->IndexNames();
+                        std::vector<TableName> old_index_names =
+                            catalog_entry->schema_->IndexNames();
+                        for (const TableName &new_index_name : new_index_names)
+                        {
+                            if (std::find(old_index_names.begin(),
+                                          old_index_names.end(),
+                                          new_index_name) ==
+                                old_index_names.end())
+                            {
+                                catalog_entry->dirty_schema_->AddDirtyIndex(
+                                    new_index_name);
+                            }
+                        }
+                    }
                 }
 
                 schema_rec->Set(catalog_entry->schema_,
@@ -995,20 +1019,11 @@ public:
                         catalog_entry->dirty_schema_->IndexNames();
                     std::vector<TableName> old_index_names =
                         catalog_entry->schema_->IndexNames();
-                    bool found = false;
                     for (const TableName &new_index_name : new_index_names)
                     {
-                        found = false;
-                        for (const auto &old_index_name : old_index_names)
-                        {
-                            if (!new_index_name.String().compare(
-                                    old_index_name.String()))
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found)
+                        if (std::find(old_index_names.begin(),
+                                      old_index_names.end(),
+                                      new_index_name) == old_index_names.end())
                         {
                             TableName index_range_name{
                                 new_index_name.StringView(),
@@ -1026,6 +1041,11 @@ public:
                                     ng_term);
                                 return false;
                             }
+
+                            // For ALTER TABLE, set the dirty index name, and
+                            // should clean them when commit dirty schema.
+                            catalog_entry->dirty_schema_->AddDirtyIndex(
+                                new_index_name);
                         }
                     }
                 }

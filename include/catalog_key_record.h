@@ -121,6 +121,10 @@ struct CatalogEntry
     {
         if (dirty_schema_version_ > schema_version_)
         {
+            if (dirty_schema_)
+            {
+                dirty_schema_->CleanDirtyInfo();
+            }
             schema_ = std::move(dirty_schema_);
             schema_version_ = dirty_schema_version_;
         }
