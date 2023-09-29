@@ -137,9 +137,9 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                                   node_group,
                                                   leader_term,
                                                   ckpt_ts,
-                                                  status,
                                                   true,
-                                                  is_dirty);
+                                                  is_dirty,
+                                                  status);
             }
         }
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
@@ -160,7 +160,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                  [&status]
                                  { return status->unfinished_tasks_ == 0; });
             }
-            if (status->unfinished_tasks_ == 0 && !status->task_failed_)
+            if (status->unfinished_tasks_ == 0 &&
+                status->err_code_ == CcErrorCode::NO_ERROR)
             {
                 // Truncate redo log
                 LOG(INFO) << "Checkpoint of node group #" << node_group

@@ -38,7 +38,6 @@ struct DataSyncStatus
 
     uint32_t unfinished_tasks_{0};
     bool all_task_started_{false};
-    bool task_failed_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
     std::condition_variable cv_;
@@ -76,7 +75,8 @@ public:
         status_->unfinished_tasks_--;
         if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
         {
-            if (need_truncate_log_ && !status_->task_failed_)
+            if (need_truncate_log_ &&
+                status_->err_code_ == CcErrorCode::NO_ERROR)
             {
                 // Truncate redo log
                 LOG(INFO) << "Checkpoint of node group #" << node_group_id_
@@ -89,13 +89,13 @@ public:
 
             if (task_res_)
             {
-                if (status_->task_failed_)
+                if (status_->err_code_ == CcErrorCode::NO_ERROR)
                 {
-                    task_res_->SetError(status_->err_code_);
+                    task_res_->SetFinished();
                 }
                 else
                 {
-                    task_res_->SetFinished();
+                    task_res_->SetError(status_->err_code_);
                 }
             }
             status_->cv_.notify_all();
@@ -106,7 +106,6 @@ public:
         std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
         status_->unfinished_tasks_--;
         status_->err_code_ = err_code;
-        status_->task_failed_ = true;
         if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
         {
             if (task_res_)
@@ -584,9 +583,9 @@ public:
                              uint32_t ng_id,
                              int64_t ng_term,
                              uint64_t data_sync_ts,
-                             std::shared_ptr<DataSyncStatus> status,
                              bool need_truncate_log = true,
                              bool is_dirty = false,
+                             std::shared_ptr<DataSyncStatus> status = nullptr,
                              CcHandlerResult<Void> *hres = nullptr);
 
     bool IsDataSyncQueueEmpty()

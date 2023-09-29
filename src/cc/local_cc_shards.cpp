@@ -1619,19 +1619,27 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                         uint32_t ng_id,
                                         int64_t ng_term,
                                         uint64_t data_sync_ts,
-                                        std::shared_ptr<DataSyncStatus> status,
                                         bool need_truncate_log,
                                         bool is_dirty,
+                                        std::shared_ptr<DataSyncStatus> status,
                                         CcHandlerResult<Void> *hres)
 {
     std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+    if (status == nullptr)
+    {
+        // Only flushing one table and there's no thread waiting on the result.
+        assert(hres != nullptr);
+        status = std::make_shared<DataSyncStatus>();
+        status->all_task_started_ = true;
+    }
     std::unique_lock<std::mutex> status_lk(status->mux_);
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
-    if (ranges == nullptr)
+    if (ranges == nullptr && hres)
     {
+        hres->SetFinished();
         return;
     }
     for (auto &range : *ranges)
@@ -1692,6 +1700,7 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                                     ng_id,
                                                     range_info->PartitionId());
                         }
+                        status->unfinished_tasks_++;
                         store_range->PushPendingSyncTask(
                             std::make_shared<DataSyncTask>(
                                 table_name,
@@ -1725,13 +1734,19 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                   << range_info->PartitionId()
                                   << " is forwarding message to ng " << ng_id
                                   << " during range split.";
-                        status->err_code_ = CcErrorCode::TX_NODE_NOT_LEADER;
-                        status->task_failed_ = true;
+                        // Mark the task as failed since we cannot gaurantee all
+                        // data before data sync ts is flushed.
+                        status->err_code_ = CcErrorCode::PIN_RANGE_SLICE_FAILED;
                         break;
                     }
                 }
             }
         }
+    }
+    if (hres && status->unfinished_tasks_ == 0)
+    {
+        hres->SetFinished();
+        return;
     }
     task_worker_cv_.notify_all();
 }

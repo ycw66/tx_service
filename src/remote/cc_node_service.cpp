@@ -384,9 +384,9 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
                                       ng_id,
                                       current_ng_term,
                                       data_sync_ts,
-                                      status,
                                       false,
-                                      is_dirty);
+                                      is_dirty,
+                                      status);
     std::unique_lock<std::mutex> lk(status->mux_);
     status->all_task_started_ = true;
     status->cv_.wait(lk, [&status] { return status->unfinished_tasks_ == 0; });
