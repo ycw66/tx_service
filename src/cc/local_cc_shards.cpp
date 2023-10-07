@@ -1637,9 +1637,12 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
-    if (ranges == nullptr && hres)
+    if (ranges == nullptr)
     {
-        hres->SetFinished();
+        if (hres)
+        {
+            hres->SetFinished();
+        }
         return;
     }
     for (auto &range : *ranges)
