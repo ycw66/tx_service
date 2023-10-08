@@ -540,13 +540,10 @@ void Sharder::NotifyCheckPointer()
 std::vector<uint32_t> Sharder::LocalNodeGroups()
 {
     std::vector<uint32_t> ngs;
-    if (cluster_config_)
+    auto cluster_config = cluster_config_;
+    for (auto &pair : cluster_config->cc_nodes_)
     {
-        auto cluster_config = cluster_config_;
-        for (auto &pair : cluster_config->cc_nodes_)
-        {
-            ngs.push_back(pair.first);
-        }
+        ngs.push_back(pair.first);
     }
     return ngs;
 }

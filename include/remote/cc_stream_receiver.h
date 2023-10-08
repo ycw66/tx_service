@@ -19,8 +19,6 @@ class LocalCcShards;
 
 namespace remote
 {
-class CcStreamSender;
-
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:

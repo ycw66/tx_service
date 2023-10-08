@@ -1261,6 +1261,103 @@ public:
         return false;
     }
 
+    bool Execute(BroadcastStatisticsCc &req) override
+    {
+        CcHandlerResult<Void> *hd_res = req.Result();
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
+        {
+            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
+
+        TableName base_table_name(req.SamplingTableName()->GetBaseTableNameSV(),
+                                  TableType::Primary);
+        CatalogKey table_key(base_table_name);
+        Iterator it = FindEmplace(table_key);
+        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        if (cce->payload_status_ == RecordStatus::Unknown)
+        {
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(base_table_name, req.NodeGroupId());
+            if (catalog_entry != nullptr)
+            {
+                if (catalog_entry->schema_ != nullptr)
+                {
+                    // upload catalog record
+                    cce->payload_ = std::make_unique<CatalogRecord>();
+                    cce->payload_->Set(catalog_entry->schema_,
+                                       catalog_entry->dirty_schema_,
+                                       catalog_entry->Version());
+                    cce->payload_status_ = RecordStatus::Normal;
+                    cce->commit_ts_ = catalog_entry->Version();
+                }
+                else
+                {
+                    cce->payload_status_ = RecordStatus::Deleted;
+                    cce->commit_ts_ = catalog_entry->Version();
+                }
+            }
+            else
+            {
+                if (Statistics::NodeGroupDoStore(base_table_name) !=
+                    req.NodeGroupId())
+                {
+                    hd_res->SetFinished();
+                    return true;
+                }
+                else
+                {
+                    shard_->FetchCatalog(
+                        base_table_name, req.NodeGroupId(), ng_term, &req);
+                    return false;
+                }
+            }
+        }
+
+        if (cce->payload_status_ == RecordStatus::Normal)
+        {
+            // Initialize table statistics before create ccmap.
+            if (!shard_->LoadRangesAndStatisticsNx(
+                    cce->payload_->Schema(), req.NodeGroupId(), ng_term, &req))
+            {
+                return false;  // Loading...
+            }
+
+            const StatisticsEntry *statistics_entry =
+                shard_->GetTableStatistics(base_table_name, req.NodeGroupId());
+            assert(statistics_entry && statistics_entry->statistics_);
+            const auto table_schema = [&req, cce]() -> const TableSchema *
+            {
+                if (cce->payload_->Schema() &&
+                    cce->payload_->Schema()->Version() == req.SchemaVersion())
+                {
+                    return cce->payload_->Schema();
+                }
+                else if (cce->payload_->DirtySchema() &&
+                         cce->payload_->DirtySchema()->Version() ==
+                             req.SchemaVersion())
+                {
+                    return cce->payload_->DirtySchema();
+                }
+                else
+                {
+                    return nullptr;
+                }
+            }();
+
+            if (table_schema)
+            {
+                statistics_entry->statistics_->OnRemoteStatisticsMessage(
+                    *req.SamplingTableName(), table_schema, *req.SamplePool());
+            }
+        }
+
+        hd_res->SetFinished();
+        return true;
+    }
+
     TableType Type() const override
     {
         return TableType::Catalog;

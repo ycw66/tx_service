@@ -210,7 +210,7 @@ public:
         return ccm_;
     }
 
-    virtual const TableName *GetTableName()
+    virtual const TableName *GetTableName() const
     {
         return table_name_;
     }
@@ -2901,6 +2901,53 @@ private:
                                     txservice::ReplayLogCc *r);
 };
 
+struct BroadcastStatisticsCc
+    : public TemplatedCcRequest<BroadcastStatisticsCc, Void>
+{
+public:
+    BroadcastStatisticsCc() = default;
+
+    void Reset(uint32_t ng_id,
+               const TableName *table_name,
+               uint64_t schema_version,
+               const remote::NodeGroupSamplePool &remote_sample_pool,
+               TxNumber tx_number,
+               CcHandlerResult<Void> *res)
+    {
+        TemplatedCcRequest<BroadcastStatisticsCc, Void>::Reset(
+            &catalog_ccm_name, res, ng_id, tx_number);
+
+        sampling_table_name_ = table_name;
+        schema_version_ = schema_version;
+        remote_sample_pool_ = &remote_sample_pool;
+    }
+
+    const TableName *SamplingTableName() const
+    {
+        return sampling_table_name_;
+    }
+
+    uint64_t SchemaVersion() const
+    {
+        return schema_version_;
+    }
+
+    const remote::NodeGroupSamplePool *SamplePool() const
+    {
+        return remote_sample_pool_;
+    }
+
+    void ResetCcm()
+    {
+        ccm_ = nullptr;
+    }
+
+protected:
+    const TableName *sampling_table_name_{nullptr};
+    uint64_t schema_version_{UINT64_MAX};
+    const remote::NodeGroupSamplePool *remote_sample_pool_{nullptr};
+};
+
 struct AnalyzeTableAllCc : public TemplatedCcRequest<AnalyzeTableAllCc, Void>
 {
 public:
@@ -2935,6 +2982,7 @@ public:
 
 public:
     AnalyzeTableAllCc() = default;
+
     void Reset(const TableName *table_name,
                uint32_t node_group_id,
                TxNumber tx_number,

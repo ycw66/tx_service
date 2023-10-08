@@ -1210,6 +1210,48 @@ void txservice::remote::RemoteFaultInjectCC::Reset(
     }
 }
 
+txservice::remote::RemoteBroadcastStatisticsCc::RemoteBroadcastStatisticsCc()
+    : cc_res_(nullptr)
+{
+    res_ = &cc_res_;
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    {
+        if (input_msg_ && recycle_input_msg_)
+        {
+            hd_->RecycleCcMsg(std::move(input_msg_));
+        }
+    };
+}
+
+void txservice::remote::RemoteBroadcastStatisticsCc::Reset(
+    std::unique_ptr<CcMessage> input_msg, bool recycle_input_msg)
+{
+    assert(input_msg->has_broadcast_statistics_req());
+
+    cc_res_.Reset();
+
+    recycle_input_msg_ = recycle_input_msg;
+
+    const BroadcastStatisticsRequest &req =
+        input_msg->broadcast_statistics_req();
+    remote_table_name_ =
+        TableName(req.table_name_str(),
+                  ToLocalType::ConvertCcTableType(req.table_type()));
+
+    BroadcastStatisticsCc::Reset(req.node_group_id(),
+                                 &remote_table_name_,
+                                 req.schema_version(),
+                                 req.node_group_sample_pool(),
+                                 0,
+                                 &cc_res_);
+    input_msg_ = std::move(input_msg);
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteAnalyzeTableAllCc::RemoteAnalyzeTableAllCc()
     : cc_res_(nullptr)
 {

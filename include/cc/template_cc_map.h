@@ -4639,6 +4639,12 @@ public:
         return false;
     }
 
+    bool Execute(BroadcastStatisticsCc &req) override
+    {
+        assert(false && "CatalogCcMap::Execute(BroadcastStatisticsCc &) only");
+        return true;
+    }
+
     bool Execute(AnalyzeTableAllCc &req) override
     {
         CcHandlerResult<Void> *hd_res = req.Result();

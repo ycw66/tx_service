@@ -503,47 +503,39 @@ public:
         index_sample_pool_map_.erase(index_name);
     }
 
-    // This method is called in one of Sharder::tx_worker_pool_ thread.
+    // This method is called in the sample tx_processor thread
     void OnRemoteStatisticsMessage(
-        TableName table_or_index_name,
+        const TableName &table_or_index_name,
         const TableSchema *table_schema,
-        remote::NodeGroupSamplePool remote_sample_pool) override
+        const remote::NodeGroupSamplePool &remote_sample_pool) override
     {
-        Task task =
-            [this,
-             table_or_index_name = std::move(table_or_index_name),
-             table_schema,
-             remote_sample_pool = std::move(remote_sample_pool)](CcShard &ccs)
+        NodeGroupId ng_id =
+            static_cast<NodeGroupId>(remote_sample_pool.ng_id());
+
+        SamplePoolParam<KeyT> param;
+        param.records_ = remote_sample_pool.records();
+
+        const KeySchema *key_schema =
+            table_or_index_name.IsBase()
+                ? table_schema->KeySchema()
+                : table_schema->IndexKeySchema(table_or_index_name);
+        for (const std::string &sample : remote_sample_pool.samples())
         {
-            NodeGroupId ng_id =
-                static_cast<NodeGroupId>(remote_sample_pool.ng_id());
+            KeyT key;
+            size_t offset = 0;
+            key.Deserialize(sample.data(), offset, key_schema);
+            param.sample_keys_.push_back(std::move(key));
+        }
 
-            SamplePoolParam<KeyT> param;
-            param.records_ = remote_sample_pool.records();
+        auto [it, insert] = index_sample_pool_map_.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(table_or_index_name),
+            std::forward_as_tuple());
 
-            const KeySchema *key_schema =
-                table_or_index_name.IsBase()
-                    ? table_schema->KeySchema()
-                    : table_schema->IndexKeySchema(table_or_index_name);
-            for (const std::string &sample : remote_sample_pool.samples())
-            {
-                KeyT key;
-                size_t offset = 0;
-                key.Deserialize(sample.data(), offset, key_schema);
-                param.sample_keys_.push_back(std::move(key));
-            }
+        it->second.insert_or_assign(
+            ng_id, TemplateCcMapSamplePool<KeyT>(&it->first, ng_id, param));
 
-            auto [it, insert] = index_sample_pool_map_.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(table_or_index_name),
-                std::forward_as_tuple());
-
-            it->second.insert_or_assign(
-                ng_id, TemplateCcMapSamplePool<KeyT>(&it->first, ng_id, param));
-
-            BuildDistribution(table_or_index_name, key_schema);
-        };
-        RunOnBindingCcShard(task);
+        BuildDistribution(table_or_index_name, key_schema);
 
         need_save_counter_.fetch_add(1, std::memory_order_release);
     }
@@ -597,7 +589,7 @@ public:
                     {
                         const std::unordered_map<NodeGroupId,
                                                  TemplateCcMapSamplePool<KeyT>>
-                            ng_sample_pool_map = iter->second;
+                            &ng_sample_pool_map = iter->second;
                         const auto it = ng_sample_pool_map.find(ng_id);
                         if (it != ng_sample_pool_map.end())
                         {
@@ -823,9 +815,6 @@ private:
         assert(table_or_index_name == table_schema->GetBaseTableName() ||
                table_schema->IndexKeySchema(table_or_index_name) != nullptr);
 
-        remote::CcStreamSender *stream_sender =
-            Sharder::Instance().GetCcStreamSender();
-
         uint32_t src_node_id = Sharder::Instance().NodeId();
 
         remote::CcMessage send_msg;
@@ -845,34 +834,42 @@ private:
             broadcast_stat_req->mutable_node_group_sample_pool();
         ccmap_sample_pool.To(remote_sample_pool);
 
-        NodeGroupId from_ng_id = remote_sample_pool->ng_id();
+        NodeGroupId src_ng_id = remote_sample_pool->ng_id();
 
         uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
         for (uint32_t ng_id = 0; ng_id < ng_cnt; ng_id++)
         {
-            if (ng_id != from_ng_id)
+            broadcast_stat_req->set_node_group_id(ng_id);
+
+            if (ng_id != src_ng_id)
             {
                 uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
                 if (dest_node_id != src_node_id)
                 {
-                    broadcast_stat_req->set_node_group_id(ng_id);
+                    remote::CcStreamSender *stream_sender =
+                        Sharder::Instance().GetCcStreamSender();
                     stream_sender->SendMessageToNode(dest_node_id, send_msg);
                 }
-                // else
-                //{
-                //     Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                //         [table_or_index_name,
-                //          schema_version = table_schema->Version(),
-                //          remote_sample_pool = *remote_sample_pool]() mutable
-                //         {
-                //             Sharder::Instance()
-                //                 .GetLocalCcShards()
-                //                 ->CreateRemoteStatisticsTx(
-                //                     std::move(table_or_index_name),
-                //                     schema_version,
-                //                     std::move(remote_sample_pool));
-                //         });
-                // }
+                else
+                {
+                    // BroadcastStatisticsCc is inherited from
+                    // TemplatedCcRequest, which holds a pointer to
+                    // CcHandlerResult. This means that someone needs to hold an
+                    // instance of CcHandlerResult, and waits on it.
+                    //
+                    // However, Broadcast() is non-blockable, and doesn't care
+                    // about CcHandlerResult. As a subsitute,
+                    // broadcast_stat_pool_ takes its place to hold
+                    // CcHandlerResult.
+                    remote::RemoteBroadcastStatisticsCc *broadcast_stat_cc =
+                        broadcast_stat_pool_.NextRequest();
+                    broadcast_stat_cc->Reset(
+                        std::make_unique<remote::CcMessage>(send_msg));
+                    uint16_t core_idx =
+                        Statistics::CoreDoSample(table_or_index_name);
+                    Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
+                        core_idx, broadcast_stat_cc);
+                }
             }
         }
     }
@@ -1191,6 +1188,9 @@ private:
     IndexSamplePoolMap index_sample_pool_map_;
 
     mutable std::atomic<int32_t> need_save_counter_{0};
+
+    mutable CcRequestPool<remote::RemoteBroadcastStatisticsCc>
+        broadcast_stat_pool_;
 };
 
 }  // namespace txservice

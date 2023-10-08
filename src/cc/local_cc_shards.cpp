@@ -480,29 +480,6 @@ void LocalCcShards::CreateSchemaRecoveryTx(
     schema_recover_thd.detach();
 }
 
-void LocalCcShards::CreateRemoteStatisticsTx(
-    TableName table_or_index_name,
-    uint64_t schema_version,
-    remote::NodeGroupSamplePool remote_sample_pool,
-    NodeGroupId ng_id)
-{
-    TransactionExecution *txm = NewTxInit(
-        tx_service_, IsolationLevel::Serializable, CcProtocol::Locking, ng_id);
-    if (txm)
-    {
-        txm->RemoteStatisticsTx(std::move(table_or_index_name),
-                                schema_version,
-                                std::move(remote_sample_pool));
-
-        // Commit the transaction and ignore commit error(leader transfer).
-        // For readonly transaction, commit transaction is same with abort.
-        CommitTxRequest commit_req;
-        commit_req.Reset();
-        txm->Execute(&commit_req);
-        commit_req.Wait();
-    }
-}
-
 void LocalCcShards::CreateSplitRangeRecoveryTx(
     ReplayLogCc &replay_log_cc,
     const ::txlog::SplitRangeOpMessage &ds_split_range_op_msg,
@@ -3081,32 +3058,43 @@ void LocalCcShards::SyncTableStatisticsWorker()
                         continue;
                     }
 
-                    const TableSchema *schema = catalog_rec.Schema();
-
-                    if (is_dirty && catalog_rec.DirtySchema())
+                    const TableSchema *table_schema = catalog_rec.Schema();
+                    if (is_dirty && catalog_rec.DirtySchema() &&
+                        !table_schema->IndexKeySchema(table_name))
                     {
-                        schema = catalog_rec.DirtySchema();
+                        assert(table_name.Type() == TableType::Secondary ||
+                               table_name.Type() == TableType::UniqueSecondary);
+                        table_schema = catalog_rec.DirtySchema();
                     }
-                    assert(schema != nullptr);
-                    while (!schema->StatisticsObject()->SyncTableStatistics(
-                        store_hd_,
-                        table_name,
-                        schema,
-                        node_group,
-                        sync_ts,
-                        updated))
+
+                    assert(table_schema != nullptr);
+
+                    if ((table_name.Type() == TableType::Secondary ||
+                         table_name.Type() == TableType::UniqueSecondary) &&
+                        table_schema->IndexKeySchema(table_name) != nullptr)
                     {
-                        LOG(ERROR) << "Failed to update statistics of table "
-                                   << table_name.Trace() << ", retrying.";
-                        std::this_thread::sleep_for(1s);
-                        // Check leader term in infinite while loop.
-                        if (!Sharder::Instance().CheckLeaderTerm(node_group,
-                                                                 leader_term))
+                        while (!table_schema->StatisticsObject()
+                                    ->SyncTableStatistics(store_hd_,
+                                                          table_name,
+                                                          table_schema,
+                                                          node_group,
+                                                          sync_ts,
+                                                          updated))
                         {
-                            LOG(ERROR) << "Leader term changed during table "
-                                          "statistics update";
-                            succ = false;
-                            break;
+                            LOG(ERROR)
+                                << "Failed to update statistics of table "
+                                << table_name.Trace() << ", retrying.";
+                            std::this_thread::sleep_for(1s);
+                            // Check leader term in infinite while loop.
+                            if (!Sharder::Instance().CheckLeaderTerm(
+                                    node_group, leader_term))
+                            {
+                                LOG(ERROR)
+                                    << "Leader term changed during table "
+                                       "statistics update";
+                                succ = false;
+                                break;
+                            }
                         }
                     }
                     CommitTxRequest commit_req;

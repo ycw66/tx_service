@@ -37,6 +37,7 @@ struct NegotiateCc;
 struct DataSyncScanCc;
 struct CkptUpdateCc;
 struct CkptTs;
+struct BroadcastStatisticsCc;
 struct AnalyzeTableAllCc;
 struct ReplayLogCc;
 struct FaultInjectCC;
@@ -125,6 +126,7 @@ public:
     virtual bool Execute(ScanSliceCc &req) = 0;
     virtual bool Execute(DataSyncScanCc &req) = 0;
     virtual bool Execute(remote::RemoteReadOutside &req) = 0;
+    virtual bool Execute(BroadcastStatisticsCc &req) = 0;
     virtual bool Execute(AnalyzeTableAllCc &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;

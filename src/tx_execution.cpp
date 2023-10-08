@@ -242,64 +242,6 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     }
 }
 
-void TransactionExecution::RemoteStatisticsTx(
-    TableName table_or_index_name,
-    uint64_t schema_version,
-    remote::NodeGroupSamplePool remote_sample_pool)
-{
-    TableName base_table_name(table_or_index_name.GetBaseTableNameSV(),
-                              TableType::Primary);
-    CatalogKey catalog_key(base_table_name);
-    CatalogRecord catalog_rec;
-    ReadTxRequest read_req(&txservice::catalog_ccm_name,
-                           &catalog_key,
-                           &catalog_rec,
-                           false,
-                           false,
-                           true);
-
-    bool exists = false;
-    TxErrorCode err = TxReadCatalog(this, read_req, exists);
-    if (err == TxErrorCode::NO_ERROR && exists)
-    {
-        const TableSchema *table_schema =
-            [](const CatalogRecord &catalog_rec,
-               uint64_t schema_version) -> const TableSchema *
-        {
-            if (catalog_rec.Schema() &&
-                catalog_rec.Schema()->Version() == schema_version)
-            {
-                return catalog_rec.Schema();
-            }
-            else if (catalog_rec.DirtySchema() &&
-                     catalog_rec.DirtySchema()->Version() == schema_version)
-            {
-                return catalog_rec.DirtySchema();
-            }
-            else
-            {
-                // unknown schema.
-                return nullptr;
-            }
-        }(catalog_rec, schema_version);
-
-        // It is safe to use raw pointer to TableSchema and Statistics, because
-        // they have been protected by Sharder::TryPinNodeGroupData in
-        // CcStreamReceiver/BroadcastStatisticsRequest.
-        if (table_schema)
-        {
-            assert(table_schema->GetBaseTableName() == table_or_index_name ||
-                   table_schema->IndexKeySchema(table_or_index_name) !=
-                       nullptr);
-            Statistics *statistics = table_schema->StatisticsObject().get();
-            statistics->OnRemoteStatisticsMessage(
-                std::move(table_or_index_name),
-                table_schema,
-                std::move(remote_sample_pool));
-        }
-    }
-}
-
 TxmStatus TransactionExecution::Forward()
 {
     bool has_more_req = false;

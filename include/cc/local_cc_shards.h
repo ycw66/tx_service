@@ -42,7 +42,7 @@ struct DataSyncStatus
     std::mutex mux_;
     std::condition_variable cv_;
 };
-class DataSyncTask
+struct DataSyncTask
 {
 public:
     DataSyncTask(const TableName &table_name,
@@ -422,12 +422,6 @@ public:
     void CreateSchemaRecoveryTx(ReplayLogCc &replay_log_cc,
                                 const ::txlog::SchemaOpMessage &schema_op_msg,
                                 int64_t tx_term);
-
-    void CreateRemoteStatisticsTx(
-        TableName table_or_index_name,
-        uint64_t schema_version,
-        remote::NodeGroupSamplePool remote_sample_pool,
-        NodeGroupId ng_id);
 
     /**
      * ---------------------------------

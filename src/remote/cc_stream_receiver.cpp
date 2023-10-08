@@ -28,6 +28,7 @@ thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanSlice> scan_slice_pool;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
+thread_local CcRequestPool<RemoteBroadcastStatisticsCc> broadcast_stat_pool_;
 thread_local CcRequestPool<RemoteAnalyzeTableAllCc> analyze_table_all_pool_;
 thread_local CcRequestPool<RemoteCleanCcEntryForTestCc> clean_cc_entry_pool_;
 thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
@@ -1255,51 +1256,13 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::
         CcMessage_MessageType_BroadcastStatisticsRequest:
     {
-        // Here we can't verify whether the msg was sent from a valid leader.
-        // And if it was sent from a invalid leader, the valid leader will
-        // overwrite it with correct sample pool later.
-
-        NodeGroupId dest_ng_id = static_cast<NodeGroupId>(
-            msg->broadcast_statistics_req().node_group_id());
-        if (Sharder::Instance().LeaderNodeId(dest_ng_id) ==
-            Sharder::Instance().NodeId())
-        {
-            TableType table_type = ToLocalType::ConvertCcTableType(
-                msg->broadcast_statistics_req().table_type());
-            std::string table_name_str =
-                msg->broadcast_statistics_req().table_name_str();
-
-            TableName table_name(std::move(table_name_str), table_type);
-            uint64_t schema_version =
-                msg->broadcast_statistics_req().schema_version();
-
-            remote::NodeGroupSamplePool remote_sample_pool =
-                msg->broadcast_statistics_req().node_group_sample_pool();
-
-            int64_t leader_term =
-                Sharder::Instance().TryPinNodeGroupData(dest_ng_id);
-
-            if (leader_term >= 0)
-            {
-                Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-                    [this,
-                     dest_ng_id,
-                     table_name = std::move(table_name),
-                     schema_version,
-                     remote_sample_pool =
-                         std::move(remote_sample_pool)]() mutable
-                    {
-                        local_shards_.CreateRemoteStatisticsTx(
-                            std::move(table_name),
-                            schema_version,
-                            std::move(remote_sample_pool),
-                            dest_ng_id);
-                        Sharder::Instance().UnpinNodeGroupData(dest_ng_id);
-                    });
-            }
-        }
-
-        msg_pool_.enqueue(std::move(msg));
+        RemoteBroadcastStatisticsCc *broadcast_stat_req =
+            broadcast_stat_pool_.NextRequest();
+        broadcast_stat_req->Reset(std::move(msg));
+        TX_TRACE_ASSOCIATE(msg.get(), broadcast_stat_req);
+        uint16_t core_idx = txservice::Statistics::CoreDoSample(
+            *broadcast_stat_req->GetTableName());
+        local_shards_.EnqueueToCcShard(core_idx, broadcast_stat_req);
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionRequest:

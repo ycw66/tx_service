@@ -185,10 +185,6 @@ public:
 
     void SetRecoverTxState(uint64_t txn, int64_t tx_term, uint64_t commit_ts);
 
-    void RemoteStatisticsTx(TableName table_or_index_name,
-                            uint64_t schema_version,
-                            remote::NodeGroupSamplePool remote_sample_pool);
-
     std::string GetErrorMessage() const;
 
     void SetErrorMessage(const std::string &err_msg);

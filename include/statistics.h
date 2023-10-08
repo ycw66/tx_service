@@ -69,9 +69,9 @@ public:
     virtual void DropIndex(const TableName &index_name) = 0;
 
     virtual void OnRemoteStatisticsMessage(
-        TableName table_or_index_name,
+        const TableName &table_or_index_name,
         const TableSchema *table_schema,
-        remote::NodeGroupSamplePool remote_sample_pool) = 0;
+        const remote::NodeGroupSamplePool &remote_sample_pool) = 0;
 
     virtual void PriorSplitRange(const TableName &table_or_index_name,
                                  const TableSchema *table_schema,
