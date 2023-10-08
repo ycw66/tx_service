@@ -1628,11 +1628,7 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
                 DLOG(ERROR) << "flush schema error: can not create table "
                                "in kv store";
 
-                if (txm->tx_status_ != TxnStatus::Recovering)
-                {
-                    txm->upsert_resp_->SetErrorCode(
-                        TxErrorCode::DATA_STORE_ERROR);
-                }
+                txm->upsert_resp_->SetErrorCode(TxErrorCode::DATA_STORE_ERROR);
 
                 // Set txm->commit_ts_ to 0 to indicate there is a flush
                 // error during upsert_kv_table_op_.
