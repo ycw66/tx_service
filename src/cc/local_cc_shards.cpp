@@ -460,10 +460,21 @@ void LocalCcShards::CreateSchemaRecoveryTx(
             txm->Execute(&recover_req);
             recover_req.Wait();
 
-            CommitTxRequest commit_req;
-            commit_req.Reset();
-            txm->Execute(&commit_req);
-            commit_req.Wait();
+            if (recover_req.IsError() ||
+                recover_req.Result() != UpsertResult::Succeeded)
+            {
+                AbortTxRequest abort_req;
+                abort_req.Reset();
+                txm->Execute(&abort_req);
+                abort_req.Wait();
+            }
+            else
+            {
+                CommitTxRequest commit_req;
+                commit_req.Reset();
+                txm->Execute(&commit_req);
+                commit_req.Wait();
+            }
         });
 
     schema_recover_thd.detach();
@@ -635,12 +646,23 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             txm->Execute(&recover_req);
             recover_req.Wait();
 
-            range->TrySetDataSync(false, nullptr, commit_ts);
-            range->PopPendingSyncTask();
-            CommitTxRequest commit_req;
-            commit_req.Reset();
-            txm->Execute(&commit_req);
-            commit_req.Wait();
+            if (recover_req.IsError() || !recover_req.Result())
+            {
+                // Leader transferred away before replay finish. No need
+                // to update StoreRange.
+                AbortTxRequest abort_req;
+                txm->Execute(&abort_req);
+                abort_req.Wait();
+            }
+            else
+            {
+                range->TrySetDataSync(false, nullptr, commit_ts);
+                range->PopPendingSyncTask();
+                CommitTxRequest commit_req;
+                commit_req.Reset();
+                txm->Execute(&commit_req);
+                commit_req.Wait();
+            }
         });
 
     split_recover_thd.detach();

@@ -61,7 +61,7 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
         LOG(INFO) << "Kickout data all operation timeout 30s, re-run this "
                      "operation with the retry number: "
                   << retry_num_;
-        if (retry_num_ > 0)
+        if (txm->CheckLeaderTerm() && retry_num_ > 0)
         {
             ReRunOp(txm);
             return;
@@ -173,36 +173,6 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
 void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 {
-    // If leader is gone during operation, force finish the operation.
-    if (!CheckLeaderTerm(txm))
-    {
-        if (op_ == nullptr || op_ == &lock_cluster_config_op_ ||
-            op_ == &acquire_all_intent_op_ ||
-            op_ == &upgrade_all_intent_to_lock_op_)
-        {
-            // Before prepare log is written, mark the op as failed
-            txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
-            ForceToFinish(txm);
-            return;
-        }
-        else if (op_ == &prepare_log_op_)
-        {
-            // If log write succeeded before leader is gone, still mark the tx
-            // as unverified
-            if (prepare_log_op_.hd_result_.IsError())
-            {
-                txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
-            }
-            ForceToFinish(txm);
-            return;
-        }
-        else if (op_ != &clean_log_op_)
-        {
-            // Force to finish
-            ForceToFinish(txm);
-            return;
-        }
-    }
     if (op_ == nullptr)
     {
         op_ = &lock_cluster_config_op_;
@@ -217,11 +187,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 << "Alter Table Index read cluster config failed, tx_number:"
                 << txm->TxNumber();
             txm->commit_ts_ = tx_op_failed_ts_;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            ForceToFinish(txm);
             return;
         }
         // Acquire write intent, and then upgrade to write lock(Locking),
@@ -323,18 +289,26 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the coordinator
                 // itself is no longer leader
-                LOG(WARNING)
-                    << "Upsert index for table: " << table_key_.Name().String()
-                    << ", write prepare log result unknown, "
-                       "tx_number:"
-                    << txm->tx_number_ << ", keep retrying";
-                // set retry flag and retry prepare log
-                ::txlog::WriteLogRequest *log_req =
-                    prepare_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&prepare_log_op_);
-                txm->Process(prepare_log_op_);
+                if (txm->CheckLeaderTerm())
+                {
+                    LOG(WARNING) << "Upsert index for table: "
+                                 << table_key_.Name().String()
+                                 << ", write prepare log result unknown, "
+                                    "tx_number:"
+                                 << txm->tx_number_ << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    txm->PushOperation(&prepare_log_op_);
+                    txm->Process(prepare_log_op_);
+                }
+                else
+                {
+                    txm->commit_ts_ = tx_op_failed_ts_;
+                    ForceToFinish(txm);
+                }
             }
             else
             {
@@ -379,13 +353,20 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // still the leader. The tx is also allowed to proceed if the tx
             // is in the recovery mode and the tx node is a leader
             // candidate.
-            // set catalog_rec_'s binary_value_ to image_str since it
-            // could be set to TableSchemaView pointer in localshard.
-            catalog_rec_.SetSchemaImage(image_str_);
-            catalog_rec_.SetDirtySchemaImage(dirty_image_str_);
+            if (txm->CheckLeaderTerm())
+            {
+                // set catalog_rec_'s binary_value_ to image_str since it
+                // could be set to TableSchemaView pointer in localshard.
+                catalog_rec_.SetSchemaImage(image_str_);
+                catalog_rec_.SetDirtySchemaImage(dirty_image_str_);
 
-            txm->PushOperation(&downgrade_all_lock_to_intent_op_);
-            txm->Process(downgrade_all_lock_to_intent_op_);
+                txm->PushOperation(&downgrade_all_lock_to_intent_op_);
+                txm->Process(downgrade_all_lock_to_intent_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         // TODO(ysw): For DropIndex, since we already got all WriteLock, so it
         // OK as the order below:
@@ -447,70 +428,78 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // The data store operation failed. Retries the operation if the
             // tx node is the leader or the tx is in the recovery mode and
             // the cc node is a leader candidate.
-            // NOTE: The logic of this part is consistent with the logic in
-            // UpsertTableOp::Forward.
-            // Keep retrying if it is DropIndex.
-            if (op_type_ == OperationType::DropIndex)
+            if (txm->CheckLeaderTerm())
             {
-                upsert_kv_table_op_.op_func_ =
-                    [tx_ts = txm->commit_ts_,
-                     table_schema = upsert_kv_table_op_.table_schema_,
-                     op_type = upsert_kv_table_op_.op_type_,
-                     alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                     &hd_res = upsert_kv_table_op_.hd_result_,
-                     &worker_thd = upsert_kv_table_op_.worker_thread_]
+                // NOTE: The logic of this part is consistent with the logic in
+                // UpsertTableOp::Forward.
+                // Keep retrying if it is DropIndex.
+                if (op_type_ == OperationType::DropIndex)
                 {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    worker_thd = std::thread(
-                        [tx_ts,
-                         table_schema,
-                         &hd_res,
-                         op_type,
-                         alter_table_info,
-                         store_hd]
-                        {
-                            store_hd->UpsertTable(table_schema,
-                                                  op_type,
-                                                  tx_ts,
-                                                  &hd_res,
-                                                  alter_table_info);
-                        });
-                };
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
+                    upsert_kv_table_op_.op_func_ =
+                        [tx_ts = txm->commit_ts_,
+                         table_schema = upsert_kv_table_op_.table_schema_,
+                         op_type = upsert_kv_table_op_.op_type_,
+                         alter_table_info =
+                             upsert_kv_table_op_.alter_table_info_,
+                         &hd_res = upsert_kv_table_op_.hd_result_,
+                         &worker_thd = upsert_kv_table_op_.worker_thread_]
+                    {
+                        store::DataStoreHandler *const store_hd =
+                            Sharder::Instance().GetLocalCcShards()->store_hd_;
+                        worker_thd = std::thread(
+                            [tx_ts,
+                             table_schema,
+                             &hd_res,
+                             op_type,
+                             alter_table_info,
+                             store_hd]
+                            {
+                                store_hd->UpsertTable(table_schema,
+                                                      op_type,
+                                                      tx_ts,
+                                                      &hd_res,
+                                                      alter_table_info);
+                            });
+                    };
+                    txm->PushOperation(&upsert_kv_table_op_);
+                    txm->Process(upsert_kv_table_op_);
+                }
+                else
+                {
+                    LOG(ERROR) << "Upsert index for table: "
+                               << table_key_.Name().String()
+                               << ", Failed to create tables in kv store";
+
+                    /*
+                    After upsert kv fails, we need to flush a commit log to
+                    indicate this error.
+                    If we skip this commit log and jump to post_all_lock_op_
+                    directly, once the participant crashes at the point between
+                    it releases write intent and the coordinator flushes
+                    clean_log, then during recovery, the participant sees a
+                    prepare_log(whose commit_ts is not 0) and recovers write
+                    lock and dirty_catalog.
+                    Since the coordinator has finished its job, the write
+                    lock recovered by participant becomes orphan lock, and the
+                    dirty catalog can not be rejected either.
+                    Also, in the current design, post_all_intent_op_ does not
+                    release the write intent, which means the write intent is
+                    still being held after upsert_kv_table_op_(during
+                    CreateTable or AddIndex). If create table or add index in kv
+                    fails, the only thing we should do after writing commit_log
+                    is to reject dirty schema. So there is no need to upgrade
+                    write intent to write lock, and it is safe to skip
+                    acquire_all_lock_op_ and jump directly to commit_log_op_.
+                    */
+                    op_ = &commit_log_op_;
+                    FillCommitLogRequest(txm);
+                    txm->PushOperation(&commit_log_op_);
+                    txm->Process(commit_log_op_);
+                }
             }
             else
             {
-                LOG(ERROR) << "Upsert index for table: "
-                           << table_key_.Name().String()
-                           << ", Failed to create tables in kv store";
-
-                /*
-                After upsert kv fails, we need to flush a commit log to
-                indicate this error.
-                If we skip this commit log and jump to post_all_lock_op_
-                directly, once the participant crashes at the point between
-                it releases write intent and the coordinator flushes
-                clean_log, then during recovery, the participant sees a
-                prepare_log(whose commit_ts is not 0) and recovers write
-                lock and dirty_catalog.
-                Since the coordinator has finished its job, the write
-                lock recovered by participant becomes orphan lock, and the
-                dirty catalog can not be rejected either.
-                Also, in the current design, post_all_intent_op_ does not
-                release the write intent, which means the write intent is
-                still being held after upsert_kv_table_op_(during
-                CreateTable or AddIndex). If create table or add index in kv
-                fails, the only thing we should do after writing commit_log
-                is to reject dirty schema. So there is no need to upgrade
-                write intent to write lock, and it is safe to skip
-                acquire_all_lock_op_ and jump directly to commit_log_op_.
-                */
-                op_ = &commit_log_op_;
-                FillCommitLogRequest(txm);
-                txm->PushOperation(&commit_log_op_);
-                txm->Process(commit_log_op_);
+                ForceToFinish(txm);
             }
         }
         else if (op_type_ == OperationType::DropIndex)
@@ -569,15 +558,22 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (flush_all_old_tuples_pk_op_.hd_result_.IsError())
         {
-            LOG(ERROR)
-                << "Upsert index for table: " << table_key_.Name().String()
-                << ", flush all old tuples pk failed with error message: "
-                << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
-                << ", tx_number:" << txm->tx_number_;
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR)
+                    << "Upsert index for table: " << table_key_.Name().String()
+                    << ", flush all old tuples pk failed with error message: "
+                    << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
+                    << ", tx_number:" << txm->tx_number_;
 
-            LOG(INFO) << "Retry flush all old pk data.";
-            txm->PushOperation(&flush_all_old_tuples_pk_op_);
-            txm->Process(flush_all_old_tuples_pk_op_);
+                LOG(INFO) << "Retry flush all old pk data.";
+                txm->PushOperation(&flush_all_old_tuples_pk_op_);
+                txm->Process(flush_all_old_tuples_pk_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -615,22 +611,29 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                 .IsError())
         {
-            LOG(ERROR) << "Upsert index for table: "
-                       << table_key_.Name().String()
-                       << ", fetch old tuples from kv and upload packed sk"
-                          " failed, tx_number:"
-                       << txm->tx_number_;
-
-            LOG(INFO) << "Upsert index: Retry fetch tuples from kv and"
-                         " generate packed sk data.";
-            if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
-                    .ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            if (txm->CheckLeaderTerm())
             {
-                ResetLeaderTerms();
+                LOG(ERROR) << "Upsert index for table: "
+                           << table_key_.Name().String()
+                           << ", fetch old tuples from kv and upload packed sk"
+                              " failed, tx_number:"
+                           << txm->tx_number_;
+
+                LOG(INFO) << "Upsert index: Retry fetch tuples from kv and"
+                             " generate packed sk data.";
+                if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                        .ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                {
+                    ResetLeaderTerms();
+                }
+                txm->PushOperation(
+                    &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+                txm->Process(fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
             }
-            txm->PushOperation(
-                &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
-            txm->Process(fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -714,34 +717,43 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (flush_all_old_tuples_sk_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Upsert table index flush all old tuples sk failed,"
-                       << " tx_number:" << txm->tx_number_;
-
-            if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
-                CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            if (txm->CheckLeaderTerm())
             {
-                LOG(WARNING) << "Flush old sk data failed because of leader"
-                                " transferred, and retry generate packed sk"
-                                " data.";
-                // For this stage, should re-execute from the previous stage
-                // if leader transferred.
-                op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
-                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.is_running_ =
-                    false;
-                ResetLeaderTerms();
-                txm->PushOperation(
-                    &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
-                // To sleep serval seconds.
-                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ReRunOp(txm);
+                LOG(ERROR)
+                    << "Upsert table index flush all old tuples sk failed,"
+                    << " tx_number:" << txm->tx_number_;
+
+                if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                {
+                    LOG(WARNING) << "Flush old sk data failed because of leader"
+                                    " transferred, and retry generate packed sk"
+                                    " data.";
+                    // For this stage, should re-execute from the previous stage
+                    // if leader transferred.
+                    op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_
+                        .is_running_ = false;
+                    ResetLeaderTerms();
+                    txm->PushOperation(
+                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+                    // To sleep serval seconds.
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ReRunOp(
+                        txm);
+                }
+                else
+                {
+                    LOG(INFO) << "Flush old sk data failed, and retry flush old"
+                              << " sk operation";
+
+                    op_ = &flush_all_old_tuples_sk_op_;
+                    txm->PushOperation(&flush_all_old_tuples_sk_op_);
+                    txm->Process(flush_all_old_tuples_sk_op_);
+                }
             }
             else
             {
-                LOG(INFO) << "Flush old sk data failed, and retry flush old"
-                          << " sk operation";
-
-                op_ = &flush_all_old_tuples_sk_op_;
-                txm->PushOperation(&flush_all_old_tuples_sk_op_);
-                txm->Process(flush_all_old_tuples_sk_op_);
+                ForceToFinish(txm);
             }
         }
         else
@@ -776,14 +788,21 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (kickout_data_all_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Upsert table index kickout old tuples sk failed,"
-                          " tx_number:"
-                       << txm->tx_number_;
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Upsert table index kickout old tuples sk failed,"
+                              " tx_number:"
+                           << txm->tx_number_;
 
-            LOG(WARNING) << "Retry kickout data.";
+                LOG(WARNING) << "Retry kickout data.";
 
-            txm->PushOperation(&kickout_data_all_op_);
-            txm->Process(kickout_data_all_op_);
+                txm->PushOperation(&kickout_data_all_op_);
+                txm->Process(kickout_data_all_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -804,13 +823,20 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Fails to flush the prepare flush log. Retries the operation if
             // the tx node is still the leader or the tx is in the recovery
             // mode and the cc node is a leader candidate.
-            // set retry flag and retry commit log
-            ::txlog::WriteLogRequest *log_req =
-                prepare_log_for_sk_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            txm->PushOperation(&prepare_log_for_sk_op_);
-            txm->Process(prepare_log_for_sk_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    prepare_log_for_sk_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&prepare_log_for_sk_op_);
+                txm->Process(prepare_log_for_sk_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -829,8 +855,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // only roll forward after flushing the prepare log. Retries the
             // request if the tx node is still the leader or the tx is in
             // the recovery mode and the cc node is a leader candidate.
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -849,13 +882,20 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Fails to flush the commit log. Retries the operation if the
             // tx node is still the leader or the tx is in the  recovery
             // mode and the cc node is a leader candidate.
-            // set retry flag and retry commit log
-            ::txlog::WriteLogRequest *log_req =
-                commit_log_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            txm->PushOperation(&commit_log_op_);
-            txm->Process(commit_log_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else if (op_type_ == OperationType::DropIndex)
         {
@@ -912,8 +952,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
-        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
-            0)
+        if (!txm->CheckLeaderTerm())
+        {
+            ForceToFinish(txm);
+        }
+        else if (acquire_all_intent_op_.fail_cnt_.load(
+                     std::memory_order_relaxed) > 0)
         {
             // The schema operation failed without flushing the prepare log.
             // Do not retry post-processing (release write intents) even if
@@ -984,7 +1028,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         // set to -1 after the leader term. So, obtains the candidate term
         // before the leader term.
 
-        if (clean_log_op_.hd_result_.IsError() && CheckLeaderTerm(txm))
+        if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
         {
             // set retry flag and retry clean log
             ::txlog::WriteLogRequest *log_req =

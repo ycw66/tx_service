@@ -70,12 +70,6 @@ struct TransactionOperation
      */
     void ReRunOp(TransactionExecution *txm);
 
-    /**
-     * @brief Check if current node is still leader of the transaction owner
-     * node group.
-     */
-    bool CheckLeaderTerm(TransactionExecution *txm) const;
-
     int retry_num_{RETRY_NUM};
     bool is_running_{false};
     static const uint64_t tx_op_failed_ts_ = 0;

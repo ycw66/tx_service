@@ -2774,7 +2774,7 @@ void TransactionExecution::Commit()
 
 void TransactionExecution::Abort()
 {
-    if (tx_term_ < 0)
+    if (tx_term_ < 0 || !CheckLeaderTerm())
     {
         if (bool_resp_ != nullptr)
         {

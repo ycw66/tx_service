@@ -223,6 +223,23 @@ public:
         return tx_processor_;
     }
 
+    /**
+     * @brief Check if current node is still leader of the transaction owner
+     * node group.
+     */
+    bool CheckLeaderTerm() const
+    {
+        NodeGroupId ng_id = TxCcNodeId();
+        if (Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()) ||
+            (TxStatus() == TxnStatus::Recovering &&
+             Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to

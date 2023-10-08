@@ -160,19 +160,6 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     txm->StartTiming();
 }
 
-bool TransactionOperation::CheckLeaderTerm(TransactionExecution *txm) const
-{
-    NodeGroupId ng_id = txm->TxCcNodeId();
-    if (Sharder::Instance().CheckLeaderTerm(ng_id, txm->TxTerm()) ||
-        (txm->TxStatus() == TxnStatus::Recovering &&
-         Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
-    {
-        return true;
-    }
-
-    return false;
-}
-
 ReadOperation::ReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
@@ -197,13 +184,6 @@ void ReadOperation::Reset()
 
 void ReadOperation::Forward(TransactionExecution *txm)
 {
-    if (!CheckLeaderTerm(txm))
-    {
-        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-        hd_result_.ForceError();
-        txm->PostProcess(*this);
-        return;
-    }
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -224,6 +204,16 @@ void ReadOperation::Forward(TransactionExecution *txm)
             bool force_error = hd_result_.ForceError();
             assert(force_error);
 
+            txm->PostProcess(*this);
+            return;
+        }
+        // Need to make sure current node is still leader since we will visit
+        // bucket meta data which is only valid if current node is still ng
+        // leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            hd_result_.ForceError();
             txm->PostProcess(*this);
             return;
         }
@@ -595,19 +585,20 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
 
 void LockWriteRangesOp::Forward(TransactionExecution *txm)
 {
-    if (!CheckLeaderTerm(txm))
-    {
-        lock_range_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-        lock_range_result_.ForceError();
-        txm->PostProcess(*this);
-        return;
-    }
     if (!is_running_)
     {
         txm->Process(*this);
     }
     else if (lock_range_result_.IsFinished())
     {
+        // Make sure current node is still ng leader since we will visit
+        // range info meta data in post process which is only valid when current
+        // node is still ng leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            lock_range_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_range_result_.ForceError();
+        }
         txm->PostProcess(*this);
     }
 }
@@ -915,8 +906,15 @@ void PostProcessOp::Forward(TransactionExecution *txm)
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
-            is_running_ = true;
-            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+            if (!catalog_range_hd_result_.IsFinished())
+            {
+                is_running_ = true;
+                txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+            }
+            else
+            {
+                txm->PostProcess(*this);
+            }
         }
     }
 }
@@ -1016,7 +1014,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                     .append(std::to_string(txm->TxTerm()));
             });
 
-        if (retry_num_ > 0)
+        if (retry_num_ > 0 && txm->CheckLeaderTerm())
         {
             ReRunOp(txm);
             return;
@@ -1065,18 +1063,6 @@ void ScanNextOperation::ResetResult()
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
 {
-    if (!CheckLeaderTerm(txm))
-    {
-#ifdef RANGE_PARTITION_ENABLED
-        slice_hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-        slice_hd_result_.ForceError();
-#else
-        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-        hd_result_.ForceError();
-#endif
-        txm->PostProcess(*this);
-        return;
-    }
     CcScanner &scanner = *scan_state_->scanner_;
 
     // start the state machine if not running.
@@ -1107,22 +1093,33 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             }
             else
             {
-                const ReadKeyResult &read_res = lock_range_result_.Value();
-                // For scans, range locks are released when the last/first slice
-                // of the range is scanned. Hence, the range lock is always put
-                // into the read set. If the tx terminates the scan early before
-                // the last/first slice is encountered, the range lock is
-                // released in post-processing.
-                // TODO: release the range lock in the scan close phase.
-                txm->rw_set_.AddRead(
-                    read_res.cce_addr_, read_res.ts_, &range_table_name_);
+                // Need to make sure current node is still leader before
+                // visiting range and bucket meta data.
+                if (!txm->CheckLeaderTerm())
+                {
+                    slice_hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                    unlock_range_result_.SetFinished();
+                    txm->PostProcess(*this);
+                }
+                else
+                {
+                    const ReadKeyResult &read_res = lock_range_result_.Value();
+                    // For scans, range locks are released when the last/first
+                    // slice of the range is scanned. Hence, the range lock is
+                    // always put into the read set. If the tx terminates the
+                    // scan early before the last/first slice is encountered,
+                    // the range lock is released in post-processing.
+                    // TODO: release the range lock in the scan close phase.
+                    txm->rw_set_.AddRead(
+                        read_res.cce_addr_, read_res.ts_, &range_table_name_);
 
-                scan_state_->range_cce_addr_ = read_res.cce_addr_;
-                scan_state_->range_id_ =
-                    range_rec_.GetRangeInfo()->PartitionId();
-                scan_state_->range_owner_ =
-                    range_rec_.GetRangeOwnerNg()->BucketOwner();
-                txm->Process(*this);
+                    scan_state_->range_cce_addr_ = read_res.cce_addr_;
+                    scan_state_->range_id_ =
+                        range_rec_.GetRangeInfo()->PartitionId();
+                    scan_state_->range_owner_ =
+                        range_rec_.GetRangeOwnerNg()->BucketOwner();
+                    txm->Process(*this);
+                }
                 return;
             }
         }
@@ -1818,35 +1815,6 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
 
 void UpsertTableOp::Forward(TransactionExecution *txm)
 {
-    // If leader is gone during operation, force finish the operation.
-    if (!CheckLeaderTerm(txm))
-    {
-        if (op_ == nullptr || op_ == &lock_cluster_config_op_ ||
-            op_ == &acquire_all_intent_op_)
-        {
-            // Before prepare log is written, mark the op as failed
-            txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
-            ForceToFinish(txm);
-            return;
-        }
-        else if (op_ == &prepare_log_op_)
-        {
-            // If log write succeeded before leader is gone, still mark the tx
-            // as unverified
-            if (prepare_log_op_.hd_result_.IsError())
-            {
-                txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
-            }
-            ForceToFinish(txm);
-            return;
-        }
-        else if (op_ != &clean_log_op_)
-        {
-            // Force to finish
-            ForceToFinish(txm);
-            return;
-        }
-    }
     if (op_ == nullptr)
     {
         op_ = &lock_cluster_config_op_;
@@ -1860,11 +1828,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             DLOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
                         << txm->TxNumber();
             txm->commit_ts_ = tx_op_failed_ts_;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            ForceToFinish(txm);
             return;
         }
         op_ = &acquire_all_intent_op_;
@@ -1935,17 +1899,45 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the
                 // coordinator itself is no longer leader
-                DLOG(WARNING)
-                    << "Upsert table write prepare log result unknown, "
-                       "tx_number:"
-                    << txm->TxNumber() << ", keep retrying";
-                // set retry flag and retry prepare log
-                ::txlog::WriteLogRequest *log_req =
-                    prepare_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&prepare_log_op_);
-                txm->Process(prepare_log_op_);
+                if (txm->CheckLeaderTerm())
+                {
+                    DLOG(WARNING)
+                        << "Upsert table write prepare log result unknown, "
+                           "tx_number:"
+                        << txm->TxNumber() << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    txm->PushOperation(&prepare_log_op_);
+                    txm->Process(prepare_log_op_);
+                }
+                else
+                {
+                    DLOG(ERROR) << "Upsert table write prepare log result "
+                                   "unknown, tx_number:"
+                                << txm->TxNumber()
+                                << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if
+                    // it does. Should not release the write intents. If
+                    // prepare log is not written, the write intents will be
+                    // released individually via orphan lock recovery
+                    // mechanism.
+                    txm->upsert_resp_->SetErrorCode(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
+
+                    txm->upsert_resp_->Finish(UpsertResult::Failed);
+                    txm->state_stack_.pop_back();
+                    assert(txm->state_stack_.empty());
+                    LocalCcShards *local_shards =
+                        Sharder::Instance().GetLocalCcShards();
+                    std::unique_lock<std::mutex> lk(
+                        local_shards->table_schema_op_pool_mux_);
+                    local_shards->table_schema_op_pool_.emplace_back(
+                        std::move(txm->schema_op_));
+                }
             }
             else
             {
@@ -1981,24 +1973,13 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (post_all_intent_op_.IsFailed())
         {
-            // When a cc node leader begins recovery, the candidate term is
-            // set to the Raft term. When recovery finishes, the candidate
-            // term is set to -1 after the leader term. So, obtains the
-            // candidate term before the leader term.
-            int64_t tx_node_candid_term =
-                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId());
-            int64_t tx_node_term =
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId());
-
             // After the prepare log is flushed, the schema op is guaranteed
             // to proceed. Retry this step to install the dirty schema in the tx
             // service, if the tx node is still the leader. The tx is also
             // allowed to proceed if the tx is in the recovery mode and the tx
             // node is a leader candidate.
 
-            if (tx_node_term == txm->TxTerm() ||
-                (txm->tx_status_ == TxnStatus::Recovering &&
-                 tx_node_candid_term >= 0))
+            if (txm->CheckLeaderTerm())
             {
                 // set catalog_rec_'s binary_value_ to image_str since it
                 // could be set to TableSchemaView pointer in localshard.
@@ -2064,70 +2045,78 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (upsert_kv_table_op_.hd_result_.IsError())
         {
-            // Keep retrying if it is DropTable or DropIndex.
-            if (op_type_ == OperationType::DropTable)
+            if (txm->CheckLeaderTerm())
             {
-                upsert_kv_table_op_.op_func_ =
-                    [tx_ts = txm->commit_ts_,
-                     table_schema = upsert_kv_table_op_.table_schema_,
-                     op_type = upsert_kv_table_op_.op_type_,
-                     alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                     &hd_res = upsert_kv_table_op_.hd_result_,
-                     &worker_thd = upsert_kv_table_op_.worker_thread_]
+                // Keep retrying if it is DropTable or DropIndex.
+                if (op_type_ == OperationType::DropTable)
                 {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    worker_thd = std::thread(
-                        [tx_ts,
-                         table_schema,
-                         &hd_res,
-                         op_type,
-                         alter_table_info,
-                         store_hd]
-                        {
-                            store_hd->UpsertTable(table_schema,
-                                                  op_type,
-                                                  tx_ts,
-                                                  &hd_res,
-                                                  alter_table_info);
-                        });
-                };
-                txm->PushOperation(&upsert_kv_table_op_);
-                txm->Process(upsert_kv_table_op_);
+                    upsert_kv_table_op_.op_func_ =
+                        [tx_ts = txm->commit_ts_,
+                         table_schema = upsert_kv_table_op_.table_schema_,
+                         op_type = upsert_kv_table_op_.op_type_,
+                         alter_table_info =
+                             upsert_kv_table_op_.alter_table_info_,
+                         &hd_res = upsert_kv_table_op_.hd_result_,
+                         &worker_thd = upsert_kv_table_op_.worker_thread_]
+                    {
+                        store::DataStoreHandler *const store_hd =
+                            Sharder::Instance().GetLocalCcShards()->store_hd_;
+                        worker_thd = std::thread(
+                            [tx_ts,
+                             table_schema,
+                             &hd_res,
+                             op_type,
+                             alter_table_info,
+                             store_hd]
+                            {
+                                store_hd->UpsertTable(table_schema,
+                                                      op_type,
+                                                      tx_ts,
+                                                      &hd_res,
+                                                      alter_table_info);
+                            });
+                    };
+                    txm->PushOperation(&upsert_kv_table_op_);
+                    txm->Process(upsert_kv_table_op_);
+                }
+                else
+                {
+                    /*
+
+                    After upsert kv fails, we need to flush a commit log to
+                    indicate this error.
+
+                    If we skip this commit log and jump to post_all_lock_op_
+                    directly, once the participant crashes at the point between
+                    it releases write intent and the coordinator flushes
+                    clean_log, then during recovery, the participant sees a
+                    prepare_log(whose commit_ts is not 0) and recovers write
+                    lock and dirty_catalog.
+
+                    Since the coordinator has finished its job, the write
+                    lock recovered by participant becomes orphan lock, and the
+                    dirty catalog can not be rejected either.
+
+                    Also, in the current design, post_all_intent_op_ does not
+                    release the write intent, which means the write intent is
+                    still being held after upsert_kv_table_op_(during
+                    CreateTable or AddIndex). If create table or add index in kv
+                    fails, the only thing we should do after writing commit_log
+                    is to reject dirty schema. So there is no need to upgrade
+                    write intent to write lock, and it is safe to skip
+                    acquire_all_lock_op_ and jump directly to commit_log_op_.
+
+                    */
+
+                    op_ = &commit_log_op_;
+                    FillCommitLogRequest(txm);
+                    txm->PushOperation(&commit_log_op_);
+                    txm->Process(commit_log_op_);
+                }
             }
             else
             {
-                /*
-
-                After upsert kv fails, we need to flush a commit log to
-                indicate this error.
-
-                If we skip this commit log and jump to post_all_lock_op_
-                directly, once the participant crashes at the point between
-                it releases write intent and the coordinator flushes
-                clean_log, then during recovery, the participant sees a
-                prepare_log(whose commit_ts is not 0) and recovers write
-                lock and dirty_catalog.
-
-                Since the coordinator has finished its job, the write
-                lock recovered by participant becomes orphan lock, and the
-                dirty catalog can not be rejected either.
-
-                Also, in the current design, post_all_intent_op_ does not
-                release the write intent, which means the write intent is
-                still being held after upsert_kv_table_op_(during
-                CreateTable or AddIndex). If create table or add index in kv
-                fails, the only thing we should do after writing commit_log
-                is to reject dirty schema. So there is no need to upgrade
-                write intent to write lock, and it is safe to skip
-                acquire_all_lock_op_ and jump directly to commit_log_op_.
-
-                */
-
-                op_ = &commit_log_op_;
-                FillCommitLogRequest(txm);
-                txm->PushOperation(&commit_log_op_);
-                txm->Process(commit_log_op_);
+                ForceToFinish(txm);
             }
         }
         else if (op_type_ == OperationType::DropTable)
@@ -2175,12 +2164,19 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
             size_t hash = write_entry.key_->Hash();
 #ifdef RANGE_PARTITION_ENABLED
+            // Make sure current node is still ng leader before visiting range
+            // and bucket meta data.
+            if (!txm->CheckLeaderTerm())
+            {
+                ForceToFinish(txm);
+                return;
+            }
             // Assign fixed range partition id for sequences table. map range
             // partition id to range owner.
             int32_t range_id = 0;
             // Transaction always started from the preferred leader node, which
             // mean the cc node group id is equal to the cc node id.
-            NodeGroupId tx_ng_id = (txm->TxNumber() >> 32L) >> 10;
+            NodeGroupId tx_ng_id = txm->TxCcNodeId();
             auto bucket_info =
                 Sharder::Instance().GetLocalCcShards()->GetRangeOwner(range_id,
                                                                       tx_ng_id);
@@ -2222,16 +2218,23 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // Fails to flush the data log. Retries the operation if the
             // tx node is still the leader or the tx is in the  recovery
             // mode and the cc node is a leader candidate.
-            // set retry flag and retry data log
-            LOG(WARNING) << "Upsert table schema transaction retry to write"
-                            " sequence data log, tx_number:"
-                         << txm->TxNumber();
-            ::txlog::WriteLogRequest *log_req =
-                sequence_data_log_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            txm->PushOperation(&sequence_data_log_op_);
-            txm->Process(sequence_data_log_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry data log
+                LOG(WARNING) << "Upsert table schema transaction retry to write"
+                                " sequence data log, tx_number:"
+                             << txm->TxNumber();
+                ::txlog::WriteLogRequest *log_req =
+                    sequence_data_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&sequence_data_log_op_);
+                txm->Process(sequence_data_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -2276,12 +2279,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         assert(op_type_ == OperationType::CreateTable);
         if (reset_sequence_record_op_.hd_result_.IsError())
         {
-            // Retry
-            LOG(WARNING) << "Upsert table schema transaction retry to initialze"
-                            " sequence record in ccmap, tx_number:"
-                         << txm->TxNumber();
-            txm->PushOperation(&reset_sequence_record_op_);
-            txm->Process(reset_sequence_record_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // Retry
+                LOG(WARNING)
+                    << "Upsert table schema transaction retry to initialze"
+                       " sequence record in ccmap, tx_number:"
+                    << txm->TxNumber();
+                txm->PushOperation(&reset_sequence_record_op_);
+                txm->Process(reset_sequence_record_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -2302,8 +2313,15 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // only roll forward after flushing the prepare log. Retries the
             // request if the tx node is still the leader or the tx is in
             // the recovery mode and the cc node is a leader candidate.
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -2320,13 +2338,20 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // Fails to flush the commit log. Retries the operation if the
             // tx node is still the leader or the tx is in the  recovery
             // mode and the cc node is a leader candidate.
-            // set retry flag and retry commit log
-            ::txlog::WriteLogRequest *log_req =
-                commit_log_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            txm->PushOperation(&commit_log_op_);
-            txm->Process(commit_log_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
         }
         else
         {
@@ -2382,6 +2407,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &post_all_lock_op_)
     {
+        if (!txm->CheckLeaderTerm())
+        {
+            // The tx node is no longer the leader or leader candidate(during
+            // recovery), ForceToFinish.
+            ForceToFinish(txm);
+        }
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
@@ -2450,7 +2481,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     else if (op_ == &clean_log_op_)
     {
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        if (clean_log_op_.hd_result_.IsError() && CheckLeaderTerm(txm))
+        if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
         {
             // set retry flag and retry clean log
             ::txlog::WriteLogRequest *log_req =
@@ -3183,18 +3214,6 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
-    // If current node is no longer leader of tx owner ng, should abort
-    // immediately.
-    if (op_ != &clean_log_op_ && !CheckLeaderTerm(txm))
-    {
-        // Should mark the tx as failed so that data sync worker cannot
-        // truncate redo log.
-        LOG(ERROR) << "Split Flush transaction no longer leader of node group "
-                   << txm->TxCcNodeId() << ", tx_number: " << txm->TxNumber();
-        txm->commit_ts_ = TransactionOperation::tx_op_failed_ts_;
-        ForceToFinish(txm);
-        return;
-    }
     if (op_ == nullptr)
     {
         // Initialize commit ts as the start time of tx. This value will
@@ -3210,12 +3229,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
                        << txm->TxNumber();
-            txm->commit_ts_ = tx_op_failed_ts_;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
+            ForceToFinish(txm);
             return;
         }
 
@@ -3275,16 +3289,33 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 // prepare log result unknown, keep retrying until getting a
                 // clear response, either success or failure, or the
                 // coordinator itself is no longer leader
-                DLOG(WARNING)
-                    << "Split range write prepare log result unknown, "
-                       "tx_number:"
-                    << txm->TxNumber() << ", keep retrying";
-                // set retry flag and retry prepare log
-                ::txlog::WriteLogRequest *log_req =
-                    prepare_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                RetrySubOperation(txm, &prepare_log_op_);
+                if (txm->CheckLeaderTerm())
+                {
+                    LOG(WARNING)
+                        << "Split range write prepare log result unknown, "
+                           "tx_number:"
+                        << txm->TxNumber() << ", keep retrying";
+                    // set retry flag and retry prepare log
+                    ::txlog::WriteLogRequest *log_req =
+                        prepare_log_op_.log_closure_.LogRequest()
+                            .mutable_write_log_request();
+                    log_req->set_retry(true);
+                    RetrySubOperation(txm, &prepare_log_op_);
+                }
+                else
+                {
+                    LOG(ERROR) << "Split range write prepare log result "
+                                  "unknown, tx_number:"
+                               << txm->TxNumber()
+                               << ", not leader any more, stop retrying";
+                    // Not leader anymore, just quit. New leader will know
+                    // whether prepare log succeeds and continue the rest if
+                    // it does. Should not release the write intents. If
+                    // prepare log is not written, the write intents will be
+                    // released individually via orphan lock recovery
+                    // mechanism.
+                    ForceToFinish(txm);
+                }
             }
             else
             {
@@ -3317,12 +3348,19 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (install_new_range_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Split Flush transaction failed to install dirty "
-                          "range, tx number "
-                       << txm->TxNumber();
-            install_new_range_op_.rec_ = range_record_.get();
-            range_record_->SetRangeInfo(&range_info_);
-            RetrySubOperation(txm, &install_new_range_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Split Flush transaction failed to install dirty "
+                              "range, tx number "
+                           << txm->TxNumber();
+                install_new_range_op_.rec_ = range_record_.get();
+                range_record_->SetRangeInfo(&range_info_);
+                RetrySubOperation(txm, &install_new_range_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -3377,12 +3415,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (ds_migrate_old_partition_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Split Flush transaction failed to migrate old "
-                          "partition, tx number "
-                       << txm->TxNumber();
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
-            RetrySubOperation(txm, &ds_migrate_old_partition_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Split Flush transaction failed to migrate old "
+                              "partition, tx number "
+                           << txm->TxNumber();
+                RetrySubOperation(txm, &ds_migrate_old_partition_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
         auto local_cc_shards = Sharder::Instance().GetLocalCcShards();
@@ -3713,22 +3756,30 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (data_sync_scan_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Split Flush transaction failed to scan for "
-                          "data sync, tx number "
-                       << txm->TxNumber();
-
-            // Errors are come from two places.
-            // 1. DataSyncScanCc. We don't need to clear previous_data_sync_vec.
-            // 2. UpdateSliceSpec. We don't need to clear any vector.
-            if (!scan_finished_)
+            if (txm->CheckLeaderTerm())
             {
-                // DataSyncScanCc was failed
-                data_sync_vec_.clear();
-                archive_vec_.clear();
-                mv_base_vec_.clear();
-            }
+                LOG(ERROR) << "Split Flush transaction failed to scan for "
+                              "data sync, tx number "
+                           << txm->TxNumber();
 
-            RetrySubOperation(txm, &data_sync_scan_op_);
+                // Errors are come from two places.
+                // 1. DataSyncScanCc. We don't need to clear
+                // previous_data_sync_vec.
+                // 2. UpdateSliceSpec. We don't need to clear any vector.
+                if (!scan_finished_)
+                {
+                    // DataSyncScanCc was failed
+                    data_sync_vec_.clear();
+                    archive_vec_.clear();
+                    mv_base_vec_.clear();
+                }
+
+                RetrySubOperation(txm, &data_sync_scan_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -3743,10 +3794,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (flush_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Split Flush transaction failed to flush data, "
-                          "tx number "
-                       << txm->TxNumber();
-            RetrySubOperation(txm, &flush_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Split Flush transaction failed to flush data, "
+                              "tx number "
+                           << txm->TxNumber();
+                RetrySubOperation(txm, &flush_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
 
             return;
         }
@@ -3786,11 +3844,18 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (commit_acquire_all_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
-            LOG(ERROR) << "Split Flush transaction failed to obtain write "
-                          "lock, tx_number:"
-                       << txm->TxNumber();
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Split Flush transaction failed to obtain write "
+                              "lock, tx_number:"
+                           << txm->TxNumber();
 
-            RetrySubOperation(txm, &commit_acquire_all_write_op_);
+                RetrySubOperation(txm, &commit_acquire_all_write_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -3924,12 +3989,19 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (commit_log_op_.hd_result_.IsError())
         {
-            // error & retry
-            ::txlog::WriteLogRequest *log_req =
-                commit_log_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            RetrySubOperation(txm, &commit_log_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // error & retry
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                RetrySubOperation(txm, &commit_log_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
         // Split the range slices based on the range split keys.
@@ -4015,11 +4087,19 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (ds_upsert_range_op_.hd_result_.IsError())
         {
-            // error & retry
-            LOG(ERROR) << "Split Flush transaction failed to update range info "
-                          "in data store, tx_number:"
-                       << txm->TxNumber();
-            RetrySubOperation(txm, &ds_upsert_range_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // error & retry
+                LOG(ERROR)
+                    << "Split Flush transaction failed to update range info "
+                       "in data store, tx_number:"
+                    << txm->TxNumber();
+                RetrySubOperation(txm, &ds_upsert_range_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
         // Kickout old range data. For those data that now falls on a
@@ -4087,12 +4167,19 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     {
         if (kickout_old_range_data_op_.hd_result_.IsError())
         {
-            // error & retry
-            LOG(ERROR)
-                << "Split Flush transaction failed to kickout old range data"
-                   ", tx_number:"
-                << txm->TxNumber();
-            RetrySubOperation(txm, &kickout_old_range_data_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                // error & retry
+                LOG(ERROR) << "Split Flush transaction failed to kickout old "
+                              "range data"
+                              ", tx_number:"
+                           << txm->TxNumber();
+                RetrySubOperation(txm, &kickout_old_range_data_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
         kickout_data_it_++;
@@ -4149,16 +4236,24 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (post_all_lock_op_.hd_result_.IsError())
         {
             // error & retry
-            LOG(ERROR) << "Split Flush transaction failed at post all "
-                          "lock, tx_number:"
-                       << txm->TxNumber() << ", err code "
-                       << (int) (post_all_lock_op_.hd_result_.ErrorCode())
-                       << ", msg " << post_all_lock_op_.hd_result_.ErrorMsg();
-            post_all_lock_op_.rec_ = range_record_.get();
-            range_record_->range_slices_ = &slice_info_;
-            range_record_->end_key_ = old_end_key_;
-            range_record_->SetRangeInfo(&range_info_);
-            RetrySubOperation(txm, &post_all_lock_op_);
+            if (!txm->CheckLeaderTerm())
+            {
+                ForceToFinish(txm);
+            }
+            else
+            {
+                LOG(ERROR) << "Split Flush transaction failed at post all "
+                              "lock, tx_number:"
+                           << txm->TxNumber() << ", err code "
+                           << (int) (post_all_lock_op_.hd_result_.ErrorCode())
+                           << ", msg "
+                           << post_all_lock_op_.hd_result_.ErrorMsg();
+                post_all_lock_op_.rec_ = range_record_.get();
+                range_record_->range_slices_ = &slice_info_;
+                range_record_->end_key_ = old_end_key_;
+                range_record_->SetRangeInfo(&range_info_);
+                RetrySubOperation(txm, &post_all_lock_op_);
+            }
             return;
         }
 
@@ -4212,11 +4307,18 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (ds_clean_old_range_op_.hd_result_.IsError())
         {
             // error & retry
-            LOG(ERROR) << "Split Flush transaction failed to delete data "
-                          "in old range "
-                          "in data store, tx_number:"
-                       << txm->TxNumber();
-            RetrySubOperation(txm, &ds_clean_old_range_op_);
+            if (txm->CheckLeaderTerm())
+            {
+                LOG(ERROR) << "Split Flush transaction failed to delete data "
+                              "in old range "
+                              "in data store, tx_number:"
+                           << txm->TxNumber();
+                RetrySubOperation(txm, &ds_clean_old_range_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
             return;
         }
 
@@ -4227,7 +4329,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &clean_log_op_)
     {
-        if (clean_log_op_.hd_result_.IsError() && CheckLeaderTerm(txm))
+        if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
         {
             // set retry flag and retry clean log
             ::txlog::WriteLogRequest *log_req =
@@ -4472,6 +4574,7 @@ void SplitFlushRangeOp::FillCleanLogRequest(TransactionExecution *txm)
 }
 void SplitFlushRangeOp::ForceToFinish(TransactionExecution *txm)
 {
+    txm->commit_ts_ = tx_op_failed_ts_;
     clean_log_op_.hd_result_.SetFinished();
     op_ = &clean_log_op_;
     Forward(txm);
@@ -4588,7 +4691,7 @@ void ObjectCommandOp::Reset(const TableName *table_name,
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
-    if (!CheckLeaderTerm(txm))
+    if (!txm->CheckLeaderTerm())
     {
         hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
         hd_result_.ForceError();
@@ -4873,7 +4976,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &prepare_log_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             // Failed before write log succeed due to leader transfer. Notify
             // caller.
@@ -4994,7 +5097,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &flush_new_cluster_config_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             ForceToFinish(txm);
             return;
@@ -5014,7 +5117,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &wait_for_new_node_ready_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             ForceToFinish(txm);
             return;
@@ -5028,7 +5131,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &acquire_cluster_config_write_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             ForceToFinish(txm);
             return;
@@ -5055,7 +5158,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &update_cluster_config_log_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             ForceToFinish(txm);
             return;
@@ -5081,7 +5184,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &install_cluster_config_op_)
     {
-        if (!CheckLeaderTerm(txm))
+        if (!txm->CheckLeaderTerm())
         {
             ForceToFinish(txm);
             return;
