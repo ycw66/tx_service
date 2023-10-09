@@ -1586,14 +1586,6 @@ DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
-DsUpsertTableOp::~DsUpsertTableOp()
-{
-    if (worker_thread_.joinable())
-    {
-        worker_thread_.join();
-    }
-}
-
 void DsUpsertTableOp::Reset()
 {
     hd_result_.Reset();
@@ -1614,12 +1606,6 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        if (worker_thread_.joinable())
-        {
-            // The worker thread must terminate after the hd_result.SetFinished.
-            worker_thread_.join();
-        }
-
         if (hd_result_.IsError())
         {
             assert(hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR);
@@ -2006,33 +1992,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // local view (pointer) of the committed and dirty schema.
             upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
             upsert_kv_table_op_.alter_table_info_ = nullptr;
-            upsert_kv_table_op_.op_func_ =
-                [tx_ts = txm->commit_ts_,
-                 table_schema = upsert_kv_table_op_.table_schema_,
-                 op_type = upsert_kv_table_op_.op_type_,
-                 alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                 &hd_res = upsert_kv_table_op_.hd_result_,
-                 &worker_thd = upsert_kv_table_op_.worker_thread_]
-            {
-                // Use seperate thread instead of the tx_worker_pool to avoid
-                // potential deadlocks.
-                store::DataStoreHandler *const store_hd =
-                    Sharder::Instance().GetLocalCcShards()->store_hd_;
-                worker_thd = std::thread(
-                    [tx_ts,
-                     table_schema,
-                     &hd_res,
-                     op_type,
-                     alter_table_info,
-                     store_hd]
-                    {
-                        store_hd->UpsertTable(table_schema,
-                                              op_type,
-                                              tx_ts,
-                                              &hd_res,
-                                              alter_table_info);
-                    });
-            };
             txm->PushOperation(&upsert_kv_table_op_);
             txm->Process(upsert_kv_table_op_);
         }
@@ -2046,32 +2005,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 // Keep retrying if it is DropTable or DropIndex.
                 if (op_type_ == OperationType::DropTable)
                 {
-                    upsert_kv_table_op_.op_func_ =
-                        [tx_ts = txm->commit_ts_,
-                         table_schema = upsert_kv_table_op_.table_schema_,
-                         op_type = upsert_kv_table_op_.op_type_,
-                         alter_table_info =
-                             upsert_kv_table_op_.alter_table_info_,
-                         &hd_res = upsert_kv_table_op_.hd_result_,
-                         &worker_thd = upsert_kv_table_op_.worker_thread_]
-                    {
-                        store::DataStoreHandler *const store_hd =
-                            Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        worker_thd = std::thread(
-                            [tx_ts,
-                             table_schema,
-                             &hd_res,
-                             op_type,
-                             alter_table_info,
-                             store_hd]
-                            {
-                                store_hd->UpsertTable(table_schema,
-                                                      op_type,
-                                                      tx_ts,
-                                                      &hd_res,
-                                                      alter_table_info);
-                            });
-                    };
                     txm->PushOperation(&upsert_kv_table_op_);
                     txm->Process(upsert_kv_table_op_);
                 }
@@ -2364,31 +2297,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 upsert_kv_table_op_.table_schema_ =
                     catalog_entry->schema_.get();
                 upsert_kv_table_op_.alter_table_info_ = nullptr;
-                upsert_kv_table_op_.op_func_ =
-                    [tx_ts = txm->commit_ts_,
-                     table_schema = upsert_kv_table_op_.table_schema_,
-                     op_type = upsert_kv_table_op_.op_type_,
-                     alter_table_info = upsert_kv_table_op_.alter_table_info_,
-                     &hd_res = upsert_kv_table_op_.hd_result_,
-                     &worker_thd = upsert_kv_table_op_.worker_thread_]
-                {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    worker_thd = std::thread(
-                        [tx_ts,
-                         table_schema,
-                         &hd_res,
-                         op_type,
-                         alter_table_info,
-                         store_hd]
-                        {
-                            store_hd->UpsertTable(table_schema,
-                                                  op_type,
-                                                  tx_ts,
-                                                  &hd_res,
-                                                  alter_table_info);
-                        });
-                };
                 txm->PushOperation(&upsert_kv_table_op_);
                 txm->Process(upsert_kv_table_op_);
             }
@@ -2816,8 +2724,8 @@ void AsyncOp<ResultType>::Reset()
     wait_secs_ = 10;
 }
 
-template class AsyncOp<PostProcessResult>;
-template class AsyncOp<Void>;
+template struct AsyncOp<PostProcessResult>;
+template struct AsyncOp<Void>;
 
 CompositeTransactionOperation::CompositeTransactionOperation() : op_(nullptr)
 {

@@ -552,7 +552,7 @@ public:
                 index_sample_pool_map_.at(table_or_index_name).at(ng_id);
             Broadcast(table_schema, ccmap_sample_pool);
         };
-        RunOnBindingCcShard(task);
+        RunOnBindingCcShard(std::move(task));
     }
 
     // This method is called in table stats sync worker thread.
@@ -600,7 +600,7 @@ public:
                     }
                 }
             };
-            RunOnBindingCcShard(task);
+            RunOnBindingCcShard(std::move(task));
 
             if (DoStore(ng_id))
             {
@@ -1026,7 +1026,7 @@ private:
     {
         uint32_t shard_code = ShardCode(base_table_name_.StringView());
 
-        RunOnTxProcessorCc cc_req(task);
+        RunOnTxProcessorCc cc_req(std::move(task));
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(shard_code,
                                                                  &cc_req);
         cc_req.Wait();

@@ -2434,7 +2434,7 @@ struct RunOnTxProcessorCc : public CcRequestBase
 {
 public:
     explicit RunOnTxProcessorCc(std::function<void(CcShard &ccs)> task)
-        : task_(task), is_finished_(false), mux_(), cv_()
+        : task_(std::move(task)), is_finished_(false), mux_(), cv_()
     {
     }
 

@@ -10,7 +10,7 @@
 #include <thread>
 #include <vector>
 
-static size_t MAX_WORKERS_NUM = 3;
+static constexpr size_t MAX_WORKERS_NUM = 3;
 
 namespace txservice
 {
