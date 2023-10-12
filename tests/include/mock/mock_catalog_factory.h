@@ -142,22 +142,6 @@ public:
     {
         return indexes_.size();
     }
-    void PrepareGeneratePackedSk() override
-    {
-        assert(false);
-    }
-    std::pair<TxKey::Uptr, TxRecord::Uptr> GeneratePackedSk(
-        const TxKey *pk,
-        const TxRecord *record,
-        const TableName &index_name) const override
-    {
-        assert(false);
-        return std::pair(nullptr, nullptr);
-    }
-    void FinishGeneratePackedSk() override
-    {
-        assert(false);
-    }
     bool HasAutoIncrement() const override
     {
         return false;

@@ -42,6 +42,24 @@ struct KVCatalogInfo
 };
 
 class Statistics;
+
+struct SkEncoder
+{
+    using uptr = std::unique_ptr<SkEncoder>;
+
+    virtual ~SkEncoder() = default;
+    /**
+     * @brief Generate packed secondary key using TxKey and TxRecord.
+     *
+     * @param sk_idx Secondary key index of this table excluding the primary
+     * key.
+     */
+    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GeneratePackedSk(
+        const TxKey *pk,
+        const TxRecord *record,
+        const TableName &index_name) const = 0;
+};
+
 struct TableSchema
 {
     using uptr = std::unique_ptr<TableSchema>;
@@ -76,18 +94,11 @@ struct TableSchema
         return nullptr;
     }
 
-    virtual void PrepareGeneratePackedSk() = 0;
-    /**
-     * @brief Generate packed secondary key using TxKey and TxRecord.
-     *
-     * @param sk_idx Secondary key index of this table excluding the primary
-     * key.
-     */
-    virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GeneratePackedSk(
-        const TxKey *pk,
-        const TxRecord *record,
-        const TableName &index_name) const = 0;
-    virtual void FinishGeneratePackedSk() = 0;
+    virtual SkEncoder::uptr CreateSkEncoder() const
+    {
+        return nullptr;
+    }
+
     virtual bool HasAutoIncrement() const = 0;
     virtual const TableName *GetSequenceTableName() const = 0;
     virtual std::pair<TxKey::Uptr, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
