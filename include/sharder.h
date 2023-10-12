@@ -437,6 +437,13 @@ public:
         CcRequestBase *cc_req,
         CcShard *cc_shard);
 
+    /**
+     * @brief Should accept the cc requests from remote node after the
+     * TxProcessor thread start, so, should start cc stream server after the
+     * txservice::Start().
+     */
+    void StartCcStreamReceiver();
+
 private:
     Sharder();
 

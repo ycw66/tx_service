@@ -720,6 +720,9 @@ public:
             thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
         }
 
+        // Start cc stream receiver server.
+        Sharder::Instance().StartCcStreamReceiver();
+
         if (local_cc_shards_.EnableMvcc())
         {
             TxStartTsCollector::Instance().Start();

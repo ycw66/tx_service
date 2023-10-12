@@ -1372,7 +1372,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             // does not hold anymore.
             msg_pool_.enqueue(std::move(msg));
             LOG(ERROR) << "Receive remote kickoutccentry response, but tx"
-                          " coordinator has filed.";
+                          " coordinator has failed.";
             break;
         }
         else

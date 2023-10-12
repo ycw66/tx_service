@@ -2605,134 +2605,164 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     bool succ = true;
     bool flush_ret = true;
 
-    // Flush to data store if this node group leader term does not
-    // change
-    if (!(data_sync_vec->empty() && archive_vec->empty() &&
-          mv_base_vec->empty()) &&
-        Sharder::Instance().LeaderTerm(node_group) == leader_term)
+    // Check the leader
+    if (!Sharder::Instance().CheckLeaderTerm(node_group, leader_term))
     {
-        // Flushes to the data store
-        if (EnableMvcc() && mv_base_vec->size() > 0)
-        {
-            flush_ret = store_hd_->CopyBaseToArchive(
-                *mv_base_vec, node_group, table_name, schema);
-            if (!flush_ret)
-            {
-                LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
-                              "storage failed";
-            }
-        }
-
-        if (flush_ret && !data_sync_vec->empty())
-        {
-            flush_ret = store_hd_->PutAll(
-                *data_sync_vec, table_name, schema, node_group);
-            if (!flush_ret)
-            {
-                LOG(ERROR) << "DataSync PutAll flush to kv "
-                              "storage failed";
-            }
-        }
-
-        if (flush_ret && EnableMvcc())
-        {
-            flush_ret = store_hd_->PutArchivesAll(node_group,
-                                                  table_name,
-                                                  schema->GetKVCatalogInfo(),
-                                                  *archive_vec);
-            if (!flush_ret)
-            {
-                LOG(ERROR) << "DataSync PutArchivesAll flush to "
-                              "kv storage failed";
-            }
-        }
-
-        // If flush to data store succeeds, update the ckpt_ts for each
-        // entry in ccmap to latest checkpoint version's commit_ts.
-        if (flush_ret)
-        {
-            if (!is_delay_update_ckpt_ts)
-            {
-                for (size_t i = 0; i < data_sync_vec->size(); i++)
-                {
-                    auto &ref = data_sync_vec->at(i);
-                    // todo: remove cce_
-                    ref.cce_->ckpt_ts_.store(ref.commit_ts_,
-                                             std::memory_order_release);
-                    ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
-                }
-                ResetCleanStartPageCc reset_cc(cc_shards_.size());
-                for (auto &ccs : cc_shards_)
-                {
-                    ccs->Enqueue(&reset_cc);
-                }
-                reset_cc.Wait();
-            }
-
-            if (data_sync_vec->size())
-            {
-#ifdef RANGE_PARTITION_ENABLED
-                // Update the slice size in data store.
-                while (!UpdateStoreSlice(table_name,
-                                         schema->Version(),
-                                         node_group,
-                                         *data_sync_vec,
-                                         true))
-                {
-                    // Keep retrying here since we've finished the flush
-                    // already, it's too expensive to start from the beginning
-                    // all over again.
-                    LOG(ERROR) << "Data sync failed to update store slice info "
-                                  "on table "
-                               << table_name.Trace() << ", retrying.";
-                    std::this_thread::sleep_for(1s);
-                    if (!Sharder::Instance().CheckLeaderTerm(node_group,
-                                                             leader_term))
-                    {
-                        LOG(ERROR)
-                            << "Leader term changed during store slice update";
-                        succ = false;
-                        break;
-                    }
-                }
-#endif
-            }
-        }
-        else
-        {
-#ifdef RANGE_PARTITION_ENABLED
-            // Reset the post ckpt size if flush failed
-            bool res = UpdateStoreSlice(table_name,
-                                        schema->Version(),
-                                        node_group,
-                                        *data_sync_vec,
-                                        false);
-            // We're only updating in memory status here, so
-            // this should always succeed.
-            assert(res);
-#endif
-            succ = false;
-        }
+        LOG(ERROR) << "FlushData: node is not the leader of ng#" << node_group
+                   << ", with term: " << leader_term;
     }
+    else
+    {
+        // Flush to data store if this node group leader term does not
+        // change
+        if (!(data_sync_vec->empty() && archive_vec->empty() &&
+              mv_base_vec->empty()))
+        {
+            // Flushes to the data store
+            if (EnableMvcc() && mv_base_vec->size() > 0)
+            {
+                flush_ret = store_hd_->CopyBaseToArchive(
+                    *mv_base_vec, node_group, table_name, schema);
+                if (!flush_ret)
+                {
+                    LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
+                                  "storage failed";
+                }
+            }
+
+            if (flush_ret && !data_sync_vec->empty())
+            {
+                flush_ret = store_hd_->PutAll(
+                    *data_sync_vec, table_name, schema, node_group);
+                if (!flush_ret)
+                {
+                    LOG(ERROR) << "DataSync PutAll flush to kv "
+                                  "storage failed";
+                }
+            }
+
+            if (flush_ret && EnableMvcc())
+            {
+                flush_ret =
+                    store_hd_->PutArchivesAll(node_group,
+                                              table_name,
+                                              schema->GetKVCatalogInfo(),
+                                              *archive_vec);
+                if (!flush_ret)
+                {
+                    LOG(ERROR) << "DataSync PutArchivesAll flush to "
+                                  "kv storage failed";
+                }
+            }
+        } /* End of PutAll */
+
+        // If this node is the leader during execute DataStore::PutAll, try to
+        // pin node group data to avoid the potentail heap-use-after-free error
+        // about the cc entry and table ranges info.
+        if (Sharder::Instance().TryPinNodeGroupData(node_group) > 0)
+        {
+            // If flush to data store succeeds, update the ckpt_ts for each
+            // entry in ccmap to latest checkpoint version's commit_ts.
+            if (flush_ret)
+            {
+                if (!is_delay_update_ckpt_ts)
+                {
+                    for (size_t i = 0; i < data_sync_vec->size(); i++)
+                    {
+                        auto &ref = data_sync_vec->at(i);
+                        // todo: remove cce_
+                        ref.cce_->ckpt_ts_.store(ref.commit_ts_,
+                                                 std::memory_order_release);
+                        ref.cce_->data_store_size_.fetch_add(ref.delta_size_);
+                    }
+                    ResetCleanStartPageCc reset_cc(cc_shards_.size());
+                    for (auto &ccs : cc_shards_)
+                    {
+                        ccs->Enqueue(&reset_cc);
+                    }
+                    reset_cc.Wait();
+                }
+
+                if (data_sync_vec->size())
+                {
+#ifdef RANGE_PARTITION_ENABLED
+                    // Update the slice size in data store.
+                    while (!UpdateStoreSlice(table_name,
+                                             schema->Version(),
+                                             node_group,
+                                             *data_sync_vec,
+                                             true))
+                    {
+                        // Keep retrying here since we've finished the flush
+                        // already, it's too expensive to start from the
+                        // beginning all over again.
+                        LOG(ERROR)
+                            << "Data sync failed to update store slice info "
+                               "on table "
+                            << table_name.Trace() << ", retrying.";
+                        std::this_thread::sleep_for(1s);
+                        if (!Sharder::Instance().CheckLeaderTerm(node_group,
+                                                                 leader_term))
+                        {
+                            LOG(ERROR) << "Leader term changed during store "
+                                          "slice update";
+                            succ = false;
+                            break;
+                        }
+                    }
+#endif
+                }
+            }
+            else
+            {
+#ifdef RANGE_PARTITION_ENABLED
+                // Reset the post ckpt size if flush failed
+                bool res = UpdateStoreSlice(table_name,
+                                            schema->Version(),
+                                            node_group,
+                                            *data_sync_vec,
+                                            false);
+                // We're only updating in memory status here, so
+                // this should always succeed.
+                assert(res);
+#endif
+                succ = false;
+            }
+
+            if (data_sync_task != nullptr)
+            {
+                StoreRange *store_range = FindRange(
+                    table_name, node_group, data_sync_task->range_id_);
+                assert(store_range);
+                if (succ)
+                {
+                    // Update the task status for this range.
+                    store_range->TrySetDataSync(false, nullptr, data_sync_ts);
+                }
+                else
+                {
+                    store_range->TrySetDataSync(false);
+                }
+                store_range->PopPendingSyncTask();
+            }
+
+            // Unpin node group data.
+            Sharder::Instance().UnpinNodeGroupData(node_group);
+        } /* End of pin node group data */
+    }     /* End of leader */
 
     // Update the work count if the work's sender is waiting.
     if (data_sync_task != nullptr)
     {
-        StoreRange *store_range =
-            FindRange(table_name, node_group, data_sync_task->range_id_);
-        assert(store_range);
         if (succ)
         {
-            // Update the task status for this range.
-            store_range->TrySetDataSync(false, nullptr, data_sync_ts);
             data_sync_task->SetFinish();
         }
         else
         {
-            store_range->TrySetDataSync(false);
             data_sync_task->SetError();
         }
-        store_range->PopPendingSyncTask();
+
         // Commit the data sync txm
         assert(data_sync_txm != nullptr);
         CommitTxRequest commit_req;

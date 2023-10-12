@@ -249,12 +249,8 @@ int Sharder::Init(uint32_t node_id,
         return -1;
     }
 
-    if (cc_stream_server_.Start(
-            cluster_config_->ng_configs_.at(node_id_).front().port_, NULL) != 0)
-    {
-        LOG(FATAL) << "Fail to start the cc stream server.";
-        return -1;
-    }
+    // Start the cc_stream_server_ after TxProcessor start using interface
+    // StartCcStreamReceiver().
 
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
@@ -936,5 +932,16 @@ bool Sharder::UpdateClusterConfig(
     cluster_config_ = dirty_cluster_config;
 
     return braft_group_updated;
+}
+
+void Sharder::StartCcStreamReceiver()
+{
+    // The cc_stream_receiver_ object has been add to this server during
+    // Sharder::Init().
+    if (cc_stream_server_.Start(
+            cluster_config_->ng_configs_.at(node_id_).front().port_, NULL) != 0)
+    {
+        LOG(FATAL) << "Fail to start the cc stream server.";
+    }
 }
 }  // namespace txservice

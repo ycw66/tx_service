@@ -58,11 +58,11 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
     }
     else if (txm->IsTimeOut(30))
     {
-        LOG(INFO) << "Kickout data all operation timeout 30s, re-run this "
-                     "operation with the retry number: "
-                  << retry_num_;
+        LOG(WARNING) << "Kickout data all operation timeout 30s";
         if (txm->CheckLeaderTerm() && retry_num_ > 0)
         {
+            LOG(WARNING) << "ReRun this operation with the retry number: "
+                         << retry_num_;
             ReRunOp(txm);
             return;
         }
@@ -71,6 +71,7 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
             bool force_error = hd_result_.ForceError();
             if (force_error)
             {
+                LOG(WARNING) << "Force error for this operation";
                 txm->PostProcess(*this);
             }
         }
@@ -562,14 +563,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                LOG(ERROR) << "Upsert index for table: "
-                           << table_key_.Name().String()
-                           << ", fetch old tuples from kv and upload packed sk"
-                              " failed, tx_number:"
-                           << txm->tx_number_;
-
-                LOG(INFO) << "Upsert index: Retry fetch tuples from kv and"
-                             " generate packed sk data.";
+                LOG(WARNING)
+                    << "Upsert index: For table: " << table_key_.Name().String()
+                    << ", retry fetch old pk tuples from kv and upload packed "
+                       "sk failed, tx_number:"
+                    << txm->tx_number_;
                 if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                         .ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                 {
@@ -581,6 +579,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                LOG(WARNING) << "Upsert index: Generate packed sk data on "
+                                "non-leader node, terminate this txm directly.";
                 ForceToFinish(txm);
             }
             return;
@@ -739,17 +739,19 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                LOG(ERROR) << "Upsert table index kickout old tuples sk failed,"
-                              " tx_number:"
-                           << txm->tx_number_;
-
-                LOG(WARNING) << "Retry kickout data.";
+                LOG(WARNING)
+                    << "Upsert table index kickout old tuples sk failed, with "
+                       "error: "
+                    << kickout_data_all_op_.hd_result_.ErrorMsg()
+                    << ". Retry kickout data, tx_number:" << txm->tx_number_;
 
                 txm->PushOperation(&kickout_data_all_op_);
                 txm->Process(kickout_data_all_op_);
             }
             else
             {
+                LOG(ERROR) << "Upsert index: Kickout sk data on non-leader "
+                              "node, terminate this txm directly.";
                 ForceToFinish(txm);
             }
         }
@@ -1180,8 +1182,8 @@ void UpsertTableIndexOp::ForceToFinish(TransactionExecution *txm)
 {
     clean_log_op_.hd_result_.SetFinished();
     op_ = &clean_log_op_;
-    Forward(txm);
     is_force_finished = true;
+    Forward(txm);
 }
 
 /**
@@ -1619,7 +1621,7 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
             {
                 std::unique_lock<std::mutex> acq_terms_lk(acquire_terms_mutex);
                 acquire_terms_cv.wait_for(acq_terms_lk,
-                                          std::chrono::seconds(10),
+                                          std::chrono::seconds(3),
                                           [&acquire_terms_finished]
                                           { return acquire_terms_finished; });
             }
@@ -1627,9 +1629,18 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
             if (!acquire_terms_finished)
             {
                 // Handle the timeout.
-                LOG(ERROR)
-                    << "Acquire node group leader terms timeout for 10s.";
+                LOG(ERROR) << "Acquire node group leader terms timeout for 3s.";
                 acquire_terms_result_.ForceError();
+            }
+
+            // Check txm leader and abort if leader has been transferred.
+            if (!txm->CheckLeaderTerm())
+            {
+                LOG(ERROR)
+                    << "Acquire node group leader terms on non-leader node.";
+                acquire_terms_result_.Reset();
+                acquire_terms_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                return false;
             }
 
             if (acquire_terms_result_.IsError())
@@ -1769,8 +1780,20 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
         if (!post_write_finished)
         {
             // Handle the timeout.
-            LOG(ERROR) << "Write the packed sk into sk ccmap timeout for 10s.";
+            LOG(ERROR) << "Write the packed sk into sk ccmap timeout for 10s. "
+                          "With remote ref count: "
+                       << post_write_result_.RemoteRefCnt();
             post_write_result_.ForceError();
+        }
+
+        // Check txm leader and abort if leader has been transferred.
+        if (!txm->CheckLeaderTerm())
+        {
+            LOG(ERROR)
+                << "Write the packed sk into sk ccmap on the non-leader node.";
+            post_write_result_.Reset();
+            post_write_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return;
         }
 
         if (post_write_result_.IsError())
@@ -1816,16 +1839,30 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     // 1. Acquire the range read locks.
     if (!AcquireRangeReadLocks(acquire_range_lock_txm, upload_txm->rw_set_))
     {
+        LOG(ERROR) << "UploadWithoutDataLog: Acquire range read locks failed.";
         return false;
     }
 #endif
 
+    // Check txm leader and abort if leader has been transferred.
+    if (!upload_txm->CheckLeaderTerm())
+    {
+        LOG(ERROR)
+            << "UploadWithoutDataLog: Upload data on the non-leader node.";
+        post_write_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+        return false;
+    }
+
     // 2. Acquire node group term
     if (!AcquireLeaderTermsIfNecessary(upload_txm))
     {
+        LOG(ERROR) << "UploadWithoutDataLog: Acquire leader terms failed with "
+                      "error message: "
+                   << acquire_terms_result_.ErrorMsg();
 #ifdef RANGE_PARTITION_ENABLED
         ReleaseRangeReadLocks(acquire_range_lock_txm, false);
 #endif
+        post_write_result_.SetError(acquire_terms_result_.ErrorCode());
         return false;
     }
 
@@ -2087,6 +2124,7 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     int32_t term = Sharder::Instance().TryPinNodeGroupData(ng_id);
     if (term < 0)
     {
+        LOG(WARNING) << "Txm node not leader, terminate directly.";
         fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetError(
             CcErrorCode::TX_NODE_NOT_LEADER);
         return;
@@ -2236,6 +2274,19 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
             // has been transferred.
             if (!Sharder::Instance().CheckLeaderTerm(ng_id, term))
             {
+#if WITH_KV_STORAGE != KV_CASS
+                FinishScanFromCcMap(
+                    scan_txm, base_table_name, scan_alias, scan_batch, false);
+#else
+                FinishScanFromDataStore(ds_scanner);
+#endif
+                // Finish the pack sk operation
+                table_schema->FinishGeneratePackedSk();
+                defer_unpin.reset();
+                LOG(WARNING) << "Generate packed sk and write into sk ccmap on "
+                                "non-leader node for ng#"
+                             << ng_id << ", and node group term " << term
+                             << ". Terminate directly.";
                 fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                     .SetError(CcErrorCode::TX_NODE_NOT_LEADER);
                 return;
@@ -2275,8 +2326,19 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 #endif
                     // Finish the pack sk operation
                     table_schema->FinishGeneratePackedSk();
-                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
-                        .SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    defer_unpin.reset();
+                    if (error_code == CcErrorCode::TX_NODE_NOT_LEADER)
+                    {
+                        fetch_old_tuples_from_kv_gen_sk_data_upload_op_
+                            .hd_result_.SetError(
+                                CcErrorCode::TX_NODE_NOT_LEADER);
+                    }
+                    else
+                    {
+                        fetch_old_tuples_from_kv_gen_sk_data_upload_op_
+                            .hd_result_.SetError(
+                                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    }
                     return;
                 }
             }
@@ -2322,8 +2384,17 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
 #endif
                 // Finish the pack sk operation
                 table_schema->FinishGeneratePackedSk();
-                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
-                    .SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                defer_unpin.reset();
+                if (error_code == CcErrorCode::TX_NODE_NOT_LEADER)
+                {
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                        .SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                }
+                else
+                {
+                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                        .SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                }
                 return;
             }
         }
@@ -2344,6 +2415,10 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
         table_schema->FinishGeneratePackedSk();
     }
 
+    defer_unpin.reset();
+    LOG(INFO)
+        << "Generate packed sk and write into sk ccmap successfully. Txn: "
+        << txm->TxNumber();
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
 }
 

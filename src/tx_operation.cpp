@@ -702,7 +702,7 @@ void ValidateOperation::Forward(TransactionExecution *txm)
         // remote node, which contains read entries, is dead.
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
     {
         bool success = hd_result_.ForceError();
         if (success)
@@ -2683,6 +2683,9 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         if (worker_thread_.joinable())
         {
             // The worker thread must terminate after the hd_result.SetFinished.
+            // It is the caller's responsibility to ensure that this
+            // worker_thread_ does not have any more work to do after the worker
+            // thread function returns.
             worker_thread_.join();
         }
         txm->PostProcess(*this);
@@ -2722,6 +2725,10 @@ void AsyncOp<ResultType>::Reset()
     hd_result_.Reset();
     handle_timeout_ = false;
     wait_secs_ = 10;
+    if (worker_thread_.joinable())
+    {
+        worker_thread_.join();
+    }
 }
 
 template struct AsyncOp<PostProcessResult>;

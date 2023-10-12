@@ -239,7 +239,7 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
 
     // Wakes up the thread dedicated to this shard, when it is in the sleep
     // mode.
-    if (processor_sleep_->load(std::memory_order_relaxed))
+    if (processor_sleep_ && processor_sleep_->load(std::memory_order_relaxed))
     {
         // Condition variable's notify() does not rely on std::mutex. We use it
         // here for a special purpose. C++ standard on std::atomic does not
@@ -265,7 +265,7 @@ void CcShard::Enqueue(CcRequestBase *req)
 
     // Wakes up the thread dedicated to this shard, when it is in the sleep
     // mode.
-    if (processor_sleep_->load(std::memory_order_relaxed))
+    if (processor_sleep_ && processor_sleep_->load(std::memory_order_relaxed))
     {
         std::unique_lock<std::mutex> lk(*processor_mux_);
         processor_cv_->notify_one();
