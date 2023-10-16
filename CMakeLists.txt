@@ -45,7 +45,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
 
     if(BRPC_WITH_GLOG)
         find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-        find_library(GLOG_LIB NAMES glog)
+        find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
         if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
             message(FATAL_ERROR "Fail to find glog")
         endif()
@@ -143,9 +143,9 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
-    ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/src/metrics.cc
     ${TX_SERVICE_SOURCE_DIR}/src/tx_service.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_index_operation.cpp
+    ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/src/metrics.cc
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})

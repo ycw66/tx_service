@@ -291,11 +291,12 @@ public:
         const std::vector<DataStoreSearchCond> &search_conds,
         const std::vector<TableName> &new_indexes_name) = 0;
 
+    virtual void SetMetricsRegistry(metrics::MetricsRegistry *,
+                                    metrics::CommonLabels = {}){};
+
     virtual bool UpdateClusterConfig(
         const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
         uint64_t version) = 0;
-
-    virtual void SetMetricsRegistry(metrics::MetricsRegistry *){};
 
 protected:
     TxService *tx_service_{nullptr};

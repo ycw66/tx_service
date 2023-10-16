@@ -1,6 +1,7 @@
 #include "cc/local_cc_shards.h"
 
 #include <cstdint>
+#include <unordered_map>
 
 #include "range_bucket_key_record.h"
 #include "store/data_store_handler.h"
@@ -24,11 +25,13 @@ LocalCcShards::LocalCcShards(
     int32_t range_bucket_seed,
     uint64_t cluster_config_version,
     store::DataStoreHandler *store_hd,
-    metrics::MetricsRegistry *metrics_registry,
     TxService *tx_service,
-    bool enable_mvcc)
+    bool enable_mvcc,
+    metrics::MetricsRegistry *metrics_registry,
+    std::unordered_map<std::string, std::string> common_labels)
     : store_hd_(store_hd),
       metrics_registry_(metrics_registry),
+      common_labels_(common_labels),
       node_id_(node_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
@@ -91,35 +94,6 @@ LocalCcShards::LocalCcShards(
     {
         statistics_thd_ = std::thread([this] { SyncTableStatisticsWorker(); });
     }
-}
-
-LocalCcShards::LocalCcShards(
-    uint32_t node_id,
-    uint16_t core_cnt,
-    uint32_t memory_limit_mb,
-    uint32_t log_limit_mb,
-    bool realtime_sampling,
-    CatalogFactory *catalog_factory,
-    std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
-    int32_t range_bucket_seed,
-    uint64_t cluster_config_version,
-    store::DataStoreHandler *store_hd,
-    TxService *tx_service,
-    bool enable_mvcc)
-    : LocalCcShards(node_id,
-                    core_cnt,
-                    memory_limit_mb,
-                    log_limit_mb,
-                    realtime_sampling,
-                    catalog_factory,
-                    ng_configs,
-                    range_bucket_seed,
-                    cluster_config_version,
-                    store_hd,
-                    nullptr,
-                    tx_service,
-                    enable_mvcc)
-{
 }
 
 LocalCcShards::~LocalCcShards()

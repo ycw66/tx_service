@@ -60,10 +60,11 @@ public:
     static const int64_t t1sec = 1000000L;
     static const int64_t t2sec = 4000000L;
 
-    TxProcessor(metrics::MetricsRegistry *metrics_registry,
-                size_t thd_id,
+    TxProcessor(size_t thd_id,
                 LocalCcShards &shards,
-                TxLog *txlog_hd)
+                TxLog *txlog_hd,
+                metrics::MetricsRegistry *metrics_registry = nullptr,
+                metrics::CommonLabels common_labels = {})
         : thd_id_(thd_id),
           terminated_(false),
           in_sleep_(false),
@@ -75,8 +76,8 @@ public:
           free_prod_token_(free_txs),
           free_consumer_token_(free_txs),
           txlog_hd_(txlog_hd),
-          meter_(std::make_unique<metrics::Meter>(metrics_registry,
-                                                  std::to_string(thd_id)))
+          meter_(
+              std::make_unique<metrics::Meter>(metrics_registry, common_labels))
     {
         if (metrics::enable_busy_round_metrics)
         {
@@ -112,14 +113,6 @@ public:
                                 "scan_next",
                                 "write_log"}}});
         }
-#ifdef EXT_TX_PROC_ENABLED
-        external_processor_func_ = [this]() { RunOneRound(); };
-#endif
-    }
-
-    TxProcessor(size_t thd_id, LocalCcShards &shards, TxLog *txlog_hd)
-        : TxProcessor(nullptr, thd_id, shards, txlog_hd)
-    {
 #ifdef EXT_TX_PROC_ENABLED
         external_processor_func_ = [this]() { RunOneRound(); };
 #endif
@@ -557,7 +550,6 @@ private:
                local_cc_shards_.IsIdle(thd_id_) &&
                !terminated_.load(std::memory_order_relaxed);
     }
-
     size_t thd_id_;
     std::atomic<bool> terminated_;
     std::atomic<bool> in_sleep_{false};
@@ -614,20 +606,22 @@ public:
 class TxService
 {
 public:
-    TxService(const std::string &local_path,
-              CatalogFactory *catalog_factory,
-              const std::map<std::string, uint32_t> &conf,
-              uint32_t node_id = 0,
-              std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
-              int32_t range_bucket_seed = -1,
-              uint64_t cluster_config_version = 0,
-              std::vector<std::string> *txlog_ips = nullptr,
-              std::vector<uint16_t> *txlog_ports = nullptr,
-              store::DataStoreHandler *store_hd = nullptr,
-              metrics::MetricsRegistry *metrics_registry = nullptr,
-              std::unique_ptr<TxLog> log_hd = nullptr,
-              bool enable_mvcc = true,
-              bool skip_redo_log = false)
+    TxService(
+        const std::string &local_path,
+        CatalogFactory *catalog_factory,
+        const std::map<std::string, uint32_t> &conf,
+        uint32_t node_id,                                         // = 0,
+        std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,  // = nullptr,
+        int32_t range_bucket_seed,                                // = -1,
+        uint64_t cluster_config_version,                          // = 0,
+        std::vector<std::string> *txlog_ips,                      // = nullptr,
+        std::vector<uint16_t> *txlog_ports,                       // = nullptr,
+        store::DataStoreHandler *store_hd,                        // = nullptr,
+        std::unique_ptr<TxLog> log_hd,                            // = nullptr,
+        bool enable_mvcc = true,
+        bool skip_redo_log = false,
+        metrics::MetricsRegistry *metrics_registry = nullptr,
+        metrics::CommonLabels common_labels = {})
         : local_cc_shards_(node_id,
                            conf.find("core_num")->second,
                            conf.find("node_memory_limit_mb")->second,
@@ -638,9 +632,10 @@ public:
                            range_bucket_seed,
                            cluster_config_version,
                            store_hd,
-                           metrics_registry,
                            this,
-                           enable_mvcc),
+                           enable_mvcc,
+                           metrics_registry,
+                           common_labels),
           ckpt_(local_cc_shards_,
                 store_hd,
                 conf.find("checkpointer_interval")->second,
@@ -655,8 +650,13 @@ public:
         {
             if (metrics::enable_collect_metrics)
             {
-                pool_.emplace_back(std::make_unique<TxProcessor>(
-                    metrics_registry, thd_idx, local_cc_shards_, log_hd.get()));
+                common_labels["core_id"] = std::to_string(thd_idx);
+                pool_.emplace_back(
+                    std::make_unique<TxProcessor>(thd_idx,
+                                                  local_cc_shards_,
+                                                  log_hd.get(),
+                                                  metrics_registry,
+                                                  common_labels));
             }
             else
             {
@@ -678,36 +678,6 @@ public:
             conf.find("collect_active_tx_ts_interval_seconds")->second);
         DeadLockCheck::Init(local_cc_shards_);
         txservice_skip_redo_log = skip_redo_log;
-    }
-
-    TxService(const std::string &local_path,
-              CatalogFactory *catalog_factory,
-              const std::map<std::string, uint32_t> &conf,
-              uint32_t node_id = 0,
-              std::map<uint32_t, std::vector<NodeConfig>> *ng_configs = nullptr,
-              int32_t range_bucket_seed = -1,
-              uint64_t cluster_config_version = 0,
-              std::vector<std::string> *txlog_ips = nullptr,
-              std::vector<uint16_t> *txlog_ports = nullptr,
-              store::DataStoreHandler *store_hd = nullptr,
-              std::unique_ptr<TxLog> log_hd = nullptr,
-              bool enable_mvcc = true,
-              bool skip_redo_log = false)
-        : TxService(local_path,
-                    catalog_factory,
-                    conf,
-                    node_id,
-                    ng_configs,
-                    range_bucket_seed,
-                    cluster_config_version,
-                    txlog_ips,
-                    txlog_ports,
-                    store_hd,
-                    nullptr,
-                    std::move(log_hd),
-                    enable_mvcc,
-                    skip_redo_log)
-    {
     }
 
     void Start()

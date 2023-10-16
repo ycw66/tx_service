@@ -47,7 +47,7 @@ CcShard::CcShard(uint16_t core_id,
       catalog_factory_(catalog_factory),
       active_si_txs_(),
       meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
-                                              std::to_string(core_id)))
+                                              local_shards_.common_labels_))
 
 {
     // memory_limit_ and log_limit_ are calculated at shard level.

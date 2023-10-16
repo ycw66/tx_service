@@ -355,5 +355,6 @@ mono_metrics
 # macOS garbage
 .DS_Store
 
-# cc compilation database for Emacs
+# Emacs
 compile_commands.json
+.dir-locals.el
