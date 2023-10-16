@@ -1858,6 +1858,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
+    int64_t expected_ng_term = data_sync_task->node_group_term_;
     int32_t range_id = data_sync_task->range_id_;
     uint64_t target_data_sync_ts = data_sync_task->data_sync_ts_;
     bool is_dirty = data_sync_task->is_dirty_;
@@ -1916,13 +1917,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
     // Check the leader
     int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(ng_id);
-    if (ng_term < 0)
+    if (ng_term < 0 || ng_term != expected_ng_term)
     {
-        LOG(ERROR) << "DataSync: node not the leader of this node group.";
+        LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
+                   << " with leader term: " << ng_term
+                   << ", and the expected leader term: " << expected_ng_term;
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         return;
     }
+    assert(ng_term == expected_ng_term);
 
     // guard to unpin node group on finish.
     std::shared_ptr<void> defer_unpin(
@@ -2606,10 +2610,17 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     bool flush_ret = true;
 
     // Check the leader
-    if (!Sharder::Instance().CheckLeaderTerm(node_group, leader_term))
+    // Try to pin node group data to avoid the potentail heap-use-after-free
+    // error about the cc entry and table ranges info. NOTE: The
+    // `RangeRecord.range_info_` which will be used during PutAll is a raw
+    // pointer that points to range info in TableRangeEntry stored in local cc
+    // shards.
+    int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(node_group);
+    if (ng_term < 0 || ng_term != leader_term)
     {
         LOG(ERROR) << "FlushData: node is not the leader of ng#" << node_group
-                   << ", with term: " << leader_term;
+                   << ", with current leader term: " << ng_term
+                   << ", and the expected leader term: " << leader_term;
     }
     else
     {
@@ -2654,13 +2665,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                                   "kv storage failed";
                 }
             }
-        } /* End of PutAll */
 
-        // If this node is the leader during execute DataStore::PutAll, try to
-        // pin node group data to avoid the potentail heap-use-after-free error
-        // about the cc entry and table ranges info.
-        if (Sharder::Instance().TryPinNodeGroupData(node_group) > 0)
-        {
             // If flush to data store succeeds, update the ckpt_ts for each
             // entry in ccmap to latest checkpoint version's commit_ts.
             if (flush_ret)
@@ -2728,28 +2733,28 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 #endif
                 succ = false;
             }
+        } /* End of PutAll */
 
-            if (data_sync_task != nullptr)
+        if (data_sync_task != nullptr)
+        {
+            StoreRange *store_range =
+                FindRange(table_name, node_group, data_sync_task->range_id_);
+            assert(store_range);
+            if (succ)
             {
-                StoreRange *store_range = FindRange(
-                    table_name, node_group, data_sync_task->range_id_);
-                assert(store_range);
-                if (succ)
-                {
-                    // Update the task status for this range.
-                    store_range->TrySetDataSync(false, nullptr, data_sync_ts);
-                }
-                else
-                {
-                    store_range->TrySetDataSync(false);
-                }
-                store_range->PopPendingSyncTask();
+                // Update the task status for this range.
+                store_range->TrySetDataSync(false, nullptr, data_sync_ts);
             }
+            else
+            {
+                store_range->TrySetDataSync(false);
+            }
+            store_range->PopPendingSyncTask();
+        }
 
-            // Unpin node group data.
-            Sharder::Instance().UnpinNodeGroupData(node_group);
-        } /* End of pin node group data */
-    }     /* End of leader */
+        // Unpin node group data.
+        Sharder::Instance().UnpinNodeGroupData(node_group);
+    } /* End of leader */
 
     // Update the work count if the work's sender is waiting.
     if (data_sync_task != nullptr)

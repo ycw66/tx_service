@@ -225,13 +225,14 @@ public:
                uint32_t node_group_id,
                uint64_t tx_number,
                CcProtocol proto = CcProtocol::OCC,
-               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+               int64_t ng_term = INIT_TERM)
     {
         res_ = res;
         table_name_ = tname;
         ccm_ = nullptr;
         node_group_id_ = node_group_id;
-        ng_term_ = -1;
+        ng_term_ = ng_term;
 
         tx_number_ = tx_number;
         proto_ = proto;
@@ -639,10 +640,16 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               bool blocked = true)
+               int64_t ng_term = INIT_TERM)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            &table_name, res, ng_id, tx_number);
+            &table_name,
+            res,
+            ng_id,
+            tx_number,
+            CcProtocol::OCC,
+            IsolationLevel::ReadCommitted,
+            ng_term);
 
         cce_addr_ = nullptr;
         key_ = key;
@@ -686,10 +693,18 @@ public:
                OperationType operation_type,
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
-               bool initial_insertion = false)
+               bool initial_insertion = false,
+               int64_t ng_term = INIT_TERM)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
-            table_name, res, node_group_id, tx_number);
+            table_name,
+            res,
+            node_group_id,
+            tx_number,
+            CcProtocol::OCC,
+            IsolationLevel::ReadCommitted,
+            ng_term);
+
         cce_addr_ = nullptr;
         key_str_ = key_str;
         commit_ts_ = ts;

@@ -561,7 +561,6 @@ void txservice::remote::RemotePostWrite::Reset(
             ToLocalType::ConvertCcTableType(post_commit.table_type()));
         OperationType op_type =
             static_cast<OperationType>(post_commit.operation_type());
-        expected_term_ = post_commit.node_group_term();
         PostWriteCc::Reset(&remote_table_name_,
                            &post_commit.key(),
                            post_commit.node_group_id(),
@@ -571,7 +570,8 @@ void txservice::remote::RemotePostWrite::Reset(
                            op_type,
                            post_commit.key_shard_code(),
                            &cc_res_,
-                           op_type == OperationType::Insert);
+                           op_type == OperationType::Insert,
+                           post_commit.node_group_term());
     }
     input_msg_ = std::move(input_msg);
 

@@ -289,29 +289,6 @@ void txservice::LocalCcHandler::UploadRecord(
             return;
         }
 
-        if (expected_term != SKIP_CHECK_TERM)
-        {
-            // The transaction that performs this operation requires that the
-            // node group leader cannot change during the entire transaction
-            // process. Therefore, it is necessary to record the leader term of
-            // each target node group when performing the operation for the
-            // first time. At the same time, in subsequent operations, by
-            // checking the node group's term to confirm whether changes have
-            // occurred.
-            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-            if (expected_term != ng_term)
-            {
-                assert(expected_term > 0);
-                // Leader transferred. For example, a remote node group
-                // transferred to local node.
-                hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                LOG(ERROR) << "LocalCcHandler::UploadRecord: The leader of "
-                              "the destinate node group transferred for ng#"
-                           << ng_id;
-                return;
-            }
-        }
-
         PostWriteCc *req = postwrite_pool.NextRequest();
 
         req->Reset(key,
@@ -323,7 +300,8 @@ void txservice::LocalCcHandler::UploadRecord(
                    operation_type,
                    key_shard_code,
                    &hres,
-                   (operation_type == OperationType::Insert));
+                   (operation_type == OperationType::Insert),
+                   expected_term);
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);

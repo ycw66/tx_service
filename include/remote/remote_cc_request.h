@@ -226,11 +226,6 @@ public:
         }
     }
 
-    int64_t NodeGroupTerm() const
-    {
-        return expected_term_;
-    }
-
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
@@ -239,7 +234,6 @@ private:
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
-    int64_t expected_term_{SKIP_CHECK_TERM};
 };
 
 struct RemotePostWriteAll : public PostWriteAllCc

@@ -220,6 +220,7 @@ static const std::map<CcErrorCode, std::string> cc_error_messages{
 
     // detect dead lock
     {CcErrorCode::DEAD_LOCK_ABORT, "DEAD_LOCK_ABORT"},
+    {CcErrorCode::REQUEST_LOST, "REQUEST_LOST"},
 
     // acquire leader term
     {CcErrorCode::ACQUIRE_LEADER_TERM_ERR, "ACQUIRE_LEADER_TERM_ERROR"},

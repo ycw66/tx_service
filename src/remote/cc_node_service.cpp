@@ -302,27 +302,46 @@ void CcNodeService::AcquireNodeGroupLeaderTerm(
     // to process the request asynchronously, pass done_guard.release().
     brpc::ClosureGuard done_guard(done);
 
-    // Set response
-    response->set_tx_number(request->tx_number());
-    response->set_tx_term(request->tx_term());
-    response->set_command_id(request->command_id());
-    response->set_handler_addr(request->handler_addr());
-
     uint32_t ng_id = request->node_group_id();
-    int64_t term = Sharder::Instance().LeaderTerm(ng_id);
+    int64_t leader_term = INIT_TERM;
 
-    if (term < 0)
+    bthread::Mutex b_thd_mu;
+    bthread::ConditionVariable b_thd_cv;
+    bool finished = false;
+    std::thread worker_thd = std::thread(
+        [ng_id, &leader_term, &b_thd_mu, &b_thd_cv, &finished]()
+        {
+            while ((leader_term = Sharder::Instance().LeaderTerm(ng_id)) < 0 &&
+                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+            {
+                // The RPC server can receive the remote request, but this
+                // node has not finish log replay, so should wait until log
+                // replay finished.
+                LOG(INFO) << "CcNodeService AcquireLeaderTerm on ng#" << ng_id
+                          << " waiting log replay finished.";
+                std::this_thread::sleep_for(10s);
+            }
+            if (leader_term < 0)
+            {
+                LOG(ERROR) << "!!!ERROR!!! The non-leader node receives "
+                              "the request for ng#"
+                           << ng_id;
+            }
+
+            std::unique_lock b_thd_lk(b_thd_mu);
+            finished = true;
+            b_thd_cv.notify_one();
+        });
+
+    std::unique_lock lk(b_thd_mu);
+    while (!finished)
     {
-        LOG(WARNING)
-            << "!!!WARNING!!! The non-leader node receives the request for ng#"
-            << ng_id;
-        response->set_node_group_term(INIT_TERM);
+        b_thd_cv.wait(lk);
     }
-    else
-    {
-        response->set_node_group_term(term);
-    }
+
+    response->set_node_group_term(leader_term);
     response->set_node_group_id(ng_id);
+    worker_thd.join();
 }
 
 /**
@@ -338,26 +357,8 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     // process the request asynchronously, pass done_guard.release().
     brpc::ClosureGuard done_guard(done);
 
-    // Set response
-    response->set_tx_number(request->tx_number());
-    response->set_tx_term(request->tx_term());
-    response->set_command_id(request->command_id());
-    response->set_handler_addr(request->handler_addr());
-
     uint32_t ng_id = request->node_group_id();
-    int64_t expected_ng_term = request->node_group_term();
-    // Check the term.
-    int64_t current_ng_term = Sharder::Instance().LeaderTerm(ng_id);
-    if (current_ng_term < 0 ||
-        (expected_ng_term > 0 && expected_ng_term != current_ng_term))
-    {
-        // The destinate node group's term has changed, ignore this request.
-        response->set_error_code(static_cast<google::protobuf::int32>(
-            CcErrorCode::REQUESTED_NODE_NOT_LEADER));
-        LOG(ERROR) << "CcNodeService FlushDataAll RPC: node not leader on ng#"
-                   << ng_id;
-        return;
-    }
+    int64_t ng_term = request->node_group_term();
 
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
@@ -375,27 +376,83 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     {
         ACTION_FAULT_INJECTOR("term_FlushDataAllRPC_SK_crashed");
     }
-    DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
-               << ", and flush table:" << table_name.String();
 
-    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
+    bthread::Mutex b_thd_mu;
+    bthread::ConditionVariable b_thd_cv;
+    bool finished = false;
+    CcErrorCode error_code = CcErrorCode::NO_ERROR;
+    std::thread worker_thd = std::thread(
+        [&table_name,
+         ng_id,
+         &ng_term,
+         data_sync_ts,
+         is_dirty,
+         &b_thd_mu,
+         &b_thd_cv,
+         &error_code,
+         &finished,
+         &local_shards = this->local_shards_]()
+        {
+            if (ng_term < 0)
+            {
+                while ((ng_term = Sharder::Instance().LeaderTerm(ng_id)) < 0 &&
+                       Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+                {
+                    // The RPC server can receive the remote request, but this
+                    // node has not finish log replay, so should wait until log
+                    // replay finished.
+                    LOG(INFO) << "CcNodeService FlushDataAll on ng#" << ng_id
+                              << " waiting log replay finished.";
+                    std::this_thread::sleep_for(10s);
+                }
+                if (ng_term < 0)
+                {
+                    error_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                    std::unique_lock b_thd_lk(b_thd_mu);
+                    finished = true;
+                    b_thd_cv.notify_one();
+                    return;
+                }
+            }
+            DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
+                       << ", with node group term: " << ng_term
+                       << ". And flush table:" << table_name.String();
 
-    local_shards_.EnqueueDataSyncTask(table_name,
-                                      ng_id,
-                                      current_ng_term,
-                                      data_sync_ts,
-                                      false,
-                                      is_dirty,
-                                      status);
-    std::unique_lock<std::mutex> lk(status->mux_);
-    status->all_task_started_ = true;
-    status->cv_.wait(lk, [&status] { return status->unfinished_tasks_ == 0; });
+            std::shared_ptr<DataSyncStatus> status =
+                std::make_shared<DataSyncStatus>();
 
-    CcErrorCode error_code = status->err_code_;
+            local_shards.EnqueueDataSyncTask(table_name,
+                                             ng_id,
+                                             ng_term,
+                                             data_sync_ts,
+                                             false,
+                                             is_dirty,
+                                             status,
+                                             nullptr);
 
-    DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
-               << " finished with error: " << (int32_t) error_code;
+            std::unique_lock<std::mutex> lk(status->mux_);
+            status->all_task_started_ = true;
+            status->cv_.wait(
+                lk, [&status] { return status->unfinished_tasks_ == 0; });
+
+            error_code = status->err_code_;
+
+            std::unique_lock b_thd_lk(b_thd_mu);
+            finished = true;
+            b_thd_cv.notify_one();
+        });
+
+    std::unique_lock lk(b_thd_mu);
+    while (!finished)
+    {
+        b_thd_cv.wait(lk);
+    }
+
     response->set_error_code(static_cast<google::protobuf::int32>(error_code));
+    worker_thd.join();
+    DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
+               << ", with node group term: " << ng_term
+               << " finished with error: " << (int32_t) error_code;
 }
 
 void CcNodeService::NotifyNewNodeReady(

@@ -237,30 +237,22 @@ public:
                         // alter table transaction, and does not execute any
                         // transaction about this table before this alter table
                         // tx since server start.
-                        shard_->CreateCatalog(table_key->Name(),
-                                              req.NodeGroupId(),
-                                              schema_rec->SchemaImage(),
-                                              schema_rec->SchemaTs());
-
-#ifdef RANGE_PARTITION_ENABLED
-                        // Initialize table ranges.
-                        TableName base_range_table_name{
-                            table_key->Name().StringView(),
-                            TableType::RangePartition};
-                        auto ranges = shard_->GetTableRangesForATable(
-                            base_range_table_name, req.NodeGroupId());
-                        if (ranges == nullptr)
-                        {
-                            shard_->FetchTableRanges(
-                                base_range_table_name,
-                                catalog_entry->schema_->GetKVCatalogInfo(),
-                                &req,
-                                req.NodeGroupId(),
-                                ng_term);
-                            return false;
-                        }
-#endif
+                        shard_->FetchCatalog(table_key->Name(),
+                                             req.NodeGroupId(),
+                                             ng_term,
+                                             &req);
+                        return false;
                     }
+
+                    if (!shard_->LoadRangesAndStatisticsNx(
+                            catalog_entry->schema_.get(),
+                            req.NodeGroupId(),
+                            ng_term,
+                            &req))
+                    {
+                        return false;
+                    }
+
                     // Bind statistics for the dirty schema.
                     catalog_entry->dirty_schema_->BindStatistics(
                         catalog_entry->schema_->StatisticsObject());

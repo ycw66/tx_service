@@ -5,6 +5,71 @@
 
 namespace txservice
 {
+
+/*
+ * RPC closure
+ */
+template <typename ResultType, typename ResponseType>
+class RPCClosure : public ::google::protobuf::Closure
+{
+public:
+    using RPCResponse_Uptr = std::unique_ptr<ResponseType>;
+
+    RPCClosure() = default;
+    ~RPCClosure() = default;
+
+    RPCClosure(const RPCClosure &rhs) = delete;
+    RPCClosure(RPCClosure &&rhs)
+    {
+        response_uptr_ = std::move(rhs.response_uptr_);
+        hd_result_ = rhs.hd_result_;
+        rhs.hd_result_ = nullptr;
+        rhs.cntl_.Reset();
+    }
+
+    void Reset(CcHandlerResult<ResultType> *hd_res, RPCResponse_Uptr response)
+    {
+        cntl_.Reset();
+        hd_result_ = hd_res;
+        response_uptr_ = std::move(response);
+    }
+
+    // Run() will be called when rpc request is processed by cc node service.
+    void Run() override
+    {
+        if (cntl_.Failed())
+        {
+            // RPC failed.
+            LOG(ERROR) << "Failed to process the RPC request with Error code: "
+                       << cntl_.ErrorCode()
+                       << ". Error Msg: " << cntl_.ErrorText();
+            hd_result_->SetError(CcErrorCode::REQUEST_LOST);
+            return;
+        }
+
+        if (post_lambda_)
+        {
+            post_lambda_(hd_result_, response_uptr_.get());
+        }
+
+        response_uptr_.reset(nullptr);
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+private:
+    brpc::Controller cntl_;
+    RPCResponse_Uptr response_uptr_;
+    CcHandlerResult<ResultType> *hd_result_{nullptr};
+
+public:
+    std::function<void(CcHandlerResult<ResultType> *, ResponseType *)>
+        post_lambda_;
+};
+
 struct KickoutDataAllOp : public TransactionOperation
 {
     explicit KickoutDataAllOp(TransactionExecution *txm);
@@ -145,15 +210,11 @@ private:
     // Flush pk or sk data from ccmap into data store.
     void FlushDataIntoDataStore(const TableName &table_name,
                                 NodeGroupId ng_id,
-                                TxNumber tx_number,
-                                int64_t tx_term,
-                                uint16_t command_id,
                                 uint64_t data_sync_ts,
                                 bool is_dirty,
-                                int64_t expected_term,
-                                CcHandlerResult<Void> &hres);
-    static void HandleFlushDataIntoDataStoreResponse(
-        brpc::Controller *cntl, remote::FlushDataAllResponse *response);
+                                CcHandlerResult<Void> &hres,
+                                int64_t ng_term = -1);
+
     // Acquire and release range read lock.
     bool AcquireRangeReadLocks(TransactionExecution *acquire_lock_txm,
                                ReadWriteSet &rw_set);
@@ -163,14 +224,8 @@ private:
     void ResetLeaderTerms();
     bool AcquireLeaderTermsIfNecessary(TransactionExecution *txm);
     void AcquireNodeGroupLeaderTerm(
-        NodeGroupId ng_id,
-        TxNumber tx_number,
-        int64_t tx_term,
-        uint16_t command_id,
-        CcHandlerResult<std::vector<int64_t>> &hd_res);
+        NodeGroupId ng_id, CcHandlerResult<std::vector<int64_t>> &hd_res);
 
-    static void HandleAcquireNodeGroupLeaderTermResponse(
-        brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response);
     // Upload sk record from local write set into sk ccmap
     void UploadSkData(TransactionExecution *txm, ReadWriteSet &rw_set);
     bool UploadWithoutDataLog(TransactionExecution *upload_txm);
@@ -188,6 +243,8 @@ private:
         std::unique_ptr<store::DataStoreScanner> &ds_scanner);
 
     void FetchTuplesAndUploadPackedKey(TransactionExecution *txm);
+    void StartWait();
+    bool WaitUntil(int wait_secs);
 
 #if WITH_KV_STORAGE != KV_CASS
     // Scan pk from ccmap
@@ -229,6 +286,7 @@ private:
 #endif
 
     uint16_t flush_data_timeout_{600};
+    static const uint32_t OpLoopCnt = 10000;
 
     // This variable have two roles:
     // 1) deserialize as AlterTableInfo object. 2) save into log.
@@ -241,7 +299,16 @@ private:
 
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
-    bool is_force_finished;
+    bool is_force_finished_{false};
+
+    std::vector<RPCClosure<Void, remote::FlushDataAllResponse>>
+        flush_data_all_closures_;
+    std::vector<
+        RPCClosure<std::vector<int64_t>, remote::AcquireNodeGroupTermResponse>>
+        acquire_leader_term_closures_;
+    bool waiting_to_retry_op_{false};
+    uint64_t start_waiting_{0};
+    uint32_t op_forward_cnt_{0};
 };
 
 }  // namespace txservice

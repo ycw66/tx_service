@@ -146,6 +146,21 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
     alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
 
+    is_force_finished_ = false;
+    waiting_to_retry_op_ = false;
+    start_waiting_ = 0;
+    op_forward_cnt_ = 0;
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    for (uint32_t id = 0; id < ng_cnt; ++id)
+    {
+        flush_data_all_closures_.emplace_back(
+            RPCClosure<Void, remote::FlushDataAllResponse>());
+        acquire_leader_term_closures_.emplace_back(
+            RPCClosure<std::vector<int64_t>,
+                       remote::AcquireNodeGroupTermResponse>());
+    }
+
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
     TX_TRACE_ASSOCIATE(this,
                        &upgrade_all_intent_to_lock_op_,
@@ -168,8 +183,6 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
-
-    is_force_finished = false;
 }
 
 void UpsertTableIndexOp::Forward(TransactionExecution *txm)
@@ -274,7 +287,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
 
         LOG(INFO) << "Alter Table Index transaction write prepare log, txn: "
-                  << txm->TxNumber();
+                  << txm->TxNumber()
+                  << ". The schema version: " << txm->commit_ts_;
         op_ = &prepare_log_op_;
         FillPrepareLogRequest(txm);
         txm->PushOperation(&prepare_log_op_);
@@ -468,11 +482,21 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushPkDataOp");
             LOG(INFO) << "Alter Table Index transaction flush all old base"
                       << " table data into data store, txn: " << txm->TxNumber()
-                      << ", and commit ts: " << txm->commit_ts_;
+                      << ", and commit ts: " << txm->commit_ts_
+                      << ", and tx term: " << txm->TxTerm();
             assert(op_type_ == OperationType::AddIndex);
 
             CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout",
                                 { flush_data_timeout_ = 10; });
+
+            if (txm->TxStatus() == TxnStatus::Recovering &&
+                Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+            {
+                // If this txm is in the recovering state, should wait until the
+                // data log replay finished to avoid data lost.
+                return;
+            }
+
             flush_all_old_tuples_pk_op_.handle_timeout_ = true;
             flush_all_old_tuples_pk_op_.wait_secs_ = flush_data_timeout_;
             flush_all_old_tuples_pk_op_.op_func_ =
@@ -483,16 +507,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 hd_res.SetRefCnt(ng_cnt);
                 for (uint32_t nid = 0; nid < ng_cnt; ++nid)
                 {
-                    this->FlushDataIntoDataStore(
-                        this->table_key_.Name(),
-                        nid,
-                        txm->tx_number_.load(std::memory_order_relaxed),
-                        txm->tx_term_,
-                        txm->command_id_.load(std::memory_order_relaxed),
-                        txm->commit_ts_,
-                        false,
-                        SKIP_CHECK_TERM,
-                        hd_res);
+                    this->FlushDataIntoDataStore(this->table_key_.Name(),
+                                                 nid,
+                                                 txm->commit_ts_,
+                                                 false,
+                                                 hd_res);
                 }
 
                 // Start timing.
@@ -510,13 +529,23 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
+                if (flush_all_old_tuples_pk_op_.hd_result_.ErrorCode() ==
+                    CcErrorCode::REQUEST_LOST)
+                {
+                    // If the RPC server is not ready yet, wait a moment to
+                    // retry this operation.
+                    StartWait();
+                    if (!WaitUntil(10))
+                    {
+                        return;
+                    }
+                }
                 LOG(ERROR)
                     << "Upsert index for table: " << table_key_.Name().String()
-                    << ", flush all old tuples pk failed with error message: "
+                    << ", flush all old pk tuples failed with error message: "
                     << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
-                    << ", tx_number:" << txm->tx_number_;
-
-                LOG(INFO) << "Retry flush all old pk data.";
+                    << ", tx_number:" << txm->tx_number_
+                    << ". Retry flush all old pk data.";
                 txm->PushOperation(&flush_all_old_tuples_pk_op_);
                 txm->Process(flush_all_old_tuples_pk_op_);
             }
@@ -641,16 +670,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                      add_index_it != new_index_names.cend();
                      ++add_index_it)
                 {
-                    this->FlushDataIntoDataStore(
-                        add_index_it->first,
-                        nid,
-                        txm->tx_number_.load(std::memory_order_relaxed),
-                        txm->tx_term_,
-                        txm->command_id_.load(std::memory_order_relaxed),
-                        txm->commit_ts_,
-                        true,
-                        expected_term,
-                        hd_res);
+                    this->FlushDataIntoDataStore(add_index_it->first,
+                                                 nid,
+                                                 txm->commit_ts_,
+                                                 true,
+                                                 hd_res,
+                                                 expected_term);
                 }
             }
 
@@ -673,7 +698,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     << " tx_number:" << txm->tx_number_;
 
                 if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
-                    CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                    flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
+                        CcErrorCode::REQUEST_LOST)
                 {
                     LOG(WARNING) << "Flush old sk data failed because of leader"
                                     " transferred, and retry generate packed sk"
@@ -968,7 +995,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             CODE_FAULT_INJECTOR("alter_schema_term_changed", {
                 LOG(INFO) << "FaultInject  alter_schema_term_changed";
-                is_force_finished = true;
+                is_force_finished_ = true;
             });
             if (txm->commit_ts_ == tx_op_failed_ts_)
             {
@@ -978,7 +1005,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             else
             {
                 assert(txm->commit_ts_ > 0);
-                if (is_force_finished)
+                if (is_force_finished_)
                 {
                     txm->upsert_resp_->Finish(UpsertResult::Unverified);
                 }
@@ -1112,7 +1139,24 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     clean_log_op_.ResetHandlerTxm(txm);
     acquire_terms_result_.ResetTxm(txm);
     post_write_result_.ResetTxm(txm);
-    is_force_finished = false;
+    is_force_finished_ = false;
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    uint32_t old_cnt = flush_data_all_closures_.size();
+    for (uint32_t id = old_cnt; id < ng_cnt; ++id)
+    {
+        flush_data_all_closures_.emplace_back(
+            RPCClosure<Void, remote::FlushDataAllResponse>());
+    }
+    old_cnt = acquire_leader_term_closures_.size();
+    for (uint32_t id = old_cnt; id < ng_cnt; ++id)
+    {
+        acquire_leader_term_closures_.emplace_back(
+            RPCClosure<std::vector<int64_t>,
+                       remote::AcquireNodeGroupTermResponse>());
+    }
+    waiting_to_retry_op_ = false;
+    start_waiting_ = 0;
+    op_forward_cnt_ = 0;
 }
 
 void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
@@ -1182,41 +1226,30 @@ void UpsertTableIndexOp::ForceToFinish(TransactionExecution *txm)
 {
     clean_log_op_.hd_result_.SetFinished();
     op_ = &clean_log_op_;
-    is_force_finished = true;
+    is_force_finished_ = true;
     Forward(txm);
 }
 
 /**
  * @param is_dirty If true, should use the dirty table schema.
- * @param expected_term Reject this operation if expected_term doesn't match the
- * current leader term of this Node Group if the value is not
- * SKIP_CHECK_TERM(-2).
  */
 void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
                                                 NodeGroupId ng_id,
-                                                TxNumber tx_number,
-                                                int64_t tx_term,
-                                                uint16_t command_id,
                                                 uint64_t data_sync_ts,
                                                 bool is_dirty,
-                                                int64_t expected_term,
-                                                CcHandlerResult<Void> &hres)
+                                                CcHandlerResult<Void> &hres,
+                                                int64_t ng_term)
 {
     LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 
     if (dest_node_id == local_cc_shards->NodeId())
     {
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0 || (expected_term > 0 && ng_term != expected_term))
+        if (ng_term < 0)
         {
-            // Leader transferred.
-            hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            LOG(ERROR) << "FlushDataIntoDataStore: the leader of the "
-                          "destinate node group transferred for ng#"
-                       << ng_id;
-            return;
+            ng_term = Sharder::Instance().LeaderTerm(ng_id);
         }
+        assert(ng_term > 0);
         local_cc_shards->EnqueueDataSyncTask(table_name,
                                              ng_id,
                                              ng_term,
@@ -1247,91 +1280,49 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
 
         remote::CcRpcService_Stub stub(&channel);
         remote::FlushDataAllRequest request;
-        request.set_tx_number(tx_number);
-        request.set_tx_term(tx_term);
-        request.set_command_id(command_id);
         request.set_table_name_str(table_name.String());
         request.set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
         request.set_node_group_id(ng_id);
-        request.set_node_group_term(expected_term);
-        request.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+        request.set_node_group_term(ng_term);
         request.set_data_sync_ts(data_sync_ts);
         request.set_is_dirty(is_dirty);
         // This will be deleted after the response been handled.
-        remote::FlushDataAllResponse *response =
-            new remote::FlushDataAllResponse();
+        std::unique_ptr<remote::FlushDataAllResponse> response =
+            std::make_unique<remote::FlushDataAllResponse>();
+        remote::FlushDataAllResponse *resp_ptr = response.get();
 
-        brpc::Controller *cntl = new brpc::Controller();
+        flush_data_all_closures_.at(ng_id).Reset(&hres, std::move(response));
+        flush_data_all_closures_.at(ng_id).post_lambda_ =
+            [ng_id](CcHandlerResult<Void> *hd_res,
+                    remote::FlushDataAllResponse *resp)
+        {
+            if (resp->error_code())
+            {
+                CcErrorCode error_code =
+                    static_cast<CcErrorCode>(resp->error_code());
+                LOG(ERROR)
+                    << "Handle flush data all response: Failed with error"
+                    << " message: " << cc_error_messages.at(error_code);
+                hd_res->SetError(error_code);
+            }
+            else
+            {
+                DLOG(INFO)
+                    << "Handle flush data all response successfully of ng#"
+                    << ng_id;
+                hd_res->SetFinished();
+            }
+        };
+
+        brpc::Controller *cntl =
+            flush_data_all_closures_.at(ng_id).Controller();
         cntl->set_timeout_ms(-1);
         // Asynchronous mode
-        google::protobuf::Closure *done = brpc::NewCallback(
-            &HandleFlushDataIntoDataStoreResponse, cntl, response);
-        stub.FlushDataAll(cntl, &request, response, done);
-        DLOG(INFO) << "Remote RPC FlushDataIntoDataStore of ng#" << ng_id
-                   << ".";
+        stub.FlushDataAll(
+            cntl, &request, resp_ptr, &flush_data_all_closures_.at(ng_id));
+        DLOG(INFO) << "Acquire FlushDataAll service of ng#" << ng_id << ".";
     }
-}
-
-void UpsertTableIndexOp::HandleFlushDataIntoDataStoreResponse(
-    brpc::Controller *cntl, remote::FlushDataAllResponse *response)
-{
-    // std::unique_ptr make sure cntl/response will be deleted before
-    // returning.
-    std::unique_ptr<brpc::Controller> cntl_guard(cntl);
-    std::unique_ptr<remote::FlushDataAllResponse> response_guard(response);
-
-    if (cntl->Failed())
-    {
-        // RPC failed, fields in response are undefined, cannot use.
-        // Special case, cannot set HandlerResult.
-        LOG(ERROR) << "Failed to process the FlushDataAll RPC. Error code: "
-                   << cntl->ErrorCode() << ". Error Msg: " << cntl->ErrorText();
-        return;
-    }
-
-    // Handle response
-    CcHandlerResult<Void> *hd_res = nullptr;
-
-    uint32_t tx_node_id = (response->tx_number() >> 32L) >> 10L;
-    int64_t tx_term = response->tx_term();
-    if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-    {
-        LOG(WARNING) << "Flush data all response, but tx node has failed.";
-        // The tx node has failed. Pointer stability does not hold anymore.
-        return;
-    }
-    else
-    {
-        hd_res =
-            reinterpret_cast<CcHandlerResult<Void> *>(response->handler_addr());
-
-        if (hd_res->Txm()->TxNumber() != response->tx_number() ||
-            hd_res->Txm()->CommandId() != response->command_id())
-        {
-            LOG(WARNING) << "Flush data all response, but original tx has"
-                            " terminated.";
-            // The original tx has terminated and the tx machine has been
-            // recycled. The response is directed to an obsolete tx. Skips
-            // setting the cc handler result.
-            return;
-        }
-    }
-
-    if (response->error_code())
-    {
-        CcErrorCode error_code =
-            static_cast<CcErrorCode>(response->error_code());
-        LOG(ERROR) << "Handle flush data all response: Failed with error"
-                   << " message: " << cc_error_messages.at(error_code);
-        hd_res->SetError(error_code);
-    }
-    else
-    {
-        DLOG(INFO) << "Handle flush data all response successfully.";
-        hd_res->SetFinished();
-    }
-    // Closure created by NewCallback deletes itself at the end of Run.
 }
 
 void UpsertTableIndexOp::ResetLeaderTerms()
@@ -1351,11 +1342,7 @@ void UpsertTableIndexOp::ResetLeaderTerms()
 }
 
 void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
-    NodeGroupId ng_id,
-    TxNumber tx_number,
-    int64_t tx_term,
-    uint16_t command_id,
-    CcHandlerResult<std::vector<int64_t>> &hd_res)
+    NodeGroupId ng_id, CcHandlerResult<std::vector<int64_t>> &hd_res)
 {
     int64_t term = INIT_TERM;
     uint32_t leader_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -1364,12 +1351,19 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
     {
         // This node is the leader of the input node group.
         term = Sharder::Instance().LeaderTerm(ng_id);
-        assert(term > 0);
+        if (term > 0)
+        {
+            auto &ng_leader_terms = hd_res.Value();
+            ng_leader_terms.at(ng_id) = term;
 
-        auto &ng_leader_terms = hd_res.Value();
-        ng_leader_terms.at(ng_id) = term;
-
-        hd_res.SetFinished();
+            hd_res.SetFinished();
+        }
+        else
+        {
+            LOG(WARNING) << "Node[" << leader_node_id
+                         << "] is not the leader for ng#" << ng_id;
+            hd_res.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
     }
     else
     {
@@ -1393,91 +1387,49 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
         remote::CcRpcService_Stub stub(&channel);
         remote::AcquireNodeGroupTermRequest request;
         request.set_node_group_id(ng_id);
-        request.set_tx_number(tx_number);
-        request.set_tx_term(tx_term);
-        request.set_command_id(command_id);
-        request.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
         // This will be deleted after the response been handled.
-        remote::AcquireNodeGroupTermResponse *response_ptr =
-            new remote::AcquireNodeGroupTermResponse();
+        std::unique_ptr<remote::AcquireNodeGroupTermResponse> response =
+            std::make_unique<remote::AcquireNodeGroupTermResponse>();
+        remote::AcquireNodeGroupTermResponse *resp_ptr = response.get();
 
-        brpc::Controller *cntl_ptr = new brpc::Controller();
+        acquire_leader_term_closures_.at(ng_id).Reset(&hd_res,
+                                                      std::move(response));
+        acquire_leader_term_closures_.at(ng_id).post_lambda_ =
+            [](CcHandlerResult<std::vector<int64_t>> *hd_res,
+               remote::AcquireNodeGroupTermResponse *resp)
+        {
+            uint32_t ng_id = resp->node_group_id();
+            int64_t term = resp->node_group_term();
+            if (term < 0)
+            {
+                LOG(ERROR)
+                    << "Handle acquire node group leader term response of ng#"
+                    << ng_id << ", request node not leader.";
+                hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            }
+            else
+            {
+                LOG(INFO)
+                    << "Handle acquire node group leader term response of ng#"
+                    << ng_id << " with term: " << term;
+                auto &ng_leader_terms = hd_res->Value();
+                ng_leader_terms.at(ng_id) = term;
+                hd_res->SetFinished();
+            }
+        };
+
+        brpc::Controller *cntl_ptr =
+            acquire_leader_term_closures_.at(ng_id).Controller();
         cntl_ptr->set_timeout_ms(1000);
         // Asynchronous mode
-        google::protobuf::Closure *done = brpc::NewCallback(
-            &HandleAcquireNodeGroupLeaderTermResponse, cntl_ptr, response_ptr);
-        stub.AcquireNodeGroupLeaderTerm(cntl_ptr, &request, response_ptr, done);
+        stub.AcquireNodeGroupLeaderTerm(
+            cntl_ptr,
+            &request,
+            resp_ptr,
+            &acquire_leader_term_closures_.at(ng_id));
+        DLOG(INFO) << "Acquire AcquireNodeGroupLeaderTerm service of ng#"
+                   << ng_id << ".";
     }
-}
-
-void UpsertTableIndexOp::HandleAcquireNodeGroupLeaderTermResponse(
-    brpc::Controller *cntl, remote::AcquireNodeGroupTermResponse *response)
-{
-    // std::unique_ptr make sure cntl/response will be deleted before
-    // returning.
-    std::unique_ptr<brpc::Controller> cntl_guard(cntl);
-    std::unique_ptr<remote::AcquireNodeGroupTermResponse> response_guard(
-        response);
-
-    if (cntl->Failed())
-    {
-        // RPC failed, fields in response are undefined, cannot use.
-        // Special case, cannot set HandlerResult.
-        LOG(ERROR) << "Failed to process the AcquireNodeGroupLeaderTerm RPC. "
-                      "Error code: "
-                   << cntl->ErrorCode() << ". Error Msg: " << cntl->ErrorText();
-        return;
-    }
-
-    // Handle response
-    CcHandlerResult<std::vector<int64_t>> *hd_res = nullptr;
-
-    uint32_t tx_node_id = (response->tx_number() >> 32L) >> 10L;
-    int64_t tx_term = response->tx_term();
-    if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-    {
-        LOG(WARNING) << "Acquire node group leader term response, but tx node "
-                        "has failed.";
-        // The tx node has failed. Pointer stability does not hold anymore.
-        return;
-    }
-    else
-    {
-        hd_res = reinterpret_cast<CcHandlerResult<std::vector<int64_t>> *>(
-            response->handler_addr());
-
-        if (hd_res->Txm()->TxNumber() != response->tx_number() ||
-            hd_res->Txm()->CommandId() != response->command_id())
-        {
-            LOG(WARNING)
-                << "Acquire node group leader term response, but original tx "
-                   "has terminated.";
-            // The original tx has terminated and the tx machine has been
-            // recycled. The response is directed to an obsolete tx. Skips
-            // setting the cc handler result.
-            return;
-        }
-    }
-
-    uint32_t ng_id = response->node_group_id();
-    int64_t term = response->node_group_term();
-    if (term < 0)
-    {
-        hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-
-        LOG(ERROR) << "Handle acquire node group leader term response for ng#"
-                   << ng_id << ", request node not leader.";
-    }
-    else
-    {
-        auto &ng_leader_terms = hd_res->Value();
-        ng_leader_terms.at(ng_id) = term;
-        hd_res->SetFinished();
-
-        LOG(INFO) << "Handle acquire node group leader term response for ng#"
-                  << ng_id << ", and term: " << term;
-    }
-    // Closure created by NewCallback deletes itself at the end of Run.
 }
 
 bool UpsertTableIndexOp::AcquireRangeReadLocks(
@@ -1606,16 +1558,10 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
             acquire_terms_result_.Reset();
             acquire_terms_result_.SetRefCnt(request_count);
             acquire_terms_finished = false;
-            ++(txm->command_id_);
 
             for (auto ng_id : target_ng_ids)
             {
-                AcquireNodeGroupLeaderTerm(
-                    ng_id,
-                    txm->tx_number_.load(std::memory_order_relaxed),
-                    txm->tx_term_,
-                    txm->command_id_,
-                    acquire_terms_result_);
+                AcquireNodeGroupLeaderTerm(ng_id, acquire_terms_result_);
             }
 
             {
@@ -1651,6 +1597,12 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
                     LOG(ERROR) << "Acquire node group leader terms failed with "
                                   "error message: "
                                << acquire_terms_result_.ErrorMsg();
+                    if (acquire_terms_result_.ErrorCode() ==
+                        CcErrorCode::REQUEST_LOST)
+                    {
+                        // Wait a moment to retry this request.
+                        std::this_thread::sleep_for(8s);
+                    }
                     auto &terms = acquire_terms_result_.Value();
                     auto new_it = target_ng_ids.begin();
                     auto old_it = target_ng_ids.begin();
@@ -1881,6 +1833,8 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     ReleaseRangeReadLocks(acquire_range_lock_txm, true);
 #endif
 
+    DLOG(INFO) << "UploadWithoutDataLog: Finished with result code: "
+               << (uint32_t) post_write_result_.ErrorCode();
     return !post_write_result_.IsError();
 }
 
@@ -2424,4 +2378,39 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
 }
 
+void UpsertTableIndexOp::StartWait()
+{
+    if (!waiting_to_retry_op_)
+    {
+        start_waiting_ =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        op_forward_cnt_ = 0;
+        waiting_to_retry_op_ = true;
+    }
+}
+bool UpsertTableIndexOp::WaitUntil(int wait_secs)
+{
+    ++op_forward_cnt_;
+    if (op_forward_cnt_ == OpLoopCnt)
+    {
+        op_forward_cnt_ = 0;
+        uint64_t duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::seconds(wait_secs))
+                .count();
+        uint64_t now_ts =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        if (now_ts - start_waiting_ > duration)
+        {
+            start_waiting_ = now_ts;
+            waiting_to_retry_op_ = false;
+            return true;
+        }
+    }
+    return false;
+}
 }  // namespace txservice
