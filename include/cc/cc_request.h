@@ -1,5 +1,8 @@
 #pragma once
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+
 #include <algorithm>  // std::min
 #include <atomic>
 #include <condition_variable>
@@ -2860,7 +2863,7 @@ public:
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock lk(mux_);
         TEntry *tx_entry = ccs.LocateTx(tx_number_);
         if (tx_entry == nullptr)
         {
@@ -2886,8 +2889,11 @@ public:
 
     void Wait()
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this]() { return finish_; });
+        std::unique_lock lk(mux_);
+        while (!finish_)
+        {
+            cv_.wait(lk);
+        }
     }
 
     TxnStatus TxStatus() const
@@ -2904,8 +2910,8 @@ private:
     TxnStatus tx_status_;
     bool exists_;
     bool finish_;
-    std::mutex mux_;
-    std::condition_variable cv_;
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::CheckTxStatusCc *r);
