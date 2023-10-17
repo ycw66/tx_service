@@ -3,6 +3,7 @@
 #include <memory>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "catalog_key_record.h"
 #include "scan.h"
@@ -378,8 +379,11 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 struct ScanBatchTuple
 {
     ScanBatchTuple() = default;
+    ScanBatchTuple(const TxKey *key, TxRecord *rec) : key_(key), record_(rec)
+    {
+    }
     ScanBatchTuple(const TxKey *key,
-                   const TxRecord *rec,
+                   TxRecord *rec,
                    RecordStatus status,
                    uint64_t version)
         : key_(key), record_(rec), status_(status), version_ts_(version)
@@ -387,11 +391,10 @@ struct ScanBatchTuple
     }
 
     ScanBatchTuple(const TxKey *key,
-                   const TxRecord *rec,
+                   TxRecord *rec,
                    RecordStatus status,
                    uint64_t version,
-                   const CcEntryAddr &cce_addr,
-                   LockType lock_type)
+                   const CcEntryAddr &cce_addr)
         : key_(key),
           record_(rec),
           status_(status),
@@ -410,7 +413,7 @@ struct ScanBatchTuple
     }
 
     const TxKey *key_{nullptr};
-    const TxRecord *record_{nullptr};
+    TxRecord *record_{nullptr};
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
     const CcEntryAddr cce_addr_;
@@ -769,6 +772,54 @@ struct CleanCcEntryForTestTxRequest
     const TxKey *key_;
     bool only_archives_;
     bool flush_;
+};
+
+// Batch read records from pk
+struct BatchReadTxRequest : public TemplateTxRequest<BatchReadTxRequest, Void>
+{
+public:
+    BatchReadTxRequest(const TableName *tab_name,
+                       std::vector<ScanBatchTuple> &batch_read_pri,
+                       bool is_for_write = false,
+                       bool is_for_share = false,
+                       bool read_local = false,
+                       const std::function<void()> *yield_fptr = nullptr,
+                       const std::function<void()> *resume_fptr = nullptr,
+                       TransactionExecution *txm = nullptr,
+                       uint64_t corresponding_sk_commit_ts = 0)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          tab_name_(tab_name),
+          batch_read_pri_(batch_read_pri),
+          is_for_write_(is_for_write),
+          is_for_share_(is_for_share),
+          read_local_(read_local),
+          corresponding_sk_commit_ts_(corresponding_sk_commit_ts)
+    {
+    }
+
+    void Set(const TableName *tab_name,
+             std::vector<ScanBatchTuple> &batch_read_pri,
+             bool is_for_write = false,
+             bool is_for_share = false,
+             bool read_local = false,
+             uint64_t corresponding_sk_commit_ts = 0)
+    {
+        tab_name_ = tab_name;
+        batch_read_pri_ = std::move(batch_read_pri);
+        is_for_write_ = is_for_write;
+        is_for_share_ = is_for_share;
+        read_local_ = read_local;
+        corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
+    }
+
+    const TableName *tab_name_;
+    std::vector<ScanBatchTuple> &batch_read_pri_;
+    bool is_for_write_;  // used for "select ... for update".
+    bool is_for_share_;  // used for "select ... lock in share mode".
+    // TODO(ZX) unique_sk_read also needs is_covering_keys_
+    // bool is_covering_keys_;
+    bool read_local_;
+    uint64_t corresponding_sk_commit_ts_;
 };
 
 }  // namespace txservice

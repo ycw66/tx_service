@@ -30,6 +30,7 @@ struct ScanOpenTxRequest;
 struct ScanBatchTxRequest;
 struct ScanBatchTuple;
 struct AnalyzeTableTxRequest;
+struct BatchReadTxRequest;
 
 #define RETRY_NUM 5
 
@@ -1121,4 +1122,54 @@ private:
     std::unordered_map<uint16_t, BucketMigrateInfo> bucket_migrate_infos_;
 };
 
+struct BatchReadOperation : TransactionOperation
+{
+public:
+    explicit BatchReadOperation(TransactionExecution *txm);
+
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    CcProtocol protocol_{CcProtocol::OCC};
+    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
+    BatchReadTxRequest *batch_read_tx_req_{nullptr};
+    std::vector<CcHandlerResult<ReadKeyResult>> vct_hd_result_;
+    bool local_cache_checked_;        // If checked local cache for this op
+    std::atomic_int32_t atm_cnt_{0};  // The count of unfinished records to read
+    std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
+    TransactionExecution *txm_;
+
+#ifdef RANGE_PARTITION_ENABLED
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    std::vector<uint32_t> vct_key_shard_code_;
+    bool range_locked_;
+#endif
+};
+
+#ifdef RANGE_PARTITION_ENABLED
+struct LockBatchReadRangesOp : public TransactionOperation
+{
+public:
+    explicit LockBatchReadRangesOp(TransactionExecution *txm)
+        : range_hd_result_(txm)
+    {
+    }
+
+    void Forward(TransactionExecution *txm) override;
+
+    void Reset(std::vector<txservice::ScanBatchTuple> &batch_key,
+               std::vector<CcHandlerResult<ReadKeyResult>> &vct_hd_result,
+               std::vector<uint32_t> &vct_key_shard_code,
+               TableName &range_table_name);
+    void FetchResult(TransactionExecution *txm);
+
+    std::vector<txservice::ScanBatchTuple> *batch_key_{nullptr};
+    int32_t curr_pos_;
+    TableName *range_table_name_{nullptr};
+    RangeRecord range_rec_;
+    std::vector<CcHandlerResult<ReadKeyResult>> *vct_hd_result_{nullptr};
+    CcHandlerResult<ReadKeyResult> range_hd_result_;
+    std::vector<uint32_t> *vct_key_shard_code_{nullptr};
+};
+#endif
 }  // namespace txservice

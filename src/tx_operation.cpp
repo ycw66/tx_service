@@ -5207,4 +5207,231 @@ void ClusterScaleOp::FillUpdateClusterConfigLogRequest(
         ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate);
     log_rec->mutable_node_terms()->clear();
 }
+
+BatchReadOperation::BatchReadOperation(TransactionExecution *txm) : txm_(txm)
+{
+}
+
+void BatchReadOperation::Reset()
+{
+    size_t cnt = batch_read_tx_req_->batch_read_pri_.size();
+    if (cnt > vct_hd_result_.size())
+    {
+        vct_hd_result_.reserve(cnt);
+    }
+    else
+    {
+        for (size_t i = vct_hd_result_.size(); i > cnt; i--)
+        {
+            vct_hd_result_.pop_back();
+        }
+    }
+
+    atm_cnt_.store(cnt, std::memory_order_relaxed);
+    atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    local_cache_checked_ = false;
+
+    for (size_t i = 0; i < cnt; i++)
+    {
+        if (i < vct_hd_result_.size())
+        {
+            vct_hd_result_[i].Value().Reset();
+            vct_hd_result_[i].Reset();
+        }
+        else
+        {
+            CcHandlerResult<ReadKeyResult> hr(txm_);
+            hr.Value().Reset();
+            hr.Reset();
+            hr.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
+            {
+                CcErrorCode err = res->ErrorCode();
+                if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                {
+                    atm_err_code_.store(err, std::memory_order_relaxed);
+                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+                else if (err == CcErrorCode::NO_ERROR)
+                {
+                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    atm_err_code_.store(err, std::memory_order_relaxed);
+                    atm_cnt_.store(-1, std::memory_order_relaxed);
+                }
+            };
+
+            vct_hd_result_.push_back(std::move(hr));
+        }
+    }
+
+#ifdef RANGE_PARTITION_ENABLED
+    range_table_name_ = TableName(batch_read_tx_req_->tab_name_->StringView(),
+                                  TableType::RangePartition);
+    range_locked_ = false;
+    vct_key_shard_code_.resize(cnt);
+#endif
+    op_start_ = metrics::TimePoint::max();
+}
+
+void BatchReadOperation::Forward(TransactionExecution *txm)
+{
+    if (!is_running_ &&
+        atm_err_code_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
+    {
+        txm->Process(*this);
+    }
+
+    if (atm_cnt_.load(std::memory_order_relaxed) < 0)
+    {
+        txm->PostProcess(*this);
+    }
+    else if (atm_cnt_.load(std::memory_order_relaxed) == 0)
+    {
+        std::set<uint32_t> ngset;
+        int cnt = 0;
+        for (size_t i = 0; i < vct_hd_result_.size(); i++)
+        {
+            const CcEntryAddr &cce_addr = vct_hd_result_[i].Value().cce_addr_;
+            if (retry_num_ == 0)
+            {
+                if (ngset.find(cce_addr.NodeGroupId()) == ngset.end())
+                {
+                    Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
+                    ngset.insert(cce_addr.NodeGroupId());
+                    retry_num_ = -1;
+                }
+            }
+            else if (vct_hd_result_[i].ErrorCode() ==
+                     CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+            {
+                vct_hd_result_[i].Value().Reset();
+                vct_hd_result_[i].Reset();
+                cnt++;
+            }
+        }
+
+        if (cnt > 0)
+        {
+            atm_cnt_.fetch_add(cnt, std::memory_order_relaxed);
+            atm_err_code_.store(CcErrorCode::NO_ERROR,
+                                std::memory_order_relaxed);
+            ReRunOp(txm);
+            retry_num_--;
+            return;
+        }
+
+        txm->PostProcess(*this);
+    }
+    else
+    {
+        bool timeout = txm->IsTimeOut();
+
+        for (size_t i = 0; timeout && i < vct_hd_result_.size(); i++)
+        {
+            const CcEntryAddr &cce_addr = vct_hd_result_[i].Value().cce_addr_;
+            if (!vct_hd_result_[i].Value().is_local_ && cce_addr.Term() < 0)
+            {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    this,
+                    "Forward.Term<0,IsTimeout || TxNodeFail",
+                    txm,
+                    (
+                        [txm]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(txm->TxNumber()))
+                                .append(",\"term\":")
+                                .append(std::to_string(txm->TxTerm()));
+                        }));
+
+                bool force_success = vct_hd_result_[i].ForceError();
+                if (force_success)
+                {
+                    txm->PostProcess(*this);
+                    break;
+                }
+            }
+            else if (cce_addr.Term() > 0)
+            {
+                txm->cc_handler_->BlockCcReqCheck(
+                    txm->TxNumber(),
+                    txm->TxTerm(),
+                    txm->CommandId(),
+                    cce_addr,
+                    &vct_hd_result_[i],
+                    ResultTemplateType::ReadKeyResult);
+            }
+        }
+    }
+}
+
+#ifdef RANGE_PARTITION_ENABLED
+void LockBatchReadRangesOp::Reset(
+    std::vector<txservice::ScanBatchTuple> &batch_key,
+    std::vector<CcHandlerResult<ReadKeyResult>> &vct_hd_result,
+    std::vector<uint32_t> &vct_key_shard_code,
+    TableName &range_table_name)
+{
+    curr_pos_ = 0;
+    batch_key_ = &batch_key;
+    vct_hd_result_ = &vct_hd_result;
+    vct_key_shard_code_ = &vct_key_shard_code;
+    range_table_name_ = &range_table_name;
+    range_hd_result_.Value().Reset();
+    range_hd_result_.Reset();
+}
+
+void LockBatchReadRangesOp::Forward(TransactionExecution *txm)
+{
+    if (!range_hd_result_.IsFinished())
+    {
+        return;
+    }
+
+    if (range_hd_result_.IsError())
+    {
+        txm->PostProcess(*this);
+        return;
+    }
+
+    FetchResult(txm);
+
+    if (curr_pos_ < (int32_t) batch_key_->size())
+    {
+        txm->Process(*this);
+    }
+    else
+    {
+        txm->PostProcess(*this);
+    }
+}
+
+void LockBatchReadRangesOp::FetchResult(TransactionExecution *txm)
+{
+    const ReadKeyResult &read_res = range_hd_result_.Value();
+    if (!read_res.cce_addr_.Empty())
+    {
+        txm->rw_set_.AddRead(
+            read_res.cce_addr_, read_res.ts_, range_table_name_);
+    }
+
+    uint32_t key_shard_code = range_rec_.GetRangeOwnerNg()->BucketOwner();
+    (*vct_key_shard_code_)[curr_pos_] = key_shard_code;
+
+    curr_pos_++;
+    while (curr_pos_ < (int32_t) batch_key_->size())
+    {
+        if (range_rec_.end_key_ != nullptr &&
+            range_rec_.end_key_->Type() != KeyType::PositiveInf &&
+            *range_rec_.end_key_ <= *batch_key_->at(curr_pos_).key_)
+            break;
+
+        (*vct_key_shard_code_)[curr_pos_] = key_shard_code;
+        curr_pos_++;
+    }
+}
+
+#endif
 }  // namespace txservice

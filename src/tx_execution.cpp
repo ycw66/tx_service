@@ -55,6 +55,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       init_txn_(this),
 #ifdef RANGE_PARTITION_ENABLED
       unlock_range_op_(this),
+      lock_batch_read_ranges_(this),
 #endif
       read_(this),
       scan_open_(this),
@@ -73,7 +74,8 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       analyze_table_all_op_(this),
       fault_inject_op_(this),
       clean_entry_op_(this),
-      abundant_lock_op_(this)
+      abundant_lock_op_(this),
+      batch_read_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, cc_handler_);
 
@@ -2209,8 +2211,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     cc_scan_tuple->Record(),
                                                     RecordStatus::Normal,
                                                     cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_,
-                                                    scan_tuple_lock_type);
+                                                    cc_scan_tuple->cce_addr_);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -2221,8 +2222,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     nullptr,
                                                     cc_scan_tuple->rec_status_,
                                                     cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_,
-                                                    scan_tuple_lock_type);
+                                                    cc_scan_tuple->cce_addr_);
                         }
 #else
                         // When the record status is not Normal, the record
@@ -2233,11 +2233,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                 : nullptr;
 
                         scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                rec,
+                                                const_cast<TxRecord *>(rec),
                                                 cc_scan_tuple->rec_status_,
                                                 cc_scan_tuple->key_ts_,
-                                                cc_scan_tuple->cce_addr_,
-                                                scan_tuple_lock_type);
+                                                cc_scan_tuple->cce_addr_);
 #endif
                     }
 
@@ -2422,8 +2421,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     cc_scan_tuple->Record(),
                                                     RecordStatus::Normal,
                                                     cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_,
-                                                    scan_tuple_lock_type);
+                                                    cc_scan_tuple->cce_addr_);
                         }
                         else if (cc_scan_tuple->rec_status_ ==
                                  RecordStatus::Deleted)
@@ -2434,8 +2432,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     nullptr,
                                                     cc_scan_tuple->rec_status_,
                                                     cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_,
-                                                    scan_tuple_lock_type);
+                                                    cc_scan_tuple->cce_addr_);
                         }
 #else
                         // When the record status is not Normal, the record
@@ -2446,11 +2443,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                 : nullptr;
 
                         scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                rec,
+                                                const_cast<TxRecord *>(rec),
                                                 cc_scan_tuple->rec_status_,
                                                 cc_scan_tuple->key_ts_,
-                                                cc_scan_tuple->cce_addr_,
-                                                scan_tuple_lock_type);
+                                                cc_scan_tuple->cce_addr_);
 #endif
                     }
 
@@ -4931,4 +4927,305 @@ void TransactionExecution::PostProcess(KickoutDataAllOp &kickout_data_all_op)
     Forward();
 }
 
+void TransactionExecution::ProcessTxRequest(BatchReadTxRequest &batch_read_req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &batch_read_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    if (tx_term_ < 0)
+    {
+        batch_read_req.SetError(TxErrorCode::TX_INIT_FAIL);
+        return;
+    }
+
+    void_resp_ = &batch_read_req.tx_result_;
+
+    batch_read_op_.batch_read_tx_req_ = &batch_read_req;
+    batch_read_op_.Reset();
+
+    PushOperation(&batch_read_op_);
+    Process(batch_read_op_);
+}
+
+void TransactionExecution::Process(BatchReadOperation &batch_read_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &batch_read_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    batch_read_op.is_running_ = true;
+    const TableName &table_name = *batch_read_op.batch_read_tx_req_->tab_name_;
+    std::vector<txservice::ScanBatchTuple> &batch_read_pri =
+        batch_read_op.batch_read_tx_req_->batch_read_pri_;
+    const uint64_t corresponding_sk_commit_ts =
+        batch_read_op.batch_read_tx_req_->corresponding_sk_commit_ts_;
+    batch_read_op.protocol_ = protocol_;
+    batch_read_op.iso_level_ = iso_level_;
+    if (batch_read_op.batch_read_tx_req_->is_for_share_ &&
+        iso_level_ < IsolationLevel::RepeatableRead)
+    {
+        batch_read_op.iso_level_ = IsolationLevel::RepeatableRead;
+    }
+    uint64_t read_ts = 0;
+    if (batch_read_op.iso_level_ == IsolationLevel::Snapshot)
+    {
+        read_ts = start_ts_;
+    }
+    else if (corresponding_sk_commit_ts != 0)
+    {
+        read_ts = corresponding_sk_commit_ts;
+    }
+
+    if (!batch_read_op.local_cache_checked_)
+    {
+        for (size_t i = 0; i < batch_read_pri.size(); i++)
+        {
+            const TxKey &key = *batch_read_pri[i].key_;
+            TxRecord &rec = *batch_read_pri[i].record_;
+
+            // Step 1: fast path if key is update by the same tx.
+            const WriteSetEntry *write = rw_set_.FindWrite(table_name, key);
+            if (write != nullptr)
+            {
+                if (write->op_ == OperationType::Delete)
+                {
+                    batch_read_op.vct_hd_result_[i].Value().rec_status_ =
+                        RecordStatus::Deleted;
+                }
+                else
+                {
+                    rec.Copy(*write->rec_.get());
+                    batch_read_op.vct_hd_result_[i].Value().rec_status_ =
+                        RecordStatus::Normal;
+                }
+
+                batch_read_op.vct_hd_result_[i].SetFinished();
+                continue;
+            }
+
+            // Step 2: fast path if key is the same as last read key.
+            const TxRecord *cache_rec = rw_set_.FindCacheRead(table_name, key);
+            if (cache_rec != nullptr)
+            {
+                rec.Copy(*cache_rec);
+                batch_read_op.vct_hd_result_[i].Value().rec_status_ =
+                    RecordStatus::Normal;
+                batch_read_op.vct_hd_result_[i].SetFinished();
+                continue;
+            }
+        }
+
+        batch_read_op.local_cache_checked_ = true;
+    }
+
+#ifdef RANGE_PARTITION_ENABLED
+    if (!batch_read_op.range_locked_ &&
+        batch_read_op.atm_cnt_.load(std::memory_order_relaxed) > 0)
+    {
+        batch_read_op.is_running_ = false;
+        lock_batch_read_ranges_.Reset(batch_read_pri,
+                                      batch_read_op.vct_hd_result_,
+                                      batch_read_op.vct_key_shard_code_,
+                                      batch_read_op.range_table_name_);
+
+        batch_read_op.range_locked_ = true;
+        PushOperation(&lock_batch_read_ranges_);
+        Process(lock_batch_read_ranges_);
+        return;
+    }
+#endif
+
+    for (size_t i = 0; i < batch_read_pri.size(); i++)
+    {
+        if (batch_read_op.vct_hd_result_[i].IsFinished())
+        {
+            continue;
+        }
+
+        const TxKey &key = *batch_read_pri[i].key_;
+        TxRecord &rec = *batch_read_pri[i].record_;
+
+        uint32_t key_shard_code = 0;
+#ifdef RANGE_PARTITION_ENABLED
+        uint32_t residual = key.Hash() & 0x3FF;
+        key_shard_code = batch_read_op.vct_key_shard_code_[i] << 10 | residual;
+#else
+        key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+#endif
+        // Step 3: do read.
+
+        cc_handler_->Read(table_name,
+                          key,
+                          key_shard_code,
+                          rec,
+                          ReadType::Inside,
+                          tx_number_.load(std::memory_order_relaxed),
+                          tx_term_,
+                          command_id_.load(std::memory_order_relaxed),
+                          read_ts,
+                          batch_read_op.vct_hd_result_[i],
+                          batch_read_op.iso_level_,
+                          batch_read_op.protocol_,
+                          batch_read_op.batch_read_tx_req_->is_for_write_);
+    }
+
+    if (batch_read_op_.atm_cnt_.load(std::memory_order_relaxed) == 0)
+    {
+        PostProcess(batch_read_op);
+    }
+    else
+    {
+        StartTiming();
+    }
+}
+
+void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &read,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (batch_read_op.atm_err_code_.load(std::memory_order_relaxed) !=
+        CcErrorCode::NO_ERROR)
+    {
+        DLOG(ERROR) << "BatchReadOperation failed for cc error:"
+                    << std::to_string(
+                           static_cast<int>(batch_read_op.atm_err_code_.load(
+                               std::memory_order_relaxed)));
+        void_resp_->FinishError(ConvertCcError(
+            batch_read_op.atm_err_code_.load(std::memory_order_relaxed)));
+    }
+    else
+    {
+        const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
+        const TableName *table_name = read_req->tab_name_;
+
+        for (size_t i = 0; i < batch_read_op.vct_hd_result_.size(); i++)
+        {
+            const ReadKeyResult &read_res =
+                batch_read_op.vct_hd_result_[i].Value();
+            ScanBatchTuple &sbt = read_req->batch_read_pri_[i];
+            LockType lock_type = read_res.lock_type_;
+
+            if (lock_type != LockType::NoLock)
+            {
+                DLOG_IF(INFO, TRACE_OCC_ERR)
+                    << "Before AddRead, txn: " << tx_number_
+                    << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
+                    << " ,ts: " << std::dec << read_res.ts_ << " ,rec_status: "
+                    << static_cast<int>(read_res.rec_status_)
+                    << " ,lock: " << static_cast<int>(read_res.lock_type_)
+                    << " ,table: " << table_name->String();
+                bool add_res;
+                if (read_res.rec_status_ == RecordStatus::Unknown)
+                {
+                    // Only used to release lock.
+                    add_res =
+                        rw_set_.AddRead(read_res.cce_addr_, 0, table_name);
+                }
+                else
+                {
+                    add_res = rw_set_.AddRead(
+                        read_res.cce_addr_, read_res.ts_, table_name);
+                }
+                if (!add_res)
+                {
+                    DLOG_IF(INFO, TRACE_OCC_ERR)
+                        << "AddRead, occ_err: " << tx_number_
+                        << " ,cce:" << std::hex << read_res.cce_addr_.CcePtr()
+                        << " ,ts: " << read_res.ts_ << " ,rec_status: "
+                        << static_cast<int>(read_res.rec_status_)
+                        << " ,lock: " << static_cast<int>(read_res.lock_type_)
+                        << " ,table: " << table_name->String();
+                    void_resp_->FinishError(
+                        TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+
+                    return;
+                }
+            }
+
+            sbt.status_ = read_res.rec_status_;
+        }
+
+        void_resp_->Finish(void_);
+    }
+}
+
+#ifdef RANGE_PARTITION_ENABLED
+void TransactionExecution::Process(LockBatchReadRangesOp &lock_batch_range)
+{
+    while (lock_batch_range.curr_pos_ <
+           (int32_t) lock_batch_range.batch_key_->size())
+    {
+        while (lock_batch_range.vct_hd_result_->at(lock_batch_range.curr_pos_)
+                   .IsFinished())
+        {
+            lock_batch_range.curr_pos_++;
+        }
+
+        cc_handler_->ReadLocal(
+            *lock_batch_range.range_table_name_,
+            *lock_batch_range.batch_key_->at(lock_batch_range.curr_pos_).key_,
+            lock_batch_range.range_rec_,
+            ReadType::Inside,
+            tx_number_.load(std::memory_order_relaxed),
+            tx_term_,
+            CommandId(),
+            start_ts_,
+            lock_batch_range.range_hd_result_,
+            IsolationLevel::RepeatableRead,
+            CcProtocol::Locking);
+        if (!lock_batch_range.range_hd_result_.IsFinished())
+        {
+            return;
+        }
+        if (lock_batch_range.range_hd_result_.IsError())
+        {
+            break;
+        }
+
+        lock_batch_range.FetchResult(this);
+    }
+
+    PostProcess(lock_batch_range);
+}
+
+void TransactionExecution::PostProcess(LockBatchReadRangesOp &lock_batch_range)
+{
+    if (lock_batch_range.range_hd_result_.ErrorCode() != CcErrorCode::NO_ERROR)
+    {
+        DLOG(ERROR) << "LockBatchReadRangesOp failed for cc error:"
+                    << lock_batch_range.range_hd_result_.ErrorMsg();
+        void_resp_->FinishError(
+            ConvertCcError(lock_batch_range.range_hd_result_.ErrorCode()));
+    }
+
+    state_stack_.pop_back();
+    Forward();
+}
+#endif
 }  // namespace txservice

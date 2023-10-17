@@ -46,6 +46,7 @@ struct ClusterScaleTxRequest;
 struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
+struct BatchReadTxRequest;
 
 class TxProcessor;
 
@@ -131,6 +132,7 @@ public:
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
+    void ProcessTxRequest(BatchReadTxRequest &batch_read_req);
 
     /**
      * Interface for storage engine runtime.
@@ -285,6 +287,8 @@ private:
 #ifdef RANGE_PARTITION_ENABLED
     void Process(UnlockReadRangeOperation &unlock_range);
     void PostProcess(UnlockReadRangeOperation &unlock_range);
+    void Process(LockBatchReadRangesOp &lock_batch_range);
+    void PostProcess(LockBatchReadRangesOp &lock_batch_range);
 #endif
     void Process(ScanOpenOperation &scan_open);
     void PostProcess(ScanOpenOperation &scan_open);
@@ -382,6 +386,9 @@ private:
 
     ScanCloseTxRequest *NextScanCloseTxReq(size_t alias,
                                            const TableName *table_name);
+
+    void Process(BatchReadOperation &batch_read_op);
+    void PostProcess(BatchReadOperation &batch_read_op);
 
     enum struct TxType
     {
@@ -497,6 +504,7 @@ private:
 #ifdef RANGE_PARTITION_ENABLED
     ReadLocalOperation lock_range_op_;
     UnlockReadRangeOperation unlock_range_op_;
+    LockBatchReadRangesOp lock_batch_read_ranges_;
 #endif
     ReadOperation read_;
     ScanOpenOperation scan_open_;
@@ -532,6 +540,7 @@ private:
     CleanCcEntryForTestOp clean_entry_op_;
 
     ReleaseScanExtraLockOp abundant_lock_op_;
+    BatchReadOperation batch_read_op_;
 
     metrics::TimePoint tx_duration_start_;
 
@@ -541,6 +550,7 @@ private:
     friend struct ReadLocalOperation;
 #ifdef RANGE_PARTITION_ENABLED
     friend struct UnlockReadRangeOperation;
+    friend struct LockBatchReadRangesOp;
 #endif
     friend struct ReadOutsideOperation;
     friend struct LockWriteRangesOp;
@@ -576,5 +586,6 @@ private:
     friend struct KickoutDataAllOp;
     friend struct UpsertTableIndexOp;
     friend class TxProcessor;
+    friend struct BatchReadOperation;
 };
 }  // namespace txservice
