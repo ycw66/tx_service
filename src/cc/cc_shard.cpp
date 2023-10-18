@@ -569,8 +569,11 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         }
         LOG(WARNING) << "orphan lock detected, lock holding txn: "
                      << lock_holding_txn << ", try to recover";
-        Sharder::Instance().RecoverTx(
-            lock_holding_txn, lk_info.tx_coord_term_, cc_ng_id, cc_ng_term);
+        Sharder::Instance().RecoverTx(lock_holding_txn,
+                                      lk_info.tx_coord_term_,
+                                      lk_info.wlock_ts_,
+                                      cc_ng_id,
+                                      cc_ng_term);
 
         // Updates the last_recover_ts field, so that following
         // conflicting tx's will not try recovery immediately,

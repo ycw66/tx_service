@@ -273,11 +273,13 @@ void ReplayService::ReplayLog(uint32_t cc_ng_id,
 
 void ReplayService::RecoverTx(uint64_t tx_number,
                               int64_t tx_term,
+                              uint64_t write_lock_ts,
                               uint32_t cc_ng_id,
                               int64_t cc_ng_term)
 {
     std::unique_lock lk(queue_mux_);
-    recover_tx_queue_.emplace_back(tx_number, tx_term, cc_ng_id, cc_ng_term);
+    recover_tx_queue_.emplace_back(
+        tx_number, tx_term, write_lock_ts, cc_ng_id, cc_ng_term);
     queue_cv_.notify_one();
 }
 
@@ -838,6 +840,7 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
 
         RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
                                                        task.tx_term_,
+                                                       task.write_lock_ts_,
                                                        task.cc_ng_id_,
                                                        task.cc_ng_term_,
                                                        ip_,

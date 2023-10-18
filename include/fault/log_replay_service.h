@@ -56,10 +56,12 @@ struct RecoverTxTask
 
     RecoverTxTask(uint64_t tx_number,
                   int64_t tx_term,
+                  uint64_t write_lock_ts,
                   uint32_t cc_ng_id,
                   int64_t cc_ng_term)
         : tx_number_(tx_number),
           tx_term_(tx_term),
+          write_lock_ts_(write_lock_ts),
           cc_ng_id_(cc_ng_id),
           cc_ng_term_(cc_ng_term)
     {
@@ -70,6 +72,8 @@ struct RecoverTxTask
     // The term of the cc node group in which the tx resides when the tx
     // acquires the intention/lock.
     int64_t tx_term_;
+    // The write lock timestamp
+    uint64_t write_lock_ts_;
     // The ID of the cc node group in which the lock/intention resides.
     uint32_t cc_ng_id_;
     // The term of the cc node group in which the lock/intention resides.
@@ -110,6 +114,7 @@ public:
 
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
+                   uint64_t write_lock_ts,
                    uint32_t cc_ng_id,
                    int64_t cc_ng_term);
 

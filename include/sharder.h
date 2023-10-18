@@ -329,6 +329,7 @@ public:
      */
     void RecoverTx(uint64_t lock_tx_number,
                    int64_t lock_tx_coord_term,
+                   uint64_t write_lock_ts,
                    uint32_t lock_cc_ng_id,
                    int64_t lock_cc_ng_term);
     /**

@@ -467,13 +467,17 @@ void Sharder::WaitClusterReady()
 
 void Sharder::RecoverTx(uint64_t lock_tx_number,
                         int64_t lock_tx_coord_term,
+                        uint64_t write_lock_ts,
                         uint32_t lock_cc_ng_id,
                         int64_t lock_cc_ng_term)
 {
     if (LeaderTerm(lock_cc_ng_id) > 0)
     {
-        log_replay_service_->RecoverTx(
-            lock_tx_number, lock_tx_coord_term, lock_cc_ng_id, lock_cc_ng_term);
+        log_replay_service_->RecoverTx(lock_tx_number,
+                                       lock_tx_coord_term,
+                                       write_lock_ts,
+                                       lock_cc_ng_id,
+                                       lock_cc_ng_term);
     }
 }
 

@@ -59,6 +59,7 @@ public:
 
     virtual RecoverTxStatus RecoverTx(uint64_t tx_number,
                                       int64_t tx_term,
+                                      uint64_t write_lock_ts,
                                       uint32_t cc_ng_id,
                                       int64_t cc_ng_term,
                                       const std::string &source_ip,
