@@ -3585,7 +3585,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     write_log.Reset();
     write_log.is_running_ = true;
 
-    if (metrics::enable_log_metrics)
+    if (metrics::enable_transactions)
     {
         auto meter = tx_processor_->meter_.get();
         meter->Collect(tx_processor_->REMOTE_REQUEST_ON_FLY_COUNT_NAME_,
@@ -3615,7 +3615,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
 void TransactionExecution::PostProcess(WriteToLogOp &write_log)
 {
     // collect metrics: write log duration
-    if (metrics::enable_log_metrics)
+    if (metrics::enable_transactions)
     {
         metrics::Meter *meter;
         meter = tx_processor_->meter_.get();
