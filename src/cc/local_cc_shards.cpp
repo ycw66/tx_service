@@ -1631,6 +1631,7 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
             data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
                 table_name,
                 range_info->PartitionId(),
+                range_info->VersionTs(),
                 ng_id,
                 ng_term,
                 data_sync_ts,
@@ -1646,58 +1647,18 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                 },
                 hres));
         }
-
-        auto new_range_ids = range_info->NewPartitionId();
-        if (new_range_ids && range_info->DirtyTs() <= data_sync_ts)
+        else
         {
-            assert(range_info->IsDirty());
-            StoreRange *store_range = nullptr;
-            for (int32_t new_range : *new_range_ids)
+            auto new_range_ids = range_info->NewPartitionId();
+            if (new_range_ids &&
+                (is_dirty || range_info->DirtyTs() <= data_sync_ts))
             {
-                NodeGroupId new_range_owner =
-                    GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
-                if (new_range_owner == ng_id)
+                assert(range_info->IsDirty());
+                for (int32_t new_range : *new_range_ids)
                 {
-                    if (range_owner == ng_id)
-                    {
-                        // If range is splitting, there might be dirty data
-                        // before data_sync_ts written into new ranges. If
-                        // the new ranges still fall on current ng, they
-                        // need to be synced before we truncate redo log
-                        // till data_sync_ts. However the new ranges have to
-                        // be processed after the current range split is
-                        // done, otherwise the StoreRange for new range won't be
-                        // available. Put the task into pending queue for
-                        // the splitting range for now so that it can be
-                        // executed after current range split is done.
-                        if (store_range == nullptr)
-                        {
-                            store_range = FindRange(range_table_name,
-                                                    ng_id,
-                                                    range_info->PartitionId());
-                        }
-                        status->unfinished_tasks_++;
-                        store_range->PushPendingSyncTask(
-                            std::make_shared<DataSyncTask>(
-                                table_name,
-                                new_range,
-                                ng_id,
-                                ng_term,
-                                data_sync_ts,
-                                status,
-                                need_truncate_log,
-                                is_dirty,
-                                [this](std::shared_ptr<DataSyncTask> task)
-                                {
-                                    std::lock_guard<std::mutex> lk(
-                                        task_worker_mux_);
-                                    data_sync_task_queue_.push_back(task);
-                                    // Notify the data sync workers.
-                                    task_worker_cv_.notify_one();
-                                },
-                                hres));
-                    }
-                    else
+                    NodeGroupId new_range_owner =
+                        GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
+                    if (new_range_owner == ng_id)
                     {
                         // If range is splitting and the new range falls on
                         // current node group, we might receive forwarded
@@ -1832,6 +1793,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
+    uint64_t expected_range_version = data_sync_task->range_version_;
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     int32_t range_id = data_sync_task->range_id_;
     uint64_t target_data_sync_ts = data_sync_task->data_sync_ts_;
@@ -2076,6 +2038,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     else
     {
         assert(bucket_rec.GetBucketInfo()->BucketOwner() == ng_id);
+        if (GetTableRangeEntry(table_name, ng_id, range_id)->Version() !=
+            expected_range_version)
+        {
+            // If the range spec has been updated since we create the task,
+            // we might miss the data in the new range during data sync scan.
+            // So we need to mark this round of data sync as failed.
+            data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
+        }
     }
 
     // 3. Scan records.

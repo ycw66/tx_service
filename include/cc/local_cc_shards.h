@@ -47,6 +47,7 @@ struct DataSyncTask
 public:
     DataSyncTask(const TableName &table_name,
                  int32_t range_id,
+                 uint64_t range_version,
                  uint32_t ng_id,
                  int64_t ng_term,
                  uint64_t data_sync_ts,
@@ -58,6 +59,7 @@ public:
                  CcHandlerResult<Void> *hres = nullptr)
         : table_name_(table_name),
           range_id_(range_id),
+          range_version_(range_version),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
           data_sync_ts_(data_sync_ts),
@@ -115,9 +117,15 @@ public:
             status_->cv_.notify_all();
         }
     }
+    void SetErrorCode(CcErrorCode err_code)
+    {
+        std::unique_lock<std::mutex> lk(status_->mux_);
+        status_->err_code_ = err_code;
+    }
 
     const TableName table_name_;
     int32_t range_id_;
+    uint64_t range_version_;
     uint32_t node_group_id_;
     int64_t node_group_term_{-1};
     uint64_t data_sync_ts_{0};

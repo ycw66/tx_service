@@ -56,6 +56,7 @@ public:
 
     txservice::RecoverTxStatus RecoverTx(uint64_t tx_number,
                                          int64_t tx_term,
+                                         uint64_t write_lock_ts,
                                          uint32_t cc_ng_id,
                                          int64_t cc_ng_term,
                                          const std::string &source_ip,
@@ -64,6 +65,7 @@ public:
         ::txlog::RecoverTxResponse_TxStatus status =
             log_agent_.RecoverTx(tx_number,
                                  tx_term,
+                                 write_lock_ts,
                                  cc_ng_id,
                                  cc_ng_term,
                                  source_ip,
