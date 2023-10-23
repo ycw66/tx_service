@@ -391,10 +391,11 @@ void PostReadOperation::ResetHandlerTxm(TransactionExecution *txm)
     hd_result_.ResetTxm(txm);
 }
 
-void PostReadOperation::Reset(
-    std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry)
+void PostReadOperation::Reset(const CcEntryAddr *cce_addr,
+                              const ReadSetEntry *read_set_entry)
 {
-    cce_entry_ = cce_entry;
+    cce_addr_ = cce_addr;
+    read_set_entry_ = read_set_entry;
     hd_result_.Reset();
 }
 
@@ -1740,6 +1741,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
       post_all_intent_op_(txm),
+      unlock_cluster_config_op_(txm),
       upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
       sequence_data_log_op_(txm),
       reset_sequence_record_op_(txm),
@@ -1809,13 +1811,27 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             DLOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
                         << txm->TxNumber();
-            txm->commit_ts_ = tx_op_failed_ts_;
+            if (!prepare_log_op_.hd_result_.IsFinished())
+            {
+                txm->commit_ts_ = tx_op_failed_ts_;
+            }
             ForceToFinish(txm);
             return;
         }
-        op_ = &acquire_all_intent_op_;
-        txm->PushOperation(&acquire_all_intent_op_);
-        txm->Process(acquire_all_intent_op_);
+
+        if (prepare_log_op_.hd_result_.IsFinished())
+        {
+            assert(op_type_ == OperationType::CreateTable);
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+        else
+        {
+            op_ = &acquire_all_intent_op_;
+            txm->PushOperation(&acquire_all_intent_op_);
+            txm->Process(acquire_all_intent_op_);
+        }
     }
     else if (op_ == &acquire_all_intent_op_)
     {
@@ -1986,15 +2002,43 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            op_ = &upsert_kv_table_op_;
-            // The post write request right after flushing the prepare log
-            // installs the dirty schema in the tx service and returns a
-            // local view (pointer) of the committed and dirty schema.
-            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-            upsert_kv_table_op_.alter_table_info_ = nullptr;
-            txm->PushOperation(&upsert_kv_table_op_);
-            txm->Process(upsert_kv_table_op_);
+            // Release cluster config op before doing data store op.
+            op_ = &unlock_cluster_config_op_;
+            // Get cce addr of cluster config read lock from rset.
+            auto &rset = txm->rw_set_.ReadSet();
+            auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
+            assert(cluster_config_rset.size() == 1);
+            for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+            {
+                unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+            }
+            txm->PushOperation(&unlock_cluster_config_op_);
+            txm->Process(unlock_cluster_config_op_);
         }
+    }
+    else if (op_ == &unlock_cluster_config_op_)
+    {
+        assert(op_type_ == OperationType::CreateTable);
+        if (unlock_cluster_config_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // Releasing a local read lock should never fail
+                assert(false);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        op_ = &upsert_kv_table_op_;
+        // The post write request right after flushing the prepare log
+        // installs the dirty schema in the tx service and returns a
+        // local view (pointer) of the committed and dirty schema.
+        upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
+        upsert_kv_table_op_.alter_table_info_ = nullptr;
+        txm->PushOperation(&upsert_kv_table_op_);
+        txm->Process(upsert_kv_table_op_);
     }
     else if (op_ == &upsert_kv_table_op_)
     {
@@ -2230,9 +2274,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             catalog_rec_.DirtySchema()->GetSequenceTableName();
         txm->rw_set_.ClearTable(*seq_table_name);
 
-        op_ = &acquire_all_lock_op_;
-        txm->PushOperation(&acquire_all_lock_op_);
-        txm->Process(acquire_all_lock_op_);
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
     }
     else if (op_ == &acquire_all_lock_op_)
     {
@@ -2467,6 +2511,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
     prepare_log_op_.Reset();
+    unlock_cluster_config_op_.Reset();
     upsert_kv_table_op_.Reset();
     sequence_data_log_op_.Reset();
     reset_sequence_record_op_.Reset();
@@ -2503,6 +2548,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     acquire_all_intent_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
     post_all_intent_op_.ResetHandlerTxm(txm);
+    unlock_cluster_config_op_.ResetHandlerTxm(txm);
     upsert_kv_table_op_.ResetHandlerTxm(txm);
     sequence_data_log_op_.ResetHandlerTxm(txm);
     reset_sequence_record_op_.ResetHandlerTxm(txm);

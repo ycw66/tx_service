@@ -154,11 +154,13 @@ public:
     explicit PostReadOperation(TransactionExecution *txm);
     void ResetHandlerTxm(TransactionExecution *txm);
 
-    void Reset(std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry);
+    void Reset(const CcEntryAddr *cce_addr = nullptr,
+               const ReadSetEntry *read_set_entry = nullptr);
 
     void Forward(TransactionExecution *txm) override;
 
-    std::pair<CcEntryAddr *, ReadSetEntry *> cce_entry_;
+    const CcEntryAddr *cce_addr_;
+    const ReadSetEntry *read_set_entry_;
     CcHandlerResult<PostProcessResult> hd_result_;
 };
 
@@ -640,6 +642,10 @@ struct UpsertTableOp : public SchemaOp
      *
      */
     PostWriteAllOp post_all_intent_op_;
+    /**
+     * @brief Release cluster config read lock after post write all.
+     */
+    PostReadOperation unlock_cluster_config_op_;
     /**
      * @brief Creates/deletes the data store table and persists/removes the
      * binary representation of the catalog in the data store.

@@ -137,6 +137,10 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     PostWriteAllOp downgrade_all_lock_to_intent_op_;
     /**
+     * @brief Release cluster config read lock after post write all.
+     */
+    PostReadOperation unlock_cluster_config_op_;
+    /**
      * @brief Creates/deletes the data store table and persists/removes the
      * binary representation of the catalog in the data store.
      */

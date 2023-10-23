@@ -93,6 +93,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       upgrade_all_intent_to_lock_op_(txm),
       prepare_log_op_(txm),
       downgrade_all_lock_to_intent_op_(txm),
+      unlock_cluster_config_op_(txm),
       upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
       flush_all_old_tuples_pk_op_(txm),
       fetch_old_tuples_from_kv_gen_sk_data_upload_op_(txm),
@@ -189,6 +190,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
     {
+        LOG(INFO) << "Alter Table Index transaction lock cluster config"
+                  << " , txn: " << txm->TxNumber();
         op_ = &lock_cluster_config_op_;
         txm->PushOperation(&lock_cluster_config_op_);
         txm->Process(lock_cluster_config_op_);
@@ -200,19 +203,37 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             LOG(ERROR)
                 << "Alter Table Index read cluster config failed, tx_number:"
                 << txm->TxNumber();
-            txm->commit_ts_ = tx_op_failed_ts_;
+            if (!prepare_log_op_.hd_result_.IsFinished() &&
+                !prepare_log_for_sk_op_.hd_result_.IsFinished())
+            {
+                txm->commit_ts_ = tx_op_failed_ts_;
+            }
             ForceToFinish(txm);
             return;
         }
-        // Acquire write intent, and then upgrade to write lock(Locking),
-        // rather than acquire write lock(OCC) directly, aim to avoid two
-        // situations: (1) concurrent DDL deadlock. (2) concurrent DML cause to
-        // always abort this tx.
-        LOG(INFO) << "Alter Table Index transaction prepare acquire all write"
-                  << " intent, txn: " << txm->TxNumber();
-        op_ = &acquire_all_intent_op_;
-        txm->PushOperation(&acquire_all_intent_op_);
-        txm->Process(acquire_all_intent_op_);
+        if (prepare_log_op_.hd_result_.IsFinished() ||
+            prepare_log_for_sk_op_.hd_result_.IsFinished())
+        {
+            assert(op_type_ == OperationType::AddIndex);
+            LOG(INFO) << "Alter Table Index transaction post acquire all"
+                      << " write lock, txn: " << txm->TxNumber();
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+        else
+        {
+            // Acquire write intent, and then upgrade to write lock(Locking),
+            // rather than acquire write lock(OCC) directly, aim to avoid two
+            // situations: (1) concurrent DDL deadlock. (2) concurrent DML cause
+            // to always abort this tx.
+            LOG(INFO)
+                << "Alter Table Index transaction prepare acquire all write"
+                << " intent, txn: " << txm->TxNumber();
+            op_ = &acquire_all_intent_op_;
+            txm->PushOperation(&acquire_all_intent_op_);
+            txm->Process(acquire_all_intent_op_);
+        }
     }
     else if (op_ == &acquire_all_intent_op_)
     {
@@ -399,17 +420,48 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Alter Table Index transaction upsert data store"
-                      << " info, txn: " << txm->TxNumber();
-            op_ = &upsert_kv_table_op_;
-            // The post write request right after flushing the prepare log
-            // installs the dirty schema in the tx service and returns a
-            // local view (pointer) of the committed and dirty schema.
-            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-            txm->PushOperation(&upsert_kv_table_op_);
-            txm->Process(upsert_kv_table_op_);
+            // Release cluster config op before doing data store op.
+            op_ = &unlock_cluster_config_op_;
+            // Get cce addr of cluster config read lock from rset.
+            auto &rset = txm->rw_set_.ReadSet();
+            auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
+            assert(cluster_config_rset.size() == 1);
+            for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+            {
+                unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+            }
+            LOG(INFO) << "Alter Table Index transaction release cluster config "
+                         "lock, txn: "
+                      << txm->TxNumber();
+            txm->PushOperation(&unlock_cluster_config_op_);
+            txm->Process(unlock_cluster_config_op_);
         }
+    }
+    else if (op_ == &unlock_cluster_config_op_)
+    {
+        if (unlock_cluster_config_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // Releasing a local read lock should never fail
+                assert(false);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        assert(op_type_ == OperationType::AddIndex);
+        LOG(INFO) << "Alter Table Index transaction upsert data store"
+                  << " info, txn: " << txm->TxNumber();
+        op_ = &upsert_kv_table_op_;
+        // The post write request right after flushing the prepare log
+        // installs the dirty schema in the tx service and returns a
+        // local view (pointer) of the committed and dirty schema.
+        upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
+        upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
+        txm->PushOperation(&upsert_kv_table_op_);
+        txm->Process(upsert_kv_table_op_);
     }
     else if (op_ == &upsert_kv_table_op_)
     {
@@ -818,11 +870,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Alter Table Index transaction post acquire all"
-                      << " write lock, txn: " << txm->TxNumber();
-            op_ = &acquire_all_lock_op_;
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
+            LOG(INFO) << "Alter Table Index transaction lock cluster config"
+                      << " , txn: " << txm->TxNumber();
+            op_ = &lock_cluster_config_op_;
+            txm->PushOperation(&lock_cluster_config_op_);
+            txm->Process(lock_cluster_config_op_);
         }
     }
     else if (op_ == &acquire_all_lock_op_)
@@ -1080,6 +1132,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     upgrade_all_intent_to_lock_op_.Reset(node_group_cnt);
     prepare_log_op_.Reset();
     downgrade_all_lock_to_intent_op_.Reset(node_group_cnt);
+    unlock_cluster_config_op_.Reset();
     upsert_kv_table_op_.Reset();
     flush_all_old_tuples_pk_op_.Reset();
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.Reset();
@@ -1127,6 +1180,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     upgrade_all_intent_to_lock_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
     downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
+    unlock_cluster_config_op_.ResetHandlerTxm(txm);
     upsert_kv_table_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_pk_op_.ResetHandlerTxm(txm);
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ResetHandlerTxm(txm);

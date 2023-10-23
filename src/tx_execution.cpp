@@ -4586,15 +4586,13 @@ void TransactionExecution::PostProcess(NoOp &no_op)
 void TransactionExecution::Process(PostReadOperation &post_read_operation)
 {
     post_read_operation.is_running_ = true;
-    CcEntryAddr *cce_addr = post_read_operation.cce_entry_.first;
-    ReadSetEntry *read_set_entry = post_read_operation.cce_entry_.second;
     cc_handler_->PostRead(tx_number_.load(std::memory_order_relaxed),
                           this->tx_term_,
                           command_id_.load(std::memory_order_relaxed),
-                          read_set_entry->version_ts_,
+                          post_read_operation.read_set_entry_->version_ts_,
                           0,
                           commit_ts_,
-                          *cce_addr,
+                          *post_read_operation.cce_addr_,
                           post_read_operation.hd_result_);
 }
 
