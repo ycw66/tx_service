@@ -1,5 +1,6 @@
 #pragma once
 
+#include <butil/macros.h>
 #include <pthread.h>
 
 #include <algorithm>  // std::min
@@ -40,6 +41,11 @@ namespace txservice
 // whether skip write redo log to log_service.
 extern bool txservice_skip_redo_log;
 
+// the OFFSET_TABLE contains only prime numbers
+inline const size_t OFFSET_TABLE[] = {
+#include "offset_inl.list"
+};
+
 /**
  * @brief TxProcessor is a worker processing concurrency control (cc) requests
  * on one cc shard (identified by the thread/core ID), advances tx state
@@ -73,8 +79,9 @@ public:
           new_tx_cnt_(0),
           new_txs_(),
           new_tx_token_(new_txs_),
-          free_prod_token_(free_txs),
-          free_consumer_token_(free_txs),
+          free_txs_(),
+          free_prod_token_(free_txs_),
+          free_consumer_token_(free_txs_),
           txlog_hd_(txlog_hd),
           meter_(
               std::make_unique<metrics::Meter>(metrics_registry, common_labels))
@@ -121,8 +128,7 @@ public:
     TransactionExecution *NewTx()
     {
         TransactionExecution::uptr tx = nullptr;
-        bool success =
-            TxProcessor::free_txs.try_dequeue(free_consumer_token_, tx);
+        bool success = free_txs_.try_dequeue(free_consumer_token_, tx);
         if (success)
         {
             assert(tx != nullptr);
@@ -156,8 +162,7 @@ public:
     TransactionExecution::uptr NewTxm()
     {
         TransactionExecution::uptr txm = nullptr;
-        bool success =
-            TxProcessor::free_txs.try_dequeue(free_consumer_token_, txm);
+        bool success = free_txs_.try_dequeue(free_consumer_token_, txm);
         if (success)
         {
             assert(txm != nullptr);
@@ -176,7 +181,7 @@ public:
 
     void RecycleTxm(TransactionExecution::uptr txm)
     {
-        TxProcessor::free_txs.enqueue(free_prod_token_, std::move(txm));
+        free_txs_.enqueue(free_prod_token_, std::move(txm));
         active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
     }
 
@@ -243,7 +248,8 @@ public:
                 {
                 case TxmStatus::Finished:
                 {
-                    TxProcessor::free_txs.enqueue(std::move(active_txs[idx]));
+                    free_txs_.enqueue(free_prod_token_,
+                                      std::move(active_txs[idx]));
                 }
                 break;
                 case TxmStatus::Idle:
@@ -331,7 +337,7 @@ public:
             switch (txm_status)
             {
             case TxmStatus::Finished:
-                TxProcessor::free_txs.enqueue(free_prod_token_, std::move(tx));
+                free_txs_.enqueue(free_prod_token_, std::move(tx));
                 active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
                 break;
             case TxmStatus::Idle:
@@ -378,8 +384,7 @@ public:
                 switch (txm_status)
                 {
                 case TxmStatus::Finished:
-                    TxProcessor::free_txs.enqueue(free_prod_token_,
-                                                  std::move(tx));
+                    free_txs_.enqueue(free_prod_token_, std::move(tx));
                     active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
                     break;
                 case TxmStatus::Idle:
@@ -565,7 +570,7 @@ private:
     CircularQueue<TransactionExecution::uptr> idle_txs_{100};
     CircularQueue<TransactionExecution::uptr> on_fly_txs_{100};
 
-    static moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_txs;
+    moodycamel::ConcurrentQueue<TransactionExecution::uptr> free_txs_;
     moodycamel::ProducerToken free_prod_token_;
     moodycamel::ConsumerToken free_consumer_token_;
 
@@ -735,7 +740,14 @@ public:
 
     TransactionExecution *NewTx()
     {
-        uint32_t run_cnt = tx_runs_.fetch_add(1, std::memory_order_relaxed);
+        // The rand seed will be initialized automatically.
+        static thread_local uint32_t tx_runs = butil::fast_rand();
+        // Based on the OFFSET_TABLE, each thread has its own tx_run pattern,
+        // and the workloads are balanced between TxProcessors.
+        static thread_local uint32_t tx_run_offset =
+            OFFSET_TABLE[tx_runs % ARRAY_SIZE(OFFSET_TABLE)];
+        uint32_t run_cnt = tx_runs;
+        tx_runs += tx_run_offset;
         size_t sid = run_cnt % pool_.size();
         return pool_[sid]->NewTx();
     }
@@ -789,9 +801,7 @@ public:
     std::vector<std::thread> thd_pool_;
     LocalCcShards local_cc_shards_;
     Checkpointer ckpt_;
-    // tx runs shared by all the clients of tx_service. It is used to
-    // balance workloads between TxProcessors.
-    std::atomic<uint32_t> tx_runs_{0};
+
     friend class txservice::fault::ReplayService;
 };
 

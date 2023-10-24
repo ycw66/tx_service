@@ -148,7 +148,6 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_service.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_index_operation.cpp
     ${TX_SERVICE_SOURCE_DIR}/log_service/mono_metrics/src/metrics.cc
     )
