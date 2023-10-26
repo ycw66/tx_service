@@ -188,7 +188,7 @@ public:
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
      */
-    TEntry &NewTx(NodeGroupId tx_owner);
+    TEntry &NewTx(NodeGroupId tx_ng_id, uint32_t log_group_id, int64_t term);
 
     /**
      * @brief Find an available NonBlockingLock in lock array and initialize it.
@@ -503,7 +503,6 @@ public:
                               CcRequestBase *requester);
 
     void FetchTableRanges(const TableName &range_table_name,
-                          const KVCatalogInfo *kv_info,
                           CcRequestBase *requester,
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term);

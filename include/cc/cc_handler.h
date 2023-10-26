@@ -356,7 +356,8 @@ public:
     /// <param name=""></param>
     virtual void NewTxn(CcHandlerResult<InitTxResult> &hres,
                         IsolationLevel iso_level,
-                        NodeGroupId tx_owner) = 0;
+                        NodeGroupId tx_ng_id,
+                        uint32_t log_group_id) = 0;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

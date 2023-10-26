@@ -289,13 +289,10 @@ public:
                                     index_range_name, req.NodeGroupId());
                                 if (ranges == nullptr)
                                 {
-                                    shard_->FetchTableRanges(
-                                        index_range_name,
-                                        catalog_entry->dirty_schema_
-                                            ->GetKVCatalogInfo(),
-                                        &req,
-                                        req.NodeGroupId(),
-                                        ng_term);
+                                    shard_->FetchTableRanges(index_range_name,
+                                                             &req,
+                                                             req.NodeGroupId(),
+                                                             ng_term);
                                     return false;
                                 }
                             }
@@ -1024,13 +1021,10 @@ public:
                                 index_range_name, req.NodeGroupId());
                             if (ranges == nullptr)
                             {
-                                shard_->FetchTableRanges(
-                                    index_range_name,
-                                    catalog_entry->dirty_schema_
-                                        ->GetKVCatalogInfo(),
-                                    &req,
-                                    req.NodeGroupId(),
-                                    ng_term);
+                                shard_->FetchTableRanges(index_range_name,
+                                                         &req,
+                                                         req.NodeGroupId(),
+                                                         ng_term);
                                 return false;
                             }
 

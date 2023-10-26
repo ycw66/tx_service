@@ -102,6 +102,8 @@ public:
             return CommitType::PrepareCommit;
         case PostWriteType::PostCommit:
             return CommitType::PostCommit;
+        case PostWriteType::Commit:
+            return CommitType::Commit;
         default:
             assert(false);
             return CommitType::PostCommit;
@@ -272,6 +274,8 @@ public:
             return PostWriteType::PrepareCommit;
         case CommitType::PostCommit:
             return PostWriteType::PostCommit;
+        case CommitType::Commit:
+            return PostWriteType::Commit;
         default:
             assert(false);
             return PostWriteType::PostCommit;

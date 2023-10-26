@@ -366,6 +366,16 @@ public:
         return range_slices_.get();
     }
 
+    void DropStoreRange()
+    {
+        range_slices_ = nullptr;
+    }
+
+    void SetStoreRange(std::unique_ptr<StoreRange> store_range)
+    {
+        range_slices_ = std::move(store_range);
+    }
+
 private:
     std::unique_ptr<RangeInfo> range_info_{nullptr};
     std::unique_ptr<StoreRange> range_slices_;
@@ -616,6 +626,10 @@ public:
             range_info_uptr_.reset();
             is_info_owner_ = false;
         }
+        else
+        {
+            range_info_ = nullptr;
+        }
 
         assert(is_info_owner_ == false);
 
@@ -738,6 +752,7 @@ public:
             static_cast<const CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                 other.range_owner_rec_)
                 ->payload_->GetBucketInfo();
+
         if (other.new_range_owner_rec_)
         {
             new_range_owner_bucket_ =

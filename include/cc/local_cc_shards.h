@@ -140,6 +140,30 @@ public:
     // Indicate the single task result.
     CcHandlerResult<Void> *task_res_{nullptr};
 };
+
+struct DataMigrationStatus
+{
+public:
+    DataMigrationStatus(TxNumber cluster_scale_txn,
+                        std::vector<uint16_t> &&bucket_ids,
+                        std::vector<NodeGroupId> &&new_owner_ids,
+                        std::vector<TxNumber> &&migration_txns)
+        : cluster_scale_txn_(cluster_scale_txn),
+          bucket_ids_(std::move(bucket_ids)),
+          new_owner_ngs_(std::move(new_owner_ids)),
+          migration_txns_(std::move(migration_txns)),
+          next_bucket_idx_(0),
+          unfinished_worker_(migration_txns_.size())
+    {
+    }
+
+    TxNumber cluster_scale_txn_;
+    std::vector<uint16_t> bucket_ids_;
+    std::vector<NodeGroupId> new_owner_ngs_;
+    std::vector<TxNumber> migration_txns_;
+    std::atomic_size_t next_bucket_idx_;
+    std::atomic_size_t unfinished_worker_;
+};
 class LocalCcShards
 {
 public:
@@ -569,14 +593,15 @@ public:
                    CcHandlerResult<Void> &hres,
                    bool delay_update_ckpt_ts);
 
-    void EnqueueDataSyncTask(const TableName &table_name,
-                             uint32_t ng_id,
-                             int64_t ng_term,
-                             uint64_t data_sync_ts,
-                             bool need_truncate_log = true,
-                             bool is_dirty = false,
-                             std::shared_ptr<DataSyncStatus> status = nullptr,
-                             CcHandlerResult<Void> *hres = nullptr);
+    void EnqueueDataSyncTaskForTable(
+        const TableName &table_name,
+        uint32_t ng_id,
+        int64_t ng_term,
+        uint64_t data_sync_ts,
+        bool need_truncate_log = true,
+        bool is_dirty = false,
+        std::shared_ptr<DataSyncStatus> status = nullptr,
+        CcHandlerResult<Void> *hres = nullptr);
 
     bool IsDataSyncQueueEmpty()
     {
@@ -681,11 +706,40 @@ public:
 
     bool IsRangeBucketsInitialized(NodeGroupId ng_id);
 
+    const BucketInfo *UploadNewBucketInfo(NodeGroupId ng_id,
+                                          uint16_t bucket_id,
+                                          NodeGroupId dirty_ng,
+                                          uint64_t dirty_version);
+
+    const BucketInfo *UploadBucketInfo(NodeGroupId ng_id,
+                                       uint16_t bucket_id,
+                                       NodeGroupId owner_ng,
+                                       uint64_t version);
+
+    void DropStoreRangesInBucket(NodeGroupId ng_id, uint16_t bucket_id);
+
+    bool LoadStoreRangesInBucket(NodeGroupId ng_id,
+                                 uint16_t bucket_id,
+                                 CcShard *shard,
+                                 CcRequestBase *cc_request,
+                                 int64_t term);
+
+    const BucketInfo *CommitDirtyBucketInfo(NodeGroupId ng_id,
+                                            uint16_t bucket_id);
+
+    void EnqueueDataSyncTaskForBucket(
+        const std::unordered_map<TableName, std::unordered_set<int32_t>>
+            &ranges_in_bucket_snapshot,
+        uint32_t ng_id,
+        int64_t ng_term,
+        uint64_t data_sync_ts,
+        CcHandlerResult<Void> *hres);
+
     /**
      * @brief Generate bucket migration plan based on the new node group config.
      */
-    std::unordered_map<uint16_t, BucketMigrateInfo> GenerateBucketMigrationPlan(
-        uint32_t new_ng_count, int32_t seed);
+    std::unordered_map<NodeGroupId, BucketMigrateInfo>
+    GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed);
 
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
@@ -723,6 +777,9 @@ public:
     std::unique_ptr<ClusterScaleOp> cluster_scale_op_{nullptr};
     std::mutex cluster_scale_op_mux_;
 
+    std::mutex data_migration_op_pool_mux_;
+    std::vector<std::unique_ptr<DataMigrationOp>> migration_op_pool_;
+
 private:
     void TimerRun();
     // Internal interface that exposes non const return type and does
@@ -750,6 +807,16 @@ private:
 
     BucketInfo *GetRangeOwnerInternal(int32_t range_id,
                                       const NodeGroupId ng_id) const;
+
+    bool EnqueueDataSyncTask(const TableName &table_name,
+                             uint32_t ng_id,
+                             int64_t ng_term,
+                             const TableRangeEntry *range_entry,
+                             uint64_t data_sync_ts,
+                             bool need_truncate_log,
+                             bool is_dirty,
+                             std::shared_ptr<DataSyncStatus> status,
+                             CcHandlerResult<Void> *hres);
 
     const uint32_t node_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;

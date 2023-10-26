@@ -438,10 +438,11 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
     uint64_resp_ = &init_txn_req.tx_result_;
     iso_level_ = init_txn_req.iso_level_;
     protocol_ = init_txn_req.protocol_;
-    init_txn_.tx_owner_ = init_txn_req.tx_owner_ == UINT32_MAX
+    init_txn_.tx_ng_id_ = init_txn_req.tx_ng_id_ == UINT32_MAX
                               ? Sharder::Instance().NodeId()
-                              : init_txn_req.tx_owner_;
+                              : init_txn_req.tx_ng_id_;
 
+    init_txn_.log_group_id_ = init_txn_req.log_group_id_;
     PushOperation(&init_txn_);
     Process(init_txn_);
 }
@@ -779,7 +780,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         split_flush_op_ = std::make_unique<SplitFlushRangeOp>(
             *req.table_name_,
             req.schema_,
-            req.node_group_,
             req.old_start_key_,
             req.old_end_key_,
             req.old_range_info_,
@@ -798,7 +798,6 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
         assert(split_flush_op_ != nullptr);
         split_flush_op_->Reset(*req.table_name_,
                                req.schema_,
-                               req.node_group_,
                                req.old_start_key_,
                                req.old_end_key_,
                                req.old_range_info_,
@@ -812,6 +811,37 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
     lk.unlock();
 
     PushOperation(split_flush_op_.get());
+    Forward();
+}
+
+void TransactionExecution::ProcessTxRequest(
+    DataMigrationTxRequest &data_migration_req)
+{
+    void_resp_ = &data_migration_req.tx_result_;
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+
+    std::lock_guard<std::mutex> lk(local_shards->data_migration_op_pool_mux_);
+
+    if (local_shards->migration_op_pool_.empty())
+    {
+        migration_op_ =
+            std::make_unique<DataMigrationOp>(this, data_migration_req.status_);
+    }
+    else
+    {
+        migration_op_ = std::move(local_shards->migration_op_pool_.back());
+        local_shards->migration_op_pool_.pop_back();
+        migration_op_->Reset(this, data_migration_req.status_);
+    }
+
+    if (data_migration_req.status_->next_bucket_idx_ != 0)
+    {
+        // If this is not the first worker, we can destruct the
+        // tx req after migrate status is passed into migration op.
+        void_resp_->Finish(void_);
+    }
+
+    PushOperation(migration_op_.get());
     Forward();
 }
 
@@ -853,6 +883,7 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
                 .append(std::to_string(this->tx_term_));
         });
 
+    void_resp_ = &req.tx_result_;
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
     if (local_shards->cluster_scale_op_)
@@ -861,10 +892,6 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
                                                req.new_nodes_,
                                                req.removed_nodes_,
                                                req.remove_node_count_,
-                                               req.mtx_,
-                                               req.cv_,
-                                               req.finished_,
-                                               req.err_,
                                                this);
     }
     else
@@ -874,10 +901,6 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
                                              req.new_nodes_,
                                              req.removed_nodes_,
                                              req.remove_node_count_,
-                                             req.mtx_,
-                                             req.cv_,
-                                             req.finished_,
-                                             req.err_,
                                              this);
     }
     lk.unlock();
@@ -1072,7 +1095,6 @@ void TransactionExecution::ProcessTxRequest(
         split_range_op = std::make_unique<SplitFlushRangeOp>(
             table_name,
             recover_req.table_schema_,
-            recover_req.node_group_id_,
             recover_req.start_key_,
             recover_req.end_key_,
             recover_req.range_info_,
@@ -1091,7 +1113,6 @@ void TransactionExecution::ProcessTxRequest(
         assert(split_range_op != nullptr);
         split_range_op->Reset(table_name,
                               recover_req.table_schema_,
-                              recover_req.node_group_id_,
                               recover_req.start_key_,
                               recover_req.end_key_,
                               recover_req.range_info_,
@@ -1169,7 +1190,10 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
 
     init_txn.Reset();
 
-    cc_handler_->NewTxn(init_txn.hd_result_, iso_level_, init_txn.tx_owner_);
+    cc_handler_->NewTxn(init_txn.hd_result_,
+                        iso_level_,
+                        init_txn.tx_ng_id_,
+                        init_txn.log_group_id_);
     init_txn.Forward(this);
 }
 
@@ -1189,7 +1213,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     {
         DLOG(ERROR) << "InitTxnOperation failed for cc error:"
                     << init_txn.hd_result_.ErrorMsg() << ", tx owner "
-                    << init_txn.tx_owner_;
+                    << init_txn.tx_ng_id_;
         state_stack_.clear();
 
         if (uint64_resp_ != &init_tx_req_->tx_result_)
@@ -1370,9 +1394,9 @@ void TransactionExecution::Process(ReadOperation &read)
                 // Uses the lower 10 bits of the key's hash code to shard the
                 // key across CPU cores in a cc node.
                 uint32_t residual = key.Hash() & 0x3FF;
-                NodeGroupId range_owner =
+                NodeGroupId range_ng =
                     read.range_rec_.GetRangeOwnerNg()->BucketOwner();
-                key_shard_code = range_owner << 10 | residual;
+                key_shard_code = range_ng << 10 | residual;
             }
 #else
             key_shard_code = Sharder::Instance().ShardCode(key.Hash());
@@ -1907,7 +1931,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             cc_handler_->ScanNextBatch(
                 scan_next.tx_req_->table_name_,
                 scan_state.range_id_,
-                scan_state.range_owner_,
+                scan_state.range_ng_,
                 scan_next.RangeNgTerm(),
                 scan_state.SliceLastKey(),
                 !scan_state.inclusive_,
@@ -1961,7 +1985,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 cc_handler_->ScanNextBatch(
                     scan_next.tx_req_->table_name_,
                     scan_state.range_id_,
-                    scan_state.range_owner_,
+                    scan_state.range_ng_,
                     -1,
                     scan_state.SliceLastKey(),
                     !scan_state.inclusive_,
@@ -5226,4 +5250,63 @@ void TransactionExecution::PostProcess(LockBatchReadRangesOp &lock_batch_range)
     Forward();
 }
 #endif
+void TransactionExecution::Process(NotifyStartMigrateOp &notify_migration_op)
+{
+    uint32_t ng_count = Sharder::Instance().NodeGroupCount();
+
+    notify_migration_op.Reset(ng_count);
+    notify_migration_op.is_running_ = true;
+
+    uint64_t cluster_scale_txn = TxNumber();
+
+    assert(notify_migration_op.unfinished_req_cnt_.load(
+               std::memory_order_relaxed) == 0);
+
+    for (const auto &migrate_plan : notify_migration_op.migrate_plans_)
+    {
+        auto nid = migrate_plan.first;
+        auto &migrate_info = migrate_plan.second;
+        if (!migrate_info.has_migration_tx_)
+        {
+            notify_migration_op.unfinished_req_cnt_.fetch_add(
+                1, std::memory_order_release);
+            notify_migration_op.InitDataMigration(cluster_scale_txn, nid);
+        }
+    }
+}
+
+void TransactionExecution::PostProcess(
+    NotifyStartMigrateOp &notify_migration_op)
+{
+    state_stack_.pop_back();
+    Forward();
+}
+
+void TransactionExecution::Process(
+    CheckMigrationIsFinishedOp &check_migration_is_finished_op)
+{
+    check_migration_is_finished_op.Reset();
+    check_migration_is_finished_op.is_running_ = true;
+
+    auto cluster_scale_txn = tx_number_.load(std::memory_order_relaxed);
+    uint32_t log_group_id = txlog_->GetLogGroupId(cluster_scale_txn);
+
+    auto &closure = check_migration_is_finished_op.closure_;
+    closure.Request().Clear();
+    closure.Request().set_log_group_id(log_group_id);
+    closure.Request().set_cluster_scale_txn(cluster_scale_txn);
+    txlog_->CheckMigrationIsFinished(log_group_id,
+                                     closure.Controller(),
+                                     closure.Request(),
+                                     closure.Response(),
+                                     closure);
+}
+
+void TransactionExecution::PostProcess(
+    CheckMigrationIsFinishedOp &notify_migration_finished_op)
+{
+    state_stack_.pop_back();
+    Forward();
+}
+
 }  // namespace txservice

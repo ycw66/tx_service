@@ -53,6 +53,9 @@ enum struct TxErrorCode
 
     // Acquire leader term
     ACQUIRE_LEADER_TERM_FAIL,
+
+    //-- NotifyStartMigrationOp
+    DUPLICATE_MIGRATION_TX_ERROR
 };
 
 static const std::map<TxErrorCode, std::string> tx_error_messages{
@@ -151,6 +154,7 @@ enum struct CcErrorCode
     // log service
     LOG_CLOSURE_RESULT_UNKNOWN_ERR,
     WRITE_LOG_FAILED,
+    DUPLICATE_MIGRATION_TX_ERR,
 
     // Detect dead lock and abort the transaction
     DEAD_LOCK_ABORT,

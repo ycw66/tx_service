@@ -78,6 +78,12 @@ public:
                       FlushDataAllResponse *response,
                       ::google::protobuf::Closure *done) override;
 
+    void InitDataMigration(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::InitMigrationRequest *request,
+        ::txservice::remote::InitMigrationResponse *response,
+        ::google::protobuf::Closure *done) override;
+
 private:
     LocalCcShards &local_shards_;
 };

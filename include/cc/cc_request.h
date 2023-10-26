@@ -142,11 +142,8 @@ public:
                         // ranges and initializes the table's range cc map.
                         // After fetching is finished, this cc request is
                         // re-enqueued for re-execution.
-                        ccs.FetchTableRanges(*table_name_,
-                                             table_schema->GetKVCatalogInfo(),
-                                             this,
-                                             node_group_id_,
-                                             ng_term_);
+                        ccs.FetchTableRanges(
+                            *table_name_, this, node_group_id_, ng_term_);
                         return false;
                     }
                 }
@@ -2786,7 +2783,6 @@ public:
                         // re-enqueued for re-execution.
                         ccs.FetchTableRanges(
                             *table_name_,
-                            table_schema_->GetKVCatalogInfo(),
                             this,
                             node_group_id_,
                             std::max(cc_ng_candid_term, cc_ng_term));

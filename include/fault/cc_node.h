@@ -201,7 +201,7 @@ public:
                                CcShard *shard,
                                braft::Configuration &config,
                                braft::Node *node)
-        : cc_req_(req), shard_(shard)
+        : cc_req_(req), shard_(shard), new_config_(config), node_(node)
     {
     }
     ~ChangePeerClosure()

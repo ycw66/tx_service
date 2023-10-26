@@ -126,6 +126,17 @@ public:
         log_agent_.UpdateLeaderCache(lg_id, node_id);
     }
 
+    void CheckMigrationIsFinished(
+        uint32_t log_group_id,
+        brpc::Controller *cntl,
+        const ::txlog::CheckMigrationIsFinishedRequest &request,
+        ::txlog::CheckMigrationIsFinishedResponse &response,
+        google::protobuf::Closure &done) override
+    {
+        log_agent_.CheckMigrationIsFinished(
+            log_group_id, cntl, &request, &response, &done);
+    }
+
 private:
     ::txlog::LogAgent log_agent_;
 };

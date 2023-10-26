@@ -113,8 +113,7 @@ public:
     {
     }
 
-    void FetchTableRanges(const txservice::KVCatalogInfo *kv_info,
-                          FetchTableRangesCc *fetch_cc) override
+    void FetchTableRanges(FetchTableRangesCc *fetch_cc) override
     {
     }
 

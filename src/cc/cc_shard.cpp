@@ -272,11 +272,12 @@ void CcShard::Enqueue(CcRequestBase *req)
     }
 }
 
-TEntry &CcShard::NewTx(NodeGroupId tx_owner)
+TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
+                       uint32_t log_group_id,
+                       int64_t term)
 {
     // allocate start timestamp.
     uint64_t start_ts = Now();
-    int64_t term = Sharder::Instance().LeaderTerm(tx_owner);
 
     // Cicurlar iteration to find an available transaction entry.
     size_t cnt = 0;
@@ -316,6 +317,17 @@ TEntry &CcShard::NewTx(NodeGroupId tx_owner)
         next_tx_idx_ = old_size;
     }
 
+    if (log_group_id != UINT32_MAX)
+    {
+        auto txlog = Sharder::Instance().GetLogAgent();
+        uint64_t global_core_id = GlobalCoreId(tx_ng_id);
+        TxNumber new_txn = (global_core_id << 32L) | next_tx_ident_;
+        while (txlog->GetLogGroupId(new_txn) != log_group_id)
+        {
+            ++next_tx_ident_;
+            new_txn = (global_core_id << 32L) | next_tx_ident_;
+        }
+    }
     TEntry &tentry = tx_vec_.at(next_tx_idx_);
     // Reset() set lower_bound ts and commit ts.
     tentry.Reset(start_ts, next_tx_ident_, term);
@@ -801,7 +813,6 @@ void CcShard::FetchTableStatistics(const TableName &table_name,
 }
 
 void CcShard::FetchTableRanges(const TableName &table_name,
-                               const KVCatalogInfo *kv_info,
                                CcRequestBase *requester,
                                NodeGroupId cc_ng_id,
                                int64_t cc_ng_term)
@@ -827,7 +838,7 @@ void CcShard::FetchTableRanges(const TableName &table_name,
     fetch_req->AddRequester(requester);
     if (fetch_req->RequesterCount() == 1)
     {
-        local_shards_.store_hd_->FetchTableRanges(kv_info, fetch_req);
+        local_shards_.store_hd_->FetchTableRanges(fetch_req);
     }
 }
 
@@ -957,11 +968,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         GetTableRangesForATable(base_range_table_name, cc_ng_id);
     if (ranges == nullptr)
     {
-        FetchTableRanges(base_range_table_name,
-                         curr_schema->GetKVCatalogInfo(),
-                         requester,
-                         cc_ng_id,
-                         cc_ng_term);
+        FetchTableRanges(
+            base_range_table_name, requester, cc_ng_id, cc_ng_term);
         return nullptr;
     }
 
@@ -974,11 +982,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
             GetTableRangesForATable(index_range_table_name, cc_ng_id);
         if (ranges == nullptr)
         {
-            FetchTableRanges(index_range_table_name,
-                             curr_schema->GetKVCatalogInfo(),
-                             requester,
-                             cc_ng_id,
-                             cc_ng_term);
+            FetchTableRanges(
+                index_range_table_name, requester, cc_ng_id, cc_ng_term);
             return nullptr;
         }
     }

@@ -1369,9 +1369,11 @@ private:
         TableStatistics<KeyT> *statistics =
             static_cast<TableStatistics<KeyT> *>(
                 table_schema_->StatisticsObject().get());
-
-        statistics->OnSplitSamplePool(
-            shard_, this->cc_ng_id_, table_or_index_name, old_info);
+        if (statistics)
+        {
+            statistics->OnSplitSamplePool(
+                shard_, this->cc_ng_id_, table_or_index_name, old_info);
+        }
     }
 };
 }  // namespace txservice

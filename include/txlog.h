@@ -39,9 +39,16 @@ public:
                           ::txlog::LogResponse &log_response,
                           google::protobuf::Closure &done) = 0;
 
-    // Invoked by a cc node group's leader to update its checkpoint timestamp in
-    // all log groups (so that the transaction logs before checkpoint timestamp
-    // can be ignored and truncated).
+    virtual void CheckMigrationIsFinished(
+        uint32_t log_group_id,
+        brpc::Controller *cntl,
+        const ::txlog::CheckMigrationIsFinishedRequest &request,
+        ::txlog::CheckMigrationIsFinishedResponse &response,
+        google::protobuf::Closure &done) = 0;
+
+    // Invoked by a cc node group's leader to update its checkpoint
+    // timestamp in all log groups (so that the transaction logs before
+    // checkpoint timestamp can be ignored and truncated).
     virtual void UpdateCheckpointTs(uint32_t cc_node_group_id,
                                     int64_t term,
                                     uint64_t checkpoint_timestamp) = 0;

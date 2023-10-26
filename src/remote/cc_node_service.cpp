@@ -186,14 +186,13 @@ void CcNodeService::ClusterAddNode(
     ClusterScaleTxRequest scale_req(
         ClusterScaleOpType::AddNode, &delta_nodes, nullptr, nullptr);
     txm->Execute(&scale_req);
-    scale_req.WaitForWriteLog();
+    scale_req.Wait();
 
-    if (scale_req.GetErr() != CcErrorCode::NO_ERROR)
+    if (scale_req.IsError())
     {
-        if (scale_req.GetErr() == CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+        if (scale_req.ErrorCode() == TxErrorCode::LOG_SERVICE_UNREACHABLE)
         {
             // write log result unkown, need to query new leader later.
-
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
         }
@@ -259,14 +258,13 @@ void CcNodeService::ClusterRemoveNode(
                                     &removed_nodes,
                                     &remove_node_count);
     txm->Execute(&scale_req);
-    scale_req.WaitForWriteLog();
+    scale_req.Wait();
 
-    if (scale_req.GetErr() != CcErrorCode::NO_ERROR)
+    if (scale_req.IsError())
     {
-        if (scale_req.GetErr() == CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
+        if (scale_req.ErrorCode() == TxErrorCode::LOG_SERVICE_UNREACHABLE)
         {
             // write log result unkown, need to query new leader later.
-
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
         }
@@ -421,14 +419,13 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
             std::shared_ptr<DataSyncStatus> status =
                 std::make_shared<DataSyncStatus>();
 
-            local_shards.EnqueueDataSyncTask(table_name,
-                                             ng_id,
-                                             ng_term,
-                                             data_sync_ts,
-                                             false,
-                                             is_dirty,
-                                             status,
-                                             nullptr);
+            local_shards.EnqueueDataSyncTaskForTable(table_name,
+                                                     ng_id,
+                                                     ng_term,
+                                                     data_sync_ts,
+                                                     false,
+                                                     is_dirty,
+                                                     status);
 
             std::unique_lock<std::mutex> lk(status->mux_);
             status->all_task_started_ = true;
@@ -455,6 +452,140 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
                << " finished with error: " << (int32_t) error_code;
 }
 
+void CcNodeService::InitDataMigration(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::InitMigrationRequest *request,
+    ::txservice::remote::InitMigrationResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    auto thd = std::thread(
+        [request, response, done]()
+        {
+            brpc::ClosureGuard done_guard(done);
+
+            // We don't know if this RPC request is stale or new.
+            // We just create a new transaction to do data migration.
+            // the write_first_prepare_log request of migration transaction will
+            // be rejected if this RPC request is stale or if the
+            // ClusterScaleTx is finished transaction.
+
+            TxLog *tx_log = Sharder::Instance().GetLogAgent();
+            auto cluster_scale_tx_log_ng_id =
+                tx_log->GetLogGroupId(request->tx_number());
+
+            TxService *tx_service =
+                Sharder::Instance().GetLocalCcShards()->GetTxservice();
+            std::vector<TransactionExecution *> txms;
+            std::vector<TxNumber> txns;
+            int worker_tx_cnt = request->migrate_infos_size() > 10
+                                    ? 10
+                                    : request->migrate_infos_size();
+            for (int i = 0; i < worker_tx_cnt; i++)
+            {
+                TransactionExecution *txm = tx_service->NewTx();
+
+                InitTxRequest init_req;
+                // Set isolation level to RepeatableRead to ensure the readlock
+                // will be set during the execution of the following
+                // ReadTxRequest.
+                init_req.iso_level_ = IsolationLevel::RepeatableRead;
+                init_req.protocol_ = CcProtocol::Locking;
+                // Set tx node group id
+                init_req.tx_ng_id_ = request->orig_owner();
+                // Set log node group id to ensure the log will be write to
+                // special location.
+                init_req.log_group_id_ = cluster_scale_tx_log_ng_id;
+
+                init_req.Reset();
+                txm->Execute(&init_req);
+                init_req.Wait();
+
+                if (init_req.IsError())
+                {
+                    response->set_success(false);
+                    for (auto cur_txm : txms)
+                    {
+                        AbortTxRequest abort_req;
+                        cur_txm->Execute(&abort_req);
+                        abort_req.Wait();
+                    }
+                    return;
+                }
+
+                txms.push_back(txm);
+                txns.push_back(txm->TxNumber());
+            }
+
+            // Fill in the migration plan that will be passed to workers
+            std::vector<uint16_t> bucket_ids;
+            std::vector<NodeGroupId> new_owner_ids;
+            size_t migrate_infos_size =
+                static_cast<size_t>(request->migrate_infos_size());
+            bucket_ids.reserve(migrate_infos_size);
+            new_owner_ids.reserve(migrate_infos_size);
+
+            for (size_t idx = 0; idx < migrate_infos_size; ++idx)
+            {
+                const auto &migrate_info = request->migrate_infos(idx);
+                bucket_ids.push_back(migrate_info.bucket_id());
+                new_owner_ids.push_back(migrate_info.new_owner());
+            }
+            std::shared_ptr<DataMigrationStatus> status =
+                std::make_shared<DataMigrationStatus>(request->tx_number(),
+                                                      std::move(bucket_ids),
+                                                      std::move(new_owner_ids),
+                                                      std::move(txns));
+            // All worker txs has been started, now write the first prepare log,
+            // the first tx will write a prepare log that marks the node group
+            // migration process has been started. The log contains all of the
+            // worker txns, so once this log is written, the migration of this
+            // node gorup is always going to succeed.
+            DataMigrationTxRequest migrate_req(status);
+            txms[0]->Execute(&migrate_req);
+            migrate_req.Wait();
+
+            if (migrate_req.IsError())
+            {
+                if (migrate_req.ErrorCode() ==
+                    TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR)
+                {
+                    // Migration on this node group is already in progress.
+                    // We can mark the migration init as success.
+                    response->set_success(true);
+                }
+                else
+                {
+                    response->set_success(false);
+                }
+                // Abort rest of the workers.
+                for (size_t i = 1; i < txms.size(); i++)
+                {
+                    AbortTxRequest abort_req;
+                    txms[i]->Execute(&abort_req);
+                    abort_req.Wait();
+                }
+            }
+            else
+            {
+                assert(!migrate_req.IsError());
+
+                response->set_success(true);
+                for (size_t i = 1; i < txms.size(); i++)
+                {
+                    // If the log is successfully written, start the rest of the
+                    // workers.
+                    DataMigrationTxRequest migrate_req(status);
+                    txms[i]->Execute(&migrate_req);
+                    // Wait for shared ptr is passed into txm before destructing
+                    // tx req.
+                    migrate_req.Wait();
+                }
+            }
+        });
+
+    thd.detach();
+}
+
 void CcNodeService::NotifyNewNodeReady(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::NotifyNewNodeReadyRequest *request,
@@ -464,20 +595,45 @@ void CcNodeService::NotifyNewNodeReady(
     brpc::ClosureGuard done_guard(done);
     auto shards = Sharder::Instance().GetLocalCcShards();
     TxNumber txn = request->tx_number();
-    std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
-    auto scale_op = shards->cluster_scale_op_.get();
-    if (scale_op->GetStatus(txn) ==
-        remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE)
+    NodeGroupId tx_ng_id = (txn >> 32L) >> 10;
+    if (Sharder::Instance().LeaderTerm(tx_ng_id) >= 0)
     {
-        assert(scale_op->op_ == &scale_op->wait_for_new_node_ready_op_);
-        scale_op->wait_for_new_node_ready_op_.hd_result_.SetFinished();
-        // TODO{liunyl}: Wait until we write log to confirm new nodes are ready.
-        response->set_error(false);
+        std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
+        auto scale_op = shards->cluster_scale_op_.get();
+        if (scale_op->GetStatus(txn) ==
+            remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE)
+        {
+            assert(scale_op->op_ == &scale_op->wait_for_new_node_ready_op_);
+            scale_op->wait_for_new_node_ready_op_.hd_result_.SetFinished();
+            // TODO{liunyl}: Wait until we write log to confirm new nodes are
+            // ready.
+            response->set_error(false);
+        }
+        else
+        {
+            // Invalid state for notify new node ready
+            response->set_error(true);
+        }
     }
     else
     {
-        // Invalid state for notify new node ready
-        response->set_error(true);
+        // Redirect rpc to leader node of tx ng.
+        int32_t node_id = Sharder::Instance().LeaderNodeId(tx_ng_id);
+        std::string node_ip;
+        uint16_t node_port;
+        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
+
+        brpc::Channel channel;
+        if (channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        {
+            response->set_error(true);
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+        brpc::Controller cntl;
+        stub.NotifyNewNodeReady(&cntl, request, response, nullptr);
     }
 }
 
@@ -490,11 +646,33 @@ void CcNodeService::CheckClusterScaleStatus(
     brpc::ClosureGuard done_gaurd(done);
     auto shards = Sharder::Instance().GetLocalCcShards();
     TxNumber txn = request->tx_number();
-    std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
-    auto scale_op = shards->cluster_scale_op_.get();
-    // TODO{liunyl}: redirect request to tx coordinator ng if current node
-    // is not tx owner.
-    response->set_status(scale_op->GetStatus(txn));
+    NodeGroupId tx_ng_id = (txn >> 32L) >> 10;
+    if (Sharder::Instance().LeaderTerm(tx_ng_id) >= 0)
+    {
+        std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
+        auto scale_op = shards->cluster_scale_op_.get();
+        response->set_status(scale_op->GetStatus(txn));
+    }
+    else
+    {
+        // Redirect rpc to leader node of tx ng.
+        int32_t node_id = Sharder::Instance().LeaderNodeId(tx_ng_id);
+        std::string node_ip;
+        uint16_t node_port;
+        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
+
+        brpc::Channel channel;
+        if (channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        {
+            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
+            return;
+        }
+
+        remote::CcRpcService_Stub stub(&channel);
+        brpc::Controller cntl;
+        stub.CheckClusterScaleStatus(&cntl, request, response, nullptr);
+    }
 }
 }  // namespace remote
 }  // namespace txservice

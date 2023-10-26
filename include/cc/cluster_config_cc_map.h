@@ -209,25 +209,7 @@ public:
         if (lk_type != LockType::NoLock)
         {
             neg_inf_.commit_ts_ = req.CommitTs();
-
-            // When commit_ts = 0, the request removes the write lock
-            // without installing a new value.
-
-            if (req.CommitType() != PostWriteType::PrepareCommit)
-            {
-                // For PostCommit or Commit, the post-write-all request
-                // releases the write lock/intent.
-                ReleaseCceKeyLock(&neg_inf_, txn, req.NodeGroupId());
-            }
-            else
-            {
-                // For PrepareCommit, the post-write-all request keeps write
-                // intent or downgrades the write lock to the write intent.
-                if (lk_type == LockType::WriteLock)
-                {
-                    DowngradeCceKeyWriteLock(&neg_inf_, txn);
-                }
-            }
+            ReleaseCceKeyLock(&neg_inf_, txn, req.NodeGroupId());
         }
 
         // No need to move the request to next core since this map is only

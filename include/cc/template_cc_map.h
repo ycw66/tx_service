@@ -1267,7 +1267,7 @@ public:
 
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
-                    if (req.CommitType() == PostWriteType::PostCommit)
+                    if (req.CommitType() != PostWriteType::PrepareCommit)
                     {
                         cce_ptr->commit_ts_ = commit_ts;
                         cce_ptr->payload_status_ =
@@ -6913,15 +6913,17 @@ protected:
      */
     bool KeyInRange(const KeyT *key, const KeyT *start_key, const KeyT *end_key)
     {
-        if (start_key == nullptr && end_key == nullptr)
+        if (start_key == nullptr || *start_key < *key || *start_key == *key)
         {
-            // Range is negative inf to positive inf
-            return true;
-        }
-
-        if (*start_key < *key || *start_key == *key)
-        {
-            return *key < *end_key;
+            if (end_key)
+            {
+                return *key < *end_key;
+            }
+            else
+            {
+                // end key is pos inf
+                return true;
+            }
         }
 
         return false;

@@ -333,6 +333,7 @@ void CcStreamSender::UpdateRemoteNodes(
                 resend_message_list_.erase(node_id);
                 long_msg_resend_message_list_.erase(node_id);
             }
+            LOG(INFO) << "Closed cc stream to node " << node_id;
             brpc::StreamClose(outbound_streams_.at(node_id).first);
             outbound_streams_.erase(node_id);
             brpc::StreamClose(long_msg_outbound_streams_.at(node_id).first);

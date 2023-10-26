@@ -58,18 +58,6 @@ public:
         assert(req.IsLocal());
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (req.IsInRecovering())
-        {
-            ng_term = ng_term > 0
-                          ? ng_term
-                          : Sharder::Instance().CandidateLeaderTerm(ng_id);
-        }
-
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
 
         const RangeBucketKey *bucket_key =
             static_cast<const RangeBucketKey *>(req.Key());
@@ -157,6 +145,223 @@ public:
         }
         }  //-- end: switch
 
+        return true;
+    }
+
+    bool Execute(PostWriteAllCc &req) override
+    {
+        RangeBucketRecord *upload_bucket_rec = nullptr;
+        const RangeBucketKey *target_key = nullptr;
+
+        if (req.Key() != nullptr)
+        {
+            // Local request
+            upload_bucket_rec = static_cast<RangeBucketRecord *>(req.Payload());
+            target_key = static_cast<const RangeBucketKey *>(req.Key());
+        }
+        else
+        {
+            // Request comes from a remote node and is processed for the first
+            // time. Deserialize the keys and payloads.
+            assert(*req.KeyStrType() == KeyType::Normal);
+
+            const std::string *key_str = req.KeyStr();
+            assert(key_str != nullptr);
+            std::unique_ptr<RangeBucketKey> decoded_key =
+                std::make_unique<RangeBucketKey>();
+            size_t offset = 0;
+            decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+            target_key = decoded_key.get();
+            req.SetDecodedKey(std::move(decoded_key));
+            assert(req.PayloadStr() != nullptr);
+            std::unique_ptr<RangeBucketRecord> decoded_rec =
+                std::make_unique<RangeBucketRecord>();
+            offset = 0;
+            decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
+            upload_bucket_rec = decoded_rec.get();
+            req.SetDecodedPayload(std::move(decoded_rec));
+        }
+
+        CcEntry<RangeBucketKey, RangeBucketRecord> *cce =
+            Find(*target_key).second;
+        assert(cce != nullptr);
+
+        // Check whether cce key lock holder is the given tx of the
+        // PostWriteAllCc before apply change.
+        if (CheckCceKeyLock(cce, req) == false)
+        {
+            // Check if the tx still has lock on this cce. If this
+            // is a duplicate post write all req or this ng has already
+            // failed over and has released the lock during recovery, skip
+            // processing this request.
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                req.Result()->SetFinished();
+                req.SetDecodedPayload(nullptr);
+                return true;
+            }
+            else
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+        }
+
+        if (req.CommitType() == PostWriteType::PrepareCommit)
+        {
+            if (shard_->core_id_ == 0)
+            {
+                // Update bucket info in local cc shards. Upload dirty bucket
+                // owner.
+                upload_bucket_rec->SetBucketInfo(
+                    shard_->local_shards_.UploadNewBucketInfo(
+                        this->cc_ng_id_,
+                        target_key->bucket_id_,
+                        upload_bucket_rec->GetBucketInfo()->DirtyBucketOwner(),
+                        upload_bucket_rec->GetBucketInfo()->DirtyVersion()));
+            }
+        }
+        else if (req.CommitType() == PostWriteType::PostCommit ||
+                 req.CommitType() == PostWriteType::Commit)
+        {
+            if (shard_->core_id_ == 0)
+            {
+                // Commit dirty bucket info in local cc shards.
+                const BucketInfo *bucket_info = shard_->GetBucketInfo(
+                    target_key->bucket_id_, this->cc_ng_id_);
+                assert(bucket_info != nullptr);
+                if (req.CommitType() == PostWriteType::PostCommit &&
+                    bucket_info->DirtyVersion() > 0)
+                {
+                    // First time processing post write all. Commit the dirty
+                    // version and drop store ranges if is old bucket owner.
+                    NodeGroupId orig_owner = bucket_info->BucketOwner();
+                    // Commit the dirty bucket info first so that store range
+                    // can be loaded into memory on the dirty bucket owner ng.
+                    bucket_info = shard_->local_shards_.CommitDirtyBucketInfo(
+                        this->cc_ng_id_, target_key->bucket_id_);
+                    if (this->cc_ng_id_ == orig_owner)
+                    {
+                        // If this ng is the original owner of the bucket,
+                        // drop store ranges in this bucket since they are
+                        // now migrated to other ng. Do this after dirty
+                        // bucket info is committed to make sure all ranges
+                        // are removed.
+                        shard_->local_shards_.DropStoreRangesInBucket(
+                            this->cc_ng_id_, target_key->bucket_id_);
+                    }
+                }
+                else if (req.CommitType() == PostWriteType::Commit &&
+                         bucket_info->Version() <
+                             upload_bucket_rec->GetBucketInfo()->Version())
+                {
+                    // We skipped prepare commit, so there's no dirty bucket
+                    // info. upload new bucket info directly.
+                    bucket_info = shard_->local_shards_.UploadBucketInfo(
+                        this->cc_ng_id_,
+                        target_key->bucket_id_,
+                        upload_bucket_rec->GetBucketInfo()->BucketOwner(),
+                        upload_bucket_rec->GetBucketInfo()->Version());
+                    if (this->cc_ng_id_ == bucket_info->BucketOwner())
+                    {
+                        // If this ng is the original owner of the bucket, drop
+                        // store ranges in this bucket since they are now
+                        // migrated to other ng.
+                        shard_->local_shards_.DropStoreRangesInBucket(
+                            this->cc_ng_id_, target_key->bucket_id_);
+                    }
+                }
+
+                // The dirty version is already committed. If this ng is the
+                // current owner of bucket, load store ranges into memory.
+                if (this->cc_ng_id_ == bucket_info->BucketOwner())
+                {
+                    // Load store range if this ng is the new owner of the
+                    // bucket.
+                    int64_t term =
+                        Sharder::Instance().LeaderTerm(this->cc_ng_id_);
+                    if (!shard_->local_shards_.LoadStoreRangesInBucket(
+                            this->cc_ng_id_,
+                            target_key->bucket_id_,
+                            shard_,
+                            &req,
+                            term))
+                    {
+                        return false;
+                    }
+                }
+                upload_bucket_rec->SetBucketInfo(bucket_info);
+            }
+        }
+
+        return TemplateCcMap::Execute(req);
+    }
+
+    bool Execute(ReplayLogCc &req) override
+    {
+        const std::string_view &content = req.LogContentView();
+        ::txlog::ClusterScaleOpMessage scale_op_msg;
+        scale_op_msg.ParseFromArray(content.data(), content.length());
+
+        // Restore bucket info
+        auto &migrate_process =
+            scale_op_msg.node_group_bucket_migrate_process();
+        auto bucket_map = shard_->GetAllBucketInfos(req.NodeGroupId());
+        for (auto &[ng_id, ng_process] : migrate_process)
+        {
+            for (auto &[bucket_id, bucket_process] :
+                 ng_process.bucket_migrate_process())
+            {
+                if (shard_->core_id_ == 0)
+                {
+                    BucketInfo *info = bucket_map->at(bucket_id).get();
+                    // Update bucket owner on the first core
+                    switch (bucket_process.stage())
+                    {
+                    case ::txlog::BucketMigrateMessage_Stage::
+                        BucketMigrateMessage_Stage_NotStarted:
+                    {
+                        info->bucket_owner_ = bucket_process.old_owner();
+                        break;
+                    }
+                    case ::txlog::BucketMigrateMessage_Stage::
+                        BucketMigrateMessage_Stage_PrepareMigrate:
+                    {
+                        // TODO
+                        assert(false);
+                        info->bucket_owner_ = bucket_process.old_owner();
+                        assert(bucket_process.migrate_ts() > info->Version());
+                        info->SetDirty(bucket_process.new_owner(),
+                                       bucket_process.migrate_ts());
+                        break;
+                    }
+                    case ::txlog::BucketMigrateMessage_Stage::
+                        BucketMigrateMessage_Stage_CommitMigrate:
+                    {
+                        // TODO
+                        assert(false);
+                        info->Set(bucket_process.new_owner(),
+                                  bucket_process.migrate_ts());
+                        break;
+                    }
+                    case ::txlog::BucketMigrateMessage_Stage::
+                        BucketMigrateMessage_Stage_CleanMigrate:
+                    {
+                        // no op
+                        assert(false);
+                        break;
+                    }
+                    default:
+                    {
+                        assert(false);
+                    }
+                    }
+                }
+            }
+        }
+
+        req.SetFinish();
         return true;
     }
 

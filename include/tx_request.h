@@ -16,6 +16,7 @@
 
 namespace txservice
 {
+struct DataMigrationStatus;
 struct TxRequest
 {
 public:
@@ -131,11 +132,13 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
                   TransactionExecution *txm = nullptr,
-                  uint32_t tx_owner = UINT32_MAX)
+                  uint32_t tx_ng_id = UINT32_MAX,
+                  uint32_t log_group_id = UINT32_MAX)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           iso_level_(level),
           protocol_(proto),
-          tx_owner_(tx_owner)
+          tx_ng_id_(tx_ng_id),
+          log_group_id_(log_group_id)
     {
     }
 
@@ -143,7 +146,8 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
-    uint32_t tx_owner_{UINT32_MAX};
+    uint32_t tx_ng_id_{UINT32_MAX};
+    uint32_t log_group_id_{UINT32_MAX};
 };
 
 struct ReadTxRequest
@@ -567,7 +571,6 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     SplitFlushTxRequest(
         const TableName &table_name,
         const TableSchema *schema,
-        NodeGroupId node_group,
         const TxKey *old_start_key,
         const TxKey *old_end_key,
         const RangeInfo *old_info,
@@ -579,7 +582,6 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
         : TemplateTxRequest(nullptr, nullptr, nullptr),
           table_name_(&table_name),
           schema_(schema),
-          node_group_(node_group),
           old_start_key_(old_start_key),
           old_end_key_(old_end_key),
           old_range_info_(old_info),
@@ -592,7 +594,6 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     }
     const TableName *table_name_{nullptr};
     const TableSchema *schema_{nullptr};
-    NodeGroupId node_group_;
     const TxKey *old_start_key_{nullptr};
     const TxKey *old_end_key_{nullptr};
     const RangeInfo *old_range_info_{nullptr};
@@ -601,6 +602,17 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     std::vector<FlushRecord> previous_data_sync_vec_;
     std::vector<FlushRecord> previous_archive_vec_;
     std::vector<const TxKey *> previous_mv_base_vec_;
+};
+
+struct DataMigrationTxRequest
+    : public TemplateTxRequest<DataMigrationTxRequest, Void>
+{
+    DataMigrationTxRequest(std::shared_ptr<DataMigrationStatus> status)
+        : TemplateTxRequest(nullptr, nullptr, nullptr), status_(status)
+    {
+    }
+
+    std::shared_ptr<DataMigrationStatus> status_;
 };
 
 struct AnalyzeTableTxRequest
@@ -643,7 +655,7 @@ struct ObjectCommandTxRequest
 };
 
 struct ClusterScaleTxRequest
-    : public TemplateTxRequest<ClusterScaleTxRequest, bool>
+    : public TemplateTxRequest<ClusterScaleTxRequest, Void>
 {
     ClusterScaleTxRequest(
         ClusterScaleOpType scale_type,
@@ -658,17 +670,6 @@ struct ClusterScaleTxRequest
     {
     }
 
-    void WaitForWriteLog()
-    {
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [this] { return finished_; });
-    }
-
-    CcErrorCode GetErr() const
-    {
-        return err_;
-    }
-
     ClusterScaleOpType scale_type_;
     // Used when adding node, to indicate added node info
     std::vector<std::pair<std::string, uint16_t>> *new_nodes_;
@@ -678,11 +679,6 @@ struct ClusterScaleTxRequest
     std::vector<std::pair<std::string, uint16_t>> *removed_nodes_;
     // Used when removing node, to indicate how many nodes to be removed
     uint16_t *remove_node_count_;
-    // Notify caller once log is written.
-    CcErrorCode err_{CcErrorCode::NO_ERROR};
-    bool finished_{false};
-    std::mutex mtx_;
-    std::condition_variable cv_;
 };
 
 struct SchemaRecoveryTxRequest

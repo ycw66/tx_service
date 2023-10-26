@@ -341,19 +341,19 @@ bool CcNode::UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
 {
     std::unique_lock<std::shared_mutex> lk(config_mux_);
     bool ng_updated = false;
+    if (ng_ips.size() != ng_ips_.size())
+    {
+        ng_updated = true;
+        ng_ips_.resize(ng_ips.size());
+        ng_ports_.resize(ng_ports.size());
+    }
     for (size_t idx = 0; idx < ng_ips.size(); ++idx)
     {
         if (ng_ips[idx] == ip_ && ng_ports[idx] == port_)
         {
             node_idx_ = idx;
         }
-        if (idx >= ng_ips_.size())
-        {
-            ng_updated = true;
-            ng_ips_.push_back(ng_ips[idx]);
-            ng_ports_.push_back(ng_ports[idx]);
-        }
-        else if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
+        if (ng_ips[idx] != ng_ips_[idx] || ng_ports[idx] != ng_ports_[idx])
         {
             ng_updated = true;
             ng_ips_[idx] = ng_ips[idx];

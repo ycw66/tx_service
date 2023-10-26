@@ -106,8 +106,7 @@ public:
     virtual void FetchTableCatalog(const TableName &ccm_table_name,
                                    FetchCatalogCc *fetch_cc) = 0;
 
-    virtual void FetchTableRanges(const KVCatalogInfo *kv_info,
-                                  FetchTableRangesCc *fetch_cc) = 0;
+    virtual void FetchTableRanges(FetchTableRangesCc *fetch_cc) = 0;
 
     /**
      * @brief Read a row from base table or skindex table in datastore with

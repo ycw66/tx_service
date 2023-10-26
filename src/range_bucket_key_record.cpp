@@ -1,31 +1,39 @@
 #include "range_bucket_key_record.h"
 
+#include <cstdint>
+
 namespace txservice
 {
 bool operator==(const RangeBucketKey &lhs, const RangeBucketKey &rhs)
 {
     return lhs.bucket_id_ == rhs.bucket_id_;
 }
+
 bool operator!=(const RangeBucketKey &lhs, const RangeBucketKey &rhs)
 {
     return lhs.bucket_id_ != rhs.bucket_id_;
 }
+
 bool operator<(const RangeBucketKey &lhs, const RangeBucketKey &rhs)
 {
     return lhs.bucket_id_ < rhs.bucket_id_;
 }
+
 bool operator<=(const RangeBucketKey &lhs, const RangeBucketKey &rhs)
 {
     return lhs.bucket_id_ <= rhs.bucket_id_;
 }
+
 bool RangeBucketKey::operator==(const TxKey &rhs) const
 {
     return false;
 }
+
 bool RangeBucketKey::operator<(const TxKey &rhs) const
 {
     return false;
 }
+
 size_t RangeBucketKey::Hash() const
 {
     return std::hash<uint16_t>()(bucket_id_);
@@ -51,44 +59,85 @@ size_t RangeBucketKey::SerializedLength() const
 {
     return sizeof(uint16_t);
 }
+
 void RangeBucketKey::Deserialize(const char *buf,
                                  size_t &offset,
                                  const Schema *schema)
 {
+    bucket_id_ = *((uint16_t *) (buf + offset));
+    offset += sizeof(uint16_t);
 }
+
 TxKey::Uptr RangeBucketKey::Clone() const
 {
     return std::make_unique<RangeBucketKey>(*this);
 }
+
 void RangeBucketKey::Copy(const TxKey &rhs)
 {
+    const RangeBucketKey &typed_rhs = static_cast<const RangeBucketKey &>(rhs);
+    bucket_id_ = typed_rhs.bucket_id_;
 }
+
 std::string RangeBucketKey::ToString() const
 {
-    return "";
+    return std::to_string(bucket_id_);
 }
+
 void RangeBucketRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 {
+    assert(false);
 }
+
 void RangeBucketRecord::Serialize(std::string &str) const
 {
+    const BucketInfo *bucket_info =
+        is_owner_ ? bucket_info_uptr_.get() : bucket_info_;
+    assert(bucket_info != nullptr);
+    SerializeToStr(&bucket_info->bucket_owner_, str);
+    SerializeToStr(&bucket_info->version_, str);
+    SerializeToStr(&bucket_info_->dirty_bucket_owner_, str);
+    SerializeToStr(&bucket_info_->dirty_version_, str);
 }
+
 size_t RangeBucketRecord::SerializedLength() const
 {
-    return 0;
+    return sizeof(NodeGroupId) * 2 + sizeof(uint64_t) * 2;
 }
+
 void RangeBucketRecord::Deserialize(const char *buf, size_t &offset)
 {
+    if (!is_owner_)
+    {
+        bucket_info_ = nullptr;
+    }
+
+    is_owner_ = true;
+    NodeGroupId bucket_owner, dirty_owner;
+    uint64_t version, dirty_version;
+    DesrializeFrom(buf, offset, &bucket_owner);
+    DesrializeFrom(buf, offset, &version);
+    DesrializeFrom(buf, offset, &dirty_owner);
+    DesrializeFrom(buf, offset, &dirty_version);
+    bucket_info_uptr_ = std::make_unique<BucketInfo>(bucket_owner, version);
+    bucket_info_uptr_->SetDirty(dirty_owner, dirty_version);
 }
+
 TxRecord::Uptr RangeBucketRecord::Clone() const
 {
     return std::make_unique<RangeBucketRecord>(*this);
 }
+
 void RangeBucketRecord::Copy(const TxRecord &rhs)
 {
+    const RangeBucketRecord &typed_rhs =
+        static_cast<const RangeBucketRecord &>(rhs);
+    *this = typed_rhs;
 }
+
 std::string RangeBucketRecord::ToString() const
 {
     return "";
 }
+
 }  // namespace txservice

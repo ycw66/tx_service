@@ -133,13 +133,13 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         continue;
                     }
                 }
-                local_shards_.EnqueueDataSyncTask(table_name,
-                                                  node_group,
-                                                  leader_term,
-                                                  ckpt_ts,
-                                                  true,
-                                                  is_dirty,
-                                                  status);
+                local_shards_.EnqueueDataSyncTaskForTable(table_name,
+                                                          node_group,
+                                                          leader_term,
+                                                          ckpt_ts,
+                                                          true,
+                                                          is_dirty,
+                                                          status);
             }
         }
         if (Sharder::Instance().LeaderTerm(node_group) != leader_term)

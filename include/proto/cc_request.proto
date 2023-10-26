@@ -103,6 +103,7 @@ enum ClusterScaleStatus
 	CLUSTER_CONFIG_UPDATE = 2;
 	DATA_MIGRATION = 3;
 	FINISHED = 4;
+	UNKNOWN = 5;
 }
 message ClusterScaleStatusResponse
 {
@@ -142,6 +143,7 @@ service CcRpcService {
 	rpc NotifyNewNodeReady(NotifyNewNodeReadyRequest) returns (NotifyNewNodeReadyResponse);
 	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
 	rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
+	rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
 }
 
 message TxId_msg {
@@ -199,6 +201,7 @@ enum RecordStatusType {
 enum CommitType {
 	PrepareCommit = 0;
 	PostCommit = 1;
+	Commit = 2;
 }
 
 enum CcTableType {
@@ -630,6 +633,21 @@ message FlushDataAllRequest {
 
 message FlushDataAllResponse {
 	int32 error_code = 1;
+}
+
+message InitMigrationRequest {
+	message MigrateInfo {
+		uint32 bucket_id = 1;
+		uint32 new_owner = 2;
+	}
+
+	uint64 tx_number = 1;
+	uint32 orig_owner = 2;
+	repeated MigrateInfo migrate_infos = 3;
+}
+
+message InitMigrationResponse {
+	bool success = 1;
 }
 
 message KickoutDataRequest {

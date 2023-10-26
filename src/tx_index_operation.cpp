@@ -1304,14 +1304,14 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
             ng_term = Sharder::Instance().LeaderTerm(ng_id);
         }
         assert(ng_term > 0);
-        local_cc_shards->EnqueueDataSyncTask(table_name,
-                                             ng_id,
-                                             ng_term,
-                                             data_sync_ts,
-                                             false,
-                                             is_dirty,
-                                             nullptr,
-                                             &hres);
+        local_cc_shards->EnqueueDataSyncTaskForTable(table_name,
+                                                     ng_id,
+                                                     ng_term,
+                                                     data_sync_ts,
+                                                     false,
+                                                     is_dirty,
+                                                     nullptr,
+                                                     &hres);
     }
     else
     {
@@ -1831,7 +1831,7 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
     InitTxRequest init_req;
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
-    init_req.tx_owner_ = upload_txm->TxCcNodeId();
+    init_req.tx_ng_id_ = upload_txm->TxCcNodeId();
     init_req.Reset();
     acquire_range_lock_txm->Execute(&init_req);
     init_req.Wait();

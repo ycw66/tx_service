@@ -6,6 +6,7 @@
 
 #include "../log_service/proto/raft_log.pb.h"
 #include "cc/cc_handler_result.h"
+#include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault_inject.h"
 #include "type.h"
@@ -48,6 +49,11 @@ public:
                                   ::txlog::LogResponse_ResponseStatus_Unknown)
         {
             hd_result_->SetError(CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR);
+        }
+        else if (response_.response_status() ==
+                 ::txlog::LogResponse_ResponseStatus_DuplicateMigrationTx)
+        {
+            hd_result_->SetError(CcErrorCode::DUPLICATE_MIGRATION_TX_ERR);
         }
         else if (response_.response_status() ==
                  ::txlog::LogResponse_ResponseStatus_Success)
@@ -98,6 +104,63 @@ private:
     ::txlog::LogResponse response_;
     CcHandlerResult<Void> *hd_result_;
 };
+
+class CheckMigrationIsFinishedClosure : public google::protobuf::Closure
+{
+public:
+    explicit CheckMigrationIsFinishedClosure(bool *migration_is_finished,
+                                             std::atomic<bool> *is_finished)
+        : cntl_(),
+          migration_is_finished_(migration_is_finished),
+          is_finished_(is_finished)
+    {
+    }
+
+    ~CheckMigrationIsFinishedClosure() = default;
+
+    void Run() override
+    {
+        if (!cntl_.Failed())
+        {
+            *migration_is_finished_ = response_.finished();
+        }
+        else
+        {
+            *migration_is_finished_ = false;
+        }
+
+        is_finished_->store(true, std::memory_order_release);
+    }
+
+    txlog::CheckMigrationIsFinishedRequest &Request()
+    {
+        return request_;
+    }
+
+    txlog::CheckMigrationIsFinishedResponse &Response()
+    {
+        return response_;
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    void Reset()
+    {
+        cntl_.Reset();
+        response_.Clear();
+    }
+
+private:
+    brpc::Controller cntl_;
+    txlog::CheckMigrationIsFinishedRequest request_;
+    txlog::CheckMigrationIsFinishedResponse response_;
+    bool *migration_is_finished_;
+    std::atomic<bool> *is_finished_;
+};
+
 }  // namespace txservice
 
 #endif

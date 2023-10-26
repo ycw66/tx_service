@@ -635,11 +635,6 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>>
         &ranges_of_all_ngs = table_it.first->second;
     auto ngs_it = ranges_of_all_ngs.try_emplace(ng_id);
-    if (!ngs_it.second)
-    {
-        // Table range already initialized by another FecthTableRangesCc
-        return;
-    }
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> &ranges =
         ngs_it.first->second;
     auto &ids = id_table_it.first->second.try_emplace(ng_id).first->second;
@@ -668,22 +663,38 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         auto res_pair =
             bucket_info->RangesInBucket().try_emplace(range_table_name);
         res_pair.first->second.emplace(range_entry.partition_id_);
-        if (ng_id == bucket_info->BucketOwner())
+
+        auto res = ranges.try_emplace(range_start_key,
+                                      std::move(range_entry.key_),
+                                      range_entry.version_ts_,
+                                      range_entry.partition_id_);
+        if (ng_id == bucket_info->BucketOwner() &&
+            res.first->second.RangeSlices() == nullptr)
         {
             InitRangeEntry &next_range_entry = init_ranges[pidx + 1];
+            const TxKey *next_start_key;
+            if (res.second)
+            {
+                // If range info for this table is initialized for the first
+                // time, use the key in InitRangeEntry
+                next_start_key = next_range_entry.key_.get();
+            }
+            else
+            {
+                // otherwise use the existing tx key stored in table_ranges_
+                auto next_range_entry_it =
+                    ranges.find(next_range_entry.key_.get());
+                next_start_key = next_range_entry_it->first;
+            }
             range_slices =
-                std::make_unique<StoreRange>(range_start_key,
-                                             next_range_entry.key_.get(),
+                std::make_unique<StoreRange>(res.first->first,
+                                             next_start_key,
                                              range_entry.partition_id_,
                                              bucket_info->BucketOwner(),
                                              *this);
             range_slices->InitSlices(range_entry.slice_keys_, fully_cached);
+            res.first->second.SetStoreRange(std::move(range_slices));
         }
-        auto res = ranges.try_emplace(range_start_key,
-                                      std::move(range_entry.key_),
-                                      range_entry.version_ts_,
-                                      range_entry.partition_id_,
-                                      std::move(range_slices));
         ids.try_emplace(range_entry.partition_id_, &res.first->second);
     }
 
@@ -702,22 +713,23 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         GetRangeOwnerInternal(last_range_entry.partition_id_, ng_id);
     auto res_pair = bucket_info->RangesInBucket().try_emplace(range_table_name);
     res_pair.first->second.emplace(last_range_entry.partition_id_);
-    if (ng_id == bucket_info->BucketOwner())
+
+    auto res = ranges.try_emplace(range_start_key,
+                                  std::move(last_range_entry.key_),
+                                  last_range_entry.version_ts_,
+                                  last_range_entry.partition_id_);
+    if (ng_id == bucket_info->BucketOwner() &&
+        res.first->second.RangeSlices() == nullptr)
     {
         range_slices =
-            std::make_unique<StoreRange>(range_start_key,
+            std::make_unique<StoreRange>(res.first->first,
                                          nullptr,
                                          last_range_entry.partition_id_,
                                          bucket_info->BucketOwner(),
                                          *this);
         range_slices->InitSlices(last_range_entry.slice_keys_, fully_cached);
+        res.first->second.SetStoreRange(std::move(range_slices));
     }
-
-    auto res = ranges.try_emplace(range_start_key,
-                                  std::move(last_range_entry.key_),
-                                  last_range_entry.version_ts_,
-                                  last_range_entry.partition_id_,
-                                  std::move(range_slices));
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
 
@@ -856,12 +868,12 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     std::unordered_map<uint32_t, TableRangeEntry *> *range_ids =
         GetTableRangeIdsForATableInternal(table_name, ng_id);
     std::unique_ptr<StoreRange> range_slices = nullptr;
-    NodeGroupId range_owner =
+    NodeGroupId range_ng =
         GetRangeOwnerInternal(partition_id, ng_id)->BucketOwner();
-    if (ng_id == range_owner)
+    if (ng_id == range_ng)
     {
         range_slices = std::make_unique<StoreRange>(
-            start_key.get(), end_key, partition_id, range_owner, *this);
+            start_key.get(), end_key, partition_id, range_ng, *this);
         range_slices->InitSlices(*slice_keys);
     }
 
@@ -877,14 +889,14 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     {
         if (new_range_entry_pair.first->second.Version() > version)
         {
-            if (ng_id == range_owner)
+            if (ng_id == range_ng)
             {
                 range_slices = std::make_unique<StoreRange>(
                     new_range_entry_pair.first->second.GetRangeInfo()
                         ->StartKey(),
                     end_key,
                     partition_id,
-                    range_owner,
+                    range_ng,
                     *this);
                 range_slices->InitSlices(*slice_keys);
             }
@@ -914,7 +926,7 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
 
     // Add new range to bucket info
     auto bucket_info = GetRangeOwnerInternal(partition_id, ng_id);
-    assert(bucket_info->BucketOwner() == range_owner);
+    assert(bucket_info->BucketOwner() == range_ng);
     auto res_pair = bucket_info->RangesInBucket().try_emplace(table_name);
     res_pair.first->second.insert(partition_id);
 
@@ -947,7 +959,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
     {
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
-            range_table_name, kv_info, cc_request, cc_ng_id, cc_ng_term);
+            range_table_name, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
@@ -1001,7 +1013,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
     {
         // Table range info not initialized, initialize range info first
         cc_shard->FetchTableRanges(
-            range_table_name, kv_info, cc_request, cc_ng_id, cc_ng_term);
+            range_table_name, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
@@ -1105,11 +1117,11 @@ uint64_t LocalCcShards::CountRangesLockless(const TableName &table_name,
         [key_ng_id, ng_id, this](
             uint64_t a, const std::pair<const TxKey *const, TableRangeEntry> &b)
         {
-            NodeGroupId range_owner =
+            NodeGroupId range_ng =
                 GetRangeOwnerInternal(b.second.GetRangeInfo()->PartitionId(),
                                       ng_id)
                     ->BucketOwner();
-            if (range_owner == key_ng_id)
+            if (range_ng == key_ng_id)
             {
                 return a + 1;
             }
@@ -1138,11 +1150,11 @@ uint64_t LocalCcShards::CountSlices(const TableName &table_name,
 
     for (auto &[range_start_key, range_entry] : ranges)
     {
-        NodeGroupId range_owner =
+        NodeGroupId range_ng =
             GetRangeOwnerInternal(range_entry.GetRangeInfo()->PartitionId(),
                                   ng_id)
                 ->BucketOwner();
-        if (range_owner == local_ng_id)
+        if (range_ng == local_ng_id)
         {
             const StoreRange *store_range = range_entry.RangeSlices();
             assert(store_range != nullptr);
@@ -1536,22 +1548,96 @@ void LocalCcShards::InitRangeBuckets(
     bucket_infos_.try_emplace(ng_id, std::move(ng_bucket_infos));
 }
 
-std::unordered_map<uint16_t, BucketMigrateInfo>
+const BucketInfo *LocalCcShards::UploadNewBucketInfo(NodeGroupId ng_id,
+                                                     uint16_t bucket_id,
+                                                     NodeGroupId dirty_ng,
+                                                     uint64_t dirty_version)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    bucket_info->SetDirty(dirty_ng, dirty_version);
+    return bucket_info;
+}
+
+const BucketInfo *LocalCcShards::UploadBucketInfo(NodeGroupId ng_id,
+                                                  uint16_t bucket_id,
+                                                  NodeGroupId owner_ng,
+                                                  uint64_t version)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    bucket_info->Set(owner_ng, version);
+    return bucket_info;
+}
+
+void LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
+                                            uint16_t bucket_id)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    auto &table_ranges = bucket_info->RangesInBucket();
+    for (auto &[table, ranges] : table_ranges)
+    {
+        for (auto range_id : ranges)
+        {
+            TableRangeEntry *range_entry =
+                GetTableRangeEntryInternal(table, ng_id, range_id);
+            if (range_entry)
+            {
+                range_entry->DropStoreRange();
+            }
+        }
+    }
+}
+
+bool LocalCcShards::LoadStoreRangesInBucket(NodeGroupId ng_id,
+                                            uint16_t bucket_id,
+                                            CcShard *shard,
+                                            CcRequestBase *cc_req,
+                                            int64_t term)
+{
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    assert(ng_id == bucket_info->BucketOwner());
+    auto &table_ranges = bucket_info->RangesInBucket();
+    for (auto &[table, ranges] : table_ranges)
+    {
+        for (auto range_id : ranges)
+        {
+            if (FindRange(table, ng_id, range_id) == nullptr)
+            {
+                shard->FetchTableRanges(table, cc_req, ng_id, term);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+const BucketInfo *LocalCcShards::CommitDirtyBucketInfo(NodeGroupId ng_id,
+                                                       uint16_t bucket_id)
+{
+    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    bucket_info->CommitDirty();
+    return bucket_info;
+}
+
+std::unordered_map<NodeGroupId, BucketMigrateInfo>
 LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
 {
     // Construct bucket info map on startup
-    // Generate 5 random numbers for each node group as virtual nodes on hashing
-    // ring. Each bucket id belongs to the first virtual node that is larger
-    // than the bucket id.
-    std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
+    // Generate 64 random numbers for each node group as virtual nodes on
+    // hashing ring. Each bucket id belongs to the first virtual node that is
+    // larger than the bucket id.
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
-    srand(seed);
+    std::srand(seed);
     for (uint32_t ng = 0; ng < new_ng_count; ng++)
     {
         size_t generated = 0;
-        while (generated < 5)
+        while (generated < 64)
         {
-            uint16_t rand_num = rand() % total_range_buckets;
+            uint16_t rand_num = std::rand() % total_range_buckets;
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
@@ -1559,9 +1645,11 @@ LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
             }
         }
     }
+
+    std::unordered_map<NodeGroupId, BucketMigrateInfo> migrate_plan;
+
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto it = rand_num_to_ng.begin();
-    std::unordered_map<uint16_t, BucketMigrateInfo> migrate_plan;
     for (uint16_t bucket_id = 0; bucket_id < total_range_buckets; bucket_id++)
     {
         // The buckets larger than the last random number belongs to the
@@ -1580,33 +1668,102 @@ LocalCcShards::GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed)
                 ->BucketOwner();
         if (cur_owner != ng_id)
         {
-            migrate_plan.try_emplace(
-                bucket_id,
-                BucketMigrateInfo(bucket_id, cur_owner, ng_id, false));
+            auto ins_pair = migrate_plan.try_emplace(cur_owner);
+            BucketMigrateInfo &bucket_migrate_info = ins_pair.first->second;
+            bucket_migrate_info.bucket_ids_.push_back(bucket_id);
+            bucket_migrate_info.new_owner_ngs_.push_back(ng_id);
         }
     }
     return migrate_plan;
 }
 
-void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
+bool LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                                         uint32_t ng_id,
                                         int64_t ng_term,
+                                        const TableRangeEntry *range_entry,
                                         uint64_t data_sync_ts,
                                         bool need_truncate_log,
                                         bool is_dirty,
                                         std::shared_ptr<DataSyncStatus> status,
                                         CcHandlerResult<Void> *hres)
 {
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition);
+    const RangeInfo *range_info = range_entry->GetRangeInfo();
+    NodeGroupId range_ng =
+        GetRangeOwnerInternal(range_info->PartitionId(), ng_id)->BucketOwner();
+    if (range_ng == ng_id)
+    {
+        // Range belongs to this ng.
+        data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
+            table_name,
+            range_info->PartitionId(),
+            range_info->VersionTs(),
+            ng_id,
+            ng_term,
+            data_sync_ts,
+            status,
+            need_truncate_log,
+            is_dirty,
+            [this](std::shared_ptr<DataSyncTask> task)
+            {
+                std::lock_guard<std::mutex> lk(task_worker_mux_);
+                data_sync_task_queue_.push_back(task);
+                // Notify the data sync workers.
+                task_worker_cv_.notify_one();
+            },
+            hres));
+
+        return true;
+    }
+    else
+    {
+        auto new_range_ids = range_info->NewPartitionId();
+        if (new_range_ids &&
+            (is_dirty || range_info->DirtyTs() <= data_sync_ts))
+        {
+            assert(range_info->IsDirty());
+            for (int32_t new_range : *new_range_ids)
+            {
+                NodeGroupId new_range_ng =
+                    GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
+                if (new_range_ng == ng_id)
+                {
+                    // If range is splitting and the new range falls on
+                    // current node group, we might receive forwarded
+                    // messages. These messages cannot be flushed into
+                    // data store yet since we cannot update their slice
+                    // specs. Thus the log cannot be truncated for this
+                    // round of checkpoint.
+                    LOG(INFO)
+                        << "Unable to truncate log since " << table_name.Trace()
+                        << ", range " << range_info->PartitionId()
+                        << " is forwarding message to ng " << ng_id
+                        << " during range split.";
+                    // Mark the task as failed since we cannot gaurantee all
+                    // data before data sync ts is flushed.
+                    status->err_code_ = CcErrorCode::PIN_RANGE_SLICE_FAILED;
+                    break;
+                }
+            }
+        }
+
+        return false;
+    }
+}
+
+void LocalCcShards::EnqueueDataSyncTaskForTable(
+    const TableName &table_name,
+    uint32_t ng_id,
+    int64_t ng_term,
+    uint64_t data_sync_ts,
+    bool need_truncate_log,
+    bool is_dirty,
+    std::shared_ptr<DataSyncStatus> status,
+    CcHandlerResult<Void> *hres)
+{
     std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    if (status == nullptr)
-    {
-        // Only flushing one table and there's no thread waiting on the result.
-        assert(hres != nullptr);
-        status = std::make_shared<DataSyncStatus>();
-        status->all_task_started_ = true;
-    }
-    std::unique_lock<std::mutex> status_lk(status->mux_);
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition);
     auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
@@ -1618,69 +1775,88 @@ void LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
         }
         return;
     }
+    if (status == nullptr)
+    {
+        // Only flushing one table and there's no thread waiting on the result.
+        assert(hres != nullptr);
+        status = std::make_shared<DataSyncStatus>();
+    }
     for (auto &range : *ranges)
     {
-        const RangeInfo *range_info = range.second.GetRangeInfo();
-        NodeGroupId range_owner =
-            GetRangeOwnerInternal(range_info->PartitionId(), ng_id)
-                ->BucketOwner();
-        if (range_owner == ng_id)
+        if (EnqueueDataSyncTask(table_name,
+                                ng_id,
+                                ng_term,
+                                &range.second,
+                                data_sync_ts,
+                                need_truncate_log,
+                                is_dirty,
+                                status,
+                                hres))
         {
-            // Range belongs to this ng.
             status->unfinished_tasks_++;
-            data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
-                table_name,
-                range_info->PartitionId(),
-                range_info->VersionTs(),
-                ng_id,
-                ng_term,
-                data_sync_ts,
-                status,
-                need_truncate_log,
-                is_dirty,
-                [this](std::shared_ptr<DataSyncTask> task)
-                {
-                    std::lock_guard<std::mutex> lk(task_worker_mux_);
-                    data_sync_task_queue_.push_back(task);
-                    // Notify the data sync workers.
-                    task_worker_cv_.notify_one();
-                },
-                hres));
+        }
+    }
+    if (hres)
+    {
+        status->all_task_started_ = true;
+        if (status->unfinished_tasks_ == 0)
+        {
+            hres->SetFinished();
+            return;
+        }
+    }
+
+    task_worker_cv_.notify_all();
+}
+
+void LocalCcShards::EnqueueDataSyncTaskForBucket(
+    const std::unordered_map<TableName, std::unordered_set<int32_t>>
+        &ranges_in_bucket_snapshot,
+    uint32_t ng_id,
+    int64_t ng_term,
+    uint64_t data_sync_ts,
+    CcHandlerResult<Void> *hres)
+{
+    std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
+    std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
+    for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
+    {
+        TableType type;
+        if (TableName::IsBase(range_table_name.StringView()))
+        {
+            type = TableType::Primary;
+        }
+        else if (TableName::IsUniqueSecondary(range_table_name.StringView()))
+        {
+            type = TableType::UniqueSecondary;
         }
         else
         {
-            auto new_range_ids = range_info->NewPartitionId();
-            if (new_range_ids &&
-                (is_dirty || range_info->DirtyTs() <= data_sync_ts))
+            type = TableType::Secondary;
+        }
+        TableName table_name(range_table_name.StringView(), type);
+        for (int32_t range_id : range_ids)
+        {
+            auto range_entry =
+                GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
+            if (range_entry && EnqueueDataSyncTask(table_name,
+                                                   ng_id,
+                                                   ng_term,
+                                                   range_entry,
+                                                   data_sync_ts,
+                                                   false,
+                                                   false,
+                                                   status,
+                                                   hres))
             {
-                assert(range_info->IsDirty());
-                for (int32_t new_range : *new_range_ids)
-                {
-                    NodeGroupId new_range_owner =
-                        GetRangeOwnerInternal(new_range, ng_id)->BucketOwner();
-                    if (new_range_owner == ng_id)
-                    {
-                        // If range is splitting and the new range falls on
-                        // current node group, we might receive forwarded
-                        // messages. These messages cannot be flushed into
-                        // data store yet since we cannot update their slice
-                        // specs. Thus the log cannot be truncated for this
-                        // round of checkpoint.
-                        LOG(INFO) << "Unable to truncate log since "
-                                  << table_name.Trace() << ", range "
-                                  << range_info->PartitionId()
-                                  << " is forwarding message to ng " << ng_id
-                                  << " during range split.";
-                        // Mark the task as failed since we cannot gaurantee all
-                        // data before data sync ts is flushed.
-                        status->err_code_ = CcErrorCode::PIN_RANGE_SLICE_FAILED;
-                        break;
-                    }
-                }
+                status->unfinished_tasks_++;
             }
         }
     }
-    if (hres && status->unfinished_tasks_ == 0)
+
+    status->all_task_started_ = true;
+    if (status->unfinished_tasks_ == 0)
     {
         hres->SetFinished();
         return;
@@ -1812,9 +1988,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
     else
     {
-        NodeGroupId range_owner =
+        NodeGroupId range_ng =
             GetRangeOwnerInternal(range_id, ng_id)->BucketOwner();
-        if (range_owner == ng_id)
+        if (range_ng == ng_id)
         {
             assert(store_range != nullptr);
             // For dirty tables (create index in process), data older than
@@ -1878,7 +2054,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // ReadTxRequest.
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
-    init_req.tx_owner_ = ng_id;
+    init_req.tx_ng_id_ = ng_id;
     init_req.Reset();
     data_sync_txm->Execute(&init_req);
     init_req.Wait();
@@ -1960,28 +2136,28 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     // in the case that there is no key schema corresponding to the index table
     // in the current table schema, should use the dirty table schema.
     const TableSchema *table_schema = catalog_rec.Schema();
-    if (is_dirty && catalog_rec.DirtySchema() &&
-        !table_schema->IndexKeySchema(table_name))
+    if (table_name.Type() == TableType::Secondary ||
+        table_name.Type() == TableType::UniqueSecondary)
     {
-        assert(table_name.Type() == TableType::Secondary ||
-               table_name.Type() == TableType::UniqueSecondary);
-        table_schema = catalog_rec.DirtySchema();
-    }
-    // For index table, if this table has been dropped, skip it.
-    if ((table_name.Type() == TableType::Secondary ||
-         table_name.Type() == TableType::UniqueSecondary) &&
-        !table_schema->IndexKeySchema(table_name))
-    {
-        // Use CommitTxRequest to release read lock.
-        CommitTxRequest commit_req;
-        data_sync_txm->Execute(&commit_req);
-        commit_req.Wait();
-        LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
-                  << ". Return finish directly.";
+        if (catalog_rec.DirtySchema() &&
+            !table_schema->IndexKeySchema(table_name))
+        {
+            table_schema = catalog_rec.DirtySchema();
+        }
+        // For index table, if this table has been dropped, skip it.
+        if (!table_schema->IndexKeySchema(table_name))
+        {
+            // Use CommitTxRequest to release read lock.
+            CommitTxRequest commit_req;
+            data_sync_txm->Execute(&commit_req);
+            commit_req.Wait();
+            LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
+                      << ". Return finish directly.";
 
-        task_worker_lk.lock();
-        data_sync_task->SetFinish();
-        return;
+            task_worker_lk.lock();
+            data_sync_task->SetFinish();
+            return;
+        }
     }
 
     // Lock bucket so that bucket cannot be migrated away during data sync.
@@ -2359,8 +2535,7 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
     }
 
     {
-        // Wait for all slice specs in this range are updated before moving
-        // on to the next range.
+        // Wait for all slice specs in this range are updated.
         std::unique_lock<std::mutex> work_sender_lk(work_sender_mux);
         work_sender_cv.wait(work_sender_lk,
                             [&slice_update_done, &slice_load_cnt]
@@ -2467,7 +2642,6 @@ void LocalCcShards::SplitFlushRange(
 
     SplitFlushTxRequest split_req(table_name,
                                   table_schema,
-                                  node_group,
                                   old_start_key,
                                   old_end_key,
                                   entry->GetRangeInfo(),
@@ -2996,7 +3170,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
                     // following ReadTxRequest.
                     init_req.iso_level_ = IsolationLevel::RepeatableRead;
                     init_req.protocol_ = CcProtocol::Locking;
-                    init_req.tx_owner_ = node_group;
+                    init_req.tx_ng_id_ = node_group;
                     init_req.Reset();
                     txm->Execute(&init_req);
                     init_req.Wait();

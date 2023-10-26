@@ -11,6 +11,7 @@
 
 #include "braft/route_table.h"
 #include "brpc/server.h"
+#include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "moodycamelqueue.h"
 #include "proto/cc_request.pb.h"
 #include "tx_serialize.h"
@@ -170,8 +171,9 @@ public:
 
     static inline uint16_t MapRangeIdToBucketId(int32_t range_id)
     {
-        return std::hash<std::string>{}(std::to_string(range_id)) %
-               total_range_buckets;
+        uint32_t hash_val;
+        butil::MurmurHash3_x86_32(&range_id, sizeof(range_id), 9001, &hash_val);
+        return hash_val % total_range_buckets;
     }
 
     uint32_t NodeGroupCount()

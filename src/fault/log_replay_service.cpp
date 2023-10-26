@@ -341,6 +341,63 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         uint32_t cc_ng_id = msg.cc_node_group_id();
         int64_t cc_ng_term = msg.cc_node_group_term();
 
+        // process cluster scale ops first
+        if (msg.has_cluster_scale_op_msg())
+        {
+            const std::string &scale_op_blob =
+                msg.cluster_scale_op_msg().cluster_scale_op_blob();
+
+            // We need to recover both cluster topology and bucket owner
+            // based on the cluster scale log.
+
+            // Replay cluster topology first
+            // std::unique_ptr<ReplayLogCc> &cc_req =
+            //    cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+            //        cc_ng_id,
+            //        cluster_config_ccm_name_sv,
+            //        TableType::ClusterConfig,
+            //        std::string_view(scale_op_blob.data(),
+            //                         scale_op_blob.length()),
+            //        msg.cluster_scale_op_msg().commit_ts(),
+            //        msg.cluster_scale_op_msg().txn(),
+            //        mux,
+            //        cv,
+            //        finish_log_cnt,
+            //        recovery_error));
+
+            // local_shards_.EnqueueCcRequest(0, cc_req.get());
+            // WaitAndClearRequests(
+            //     stream_id, cc_req_vec, mux, cv, finish_log_cnt,
+            //     recovery_error);
+            // if (recovery_error)
+            //{
+            //     return 0;
+            // }
+
+            // Recover bucket owner to correct state
+            std::unique_ptr<ReplayLogCc> &cc_req =
+                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
+                    cc_ng_id,
+                    range_bucket_ccm_name_sv,
+                    TableType::RangeBucket,
+                    std::string_view(scale_op_blob.data(),
+                                     scale_op_blob.length()),
+                    msg.cluster_scale_op_msg().commit_ts(),
+                    msg.cluster_scale_op_msg().txn(),
+                    mux,
+                    cv,
+                    finish_log_cnt,
+                    recovery_error));
+
+            local_shards_.EnqueueCcRequest(0, cc_req.get());
+            WaitAndClearRequests(
+                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+            if (recovery_error)
+            {
+                return 0;
+            }
+        }
+
         // process schema ops before processing data ops
         for (const ::txlog::ReplaySchemaMsg &schema_op_msg :
              msg.schema_op_msgs())

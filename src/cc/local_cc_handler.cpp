@@ -587,7 +587,8 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
 
     if (ccm != nullptr && thd_id_ == ccs->core_id_)
-    {  //__catalog table will be preloaded when ccshard constructed
+    {
+        //__catalog table will be preloaded when ccshard constructed
         bool finished = ccm->Execute(*read_req);
         if (finished)
         {
@@ -1160,11 +1161,12 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
                                        IsolationLevel iso_level,
-                                       NodeGroupId tx_owner)
+                                       NodeGroupId tx_ng_id,
+                                       uint32_t log_group_id)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
 
-    int64_t term = Sharder::Instance().LeaderTerm(tx_owner);
+    int64_t term = Sharder::Instance().LeaderTerm(tx_ng_id);
 
     // Code injection for test InitTxRequest failure
     CODE_FAULT_INJECTOR("init_tx_error", {
@@ -1177,9 +1179,9 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // NewTx reads each ccshard's next_tx_ident_, which is set concurrently
         // by log replay thread when native cc node finishes log replay. The two
         // events are synchronized by leader_term_.
-        TEntry &tx = ccs.NewTx(tx_owner);
+        TEntry &tx = ccs.NewTx(tx_ng_id, log_group_id, term);
         InitTxResult &init_tx_res = hres.Value();
-        init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId(tx_owner));
+        init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId(tx_ng_id));
         TxNumber txn = init_tx_res.txid_.TxNumber();
         init_tx_res.start_ts_ = tx.lower_bound_;
         init_tx_res.term_ = tx.term_;

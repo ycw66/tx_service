@@ -250,7 +250,8 @@ public:
     /// <param name=""></param>
     void NewTxn(CcHandlerResult<InitTxResult> &hres,
                 IsolationLevel iso_level,
-                NodeGroupId tx_owner) override;
+                NodeGroupId tx_ng_id,
+                uint32_t log_group_id) override;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

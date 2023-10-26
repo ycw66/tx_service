@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,7 @@ struct ScanBatchTxRequest;
 struct ScanBatchTuple;
 struct AnalyzeTableTxRequest;
 struct BatchReadTxRequest;
+struct DataMigrationStatus;
 
 #define RETRY_NUM 5
 
@@ -116,6 +118,7 @@ struct UnlockReadRangeOperation : TransactionOperation
 public:
     explicit UnlockReadRangeOperation(TransactionExecution *txm);
     void Reset();
+    void ResetHandlerTxm(TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
     // in-parameters
@@ -312,7 +315,8 @@ struct InitTxnOperation : TransactionOperation
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    uint32_t tx_owner_;
+    uint32_t log_group_id_{UINT32_MAX};
+    uint32_t tx_ng_id_;
     CcHandlerResult<InitTxResult> hd_result_;
 };
 
@@ -370,7 +374,7 @@ struct ScanState
               const TxKey *end_key,
               bool end_inclusive,
               uint32_t range_id,
-              NodeGroupId range_owner,
+              NodeGroupId range_ng,
               const TxKey *last_key,
               bool inclusive,
               SlicePosition position)
@@ -378,7 +382,7 @@ struct ScanState
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
-          range_owner_(range_owner),
+          range_ng_(range_ng),
           slice_last_key_ptr_(last_key),
           is_key_owner_(false),
           inclusive_(inclusive),
@@ -390,7 +394,7 @@ struct ScanState
               const TxKey *end_key,
               bool end_inclusive,
               uint32_t range_id,
-              NodeGroupId range_owner,
+              NodeGroupId range_ng,
               std::unique_ptr<TxKey> last_key,
               bool inclusive,
               SlicePosition position)
@@ -398,7 +402,7 @@ struct ScanState
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           range_id_(range_id),
-          range_owner_(range_owner),
+          range_ng_(range_ng),
           slice_last_key_uptr_(std::move(last_key)),
           is_key_owner_(true),
           inclusive_(inclusive),
@@ -430,7 +434,7 @@ struct ScanState
     }
 
     uint32_t range_id_;
-    NodeGroupId range_owner_;
+    NodeGroupId range_ng_;
     union
     {
         const TxKey *slice_last_key_ptr_;
@@ -791,7 +795,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     SplitFlushRangeOp(
         const TableName &table_name,
         const TableSchema *table_schema,
-        NodeGroupId node_group,
         const TxKey *old_start_key,
         const TxKey *old_end_key,
         const RangeInfo *old_range_info,
@@ -804,7 +807,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
 
     void Reset(const TableName &table_name,
                const TableSchema *table_schema,
-               NodeGroupId node_group,
                const TxKey *old_start_key,
                const TxKey *old_end_key,
                const RangeInfo *old_range_info,
@@ -820,7 +822,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     const TableSchema *table_schema_{nullptr};
     TableName table_name_;        // TableName owner.
     TableName range_table_name_;  // References table_name_.
-    NodeGroupId node_group_;
     CcHandlerResult<ReadKeyResult> read_cluster_result_;
     ClusterConfigRecord cluster_conf_rec_;
 
@@ -883,6 +884,10 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      * Downgrade write lock to write intent lock.
      */
     PostWriteAllOp install_new_range_op_;
+    /**
+     * @brief Release cluster config lock after post write all.
+     */
+    PostReadOperation unlock_cluster_config_op_;
     /**
      * @brief Copy data from old partition to new partition in KV store.
      * Flush in-memory data that has smaller ts than commit ts to new KV
@@ -1012,25 +1017,99 @@ struct ObjectCommandOp : TransactionOperation
 #endif
 };
 
-struct BucketMigrateInfo
+class NotifyMigrationClosure : public google::protobuf::Closure
 {
-    BucketMigrateInfo() = delete;
-    BucketMigrateInfo(uint16_t bucket_id,
-                      NodeGroupId orig_owner,
-                      NodeGroupId new_owner,
-                      bool is_migrated)
-        : bucket_id_(bucket_id),
-          orig_owner_(orig_owner),
-          new_owner_(new_owner),
-          is_migrated_(is_migrated)
+public:
+    NotifyMigrationClosure(
+        std::atomic<size_t> *unfinished_cnt,
+        std::unordered_map<NodeGroupId, BucketMigrateInfo> &migrate_plans)
+        : cntl_(),
+          unfinished_cnt_(unfinished_cnt),
+          migrate_plans_(migrate_plans)
     {
     }
-    uint16_t bucket_id_;
-    NodeGroupId orig_owner_;
-    NodeGroupId new_owner_;
-    bool is_migrated_;
+
+    ~NotifyMigrationClosure() = default;
+
+    void Run() override
+    {
+        if (cntl_.Failed())
+        {
+            LOG(INFO)
+                << "Cluster scale tx notify migration response, node group: "
+                << request_.orig_owner() << ", success: false";
+            migrate_plans_[request_.orig_owner()].has_migration_tx_ = false;
+        }
+        else
+        {
+            LOG(INFO)
+                << "Cluster scale tx notify migration response, node group: "
+                << request_.orig_owner()
+                << ", success: " << response_.success();
+            migrate_plans_[request_.orig_owner()].has_migration_tx_ =
+                response_.success();
+        }
+
+        unfinished_cnt_->fetch_sub(1, std::memory_order_release);
+    }
+
+    remote::InitMigrationRequest &Request()
+    {
+        return request_;
+    }
+
+    remote::InitMigrationResponse &Response()
+    {
+        return response_;
+    }
+
+    brpc::Controller *Controller()
+    {
+        return &cntl_;
+    }
+
+    void Reset()
+    {
+        cntl_.Reset();
+        response_.Clear();
+    }
+
+private:
+    brpc::Controller cntl_;
+    remote::InitMigrationRequest request_;
+    remote::InitMigrationResponse response_;
+    std::atomic<size_t> *unfinished_cnt_;
+    std::unordered_map<NodeGroupId, BucketMigrateInfo> &migrate_plans_;
 };
 
+struct NotifyStartMigrateOp : public TransactionOperation
+{
+    explicit NotifyStartMigrateOp(TransactionExecution *txm);
+
+    void Clear();
+    void Reset(size_t node_group_count);
+    void Forward(TransactionExecution *txm) override;
+
+    void InitDataMigration(TxNumber tx_number, NodeGroupId old_owner);
+
+    std::unordered_map<NodeGroupId, BucketMigrateInfo> migrate_plans_;
+
+    std::atomic<size_t> unfinished_req_cnt_{0};
+    std::vector<std::unique_ptr<NotifyMigrationClosure>> closures_;
+};
+
+struct CheckMigrationIsFinishedOp : public TransactionOperation
+{
+    explicit CheckMigrationIsFinishedOp(TransactionExecution *txm);
+
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    bool migration_is_finished_{false};
+    std::atomic<bool> rpc_is_finished_{false};
+
+    CheckMigrationIsFinishedClosure closure_;
+};
 struct ClusterScaleOp : public CompositeTransactionOperation
 {
 public:
@@ -1039,19 +1118,11 @@ public:
                    std::vector<std::pair<std::string, uint16_t>> *new_nodes,
                    std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
                    uint16_t *remove_node_count,
-                   std::mutex &prepare_log_mux,
-                   std::condition_variable &prepare_log_cv,
-                   bool &prepare_log_finished,
-                   CcErrorCode &err,
                    TransactionExecution *txm);
     void Reset(ClusterScaleOpType event_type,
                std::vector<std::pair<std::string, uint16_t>> *new_nodes,
                std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
                uint16_t *remove_node_count,
-               std::mutex &prepare_log_mux,
-               std::condition_variable &prepare_log_cv,
-               bool &prepare_log_finished,
-               CcErrorCode &err,
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
@@ -1065,12 +1136,7 @@ public:
     uint16_t remove_node_count_{0};
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
     ClusterConfigRecord cluster_config_rec_;
-    // Passed in by caller, need to notify caller once log has been written.
-    std::mutex *prepare_log_mux_;
-    std::condition_variable *prepare_log_cv_;
-    bool *prepare_log_finished_;
-    CcErrorCode *err_;
-    std::vector<std::pair<std::string, uint16_t>> *removed_nodes_;
+    std::vector<std::pair<std::string, uint16_t>> *removed_nodes_{nullptr};
 
     /**
      * Acquire write intent on cluster config ccm. This is to prevent other
@@ -1080,20 +1146,11 @@ public:
      */
     AcquireAllOp acquire_cluster_config_intent_op_;
 
+    /**
+     * Write prepare log for the scale event. This log should contain the new
+     * cluster config and data migration plan.
+     */
     WriteToLogOp prepare_log_op_;
-
-    /**
-     * Flush the new cluster config to kv storage. When the new nodes are
-     * started, they be starting with the new cluster config.
-     */
-    AsyncOp<Void> flush_new_cluster_config_op_;
-
-    /**
-     * Control plane will start new nodes once the op status reaches
-     * CLUSTER_UPDATE. It will send a rpc request to finish this async op once
-     * the new nodes are ready.
-     */
-    AsyncOp<Void> wait_for_new_node_ready_op_;
 
     /**
      * Upgrade the cluster config lock to write lock as we're now going to
@@ -1101,31 +1158,162 @@ public:
      */
     AcquireAllOp acquire_cluster_config_write_op_;
 
+    /**
+     * Write log for cluster config update. The cluster config update is a 1
+     * phase commit.
+     */
     WriteToLogOp update_cluster_config_log_op_;
 
     /**
+     * Flush the new cluster config to kv storage. When the new nodes are
+     * started, they be starting with the new cluster config.
+     */
+    AsyncOp<Void> flush_new_cluster_config_op_;
+
+    AsyncOp<Void> wait_for_new_node_ready_op_;
+
+    /**
      * Release the cluster config lock. Install the new cluster config on all
-     * ngs. This will establish new cc streams and raft nodes.
+     * ngs. This will establish new cc streams and raft nodes. After this stage,
+     * the CP will be able to start new nodes or remove old nodes.
      */
     PostWriteAllOp install_cluster_config_op_;
 
-    AsyncOp<Void> data_migration_op_;
+    /**
+     * @brief Notify all node group to start bucekt migration.
+     */
+    NotifyStartMigrateOp notify_migration_op_;
+
+    /**
+     * @brief Check whether bucket migration is finished.
+     */
+    CheckMigrationIsFinishedOp check_migration_is_finished_op_;
 
     WriteToLogOp clean_log_op_;
-
-    PostWriteAllOp post_all_lock_op_;
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillUpdateClusterConfigLogRequest(TransactionExecution *txm);
+    void FillCleanLogRequest(TransactionExecution *txm);
+
     void ForceToFinish(TransactionExecution *txm);
     void SetStatus(remote::ClusterScaleStatus);
+
+    void ClearContainer();
 
     // used to protect status_. It will be updated by tx processor thread and
     // visited by rpc thread that queries scale event status.
     std::mutex status_mux_;
     remote::ClusterScaleStatus status_;
-    std::unordered_map<uint16_t, BucketMigrateInfo> bucket_migrate_infos_;
+    std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
+};
+
+struct DataMigrationOp : public CompositeTransactionOperation
+{
+public:
+    enum class BucketMigrateStatus
+    {
+        Started = 1,
+        Prepared = 2,
+        Commited = 3,
+        Cleaned = 4,
+    };
+
+    DataMigrationOp() = delete;
+
+    DataMigrationOp(TransactionExecution *txm,
+                    std::shared_ptr<DataMigrationStatus> status);
+
+    void Reset(TransactionExecution *txm,
+               std::shared_ptr<DataMigrationStatus> status);
+
+    void Forward(TransactionExecution *txm) override;
+
+    void FillLogRequest(TransactionExecution *txm,
+                        WriteToLogOp *log_op,
+                        TxLogType log_type,
+                        txlog::BucketMigrateMessage_Stage migrate_stage);
+
+    void FillFirstLogRequest(TransactionExecution *txm,
+                             std::vector<uint64_t> &migration_txns);
+    void FillLastLogRequest(TransactionExecution *txm);
+
+    void ForceToFinish(TransactionExecution *txm);
+
+private:
+    /**
+     * @brief Write the first prepare log. This log request will check if the
+     * ClusterScaleTx log is exsit. If not, log service will reject this write
+     * log request. This migration transaction will be aborted. Since a finished
+     * ClusterScaleTx notify request will arrive late due network delay. It will
+     * break idempotent. This log request will also insert an empty log for
+     * DataMigration Tx. Empty log just used by RecoverTx.
+     */
+    WriteToLogOp write_first_prepare_log_op_;
+
+    WriteToLogOp write_migrate_txn_log_op_;
+    /**
+     * @brief Acquire bucket write lock on all node groups.
+     */
+    AcquireAllOp prepare_bucket_lock_op_;
+    /**
+     * @brief Write prepare log for bucket migration
+     */
+    WriteToLogOp prepare_log_op_;
+    /**
+     * @brief Install dirty bucket record on CcMap and downgrade write lock to
+     * write intent lock.
+     */
+    PostWriteAllOp install_dirty_bucket_op_;
+
+    AsyncOp<Void> data_sync_op_;
+    /**
+     * @brief Upgrade write intent lock to write lock on all node group.
+     */
+    AcquireAllOp acquire_bucket_lock_op_;
+    /**
+     * @brief Write commit log for bucket migration
+     */
+    WriteToLogOp commit_log_op_;
+
+    KickoutDataOp kickout_data_op_;
+    /**
+     * @brief Commit dirty bucket record and release bucket write lock
+     */
+    PostWriteAllOp post_all_bucket_lock_op_;
+    /**
+     * @brief Write clean log for bucket migration
+     */
+    WriteToLogOp clean_log_op_;
+    /**
+     * @brief When all bucket migration are finished, we will write the last
+     * clean log to log service. This op will also erase empty log of
+     * DataMigration. once this operation is finished, we will set finished flag
+     * to true on MigrateStatus.
+     * Note: Whether write_last_clean_log_op_ is needed needs more
+     * consideration.
+     */
+    WriteToLogOp write_last_clean_log_op_;
+
+    // the snapshot of the ranges that we need to migrate for current bucket.
+    // Note that the table name here is of type range partition.
+    std::unordered_map<TableName, std::unordered_set<int32_t>>
+        ranges_in_bucket_snapshot_;
+    std::unordered_map<TableName, std::unordered_set<int32_t>>::const_iterator
+        kickout_tbl_it_;
+    std::unordered_set<int32_t>::const_iterator kickout_range_it_;
+    TableName kickout_table_{std::string(""), TableType::Primary};
+
+    RangeBucketKey bucket_key_;
+    RangeBucketRecord bucket_record_;
+    BucketInfo bucket_info_;
+
+    size_t migrate_ts_{0};
+
+    size_t migrate_bucket_idx_{0};
+    std::shared_ptr<DataMigrationStatus> status_;
+
+    void Clear();
 };
 
 struct BatchReadOperation : TransactionOperation

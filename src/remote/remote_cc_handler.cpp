@@ -273,9 +273,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
 
     post_write_all->clear_record();
     if (commit_ts > 0 && op_type != OperationType::Delete &&
-        op_type != OperationType::DropTable &&
-        (post_write_type == PostWriteType::PrepareCommit ||
-         post_write_type == PostWriteType::PostCommit))
+        op_type != OperationType::DropTable)
     {
         // The commit ts is 0, if the post-write request is used to clear the
         // write lock when the tx aborts.
