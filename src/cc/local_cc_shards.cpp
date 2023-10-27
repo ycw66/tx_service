@@ -2034,6 +2034,19 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         LOG(ERROR) << "DataSync: node is not the leader of ng#" << ng_id
                    << " with leader term: " << ng_term
                    << ", and the expected leader term: " << expected_ng_term;
+        // Set range sync status.
+        meta_lk.lock();
+        store_range = FindRange(table_name, ng_id, range_id);
+        if (store_range)
+        {
+            store_range->TrySetDataSync(false);
+            // Handle the pending tasks for the same range
+            store_range->PopPendingSyncTask();
+        }
+        if (ng_term >= 0)
+        {
+            Sharder::Instance().UnpinNodeGroupData(ng_id);
+        }
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         return;
@@ -2739,6 +2752,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         LOG(ERROR) << "FlushData: node is not the leader of ng#" << node_group
                    << ", with current leader term: " << ng_term
                    << ", and the expected leader term: " << leader_term;
+        succ = false;
     }
     else
     {
@@ -2853,6 +2867,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             }
         } /* End of PutAll */
 
+    } /* End of leader */
+
+    if (ng_term >= 0)
+    {
         if (data_sync_task != nullptr)
         {
             StoreRange *store_range =
@@ -2872,26 +2890,36 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
         // Unpin node group data.
         Sharder::Instance().UnpinNodeGroupData(node_group);
-    } /* End of leader */
+    }
 
     // Update the work count if the work's sender is waiting.
     if (data_sync_task != nullptr)
     {
+        assert(data_sync_txm != nullptr);
         if (succ)
         {
+            // Commit the data sync txm
+            CommitTxRequest commit_req;
+            commit_req.Reset();
+            data_sync_txm->Execute(&commit_req);
+            commit_req.Wait();
+
             data_sync_task->SetFinish();
         }
         else
         {
-            data_sync_task->SetError();
-        }
+            // Abort the data sync txm
+            AbortTxRequest abort_req;
+            abort_req.Reset();
+            data_sync_txm->Execute(&abort_req);
+            abort_req.Wait();
 
-        // Commit the data sync txm
-        assert(data_sync_txm != nullptr);
-        CommitTxRequest commit_req;
-        commit_req.Reset();
-        data_sync_txm->Execute(&commit_req);
-        commit_req.Wait();
+            CcErrorCode err_code =
+                Sharder::Instance().LeaderTerm(node_group) > 0
+                    ? CcErrorCode::DATA_STORE_ERR
+                    : CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+            data_sync_task->SetError(err_code);
+        }
     }
 
     if (hand_res)
@@ -2901,7 +2929,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         // request.
         if (!succ)
         {
-            hand_res->SetError(CcErrorCode::DATA_STORE_ERR);
+            CcErrorCode err_code =
+                Sharder::Instance().LeaderTerm(node_group) > 0
+                    ? CcErrorCode::DATA_STORE_ERR
+                    : CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+            hand_res->SetError(err_code);
         }
         else
         {

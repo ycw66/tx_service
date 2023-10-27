@@ -540,6 +540,7 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
     if (cc_ng_term < 0)
     {
         slice_items_.clear();
+        SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         return false;
     }
 

@@ -565,8 +565,15 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         }
 
         post_ckpt_slice.Wait();
-        // GetPostCkptSlice should never fail.
-        assert(post_ckpt_slice.ErrorCode() == CcErrorCode::NO_ERROR);
+        if (post_ckpt_slice.ErrorCode() != CcErrorCode::NO_ERROR)
+        {
+            LOG(WARNING) << "UpdateSliceSpec on the non-leader node of ng#"
+                         << ng_id << " for table: " << table_name.Trace();
+            assert(post_ckpt_slice.ErrorCode() ==
+                   CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            UnpinSlice(slice);
+            return false;
+        }
 
         for (size_t shard_idx = 0; shard_idx < core_cnt; ++shard_idx)
         {

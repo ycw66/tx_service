@@ -280,15 +280,6 @@ void txservice::LocalCcHandler::UploadRecord(
 
     if (dest_node_id == cc_shards_.node_id_)
     {
-        if (!Sharder::Instance().CheckLeaderTerm(ng_id, tx_term))
-        {
-            // Term mismatch means this PostWrite is failovered to the current
-            // node, and locks are already lost during failover hence no need to
-            // release the lock again.
-            hres.SetFinished();
-            return;
-        }
-
         PostWriteCc *req = postwrite_pool.NextRequest();
 
         req->Reset(key,

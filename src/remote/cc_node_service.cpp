@@ -391,27 +391,28 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
          &finished,
          &local_shards = this->local_shards_]()
         {
-            if (ng_term < 0)
+            int64_t leader_term = INIT_TERM;
+            while (Sharder::Instance().LeaderTerm(ng_id) < 0 &&
+                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
             {
-                while ((ng_term = Sharder::Instance().LeaderTerm(ng_id)) < 0 &&
-                       Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
-                {
-                    // The RPC server can receive the remote request, but this
-                    // node has not finish log replay, so should wait until log
-                    // replay finished.
-                    LOG(INFO) << "CcNodeService FlushDataAll on ng#" << ng_id
-                              << " waiting log replay finished.";
-                    std::this_thread::sleep_for(10s);
-                }
-                if (ng_term < 0)
-                {
-                    error_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
-                    std::unique_lock b_thd_lk(b_thd_mu);
-                    finished = true;
-                    b_thd_cv.notify_one();
-                    return;
-                }
+                // The RPC server can receive the remote request, but this
+                // node has not finish log replay, including data(.pk) log and
+                // catalog(.table range info) log, so should wait until log
+                // replay finished.
+                LOG(INFO) << "CcNodeService FlushDataAll on ng#" << ng_id
+                          << " waiting log replay finished.";
+                std::this_thread::sleep_for(3s);
             }
+
+            if ((leader_term = Sharder::Instance().LeaderTerm(ng_id)) < 0)
+            {
+                error_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                std::unique_lock b_thd_lk(b_thd_mu);
+                finished = true;
+                b_thd_cv.notify_one();
+                return;
+            }
+            ng_term = ng_term < 0 ? leader_term : ng_term;
             DLOG(INFO) << "CcNodeService FlushDataAll RPC on #ng" << ng_id
                        << ", with node group term: " << ng_term
                        << ". And flush table:" << table_name.String();

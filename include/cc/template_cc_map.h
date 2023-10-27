@@ -1967,8 +1967,19 @@ public:
             // TODO: TxExecution and runtime also use this new value as read
             // result to avoid future PostRead abort.
 
+            // NOTE: Check if really need to wait for post write. There is no
+            // need to wait for post write for the below case which also match
+            // this condition `cce->commit_ts_ < req.ReadTimestamp()`:
+            // The commit_ts of sk data generated from pk data during add index
+            // txm is the commit_ts of add index txm, so those cce's commit_ts
+            // also large than corresponding pk's commit_ts.
+            bool wait_for_post_write =
+                (cce->key_lock_ptr_ != nullptr &&
+                 cce->key_lock_ptr_->HasWriteLock() &&
+                 cce->key_lock_ptr_->WriteLockTx() != req.Txn());
             if (req.Isolation() == IsolationLevel::ReadCommitted &&
-                cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp())
+                cce->commit_ts_ > 0 && cce->commit_ts_ < req.ReadTimestamp() &&
+                wait_for_post_write)
             {
                 // When backtracking the content of primary key record according
                 // to the secondary index key, if the commit_ts of this
@@ -1978,9 +1989,6 @@ public:
                 // PostWriteCc request waiting to be executed. So, this read
                 // should wait for the PostWriteCc completed.
                 req.SetIsWaitForPostWrite(true);
-                assert(cce->key_lock_ptr_ != nullptr &&
-                       cce->key_lock_ptr_->HasWriteLock() &&
-                       cce->key_lock_ptr_->WriteLockTx() != req.Txn());
                 // Put the request to top of key lock's blocking queue with
                 // acquring readlock. And then should release the readlock
                 // before handling this requst when PostWriteCc finished.

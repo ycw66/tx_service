@@ -200,9 +200,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (lock_cluster_config_op_.hd_result_->IsError())
         {
-            LOG(ERROR)
-                << "Alter Table Index read cluster config failed, tx_number:"
-                << txm->TxNumber();
+            LOG(ERROR) << "Alter Table Index read cluster config failed, txn:"
+                       << txm->TxNumber();
             if (!prepare_log_op_.hd_result_.IsFinished() &&
                 !prepare_log_for_sk_op_.hd_result_.IsFinished())
             {
@@ -242,8 +241,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Upsert index for table: "
                        << table_key_.Name().String()
-                       << ", acquire write intent failed, tx_number:"
-                       << txm->tx_number_;
+                       << ", acquire write intent failed, txn: "
+                       << txm->TxNumber();
             txm->upsert_resp_->SetErrorCode(
                 TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
             // Fails to acquire the write intent on the schema. Since write
@@ -277,8 +276,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Upsert index for table: "
                        << table_key_.Name().String()
-                       << ", upgrade write lock failed, tx_number: "
-                       << txm->tx_number_;
+                       << ", upgrade write lock failed, txn: "
+                       << txm->TxNumber();
             // Set the commit ts to 0 to signal that the following post write
             // operation releases all write intents.
             txm->commit_ts_ = tx_op_failed_ts_;
@@ -329,9 +328,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 {
                     LOG(WARNING) << "Upsert index for table: "
                                  << table_key_.Name().String()
-                                 << ", write prepare log result unknown, "
-                                    "tx_number:"
-                                 << txm->tx_number_ << ", keep retrying";
+                                 << ", write prepare log result unknown, txn: "
+                                 << txm->TxNumber() << ", keep retrying";
                     // set retry flag and retry prepare log
                     ::txlog::WriteLogRequest *log_req =
                         prepare_log_op_.log_closure_.LogRequest()
@@ -350,8 +348,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             {
                 LOG(ERROR) << "Upsert index for table: "
                            << table_key_.Name().String()
-                           << ", write prepare log failed, tx_number:"
-                           << txm->tx_number_;
+                           << ", write prepare log failed with error message: "
+                           << prepare_log_op_.hd_result_.ErrorMsg()
+                           << ", txn: " << txm->TxNumber();
                 // Fails to flush the prepare log. The schema operation is
                 // considered failed if the prepare log is not flushed. The
                 // commit ts is set to 0 to signal that the following post write
@@ -531,23 +530,23 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         else
         {
 #if WITH_KV_STORAGE == KV_CASS
-            ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushPkDataOp");
-            LOG(INFO) << "Alter Table Index transaction flush all old base"
-                      << " table data into data store, txn: " << txm->TxNumber()
-                      << ", and commit ts: " << txm->commit_ts_
-                      << ", and tx term: " << txm->TxTerm();
-            assert(op_type_ == OperationType::AddIndex);
-
-            CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout",
-                                { flush_data_timeout_ = 10; });
-
             if (txm->TxStatus() == TxnStatus::Recovering &&
-                Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+                Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
             {
                 // If this txm is in the recovering state, should wait until the
                 // data log replay finished to avoid data lost.
                 return;
             }
+
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_FlushPkDataOp");
+            LOG(INFO) << "Alter Table Index transaction flush all old base"
+                      << " table data into data store, txn: " << txm->TxNumber()
+                      << ", commit ts: " << txm->commit_ts_
+                      << ", and tx term: " << txm->TxTerm();
+            assert(op_type_ == OperationType::AddIndex);
+
+            CODE_FAULT_INJECTOR("term_FlushDataAllOp_Timeout",
+                                { flush_data_timeout_ = 10; });
 
             flush_all_old_tuples_pk_op_.handle_timeout_ = true;
             flush_all_old_tuples_pk_op_.wait_secs_ = flush_data_timeout_;
@@ -586,23 +585,26 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 {
                     // If the RPC server is not ready yet, wait a moment to
                     // retry this operation.
-                    StartWait();
-                    if (!WaitUntil(10))
+                    StartWaiting();
+                    if (!WaitOver(10))
                     {
                         return;
                     }
                 }
-                LOG(ERROR)
+                LOG(WARNING)
                     << "Upsert index for table: " << table_key_.Name().String()
                     << ", flush all old pk tuples failed with error message: "
                     << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
-                    << ", tx_number:" << txm->tx_number_
+                    << ", txn: " << txm->TxNumber()
                     << ". Retry flush all old pk data.";
                 txm->PushOperation(&flush_all_old_tuples_pk_op_);
                 txm->Process(flush_all_old_tuples_pk_op_);
             }
             else
             {
+                LOG(WARNING) << "Upsert index: Flush all old pk tuples on "
+                                "non-leader node, terminate directly for txn: "
+                             << txm->TxNumber();
                 ForceToFinish(txm);
             }
         }
@@ -617,8 +619,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Reset the node group leader terms.
             ResetLeaderTerms();
 
-            // To sleep 4s if failed.
-            fetch_old_tuples_from_kv_gen_sk_data_upload_op_.retry_num_ = 3;
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.handle_timeout_ =
                 false;
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.op_func_ =
@@ -647,8 +647,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 LOG(WARNING)
                     << "Upsert index: For table: " << table_key_.Name().String()
                     << ", retry fetch old pk tuples from kv and upload packed "
-                       "sk failed, tx_number:"
-                    << txm->tx_number_;
+                       "sk failed, txn: "
+                    << txm->TxNumber();
                 if (fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
                         .ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                 {
@@ -661,7 +661,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             else
             {
                 LOG(WARNING) << "Upsert index: Generate packed sk data on "
-                                "non-leader node, terminate this txm directly.";
+                                "non-leader node, terminate directly for txn: "
+                             << txm->TxNumber();
                 ForceToFinish(txm);
             }
             return;
@@ -745,34 +746,34 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                LOG(ERROR)
-                    << "Upsert table index flush all old tuples sk failed,"
-                    << " tx_number:" << txm->tx_number_;
-
                 if (flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
                     flush_all_old_tuples_sk_op_.hd_result_.ErrorCode() ==
                         CcErrorCode::REQUEST_LOST)
                 {
-                    LOG(WARNING) << "Flush old sk data failed because of leader"
-                                    " transferred, and retry generate packed sk"
-                                    " data.";
+                    LOG(WARNING)
+                        << "Upsert table index flush all old sk tuples failed "
+                           "because of leader transferred. Retry generate "
+                           "packed sk data, txn: "
+                        << txm->TxNumber();
                     // For this stage, should re-execute from the previous stage
                     // if leader transferred.
-                    op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
-                    fetch_old_tuples_from_kv_gen_sk_data_upload_op_
-                        .is_running_ = false;
                     ResetLeaderTerms();
+                    op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
                     txm->PushOperation(
-                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_);
+                        &fetch_old_tuples_from_kv_gen_sk_data_upload_op_, 3);
                     // To sleep serval seconds.
                     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.ReRunOp(
                         txm);
                 }
                 else
                 {
-                    LOG(INFO) << "Flush old sk data failed, and retry flush old"
-                              << " sk operation";
+                    LOG(WARNING)
+                        << "Upsert table index flush all old sk tuples failed "
+                           "with error message: "
+                        << flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg()
+                        << ". Retry flush old sk operation, txn: "
+                        << txm->TxNumber();
 
                     op_ = &flush_all_old_tuples_sk_op_;
                     txm->PushOperation(&flush_all_old_tuples_sk_op_);
@@ -781,6 +782,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                LOG(INFO) << "Upsert table index flush all old sk tuples on "
+                             "non-leader node, termiate directly for txn: "
+                          << txm->TxNumber();
                 ForceToFinish(txm);
             }
         }
@@ -820,9 +824,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             {
                 LOG(WARNING)
                     << "Upsert table index kickout old tuples sk failed, with "
-                       "error: "
+                       "error message: "
                     << kickout_data_all_op_.hd_result_.ErrorMsg()
-                    << ". Retry kickout data, tx_number:" << txm->tx_number_;
+                    << ". Retry kickout data, txn: " << txm->TxNumber();
 
                 txm->PushOperation(&kickout_data_all_op_);
                 txm->Process(kickout_data_all_op_);
@@ -830,7 +834,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             else
             {
                 LOG(ERROR) << "Upsert index: Kickout sk data on non-leader "
-                              "node, terminate this txm directly.";
+                              "node, terminate directly for txn: "
+                           << txm->TxNumber();
                 ForceToFinish(txm);
             }
         }
@@ -1355,9 +1360,9 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
             {
                 CcErrorCode error_code =
                     static_cast<CcErrorCode>(resp->error_code());
-                LOG(ERROR)
-                    << "Handle flush data all response: Failed with error"
-                    << " message: " << cc_error_messages.at(error_code);
+                LOG(ERROR) << "Handle flush data all response of ng#" << ng_id
+                           << ". Failed with error message: "
+                           << cc_error_messages.at(error_code);
                 hd_res->SetError(error_code);
             }
             else
@@ -1371,7 +1376,7 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
 
         brpc::Controller *cntl =
             flush_data_all_closures_.at(ng_id).Controller();
-        cntl->set_timeout_ms(-1);
+        cntl->set_timeout_ms(flush_data_timeout_ * 1000);
         // Asynchronous mode
         stub.FlushDataAll(
             cntl, &request, resp_ptr, &flush_data_all_closures_.at(ng_id));
@@ -1652,7 +1657,9 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
                                   "error message: "
                                << acquire_terms_result_.ErrorMsg();
                     if (acquire_terms_result_.ErrorCode() ==
-                        CcErrorCode::REQUEST_LOST)
+                            CcErrorCode::REQUEST_LOST ||
+                        acquire_terms_result_.ErrorCode() ==
+                            CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                     {
                         // Wait a moment to retry this request.
                         std::this_thread::sleep_for(8s);
@@ -1778,7 +1785,7 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
         {
             std::unique_lock<std::mutex> post_write_lk(post_write_mutex);
             post_write_cv.wait_for(post_write_lk,
-                                   std::chrono::seconds(10),
+                                   std::chrono::seconds(3),
                                    [&post_write_finished]
                                    { return post_write_finished; });
         } while (post_write_result_.LocalRefCnt() > 0);
@@ -1786,7 +1793,7 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
         if (!post_write_finished)
         {
             // Handle the timeout.
-            LOG(ERROR) << "Write the packed sk into sk ccmap timeout for 10s. "
+            LOG(ERROR) << "Write the packed sk into sk ccmap timeout for 3s. "
                           "With remote ref count: "
                        << post_write_result_.RemoteRefCnt();
             post_write_result_.ForceError();
@@ -1884,7 +1891,8 @@ bool UpsertTableIndexOp::UploadWithoutDataLog(TransactionExecution *upload_txm)
 
 #ifdef RANGE_PARTITION_ENABLED
     // 4. release the range locks.
-    ReleaseRangeReadLocks(acquire_range_lock_txm, true);
+    bool successed = post_write_result_.ErrorCode() == CcErrorCode::NO_ERROR;
+    ReleaseRangeReadLocks(acquire_range_lock_txm, successed);
 #endif
 
     DLOG(INFO) << "UploadWithoutDataLog: Finished with result code: "
@@ -2432,31 +2440,25 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
 }
 
-void UpsertTableIndexOp::StartWait()
+void UpsertTableIndexOp::StartWaiting()
 {
     if (!waiting_to_retry_op_)
     {
-        start_waiting_ =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count();
+        start_waiting_ = LocalCcShards::ClockTs();
         op_forward_cnt_ = 0;
         waiting_to_retry_op_ = true;
     }
 }
-bool UpsertTableIndexOp::WaitUntil(int wait_secs)
+bool UpsertTableIndexOp::WaitOver(int wait_secs)
 {
     ++op_forward_cnt_;
     if (op_forward_cnt_ == OpLoopCnt)
     {
         op_forward_cnt_ = 0;
+        uint64_t now_ts = LocalCcShards::ClockTs();
         uint64_t duration =
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::seconds(wait_secs))
-                .count();
-        uint64_t now_ts =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
                 .count();
         if (now_ts - start_waiting_ > duration)
         {

@@ -247,8 +247,8 @@ private:
         std::unique_ptr<store::DataStoreScanner> &ds_scanner);
 
     void FetchTuplesAndUploadPackedKey(TransactionExecution *txm);
-    void StartWait();
-    bool WaitUntil(int wait_secs);
+    void StartWaiting();
+    bool WaitOver(int wait_secs);
 
 #if WITH_KV_STORAGE != KV_CASS
     // Scan pk from ccmap
