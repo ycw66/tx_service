@@ -26,7 +26,7 @@ struct KVCatalogInfo
         assert(table_type == TableType::Primary ||
                table_type == TableType::Secondary ||
                table_type == TableType::UniqueSecondary);
-        if (table_name.Type() == TableType::Primary)
+        if (table_type == TableType::Primary)
         {
             return kv_table_name_;
         }
@@ -117,8 +117,7 @@ public:
     virtual TableSchema::uptr CreateTableSchema(
         const TableName &table_name,
         const std::string &catalog_image,
-        uint64_t version,
-        NodeGroupId cc_ng_id) = 0;
+        uint64_t version) = 0;
 
     virtual CcMap::uptr CreatePkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,

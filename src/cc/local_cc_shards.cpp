@@ -169,10 +169,9 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     {
         // A new catalog entry is created in LocalCcShards.
         catalog_entry.InitSchema(
-            catalog_image.empty()
-                ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, catalog_image, commit_ts, cc_ng_id),
+            catalog_image.empty() ? nullptr
+                                  : catalog_factory_->CreateTableSchema(
+                                        table_name, catalog_image, commit_ts),
             commit_ts);
     }
     else
@@ -185,7 +184,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
                 catalog_image.empty()
                     ? nullptr
                     : catalog_factory_->CreateTableSchema(
-                          table_name, catalog_image, commit_ts, cc_ng_id),
+                          table_name, catalog_image, commit_ts),
                 commit_ts);
         }
         else if (catalog_entry.Version() == commit_ts)
@@ -224,7 +223,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             old_catalog_image.empty()
                 ? nullptr
                 : catalog_factory_->CreateTableSchema(
-                      table_name, old_catalog_image, old_schema_ts, cc_ng_id),
+                      table_name, old_catalog_image, old_schema_ts),
             old_schema_ts);
     }
 
@@ -237,7 +236,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             new_catalog_image.empty()
                 ? nullptr
                 : catalog_factory_->CreateTableSchema(
-                      table_name, new_catalog_image, dirty_schema_ts, cc_ng_id),
+                      table_name, new_catalog_image, dirty_schema_ts),
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
@@ -277,10 +276,9 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
-            catalog_image.empty()
-                ? nullptr
-                : catalog_factory_->CreateTableSchema(
-                      table_name, catalog_image, commit_ts, cc_ng_id),
+            catalog_image.empty() ? nullptr
+                                  : catalog_factory_->CreateTableSchema(
+                                        table_name, catalog_image, commit_ts),
             commit_ts);
     }
 

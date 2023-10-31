@@ -396,7 +396,10 @@ public:
                 }
 
                 // Flush kv fails, need to clear dirty CatalogEntry
-                catalog_entry->RejectDirtySchema();
+                if (shard_->core_id_ == shard_->core_cnt_ - 1)
+                {
+                    catalog_entry->RejectDirtySchema();
+                }
 
                 if (cce_ptr->payload_)
                 {

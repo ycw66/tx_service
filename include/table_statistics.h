@@ -374,7 +374,7 @@ private:
             //            S - 1
             for (size_t i = 0; i < key_parts; i++)
             {
-                assert(records_ >= sample_keys_count);
+                records_ = std::max(records_, sample_keys_count);
                 distinct_keys_per_prefix_all[i] =
                     ((records_ - 1) * (distinct_keys_per_prefix[i] - 1) /
                      static_cast<double>(sample_keys_count - 1)) +

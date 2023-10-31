@@ -192,8 +192,7 @@ public:
 
     TableSchema::uptr CreateTableSchema(const TableName &table_name,
                                         const std::string &catalog_image,
-                                        uint64_t version,
-                                        NodeGroupId cc_ng_id) override
+                                        uint64_t version) override
     {
         return std::make_unique<MockTableSchema>(
             table_name, catalog_image, version);

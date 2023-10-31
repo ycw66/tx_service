@@ -4882,6 +4882,19 @@ public:
             {
                 return false;
             }
+            else if (pin_status == RangeSliceOpStatus::Delay)
+            {
+                if (slice_id.Range()->HasLock())
+                {
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
+                }
+                else
+                {
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+            }
             else
             {
                 hd_res->SetError(CcErrorCode::DATA_STORE_ERR);

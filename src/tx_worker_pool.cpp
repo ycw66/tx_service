@@ -28,7 +28,8 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                     // Take work if work queue is not empty
                     if (!work_queue_.empty())
                     {
-                        std::function<void()> work = work_queue_.front();
+                        std::function<void()> work =
+                            std::move(work_queue_.front());
                         work_queue_.pop_front();
                         lk.unlock();
                         // Do work
@@ -57,11 +58,11 @@ size_t TxWorkerPool::WorkQueueSize()
 void TxWorkerPool::SubmitWork(std::function<void()> work)
 {
     std::unique_lock<std::mutex> lk(work_queue_mutex_);
-    work_queue_.push_back(work);
     if (shutdown_indicator_.load(std::memory_order_acquire))
     {
         return;
     }
+    work_queue_.push_back(std::move(work));
     work_queue_cv_.notify_one();
 }
 
