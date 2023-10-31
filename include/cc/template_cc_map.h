@@ -3620,6 +3620,40 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]() -> bool {
+            return req.IsLocal() ? scan_cache->IsFull()
+                                 : remote_scan_cache->IsFull();
+        };
+
+        auto last_cce_of_cache =
+            [&req, scan_cache, remote_scan_cache]() -> CcEntry<KeyT, ValueT> *
+        {
+            if (req.IsLocal())
+            {
+                if (scan_cache->Last())
+                {
+                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                        scan_cache->Last()->cce_addr_.CcePtr());
+                }
+                else
+                {
+                    return nullptr;
+                }
+            }
+            else
+            {
+                if (!remote_scan_cache->cce_ptr_.empty())
+                {
+                    return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                        remote_scan_cache->cce_ptr_.back());
+                }
+                else
+                {
+                    return nullptr;
+                }
+            }
+        };
+
         RangeSliceId slice_id;
         if (shard_->core_id_ == 0 && req.SliceId().Slice() == nullptr)
         {
@@ -3762,6 +3796,17 @@ public:
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                 req.PriorCceAddr(core_id));
             scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+
+            if (LockTypeUtil::DeduceLockType(
+                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
+                LockType::NoLock)
+            {
+                if (cce->key_lock_ptr_->ReadIntents().find(req.Txn()) !=
+                    cce->key_lock_ptr_->ReadIntents().end())
+                {
+                    ReleaseCceKeyLock(cce, req.Txn(), ng_id);
+                }
+            }
         }
         else
         {
@@ -3950,13 +3995,11 @@ public:
             Iterator pos_inf_it = End();
             cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
-            bool is_cache_full = req.IsLocal() ? scan_cache->IsFull()
-                                               : remote_scan_cache->IsFull();
 
             assert(scan_end != nullptr);
 
             while (scan_ccm_it != pos_inf_it &&
-                   (shard_->core_id_ > 0 || !is_cache_full) &&
+                   (shard_->core_id_ > 0 || !is_cache_full()) &&
                    (*cce_key < *scan_end ||
                     scan_end_inclusive && *cce_key == *scan_end))
             {
@@ -4035,8 +4078,19 @@ public:
                 ++scan_ccm_it;
                 cce_key = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
-                is_cache_full = req.IsLocal() ? scan_cache->IsFull()
-                                              : remote_scan_cache->IsFull();
+            }
+
+            // For Occ/ReadCommitted, acquire ReadIntent on the last scanned
+            // ccentry to prevent it being kicked out.
+            if (LockTypeUtil::DeduceLockType(
+                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
+                LockType::NoLock)
+            {
+                CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
+                if (last_cce != nullptr)
+                {
+                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                }
             }
 
             // Only sets the result once at the first core.
@@ -4180,13 +4234,11 @@ public:
             Iterator neg_inf_it = Begin();
             cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
-            bool is_cache_full = req.IsLocal() ? scan_cache->IsFull()
-                                               : remote_scan_cache->IsFull();
 
             assert(scan_end != nullptr);
 
             while (scan_ccm_it != neg_inf_it &&
-                   (shard_->core_id_ > 0 || !is_cache_full) &&
+                   (shard_->core_id_ > 0 || !is_cache_full()) &&
                    (*scan_end < *cce_key ||
                     scan_end_inclusive && *scan_end == *cce_key))
             {
@@ -4265,8 +4317,19 @@ public:
                 --scan_ccm_it;
                 cce_key = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
-                is_cache_full = req.IsLocal() ? scan_cache->IsFull()
-                                              : remote_scan_cache->IsFull();
+            }
+
+            // For Occ/ReadCommitted, acquire ReadIntent on the last scanned
+            // ccentry to prevent it being kicked out.
+            if (LockTypeUtil::DeduceLockType(
+                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
+                LockType::NoLock)
+            {
+                CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
+                if (last_cce != nullptr)
+                {
+                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                }
             }
 
             if (shard_->core_id_ == 0)

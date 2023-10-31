@@ -2584,10 +2584,10 @@ void TransactionExecution::ScanClose(
     }
     scanner = scan_it->second.scanner_.get();
 
+    drain_batch_.reserve(unlock_batch.size() + scanner->CacheCount());
+
     if (!unlock_batch.empty())
     {
-        drain_batch_.reserve(unlock_batch.size());
-
         for (const UnlockTuple &tpl : unlock_batch)
         {
             // Newly-inserted records in the write set have empty cc entry
@@ -2605,10 +2605,31 @@ void TransactionExecution::ScanClose(
 
             uint16_t read_cnt =
                 rw_set_.RemoveReadEntry(table_name, tpl.cce_addr_);
-
             if (read_cnt == 0)
             {
                 drain_batch_.emplace_back(tpl.cce_addr_, tpl.version_ts_);
+            }
+        }
+    }
+
+    // Append last tuple of each ScanCache which has acquired ReadIntent to
+    // the drain_batch_.
+    //
+    // 1) If last_tuple.lk_type is NoLock, then drain_batch_ doesn't include
+    // them and should append them into itself. 2) If last_tuple.lk_type is not
+    // NoLock, then drain_batch_ has include them, and should skip them.
+    // Non-repetition and non-omission.
+    for (uint32_t core_id = 0; core_id < scanner->CacheCount(); core_id++)
+    {
+        const ScanTuple *last_tuple = scanner->Cache(core_id)->LastTuple();
+        if (last_tuple)
+        {
+            LockType lk_type =
+                scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
+            if (lk_type == LockType::NoLock)
+            {
+                drain_batch_.emplace_back(last_tuple->cce_addr_,
+                                          last_tuple->key_ts_);
             }
         }
     }
