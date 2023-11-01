@@ -4720,13 +4720,6 @@ void ObjectCommandOp::Reset(const TableName *table_name,
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
-    if (!txm->CheckLeaderTerm())
-    {
-        hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-        hd_result_.ForceError();
-        txm->PostProcess(*this);
-        return;
-    }
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -4741,6 +4734,16 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             bool force_error = hd_result_.ForceError();
             assert(force_error);
 
+            txm->PostProcess(*this);
+            return;
+        }
+        // Need to make sure current node is still leader since we will visit
+        // bucket meta data which is only valid if current node is still ng
+        // leader.
+        if (!txm->CheckLeaderTerm())
+        {
+            hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            hd_result_.ForceError();
             txm->PostProcess(*this);
             return;
         }

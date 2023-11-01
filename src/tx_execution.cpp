@@ -4796,9 +4796,9 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         // Uses the lower 10 bits of the key's hash code to shard the
         // key across CPU cores in a cc node.
         uint32_t residual = key.Hash() & 0x3FF;
-        key_shard_code = obj_cmd_op.range_rec_.GetRangeInfo()->PartitionId()
-                             << 10 |
-                         residual;
+        NodeGroupId range_ng =
+            obj_cmd_op.range_rec_.GetRangeOwnerNg()->BucketOwner();
+        key_shard_code = range_ng << 10 | residual;
     }
     else
     {
