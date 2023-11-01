@@ -812,8 +812,6 @@ public:
     std::vector<ScanBatchTuple> &batch_read_pri_;
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
-    // TODO(ZX) unique_sk_read also needs is_covering_keys_
-    // bool is_covering_keys_;
     bool read_local_;
     uint64_t corresponding_sk_commit_ts_;
 };

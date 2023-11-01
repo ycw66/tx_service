@@ -75,9 +75,6 @@ public:
                                    CcProtocol cc_protocol,
                                    bool is_covering_keys)
     {
-        assert(!(iso_level == IsolationLevel::Snapshot &&
-                 cc_protocol == CcProtocol::Locking));
-
         if (cc_op == CcOperation::ReadSkIndex)
         {
             if (iso_level == IsolationLevel::Snapshot ||
