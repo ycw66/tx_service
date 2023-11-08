@@ -1974,6 +1974,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     bool is_dirty = data_sync_task->is_dirty_;
     data_sync_task_queue_.pop_front();
 
+    task_worker_lk.unlock();
+
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     bool need_process = false;
     uint64_t last_sync_ts = 0;
@@ -2002,7 +2004,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                 // directly.
                 data_sync_task->SetFinish();
                 // Handle the pending tasks for the same table
-                task_worker_lk.unlock();
                 store_range->PopPendingSyncTask();
             }
             else if (store_range->TrySetDataSync(true, data_sync_task))
@@ -2023,7 +2024,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     }
 
     meta_lk.unlock();
-    task_worker_lk.unlock();
 
     // Check the leader
     int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(ng_id);
@@ -2114,7 +2114,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         abort_req.Wait();
         assert(abort_req.Result() == false);
 
-        task_worker_lk.lock();
         if (rec_status != RecordStatus::Normal)
         {
             LOG(ERROR) << "DataSync try to add read lock on deleted table, "
@@ -2129,6 +2128,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(ERROR) << "DataSync add read lock on table failed, "
                           "table name: "
                        << table_key.Name().StringView();
+
+            task_worker_lk.lock();
             // If read lock acquire failed, retry next time.
             // Put back into the beginning.
             data_sync_task_queue_.emplace_front(std::move(data_sync_task));
@@ -2165,7 +2166,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             LOG(INFO) << "DataSync on the deleted table: " << table_name.Trace()
                       << ". Return finish directly.";
 
-            task_worker_lk.lock();
             data_sync_task->SetFinish();
             return;
         }
