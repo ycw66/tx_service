@@ -30,6 +30,7 @@
 #include "cc/cc_shard.h"
 #include "cc/ccm_scanner.h"
 #include "cc_handler_result.h"
+#include "cc_protocol.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
 #include "constants.h"
@@ -3961,6 +3962,7 @@ public:
                uint64_t tx_ts,
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
+               IsolationLevel iso_level,
                bool commit)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
@@ -3968,7 +3970,8 @@ public:
             res,
             Sharder::Instance().ShardToCcNodeGroup(key_shard_code),
             txn,
-            proto);
+            proto,
+            iso_level);
 
         // TODO(zkl): release uptrs on ApplyCc finish, instead of reuse
         if (!is_local_)

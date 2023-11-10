@@ -98,12 +98,32 @@ struct ScanSetEntry
     CcEntryAddr cce_addr_;
 };
 
+/**
+ * Txn commands on the same object.
+ */
 struct CmdSetEntry
 {
-    CmdSetEntry(uint64_t object_version, std::string &&key, std::string &&cmd)
-        : object_version_(object_version), obj_key_str_(std::move(key))
+    CmdSetEntry(uint64_t object_version, std::string &&key)
+        : object_version_(object_version),
+          obj_key_str_(std::move(key)),
+          has_del_(false)
     {
-        cmd_str_list_.emplace_back(std::move(cmd));
+    }
+
+    void AddCommand(const TxCommand *cmd)
+    {
+        if (cmd->IsDelete())
+        {
+            // clear all the commands since we don't need to write them into log
+            cmd_str_list_.clear();
+            has_del_ = true;
+        }
+        else
+        {
+            std::string cmd_str;
+            cmd->Serialize(cmd_str);
+            cmd_str_list_.emplace_back(std::move(cmd_str));
+        }
     }
 
     // commit_ts of the object cce when the commands apply to it, commands on
@@ -113,6 +133,9 @@ struct CmdSetEntry
     std::string obj_key_str_{};
     // serialized commands, for writing log
     std::vector<std::string> cmd_str_list_{};
+    // Whether a DEL command exists. If true, commands before DEL are discarded
+    // since there is no point writing them into the log.
+    bool has_del_{};
 };
 
 }  // namespace txservice

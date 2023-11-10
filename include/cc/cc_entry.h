@@ -20,6 +20,10 @@
 #include "tx_record.h"
 #include "type.h"  // TableType
 
+#ifdef ON_KEY_OBJECT
+#include "tx_command.h"
+#endif
+
 namespace txservice
 {
 class CcMap;
@@ -500,6 +504,14 @@ public:
 
     std::shared_ptr<ValueT> payload_;
     RecordStatus payload_status_;
+#ifdef ON_KEY_OBJECT
+    std::unique_ptr<TxCommand> pending_cmd_;
+    std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
+    // temporary object to process subsequent commands in the same txn
+    std::unique_ptr<ValueT> dirty_payload_;
+    // status of temporary object
+    RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
+#endif
 
     std::map<const KeyT *,
              std::unique_ptr<InsertEntry<KeyT, ValueT>>,

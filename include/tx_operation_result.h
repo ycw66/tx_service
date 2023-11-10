@@ -467,7 +467,8 @@ struct ObjectCommandResult
         commit_ts_ = 0;
         last_vali_ts_ = 0;
         cce_addr_ = CcEntryAddr{};
-        rec_status_ = RecordStatus{};
+        rec_status_ = RecordStatus::Unknown;
+        lock_acquired_ = LockType::NoLock;
         cmd_uptr_ = nullptr;
     }
 
@@ -478,7 +479,9 @@ struct ObjectCommandResult
     // add read write set
     CcEntryAddr cce_addr_{};
 
-    RecordStatus rec_status_;
+    RecordStatus rec_status_{RecordStatus::Unknown};
+
+    LockType lock_acquired_{LockType::NoLock};
 
     // for read-modify-write commands, complete command copies (including the
     // command arguments) to be stored in write set and referenced by objects

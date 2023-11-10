@@ -40,7 +40,7 @@ enum class OperationType
     DropIndex,
 
     // redis object command operation
-    RedisCommand
+    CommitCommands,
 };
 
 /**

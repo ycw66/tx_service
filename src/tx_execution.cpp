@@ -2876,7 +2876,6 @@ void TransactionExecution::Commit()
     {
         tx_status_.store(TxnStatus::Committing, std::memory_order_relaxed);
     }
-#ifndef ON_KEY_OBJECT
     if (rw_set_.WriteSetSize() > 0)
     {
         assert(!is_recovering);
@@ -2890,7 +2889,6 @@ void TransactionExecution::Commit()
 #endif
     }
     else
-#endif
     {
         if (is_recovering)
         {
@@ -3748,6 +3746,9 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             log_ng_blob.append(reinterpret_cast<const char *>(&cmds_len),
                                sizeof(cmds_len));
 
+            uint8_t has_del = cmd_entry->has_del_;
+            log_ng_blob.append(reinterpret_cast<const char *>(&has_del),
+                               sizeof(has_del));
             // number of commands
             uint16_t cmd_cnt = cmd_str_list.size();
             log_ng_blob.append(reinterpret_cast<const char *>(&cmd_cnt),
@@ -4011,6 +4012,9 @@ void TransactionExecution::Process(PostProcessOp &post_process)
 
     post_process.is_running_ = false;
 
+    uint64_t tx_number = TxNumber();
+    uint16_t command_id = command_id_.load(std::memory_order_relaxed);
+
     if (tx_status_.load(std::memory_order_relaxed) == TxnStatus::Committed)
     {
         // If the tx has finished validation, the read intentions/locks of
@@ -4018,9 +4022,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         // Post-processing only clears the write locks of the write-set
         // keys.
 
-        uint64_t tx_number = TxNumber();
         size_t idx = 0;
-        uint16_t command_id = command_id_.load(std::memory_order_relaxed);
         const std::unordered_map<TableName, TableWriteSet> &wset =
             rw_set_.WriteSet();
         for (const auto &[table_name, table_write_set] : wset)
@@ -4070,7 +4072,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                        commit_ts_,
                                        cce_addr,
                                        nullptr,
-                                       OperationType::RedisCommand,
+                                       OperationType::CommitCommands,
                                        0,
                                        post_process.hd_result_);
                 ++idx;
@@ -4127,21 +4129,45 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                         if (cce_addr.Term() >= 0)
                         {
                             assert(!cce_addr.Empty());
-                            cc_handler_->PostWrite(
-                                tx_number_.load(std::memory_order_relaxed),
-                                tx_term_,
-                                command_id_.load(std::memory_order_relaxed),
-                                0,
-                                cce_addr,
-                                nullptr,
-                                write_entry.op_,
-                                forward_shard_code,
-                                post_process.hd_result_);
+                            cc_handler_->PostWrite(tx_number,
+                                                   tx_term_,
+                                                   command_id,
+                                                   0,
+                                                   cce_addr,
+                                                   nullptr,
+                                                   write_entry.op_,
+                                                   forward_shard_code,
+                                                   post_process.hd_result_);
                             ++idx;
                         }
                     }
                 }
             }
+
+#ifdef ON_KEY_OBJECT
+            const std::unordered_map<
+                TableName,
+                std::unordered_map<CcEntryAddr, CmdSetEntry>> *cmd_cce_set =
+                rw_set_.ObjectCommandCce();
+            assert(cmd_cce_set != nullptr);
+
+            for (const auto &[table_name, cce_set] : *cmd_cce_set)
+            {
+                for (const auto &[cce_addr, cmd_set_entry] : cce_set)
+                {
+                    cc_handler_->PostWrite(tx_number,
+                                           tx_term_,
+                                           command_id,
+                                           0,
+                                           cce_addr,
+                                           nullptr,
+                                           OperationType::CommitCommands,
+                                           0,
+                                           post_process.hd_result_);
+                    ++idx;
+                }
+            }
+#endif
         }
 
         const std::unordered_map<TableName,
@@ -5069,6 +5095,7 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                tx_term_,
                                current_ts,
                                hd_res,
+                               iso_level_,
                                protocol_,
                                commit);
     StartTiming();
@@ -5117,11 +5144,19 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WritLog.
 
-        bool add_to_write_set = !directly_commit && !cmd->IsReadOnly() &&
-                                obj_status == RecordStatus::Normal;
-
-        if (add_to_write_set)
+        LockType lock_acquired = cmd_result.lock_acquired_;
+        if (lock_acquired == LockType::ReadLock)
         {
+            LOG(INFO) << "txm acquired readlock";
+            // Read lock is acquired under locking protocol. Add the cce to
+            // read set for later PostRead.
+            rw_set_.AddRead(cmd_result.cce_addr_,
+                            cmd_result.commit_ts_,
+                            obj_cmd_op.table_name_);
+        }
+        else if (lock_acquired == LockType::WriteLock)
+        {
+            LOG(INFO) << "txm acquired writelock";
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing.
             rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,

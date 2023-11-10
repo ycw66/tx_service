@@ -3,6 +3,7 @@
 #include <chrono>
 #include <string>
 
+#include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
@@ -1454,7 +1455,8 @@ void txservice::LocalCcHandler::ObjectCommand(
     int64_t tx_term,
     uint64_t tx_ts,
     txservice::CcHandlerResult<txservice::ObjectCommandResult> &hres,
-    const txservice::CcProtocol proto,
+    IsolationLevel iso_level,
+    txservice::CcProtocol proto,
     bool commit)
 {
 #ifdef EXT_TX_PROC_ENABLED
@@ -1477,6 +1479,7 @@ void txservice::LocalCcHandler::ObjectCommand(
                    tx_ts,
                    &hres,
                    proto,
+                   iso_level,
                    commit);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }

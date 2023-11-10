@@ -449,7 +449,8 @@ public:
                                int64_t tx_term,
                                uint64_t tx_ts,
                                CcHandlerResult<ObjectCommandResult> &hres,
-                               const CcProtocol proto,
+                               IsolationLevel iso_level,
+                               CcProtocol proto,
                                bool commit) = 0;
 
     virtual void CleanCcEntryForTest(const TableName &table_name,

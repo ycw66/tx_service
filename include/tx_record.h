@@ -50,6 +50,19 @@ enum struct RecordStatus
     /// be in "mvcc_archives tables".
     /// </summary>
     ArchiveVersionMiss,
+
+#ifdef ON_KEY_OBJECT
+    /// <summary>
+    /// Used only to indicate the status of temporary object. The temporary
+    /// object hasn't been created.
+    /// </summary>
+    NonExistent,
+    /// <summary>
+    /// Used only to indicate the status of temporary object. The temporary
+    /// hasn't been created yet.
+    /// </summary>
+    Uncreated,
+#endif
 };
 
 struct TxRecord

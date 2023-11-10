@@ -544,25 +544,20 @@ public:
         auto [table_it, success] = cmd_set_.try_emplace(table_name);
         auto &table_cmd_set = table_it->second;
 
-        std::string cmd_str;
-        cmd->Serialize(cmd_str);
-
         auto cce_it = table_cmd_set.find(cce_addr);
-        if (cce_it != table_cmd_set.end())
-        {
-            CmdSetEntry &entry = cce_it->second;
-            entry.cmd_str_list_.emplace_back(std::move(cmd_str));
-        }
-        else
+        if (cce_it == table_cmd_set.end())
         {
             std::string key_str;
             key->Serialize(key_str);
             bool inserted = false;
             std::tie(cce_it, inserted) = table_cmd_set.try_emplace(
-                cce_addr, cce_version, std::move(key_str), std::move(cmd_str));
+                cce_addr, cce_version, std::move(key_str));
             assert(inserted);
             cce_cnt_++;
         }
+
+        CmdSetEntry &entry = cce_it->second;
+        entry.AddCommand(cmd);
 #endif
     }
 
@@ -605,7 +600,7 @@ private:
 
 #ifdef ON_KEY_OBJECT
     /**
-     * Collection of object keys and commands.
+     * Collection of object keys and commands on each object.
      */
     std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
         cmd_set_;
