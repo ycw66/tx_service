@@ -42,8 +42,6 @@ CcShard::CcShard(uint16_t core_id,
       clean_start_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
-      processor_sleep_(nullptr),
-      processor_mux_(nullptr),
       catalog_factory_(catalog_factory),
       active_si_txs_(),
       meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
@@ -237,23 +235,29 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
     bool ret = cc_queue_.enqueue(thd_token_.at(thd_id), req);
     assert(ret == true);
 
-    // Wakes up the thread dedicated to this shard, when it is in the sleep
-    // mode.
-    if (processor_sleep_ && processor_sleep_->load(std::memory_order_relaxed))
+    // Wakes up the tx processor dedicated to this shard when it is asleep. The
+    // notify function internally uses a std::mutex before notifying via the
+    // condition variable. This is to create a barrier such that the prior queue
+    // size update and the enqueue of the cc request precedes notify().
+    TxProcessorStatus tx_proc_status =
+        tx_proc_status_ != nullptr
+            ? tx_proc_status_->load(std::memory_order_relaxed)
+            : TxProcessorStatus::Busy;
+#ifdef EXT_TX_PROC_ENABLED
+    if (tx_proc_status == TxProcessorStatus::Sleep ||
+        (tx_proc_status == TxProcessorStatus::Standby &&
+         tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) == 0))
     {
-        // Condition variable's notify() does not rely on std::mutex. We use it
-        // here for a special purpose. C++ standard on std::atomic does not
-        // enforce the StoreLoad fence. As a result, processor_sleep_->load()
-        // may precede enqueue() and queue size update. And the tx processor may
-        // miss the queue size change and the notify() signal. With std::mutex,
-        // the memory order (std::memory_order_release) in std::mutex ensures
-        // that after entering the critical section, the prior queue size update
-        // is visible to the tx processor thread. The tx processor either
-        // captures the notify() signal, or enters the critical section later,
-        // sees the queue size update and continues without sleeping.
-        std::unique_lock<std::mutex> lk(*processor_mux_);
-        processor_cv_->notify_one();
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
     }
+#else
+    if (tx_proc_status == TxProcessorStatus::Sleep)
+    {
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
+    }
+#endif
 }
 
 void CcShard::Enqueue(CcRequestBase *req)
@@ -263,13 +267,29 @@ void CcShard::Enqueue(CcRequestBase *req)
     bool ret = cc_queue_.enqueue(req);
     assert(ret == true);
 
-    // Wakes up the thread dedicated to this shard, when it is in the sleep
-    // mode.
-    if (processor_sleep_ && processor_sleep_->load(std::memory_order_relaxed))
+    // Wakes up the tx processor dedicated to this shard, when it is asleep. The
+    // notify function internally uses a std::mutex before notifying via the
+    // condition variable. This is to create a barrier such that the prior queue
+    // size update and the enqueue of the cc request precedes notify().
+    TxProcessorStatus tx_proc_status =
+        tx_proc_status_ != nullptr
+            ? tx_proc_status_->load(std::memory_order_relaxed)
+            : TxProcessorStatus::Busy;
+#ifdef EXT_TX_PROC_ENABLED
+    if (tx_proc_status == TxProcessorStatus::Sleep ||
+        (tx_proc_status == TxProcessorStatus::Standby &&
+         tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) == 0))
     {
-        std::unique_lock<std::mutex> lk(*processor_mux_);
-        processor_cv_->notify_one();
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
     }
+#else
+    if (tx_proc_status == TxProcessorStatus::Sleep)
+    {
+        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
+        tx_coordi_->sleep_cv_.notify_one();
+    }
+#endif
 }
 
 TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,

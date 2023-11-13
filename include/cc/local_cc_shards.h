@@ -21,6 +21,7 @@
 #include "metrics.h"
 #include "raft_log.pb.h"
 #include "store/data_store_handler.h"
+#include "tx_service_common.h"
 #include "type.h"
 
 namespace txservice
@@ -226,13 +227,11 @@ public:
         return cc_shards_[thd_id]->IsIdle();
     }
 
-    void ProcessorSleepFlag(uint16_t thd_id,
-                            std::atomic<bool> *sleep_flag,
-                            std::mutex *processor_mux,
-                            std::condition_variable *processor_cv)
+    void SetTxProcNotifier(uint16_t thd_id,
+                           std::atomic<TxProcessorStatus> *tx_proc_status,
+                           TxProcCoordinator *tx_coordi)
     {
-        return cc_shards_[thd_id]->SetProcessorSleepFlag(
-            sleep_flag, processor_mux, processor_cv);
+        return cc_shards_[thd_id]->SetTxProcNotifier(tx_proc_status, tx_coordi);
     }
 
     size_t Count() const

@@ -53,6 +53,13 @@ void CcHandlerResult<T>::SetFinished()
             bool expect = false;
             is_finished_.compare_exchange_strong(
                 expect, true, std::memory_order_acq_rel);
+
+#ifdef EXT_TX_PROC_ENABLED
+            if (txm_ != nullptr && is_blocking_)
+            {
+                txm_->Enlist();
+            }
+#endif
         }
     }
     else
@@ -65,6 +72,13 @@ void CcHandlerResult<T>::SetFinished()
         bool expect = false;
         is_finished_.compare_exchange_strong(
             expect, true, std::memory_order_acq_rel);
+
+#ifdef EXT_TX_PROC_ENABLED
+        if (txm_ != nullptr && is_blocking_)
+        {
+            txm_->Enlist();
+        }
+#endif
     }
 };
 
@@ -90,7 +104,7 @@ void CcHandlerResult<T>::SetError(CcErrorCode err_code)
         });
     CcErrorCode no_error = CcErrorCode::NO_ERROR;
     error_code_.compare_exchange_strong(
-        no_error, err_code, std::memory_order_acq_rel);
+        no_error, err_code, std::memory_order_relaxed);
     SetFinished();
 };
 
@@ -128,6 +142,13 @@ bool CcHandlerResult<T>::ForceError()
         {
             post_lambda_(this);
         }
+
+#ifdef EXT_TX_PROC_ENABLED
+        if (txm_ != nullptr && is_blocking_)
+        {
+            txm_->Enlist();
+        }
+#endif
     }
 
     return success;

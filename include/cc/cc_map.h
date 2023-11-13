@@ -261,8 +261,11 @@ protected:
      * @param tx_number
      * @param lock_type
      */
-    void ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id);
-    void ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id);
+    void ReleaseCceLock(NonBlockingLock *lock,
+                        LruEntry *cce,
+                        TxNumber tx_number,
+                        uint32_t ng_id,
+                        LockType lk_type = LockType::NoLock);
 
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;

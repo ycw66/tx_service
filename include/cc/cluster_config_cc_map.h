@@ -151,7 +151,10 @@ public:
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
         {
             // transaction failed before prepare log. Release lock and return.
-            ReleaseCceKeyLock(&neg_inf_, req.Txn(), req.NodeGroupId());
+            ReleaseCceLock(neg_inf_.key_lock_ptr_,
+                           &neg_inf_,
+                           req.Txn(),
+                           req.NodeGroupId());
             req.Result()->SetFinished();
             return true;
         }
@@ -194,22 +197,24 @@ public:
         if (neg_inf_.key_lock_ptr_ != nullptr)
         {
             // AcquireAllCc only acquire WriteIntent or WriteLock
-            if (neg_inf_.key_lock_ptr_->HasWriteLock() &&
-                neg_inf_.key_lock_ptr_->WriteLockTx() == txn)
+            auto [write_lk_txn, write_lk_type] =
+                neg_inf_.key_lock_ptr_->WriteTx();
+
+            if (write_lk_type != NonBlockingLock::WriteLockType::NoWritelock &&
+                write_lk_txn == txn)
             {
-                lk_type = LockType::WriteLock;
-            }
-            else if (neg_inf_.key_lock_ptr_->HasWriteIntent() &&
-                     neg_inf_.key_lock_ptr_->WriteIntentTx() == txn)
-            {
-                lk_type = LockType::WriteIntent;
+                lk_type =
+                    write_lk_type == NonBlockingLock::WriteLockType::WriteLock
+                        ? LockType::WriteLock
+                        : LockType::WriteIntent;
             }
         }
 
         if (lk_type != LockType::NoLock)
         {
             neg_inf_.commit_ts_ = req.CommitTs();
-            ReleaseCceKeyLock(&neg_inf_, txn, req.NodeGroupId());
+            ReleaseCceLock(
+                neg_inf_.key_lock_ptr_, &neg_inf_, txn, req.NodeGroupId());
         }
 
         // No need to move the request to next core since this map is only

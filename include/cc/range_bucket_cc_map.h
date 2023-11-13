@@ -188,7 +188,8 @@ public:
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (CheckCceKeyLock(cce, req) == false)
+        if (cce->key_lock_ptr_ == nullptr ||
+            !cce->key_lock_ptr_->HasWrite(req.Txn()))
         {
             // Check if the tx still has lock on this cce. If this
             // is a duplicate post write all req or this ng has already

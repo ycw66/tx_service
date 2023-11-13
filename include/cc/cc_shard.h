@@ -29,6 +29,7 @@
 #include "range_slice.h"
 #include "sharder.h"
 #include "tentry.h"
+#include "tx_service_common.h"
 
 namespace txservice
 {
@@ -641,13 +642,11 @@ public:
     }
 
 private:
-    void SetProcessorSleepFlag(std::atomic<bool> *processor_sleep,
-                               std::mutex *processor_mux,
-                               std::condition_variable *processor_cv)
+    void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
+                           TxProcCoordinator *tx_coordi)
     {
-        processor_sleep_ = processor_sleep;
-        processor_mux_ = processor_mux;
-        processor_cv_ = processor_cv;
+        tx_proc_status_ = tx_proc_status;
+        tx_coordi_ = tx_coordi;
     }
 
     size_t memory_usage_round_ = 1;
@@ -711,9 +710,8 @@ private:
      * the shard that it enters into the sleep mode.
      *
      */
-    std::atomic<bool> *processor_sleep_{nullptr};
-    std::mutex *processor_mux_{nullptr};
-    std::condition_variable *processor_cv_{nullptr};
+    std::atomic<TxProcessorStatus> *tx_proc_status_{nullptr};
+    TxProcCoordinator *tx_coordi_{nullptr};
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.

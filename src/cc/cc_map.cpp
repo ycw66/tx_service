@@ -54,12 +54,20 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                 cce->key_lock_ptr_->HasWriteLock() &&
                 cce->key_lock_ptr_->WLockTs() < read_ts)
             {
-                // Having write lock means the ccentry will be updated soon.
-                // If wlock_ts_ < ts, the future 'commit_ts' is may also less
-                // than the 'read timestamp', then should return the future
-                // version.
-                // There are two choice: (1)wait until the future version is
-                // committed; (2) abort read transcation.
+                // Having a write lock means the entry will be updated soon. If
+                // wlock_ts_ is less than the read timestamp, this read may be
+                // toward a future version, given that the tx may commit before
+                // the read timestamp. Puts the request to the head of the
+                // key's blocking queue to acquire the read lock. The read lock
+                // ensures that the cc entry is not kicked out between when the
+                // write lock is released and when this request is re-enqueued
+                // and processed. The read lock is released when the request is
+                // re-processed.
+                cce->key_lock_ptr_->InsertBlockingQueue(req,
+                                                        LockType::ReadLock);
+                shard_->CheckRecoverTx(
+                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
+
                 return std::pair<LockType, CcErrorCode>(
                     LockType::NoLock, CcErrorCode::MVCC_READ_MUST_WAIT_WRITE);
             }
@@ -131,9 +139,9 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     {
         // check and recover conflicted transactions.
         RecoverTxForLockConfilct(cce->GetKeyLock(), lock_type, ng_id, ng_term);
+        auto [w_tx, w_lk_type] = cce->GetKeyLock().WriteTx();
         if (lock_type == LockType::WriteLock &&
-            !cce->GetKeyLock().HasWriteLock() &&
-            !cce->GetKeyLock().HasWriteIntent())
+            w_lk_type == NonBlockingLock::WriteLockType::NoWritelock)
         {
             err_code = CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT;
         }
@@ -209,39 +217,45 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         cc_op, iso_level, protocol, is_covering_keys);
     CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
-    bool should_release_lock = (cce_payload_status == RecordStatus::Deleted &&
-                                acquired_lock != LockType::WriteLock &&
-                                acquired_lock != LockType::WriteIntent);
-
-    if (iso_level == IsolationLevel::Snapshot &&
-        cc_op == CcOperation::ReadForWrite && read_ts < cce->commit_ts_)
+    if (acquired_lock == LockType::ReadLock &&
+        cce_payload_status == RecordStatus::Deleted)
     {
+        // The read lock has been acquired. But if the key has been deleted by
+        // the prior tx, there is no point of keeping the lock.
+        cce->key_lock_ptr_->ReleaseReadLock(tx_number, shard_);
+        cce->RecycleKeyLock();
+        acquired_lock = LockType::NoLock;
+
+        // DeleteLockHoldingTx is required. Because this may be a retried
+        // request and the prior blocked request may has upsert the tx's lock
+        // info in the shard.
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
+    }
+    else if (acquired_lock == LockType::WriteIntent &&
+             iso_level == IsolationLevel::Snapshot && read_ts < cce->commit_ts_)
+    {
+        // The write intent has been acquired. Does not keep the write intent if
+        // this tx under Snapshot Isolation (SI) is destined to fail. For
+        // ReadForWrite under SI, if the tx' snapshot sees a key's old version,
+        // but the tx also intends to update the key, the tx is destined to
+        // fail. The transaction will successfully commit only if its updates do
+        // not conflict with any concurrent updates made since its snapshot.
         LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
                         "timestamp. tx:"
                      << req->Txn();
-        // For ReadForWrite under Snapshot Isolation,  we will return the
-        // latest version, only if the latest version fits the read's timestamp.
-        // Otherwise, we will return an error to abort the tx.
-        // Because, snapshot isolation is a guarantee that all reads made in a
-        // transaction will see a consistent snapshot of the database, and the
-        // transaction itself will successfully commit only if no updates it has
-        // made conflict with any concurrent updates made since that snapshot.
-        should_release_lock = true;
-        err_code = CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT;
-    }
 
-    if (should_release_lock)
-    {
-        cce->key_lock_ptr_->ReleaseLock(tx_number, shard_, acquired_lock);
+        err_code = CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT;
+        cce->key_lock_ptr_->ReleaseWriteIntent(tx_number, shard_);
         cce->RecycleKeyLock();
         acquired_lock = LockType::NoLock;
-        // Here "DeleteLockHoldingTx" is required. For, this may be a retried
-        // request and the prior blocked request may has upsert tx's lock info.
+
+        // DeleteLockHoldingTx is required. Because this may be a retried
+        // request and the prior blocked request may has upsert the tx's lock
+        // info in the shard.
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
     }
     else
     {
-        assert(acquired_lock != LockType::NoLock);
         shard_->UpsertLockHoldingTx(tx_number,
                                     tx_term,
                                     cce,
@@ -263,7 +277,9 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
     {
     case LockType::WriteLock:
     {
-        if (lock.HasWriteLock())
+        auto [write_tx, write_type] = lock.WriteTx();
+
+        if (write_type != NonBlockingLock::WriteLockType::NoWritelock)
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
@@ -276,11 +292,7 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
                         .append(",\"associate\":\"key_lock_.write_lock\"");
                 });
 
-            shard_->CheckRecoverTx(lock.WriteLockTx(), ng_id, ng_term);
-        }
-        else if (lock.HasWriteIntent())
-        {
-            shard_->CheckRecoverTx(lock.WriteIntentTx(), ng_id, ng_term);
+            shard_->CheckRecoverTx(write_tx, ng_id, ng_term);
         }
         else
         {
@@ -297,13 +309,10 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
     }
     case LockType::WriteIntent:
     {
-        if (lock.HasWriteLock())
+        auto [write_tx, write_type] = lock.WriteTx();
+        if (write_type != NonBlockingLock::WriteLockType::NoWritelock)
         {
-            shard_->CheckRecoverTx(lock.WriteLockTx(), ng_id, ng_term);
-        }
-        else if (lock.HasWriteIntent())
-        {
-            shard_->CheckRecoverTx(lock.WriteIntentTx(), ng_id, ng_term);
+            shard_->CheckRecoverTx(write_tx, ng_id, ng_term);
         }
         break;
     }
@@ -325,36 +334,66 @@ void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
     cce->key_lock_ptr_->DowngradeWriteLock(tx_number, shard_);
 }
 
-void CcMap::ReleaseCceKeyLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id)
+void CcMap::ReleaseCceLock(NonBlockingLock *lock,
+                           LruEntry *cce,
+                           TxNumber tx_number,
+                           uint32_t ng_id,
+                           LockType lk_type)
 {
-    if (cce != nullptr && cce->key_lock_ptr_ != nullptr)
+    if (lock == nullptr)
     {
-        bool is_write_lock = (cce->key_lock_ptr_->HasWriteLock() &&
-                              cce->key_lock_ptr_->WriteLockTx() == tx_number);
-        cce->key_lock_ptr_->ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
-        if (is_write_lock)
+        return;
+    }
+
+    LockType unlock_type = LockType::NoLock;
+    switch (lk_type)
+    {
+    case LockType::ReadLock:
+    {
+        bool success = lock->ReleaseReadLock(tx_number, shard_);
+        if (success)
         {
-            cce->key_lock_ptr_->SetWLockTs(0);
+            unlock_type = LockType::ReadLock;
         }
+        break;
+    }
+    case LockType::ReadIntent:
+    {
+        bool success = lock->ReleaseReadIntent(tx_number);
+        if (success)
+        {
+            unlock_type = LockType::ReadIntent;
+        }
+        break;
+    }
+    case LockType::WriteLock:
+    {
+        bool success = lock->ReleaseWriteLock(tx_number, shard_);
+        if (success)
+        {
+            unlock_type = LockType::WriteLock;
+        }
+        break;
+    }
+    default:
+        unlock_type = lock->ClearTx(tx_number, shard_);
+        break;
+    }
+
+    if (unlock_type != LockType::NoLock)
+    {
+        if (unlock_type == LockType::WriteLock)
+        {
+            lock->SetWLockTs(0);
+        }
+
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
         cce->RecycleKeyLock();
     }
-}
-
-void CcMap::ReleaseCceGapLock(LruEntry *cce, TxNumber tx_number, uint32_t ng_id)
-{
-    if (cce != nullptr && cce->gap_lock_ptr_ != nullptr)
+    else
     {
-        bool is_write_lock = (cce->gap_lock_ptr_->HasWriteLock() &&
-                              cce->gap_lock_ptr_->WriteLockTx() == tx_number);
-        cce->gap_lock_ptr_->ClearTx(tx_number, shard_);
-        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
-        if (is_write_lock)
-        {
-            cce->gap_lock_ptr_->SetWLockTs(0);
-        }
-        cce->RecycleGapLock();
+        // Otherwise, the lock should have been recycled.
+        assert(!lock->IsEmpty());
     }
 }
-
 }  // namespace txservice

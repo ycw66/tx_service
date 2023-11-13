@@ -161,7 +161,7 @@ public:
                      CcHandlerResult<ReadKeyResult> &hres,
                      std::vector<VersionTxRecord> *archives = nullptr) override;
 
-    void ReadLocal(const TableName &table_name,
+    bool ReadLocal(const TableName &table_name,
                    const TxKey &key,
                    TxRecord &record,
                    ReadType read_type,

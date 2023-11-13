@@ -262,7 +262,7 @@ public:
      * @param iso_level Isolation level
      * @param proto Concurrency control (cc) protocol
      */
-    virtual void ReadLocal(
+    virtual bool ReadLocal(
         const TableName &table_name,
         const TxKey &key,
         TxRecord &record,

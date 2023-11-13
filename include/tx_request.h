@@ -26,14 +26,19 @@ public:
     virtual void Process(TransactionExecution *txm) = 0;
     // virtual bool Finish() const = 0;
 
-    static std::string ErrorMessage(TxErrorCode err_code)
+    static const std::string &ErrorMessage(TxErrorCode err_code)
     {
-        auto it = tx_error_messages.find(err_code);
-        if (it != tx_error_messages.end())
+        if (err_code != TxErrorCode::NO_ERROR)
         {
-            return it->second;
+            auto it = tx_error_messages.find(err_code);
+            if (it != tx_error_messages.end())
+            {
+                return it->second;
+            }
         }
-        return "";
+
+        static std::string empty_err_msg;
+        return empty_err_msg;
     }
 
     virtual void SetError(
@@ -45,7 +50,7 @@ struct TemplateTxRequest : TxRequest
 {
     TemplateTxRequest(const std::function<void()> *yield_fptr,
                       const std::function<void()> *resume_fptr,
-                      TransactionExecution *txm)
+                      TransactionExecution *txm = nullptr)
         : tx_result_(yield_fptr, resume_fptr), txm_(txm)
     {
     }
@@ -55,7 +60,6 @@ struct TemplateTxRequest : TxRequest
     void Process(TransactionExecution *txm) override
     {
         txm->ProcessTxRequest(static_cast<Subtype &>(*this));
-        return;
     }
 
     bool IsFinished()
@@ -75,14 +79,7 @@ struct TemplateTxRequest : TxRequest
 
     const std::string &ErrorMsg() const
     {
-        auto it = tx_error_messages.find(ErrorCode());
-        if (it != tx_error_messages.end())
-        {
-            return it->second;
-        }
-
-        static std::string empty_err_msg;
-        return empty_err_msg;
+        return TxRequest::ErrorMessage(ErrorCode());
     }
 
     void Wait()
@@ -96,9 +93,7 @@ struct TemplateTxRequest : TxRequest
                 txm_->ExternalForward();
             }
 #endif
-
             tx_result_.Wait();
-
             result_status = tx_result_.Status();
         } while (result_status == TxResultStatus::Unknown);
     }
@@ -119,9 +114,9 @@ struct TemplateTxRequest : TxRequest
     }
 
     TxResult<T> tx_result_;
-    TransactionExecution *txm_{nullptr};
 
 protected:
+    TransactionExecution *txm_{nullptr};
     friend class TransactionExecution;
 };
 
@@ -244,10 +239,10 @@ public:
     ReadOutsideTxRequest(TxRecord &rec,
                          bool is_deleted,
                          uint64_t commit_ts,
+                         std::vector<VersionTxRecord> *archives,
                          const std::function<void()> *yield_fptr = nullptr,
                          const std::function<void()> *resume_fptr = nullptr,
-                         TransactionExecution *txm = nullptr,
-                         std::vector<VersionTxRecord> *archives = nullptr)
+                         TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           rec_(rec),
           is_deleted_(is_deleted),
@@ -269,9 +264,8 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
                     TxRecord::Uptr rec,
                     OperationType operation_type,
                     const std::function<void()> *yield_fptr = nullptr,
-                    const std::function<void()> *resume_fptr = nullptr,
-                    TransactionExecution *txm = nullptr)
-        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+                    const std::function<void()> *resume_fptr = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr),
           tab_name_(tab_name),
           key_(std::move(key)),
           rec_(std::move(rec)),
@@ -287,7 +281,7 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
-    ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr, nullptr)
+    ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr)
     {
     }
 
@@ -340,6 +334,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                TransactionExecution *txm = nullptr)
     {
         tx_result_.Reset(yield_fptr, resume_fptr);
+        txm_ = txm;
         tab_name_ = tabname;
         indx_type_ = index_type;
         start_key_ = start_key;
@@ -420,7 +415,7 @@ struct ScanBatchTuple
     TxRecord *record_{nullptr};
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
-    const CcEntryAddr cce_addr_;
+    CcEntryAddr cce_addr_;
 };
 
 struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
@@ -519,21 +514,23 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 struct AbortTxRequest : public TemplateTxRequest<AbortTxRequest, bool>
 {
     AbortTxRequest(const std::function<void()> *yield_fptr = nullptr,
-                   const std::function<void()> *resume_fptr = nullptr,
-                   TransactionExecution *txm = nullptr)
-        : TemplateTxRequest(yield_fptr, resume_fptr, txm)
+                   const std::function<void()> *resume_fptr = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr)
     {
     }
 };
 
 struct CommitTxRequest : public TemplateTxRequest<CommitTxRequest, bool>
 {
-    CommitTxRequest(const std::function<void()> *yield_fptr = nullptr,
+    CommitTxRequest(bool to_commit = true,
+                    const std::function<void()> *yield_fptr = nullptr,
                     const std::function<void()> *resume_fptr = nullptr,
                     TransactionExecution *txm = nullptr)
-        : TemplateTxRequest(yield_fptr, resume_fptr, txm)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm), to_commit_(to_commit)
     {
     }
+
+    bool to_commit_{true};
 };
 
 struct UpsertTableTxRequest
@@ -638,7 +635,7 @@ struct ObjectCommandTxRequest
                            const TxCommand *command,
                            TxCommandResult *cmd_result,
                            bool auto_commit = true)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
+        : TemplateTxRequest(nullptr, nullptr),
           table_name_(table_name),
           key_(key),
           command_(command),
@@ -662,7 +659,7 @@ struct ClusterScaleTxRequest
         std::vector<std::pair<std::string, uint16_t>> *new_nodes,
         std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
         uint16_t *remove_node_count)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
+        : TemplateTxRequest(nullptr, nullptr),
           scale_type_(scale_type),
           new_nodes_(new_nodes),
           removed_nodes_(removed_nodes),
@@ -685,8 +682,7 @@ struct SchemaRecoveryTxRequest
     : public TemplateTxRequest<SchemaRecoveryTxRequest, UpsertResult>
 {
     SchemaRecoveryTxRequest(const ::txlog::SchemaOpMessage &schema_op_msg)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
-          schema_op_msg_(schema_op_msg)
+        : TemplateTxRequest(nullptr, nullptr), schema_op_msg_(schema_op_msg)
     {
     }
 
@@ -706,7 +702,7 @@ struct RangeSplitRecoveryTxRequest
         std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
         std::vector<int32_t> &&new_partition_ids,
         uint32_t node_group_id)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
+        : TemplateTxRequest(nullptr, nullptr),
           ds_split_range_op_msg_(ds_split_range_op_msg),
           table_schema_(table_schema),
           partition_id_(partition_id),
@@ -735,8 +731,11 @@ struct FaultInjectTxRequest
 {
     FaultInjectTxRequest(const std::string &fault_name,
                          const std::string &fault_paras,
-                         std::vector<int> &vct_node_id)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
+                         std::vector<int> &vct_node_id,
+                         const std::function<void()> *yield_fptr = nullptr,
+                         const std::function<void()> *resume_fptr = nullptr,
+                         TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           fault_name_(fault_name),
           fault_paras_(fault_paras)
     {
@@ -756,7 +755,7 @@ struct CleanCcEntryForTestTxRequest
                                  const TxKey *key = nullptr,
                                  bool only_archives = false,
                                  bool flush = true)
-        : TemplateTxRequest(nullptr, nullptr, nullptr),
+        : TemplateTxRequest(nullptr, nullptr),
           tab_name_(tab_name),
           key_(key),
           only_archives_{only_archives},
@@ -775,7 +774,7 @@ struct BatchReadTxRequest : public TemplateTxRequest<BatchReadTxRequest, Void>
 {
 public:
     BatchReadTxRequest(const TableName *tab_name,
-                       std::vector<ScanBatchTuple> &batch_read_pri,
+                       std::vector<ScanBatchTuple> &tuple_batch,
                        bool is_for_write = false,
                        bool is_for_share = false,
                        bool read_local = false,
@@ -785,7 +784,7 @@ public:
                        uint64_t corresponding_sk_commit_ts = 0)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tab_name),
-          batch_read_pri_(batch_read_pri),
+          read_batch_(tuple_batch),
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           read_local_(read_local),
@@ -801,7 +800,7 @@ public:
              uint64_t corresponding_sk_commit_ts = 0)
     {
         tab_name_ = tab_name;
-        batch_read_pri_ = std::move(batch_read_pri);
+        read_batch_ = std::move(batch_read_pri);
         is_for_write_ = is_for_write;
         is_for_share_ = is_for_share;
         read_local_ = read_local;
@@ -809,7 +808,7 @@ public:
     }
 
     const TableName *tab_name_;
-    std::vector<ScanBatchTuple> &batch_read_pri_;
+    std::vector<ScanBatchTuple> &read_batch_;
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;

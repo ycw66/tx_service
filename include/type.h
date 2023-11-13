@@ -506,6 +506,13 @@ enum struct SlicePosition
      */
     LastSlice
 };
+
+enum struct TxProcessorStatus
+{
+    Busy = 0,
+    Sleep,
+    Standby
+};
 }  // namespace txservice
 
 namespace std

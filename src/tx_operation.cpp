@@ -153,7 +153,8 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
 
     // sleep for a while and then execute the new operation.
     // sleep time is based on retry_num_.
-    txm->sleep_op_.sleep_secs_ = (RETRY_NUM - retry_num_) * 2;
+    txm->sleep_op_.sleep_secs_ =
+        RETRY_NUM >= retry_num_ ? (RETRY_NUM - retry_num_) * 2 : 2;
     is_running_ = false;
     retry_num_--;
 
@@ -162,11 +163,12 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
     txm->StartTiming();
 }
 
-ReadOperation::ReadOperation(TransactionExecution *txm)
+ReadOperation::ReadOperation(TransactionExecution *txm,
+                             CcHandlerResult<ReadKeyResult> *lock_range_result)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(txm)
+      lock_range_result_(lock_range_result)
 #endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -178,8 +180,8 @@ void ReadOperation::Reset()
     hd_result_.Reset();
     local_cache_miss_ = false;
 #ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_.Value().Reset();
-    lock_range_result_.Reset();
+    lock_range_result_->Value().Reset();
+    lock_range_result_->Reset();
 #endif
     op_start_ = metrics::TimePoint::max();
 }
@@ -189,25 +191,22 @@ void ReadOperation::Forward(TransactionExecution *txm)
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
-        if (read_tx_req_->read_local_)
+        if (!read_tx_req_->read_local_)
         {
-            txm->Process(*this);
-            return;
-        }
+            // Just returned from LockReadRangeOp, check lock_range_result_.
+            assert(lock_range_result_->IsFinished());
+            if (lock_range_result_->IsError())
+            {
+                // There is an error when getting the input key's range. The
+                // read operation is set to be errored.
+                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
 
-        // Just returned from LockReadRangeOp, check lock_range_result_.
-        assert(lock_range_result_.IsFinished());
-        if (lock_range_result_.IsError())
-        {
-            // There is an error when getting the input key's range. The
-            // read operation is set to be errored.
-            hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+                bool force_success = hd_result_.ForceError();
+                assert(force_success);
 
-            bool force_error = hd_result_.ForceError();
-            assert(force_error);
-
-            txm->PostProcess(*this);
-            return;
+                txm->PostProcess(*this);
+                return;
+            }
         }
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
@@ -221,6 +220,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
         }
 #endif
         txm->Process(*this);
+        return;
     }
 
     const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
@@ -265,7 +265,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
 #endif
         txm->PostProcess(*this);
     }
-    else
+    else if (!hd_result_.Value().is_local_)
     {
         bool timeout = txm->IsTimeOut();
         CODE_FAULT_INJECTOR("read_operation_timeout", {
@@ -275,7 +275,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
                                                 "remove");
         });
 
-        if (!hd_result_.Value().is_local_ && cce_addr.Term() < 0 && timeout)
+        if (cce_addr.Term() < 0 && timeout)
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
@@ -354,39 +354,6 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
         return;
     }
 }
-
-#ifdef RANGE_PARTITION_ENABLED
-UnlockReadRangeOperation::UnlockReadRangeOperation(
-    txservice::TransactionExecution *txm)
-    : unlock_range_result_(txm)
-{
-}
-
-void UnlockReadRangeOperation::Reset()
-{
-    cce_addr_ = nullptr;
-    unlock_range_result_.Reset();
-}
-
-void UnlockReadRangeOperation::ResetHandlerTxm(TransactionExecution *txm)
-{
-    unlock_range_result_.ResetTxm(txm);
-}
-
-void UnlockReadRangeOperation::Forward(txservice::TransactionExecution *txm)
-{
-    if (unlock_range_result_.IsFinished())
-    {
-        txm->PostProcess(*this);
-    }
-    else
-    {
-        // The unlock-range request has not finished. Just wait since it is a
-        // local operation.
-        return;
-    }
-}
-#endif
 
 PostReadOperation::PostReadOperation(TransactionExecution *txm)
     : hd_result_(txm)
@@ -597,15 +564,15 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
     {
         txm->Process(*this);
     }
-    else if (lock_range_result_.IsFinished())
+    else if (lock_range_result_->IsFinished())
     {
         // Make sure current node is still ng leader since we will visit
         // range info meta data in post process which is only valid when current
         // node is still ng leader.
         if (!txm->CheckLeaderTerm())
         {
-            lock_range_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            lock_range_result_.ForceError();
+            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_range_result_->ForceError();
         }
         txm->PostProcess(*this);
     }
@@ -613,7 +580,7 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
 
 void LockWriteRangesOp::Advance(TransactionExecution *txm)
 {
-    AdvanceWriteKeyForRangeInfo(range_rec_,
+    AdvanceWriteKeyForRangeInfo(txm->range_rec_,
                                 table_it_->second,
                                 write_key_it_,
                                 write_key_end_,
@@ -626,9 +593,6 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
         ++table_it_;
         if (table_it_ != table_end_)
         {
-            const TableName &next_tbl_name = table_it_->first;
-            range_table_name_ = TableName(next_tbl_name.StringView(),
-                                          TableType::RangePartition);
             write_key_it_ = table_it_->second.begin();
             write_key_end_ = table_it_->second.end();
         }
@@ -860,6 +824,7 @@ void PostProcessOp::Reset(size_t write_cnt,
 {
     hd_result_.Reset();
     hd_result_.Value().Clear();
+
     if (write_cnt + data_read_cnt == 0)
     {
         hd_result_.SetFinished();
@@ -1155,7 +1120,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         }
 
         scanner.SetStatus(ScannerStatus::Open);
-
         txm->PostProcess(*this);
     }
 #ifdef RANGE_PARTITION_ENABLED
@@ -1224,9 +1188,9 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             scan_state_->inclusive_ =
                 Direction() == ScanDirection::Forward ? false : true;
             scan_state_->slice_position_ = scan_slice_result.slice_position_;
-            scanner.SetStatus(ScannerStatus::Open);
         }
 
+        scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut() && !slice_hd_result_.Value().is_local_)
@@ -2634,7 +2598,6 @@ void SleepOperation::Forward(TransactionExecution *txm)
             });
         // pop the sleep op and re-execute the last failed op.
         txm->state_stack_.pop_back();
-        txm->Forward();
     }
 }
 
@@ -3386,6 +3349,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
                     Sharder::Instance().GetLocalCcShards()->store_hd_;
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+#endif
                 tx_worker_pool->SubmitWork(
                     [partition_id,
                      start_key,
@@ -3429,6 +3395,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
                     Sharder::Instance().GetLocalCcShards()->store_hd_;
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+#endif
                 tx_worker_pool->SubmitWork(
                     [table_name,
                      old_partition_id,
@@ -3503,6 +3472,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             TxWorkerPool *tx_worker_pool =
                 Sharder::Instance().GetTxWorkerPool();
+#ifdef EXT_TX_PROC_ENABLED
+            hd_res.SetToBlock();
+#endif
             tx_worker_pool->SubmitWork(
                 [this,
                  table_name,
@@ -3922,6 +3894,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             TxWorkerPool *tx_worker_pool =
                 Sharder::Instance().GetTxWorkerPool();
+#ifdef EXT_TX_PROC_ENABLED
+            hd_result.SetToBlock();
+#endif
             tx_worker_pool->SubmitWork(
                 [data_sync_vec,
                  &hd_result,
@@ -4107,6 +4082,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
              &hd_res = ds_upsert_range_op_.hd_result_,
              &worker = ds_upsert_range_op_.worker_thread_]
         {
+#ifdef EXT_TX_PROC_ENABLED
+            hd_res.SetToBlock();
+            // The memory fence ensures that the block flag is set before the
+            // background data store thread is executed.
+            std::atomic_thread_fence(std::memory_order_release);
+#endif
             // Launch a new thread instead of sending it to workerpool to
             // avoid being blocked during write lock is held.
             worker = std::thread(
@@ -6628,230 +6609,236 @@ void DataMigrationOp::Clear()
     ranges_in_bucket_snapshot_.clear();
 }
 
-BatchReadOperation::BatchReadOperation(TransactionExecution *txm) : txm_(txm)
+BatchReadOperation::BatchReadOperation(
+    TransactionExecution *txm,
+    CcHandlerResult<ReadKeyResult> *lock_range_result)
+    : lock_range_result_(lock_range_result)
 {
+    CcHandlerResult<ReadKeyResult> &hd_res = hd_result_vec_.emplace_back(txm);
+    hd_res.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        uint32_t cnt = unfinished_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        // This is the last response. Enlists the tx for execution.
+        if (cnt == 1)
+        {
+            res->Txm()->Enlist();
+        }
+#else
+        unfinished_cnt_.fetch_sub(1, std::memory_order_relaxed);
+#endif
+    };
 }
 
 void BatchReadOperation::Reset()
 {
-    size_t cnt = batch_read_tx_req_->batch_read_pri_.size();
-    if (cnt > vct_hd_result_.size())
+    std::vector<ScanBatchTuple> &read_batch = batch_read_tx_req_->read_batch_;
+    size_t cnt = read_batch.size();
+#ifdef RANGE_PARTITION_ENABLED
+    lock_range_result_->Value().Reset();
+    lock_range_result_->Reset();
+    lock_it_ = read_batch.begin();
+#endif
+
+    if (cnt > hd_result_vec_.size())
     {
-        vct_hd_result_.reserve(cnt);
+        hd_result_vec_.reserve(cnt);
     }
     else
     {
-        for (size_t i = vct_hd_result_.size(); i > cnt; i--)
+        while (hd_result_vec_.size() > cnt)
         {
-            vct_hd_result_.pop_back();
+            hd_result_vec_.pop_back();
         }
     }
 
-    atm_cnt_.store(cnt, std::memory_order_relaxed);
-    atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    unfinished_cnt_.store(cnt, std::memory_order_relaxed);
     local_cache_checked_ = false;
 
-    for (size_t i = 0; i < cnt; i++)
+    for (size_t idx = 0; idx < cnt; ++idx)
     {
-        if (i < vct_hd_result_.size())
+        if (idx < hd_result_vec_.size())
         {
-            vct_hd_result_[i].Value().Reset();
-            vct_hd_result_[i].Reset();
+            hd_result_vec_[idx].Value().Reset();
+            hd_result_vec_[idx].Reset();
         }
         else
         {
-            CcHandlerResult<ReadKeyResult> hr(txm_);
-            hr.Value().Reset();
-            hr.Reset();
-            hr.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
-            {
-                CcErrorCode err = res->ErrorCode();
-                if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-                {
-                    atm_err_code_.store(err, std::memory_order_relaxed);
-                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
-                }
-                else if (err == CcErrorCode::NO_ERROR)
-                {
-                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
-                }
-                else
-                {
-                    atm_err_code_.store(err, std::memory_order_relaxed);
-                    atm_cnt_.store(-1, std::memory_order_relaxed);
-                }
-            };
-
-            vct_hd_result_.push_back(std::move(hr));
+            CcHandlerResult<ReadKeyResult> &head_hd_result = hd_result_vec_[0];
+            CcHandlerResult<ReadKeyResult> &new_hd_result =
+                hd_result_vec_.emplace_back(head_hd_result.Txm());
+            new_hd_result.post_lambda_ = head_hd_result.post_lambda_;
         }
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    range_table_name_ = TableName(batch_read_tx_req_->tab_name_->StringView(),
-                                  TableType::RangePartition);
-    range_locked_ = false;
-    vct_key_shard_code_.resize(cnt);
-#endif
     op_start_ = metrics::TimePoint::max();
 }
 
 void BatchReadOperation::Forward(TransactionExecution *txm)
 {
-    if (!is_running_ &&
-        atm_err_code_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
+    if (!is_running_)
     {
-        txm->Process(*this);
-    }
-
-    if (atm_cnt_.load(std::memory_order_relaxed) < 0)
-    {
-        txm->PostProcess(*this);
-    }
-    else if (atm_cnt_.load(std::memory_order_relaxed) == 0)
-    {
-        std::set<uint32_t> ngset;
-        int cnt = 0;
-        for (size_t i = 0; i < vct_hd_result_.size(); i++)
-        {
-            const CcEntryAddr &cce_addr = vct_hd_result_[i].Value().cce_addr_;
-            if (retry_num_ == 0)
-            {
-                if (ngset.find(cce_addr.NodeGroupId()) == ngset.end())
-                {
-                    Sharder::Instance().UpdateLeader(cce_addr.NodeGroupId());
-                    ngset.insert(cce_addr.NodeGroupId());
-                    retry_num_ = -1;
-                }
-            }
-            else if (vct_hd_result_[i].ErrorCode() ==
-                     CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-            {
-                vct_hd_result_[i].Value().Reset();
-                vct_hd_result_[i].Reset();
-                cnt++;
-            }
-        }
-
-        if (cnt > 0)
-        {
-            atm_cnt_.fetch_add(cnt, std::memory_order_relaxed);
-            atm_err_code_.store(CcErrorCode::NO_ERROR,
-                                std::memory_order_relaxed);
-            ReRunOp(txm);
-            retry_num_--;
-            return;
-        }
-
-        txm->PostProcess(*this);
-    }
-    else
-    {
-        bool timeout = txm->IsTimeOut();
-
-        for (size_t i = 0; timeout && i < vct_hd_result_.size(); i++)
-        {
-            const CcEntryAddr &cce_addr = vct_hd_result_[i].Value().cce_addr_;
-            if (!vct_hd_result_[i].Value().is_local_ && cce_addr.Term() < 0)
-            {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    this,
-                    "Forward.Term<0,IsTimeout || TxNodeFail",
-                    txm,
-                    (
-                        [txm]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(txm->TxNumber()))
-                                .append(",\"term\":")
-                                .append(std::to_string(txm->TxTerm()));
-                        }));
-
-                bool force_success = vct_hd_result_[i].ForceError();
-                if (force_success)
-                {
-                    txm->PostProcess(*this);
-                    break;
-                }
-            }
-            else if (cce_addr.Term() > 0)
-            {
-                txm->cc_handler_->BlockCcReqCheck(
-                    txm->TxNumber(),
-                    txm->TxTerm(),
-                    txm->CommandId(),
-                    cce_addr,
-                    &vct_hd_result_[i],
-                    ResultTemplateType::ReadKeyResult);
-            }
-        }
-    }
-}
-
 #ifdef RANGE_PARTITION_ENABLED
-void LockBatchReadRangesOp::Reset(
-    std::vector<txservice::ScanBatchTuple> &batch_key,
-    std::vector<CcHandlerResult<ReadKeyResult>> &vct_hd_result,
-    std::vector<uint32_t> &vct_key_shard_code,
-    TableName &range_table_name)
-{
-    curr_pos_ = 0;
-    batch_key_ = &batch_key;
-    vct_hd_result_ = &vct_hd_result;
-    vct_key_shard_code_ = &vct_key_shard_code;
-    range_table_name_ = &range_table_name;
-    range_hd_result_.Value().Reset();
-    range_hd_result_.Reset();
-}
+        assert(lock_range_result_->IsFinished());
+        std::vector<ScanBatchTuple> &read_batch =
+            batch_read_tx_req_->read_batch_;
 
-void LockBatchReadRangesOp::Forward(TransactionExecution *txm)
-{
-    if (!range_hd_result_.IsFinished())
-    {
-        return;
-    }
+        if (lock_range_result_->IsError())
+        {
+            txm->PostProcess(*this);
+        }
+        else if (!txm->CheckLeaderTerm())
+        {
+            // If the current node is not the leader of the node group, the
+            // range and bucket info returned by the lock-range request should
+            // not be accessed. Hence, the lock range result is reset to be
+            // errored.
+            lock_range_result_->Reset();
+            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            txm->PostProcess(*this);
+        }
+        else if (lock_it_ != read_batch.end())
+        {
+            // A range has been locked. Assigns the range's node group to all
+            // keys belonging to this range.
+            const RangeRecord *range_rec =
+                static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
+            const TxKey *range_end_key = range_rec->end_key_;
+            NodeGroupId range_ng = range_rec->GetRangeOwnerNg()->BucketOwner();
 
-    if (range_hd_result_.IsError())
-    {
-        txm->PostProcess(*this);
-        return;
-    }
+            auto cmp = [](const ScanBatchTuple &tuple, const TxKey *end_key)
+            {
+                if (end_key == nullptr ||
+                    end_key->Type() == KeyType::PositiveInf)
+                {
+                    return true;
+                }
+                else
+                {
+                    return *tuple.key_ < *end_key;
+                }
+            };
 
-    FetchResult(txm);
+            for (;
+                 lock_it_ != read_batch.end() && cmp(*lock_it_, range_end_key);
+                 ++lock_it_)
+            {
+                if (lock_it_->status_ != RecordStatus::Unknown)
+                {
+                    continue;
+                }
+                lock_it_->cce_addr_.SetNodeGroupId(range_ng);
+            }
 
-    if (curr_pos_ < (int32_t) batch_key_->size())
-    {
+            txm->Process(*this);
+        }
+        else
+        {
+            // Range locks have been acquired. But one or more reads failed.
+            // Retry reads.
+            txm->Process(*this);
+        }
+#else
         txm->Process(*this);
-    }
-    else
-    {
-        txm->PostProcess(*this);
-    }
-}
-
-void LockBatchReadRangesOp::FetchResult(TransactionExecution *txm)
-{
-    const ReadKeyResult &read_res = range_hd_result_.Value();
-    if (!read_res.cce_addr_.Empty())
-    {
-        txm->rw_set_.AddRead(
-            read_res.cce_addr_, read_res.ts_, range_table_name_);
-    }
-
-    uint32_t key_shard_code = range_rec_.GetRangeOwnerNg()->BucketOwner();
-    (*vct_key_shard_code_)[curr_pos_] = key_shard_code;
-
-    curr_pos_++;
-    while (curr_pos_ < (int32_t) batch_key_->size())
-    {
-        if (range_rec_.end_key_ != nullptr &&
-            range_rec_.end_key_->Type() != KeyType::PositiveInf &&
-            *range_rec_.end_key_ <= *batch_key_->at(curr_pos_).key_)
-            break;
-
-        (*vct_key_shard_code_)[curr_pos_] = key_shard_code;
-        curr_pos_++;
-    }
-}
-
 #endif
+        return;
+    }
+
+    if (IsFinished())
+    {
+        uint32_t err_cnt = 0;
+        if (retry_num_ == 0)
+        {
+            std::unordered_set<uint32_t> update_leader_set;
+            for (const CcHandlerResult<ReadKeyResult> &hd_result :
+                 hd_result_vec_)
+            {
+                if (hd_result.IsError())
+                {
+                    ++err_cnt;
+                    if (hd_result.ErrorCode() ==
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                    {
+                        const CcEntryAddr &cce_addr =
+                            hd_result.Value().cce_addr_;
+                        auto insert_it =
+                            update_leader_set.emplace(cce_addr.NodeGroupId());
+                        if (insert_it.second)
+                        {
+                            Sharder::Instance().UpdateLeader(
+                                cce_addr.NodeGroupId());
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (auto &hd_result : hd_result_vec_)
+            {
+                if (hd_result.IsError())
+                {
+                    ++err_cnt;
+                    // Failed read requests will be retried. Resets their
+                    // handler results.
+                    hd_result.Value().Reset();
+                    hd_result.Reset();
+                }
+            }
+        }
+
+        if (err_cnt > 0)
+        {
+            unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
+            ReRunOp(txm);
+        }
+        else
+        {
+            txm->PostProcess(*this);
+        }
+    }
+    else if (txm->IsTimeOut())
+    {
+        for (CcHandlerResult<ReadKeyResult> &hd_result : hd_result_vec_)
+        {
+            if (hd_result.IsFinished())
+            {
+                continue;
+            }
+
+            if (!hd_result.Value().is_local_)
+            {
+                const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+                if (cce_addr.Term() < 0)
+                {
+                    hd_result.ForceError();
+                    assert(hd_result.IsFinished());
+                }
+                else
+                {
+                    txm->cc_handler_->BlockCcReqCheck(
+                        txm->TxNumber(),
+                        txm->TxTerm(),
+                        txm->CommandId(),
+                        cce_addr,
+                        &hd_result,
+                        ResultTemplateType::ReadKeyResult);
+                }
+            }
+        }
+
+        if (IsFinished())
+        {
+            // All read requests have finished, after forcing unresponsive
+            // remote requests to finish with errors. Advances the command so
+            // that the tx is forwarded again on the batch read operation, which
+            // determines whether to retry or to finish the operation.
+            txm->AdvanceCommand();
+        }
+        else
+        {
+            txm->StartTiming();
+        }
+    }
+}
 }  // namespace txservice

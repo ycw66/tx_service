@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace txservice
@@ -58,7 +59,7 @@ enum struct TxErrorCode
     DUPLICATE_MIGRATION_TX_ERROR
 };
 
-static const std::map<TxErrorCode, std::string> tx_error_messages{
+static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::UNDEFINED_ERR,
      "Transaction failed due to an internal undefined error."},
     {TxErrorCode::INTERNAL_ERR_TIMEOUT,
@@ -178,7 +179,7 @@ enum struct CcErrorCode
 
 };
 
-static const std::map<CcErrorCode, std::string> cc_error_messages{
+static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::NO_ERROR, "NO_ERROR"},
     {CcErrorCode::UNDEFINED_ERR, "UNDEFINED_CC_ERR"},
 

@@ -1391,14 +1391,12 @@ const TxKey *CcEntry<KeyT, ValueT>::Key() const
 struct CcEntryAddr
 {
 public:
-    CcEntryAddr()
-        : cce_ptr_(0), insert_ptr_(0), node_group_id_(0), core_id_(0), term_(-1)
+    CcEntryAddr() : cce_ptr_(0), node_group_id_(0), core_id_(0), term_(-1)
     {
     }
 
     CcEntryAddr(const CcEntryAddr &rhs)
         : cce_ptr_(rhs.cce_ptr_),
-          insert_ptr_(rhs.insert_ptr_),
           node_group_id_(rhs.node_group_id_),
           core_id_(rhs.core_id_),
           term_(rhs.term_.load(std::memory_order_acquire))
@@ -1408,10 +1406,7 @@ public:
     bool operator==(const CcEntryAddr &rhs) const
     {
         return node_group_id_ == rhs.node_group_id_ && term_ == rhs.term_ &&
-               ((cce_ptr_ != 0 && rhs.cce_ptr_ != 0 &&
-                 cce_ptr_ == rhs.cce_ptr_) ||
-                (insert_ptr_ != 0 && rhs.insert_ptr_ != 0 &&
-                 insert_ptr_ == rhs.insert_ptr_));
+               cce_ptr_ != 0 && rhs.cce_ptr_ != 0 && cce_ptr_ == rhs.cce_ptr_;
     }
 
     CcEntryAddr &operator=(const CcEntryAddr &rhs)
@@ -1422,7 +1417,6 @@ public:
         }
 
         cce_ptr_ = rhs.cce_ptr_;
-        insert_ptr_ = rhs.insert_ptr_;
         node_group_id_ = rhs.node_group_id_;
         term_.store(rhs.term_.load(std::memory_order_acquire),
                     std::memory_order_release);
@@ -1433,7 +1427,7 @@ public:
 
     bool Empty() const
     {
-        return cce_ptr_ == 0 && insert_ptr_ == 0;
+        return cce_ptr_ == 0 || cce_ptr_ == 1;
     }
 
     uint64_t CcePtr() const
@@ -1443,7 +1437,14 @@ public:
 
     uint64_t InsertPtr() const
     {
-        return insert_ptr_;
+        if (cce_ptr_ & 1)
+        {
+            return cce_ptr_ & (UINT64_MAX - 1);
+        }
+        else
+        {
+            return 0;
+        }
     }
 
     uint32_t NodeGroupId() const
@@ -1464,7 +1465,6 @@ public:
     void SetCce(uint64_t addr, int64_t term, uint32_t core_id)
     {
         cce_ptr_ = addr;
-        insert_ptr_ = 0;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
     }
@@ -1472,7 +1472,6 @@ public:
     void SetCce(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
     {
         cce_ptr_ = addr;
-        insert_ptr_ = 0;
         node_group_id_ = ng;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
@@ -1480,16 +1479,16 @@ public:
 
     void SetInsert(uint64_t addr, int64_t term, uint32_t core_id)
     {
-        insert_ptr_ = addr;
-        cce_ptr_ = 0;
+        assert((addr & 1) == 0);
+        cce_ptr_ = addr | 1;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
     }
 
     void SetInsert(uint64_t addr, int64_t term, uint32_t ng, uint32_t core_id)
     {
-        insert_ptr_ = addr;
-        cce_ptr_ = 0;
+        assert((addr & 1) == 0);
+        cce_ptr_ = addr | 1;
         node_group_id_ = ng;
         term_.store(term, std::memory_order_release);
         core_id_ = core_id;
@@ -1506,8 +1505,13 @@ public:
     }
 
 private:
+    /**
+     * @brief The cc entry memory address. Given that memory addresses are even
+     * numbers, we use the lowest bit to denote if this address points to an
+     * insert entry.
+     *
+     */
     uint64_t cce_ptr_;
-    uint64_t insert_ptr_;
     uint32_t node_group_id_;
     uint32_t core_id_;
     // The term of the cc node group to which the cc entry belongs. The variable

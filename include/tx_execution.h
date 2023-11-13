@@ -18,7 +18,9 @@
 #include "metrics.h"
 #include "read_write_set.h"
 #include "readerwriterqueue.h"
+#include "spinlock.h"
 #include "tx_index_operation.h"
+#include "tx_operation.h"
 #include "tx_req_result.h"
 #include "txlog.h"
 
@@ -71,7 +73,7 @@ public:
     TransactionExecution(CcHandler *handler,
                          TxLog *tx_log,
                          TxProcessor *tx_processor,
-                         CcProtocol proto = CcProtocol::OCC);
+                         bool bind_to_ext_proc = false);
 
     TransactionExecution(const TransactionExecution &) = delete;
 
@@ -82,23 +84,18 @@ public:
      * @brief Resets the internal states of the tx state machine. Called when
      * the tx finishes.
      *
-     * @param proto The concurrency control protocol.
      */
-    void Reset(CcProtocol proto = CcProtocol::OCC);
+    void Reset();
 
     /**
      * @brief Restarts the tx state machine when it is reused for a new
      * user-level tx, allowing it to receive tx requests.
      *
      */
-    void Restart(CcHandler *handler, TxLog *tx_log, TxProcessor *tx_processor);
-
-    void Recycle()
-    {
-        assert(tx_status_.load(std::memory_order_relaxed) ==
-               TxnStatus::Finished);
-        tx_status_.store(TxnStatus::Recycled, std::memory_order_relaxed);
-    }
+    void Restart(CcHandler *handler,
+                 TxLog *tx_log,
+                 TxProcessor *tx_processor,
+                 bool bind_to_ext_proc = false);
 
     /**
      * @brief Check whether transction is idle and waiting for new TxRequest
@@ -146,7 +143,10 @@ public:
      */
     int Execute(TxRequest *tx_req);
 
-    void InitTx(IsolationLevel iso_level, CcProtocol protocol);
+    void InitTx(IsolationLevel iso_level,
+                CcProtocol protocol,
+                NodeGroupId tx_ng_id = UINT32_MAX,
+                bool start_now = false);
     std::unique_ptr<InitTxRequest> init_tx_req_;
     bool CommitTx(CommitTxRequest &commit_req);
     std::unique_ptr<CommitTxRequest> commit_tx_req_;
@@ -166,12 +166,6 @@ public:
 
     void TxRevert(const TableName &table_name, const TxKey &key);
 
-#ifdef EXT_TX_PROC_ENABLED
-    void ExternalForward();
-    std::atomic<uint16_t> *ExternalProcessorCnt();
-    std::function<void()> *ExternalProcessorFunctor();
-#endif
-
     /**
      * General Interface
      */
@@ -188,10 +182,6 @@ public:
     TxnStatus TxStatus() const;
 
     void SetRecoverTxState(uint64_t txn, int64_t tx_term, uint64_t commit_ts);
-
-    std::string GetErrorMessage() const;
-
-    void SetErrorMessage(const std::string &err_msg);
 
     CcProtocol GetCcProtocol() const
     {
@@ -240,6 +230,11 @@ public:
         return false;
     }
 
+#ifdef EXT_TX_PROC_ENABLED
+    void Enlist();
+    void ExternalForward();
+#endif
+
 private:
     /**
      * @brief Moves forward the tx state machine and transitions the machine to
@@ -286,12 +281,6 @@ private:
     void PostProcess(ReadOperation &read);
     void Process(ReadLocalOperation &lock_local);
     void PostProcess(ReadLocalOperation &lock_local);
-#ifdef RANGE_PARTITION_ENABLED
-    void Process(UnlockReadRangeOperation &unlock_range);
-    void PostProcess(UnlockReadRangeOperation &unlock_range);
-    void Process(LockBatchReadRangesOp &lock_batch_range);
-    void PostProcess(LockBatchReadRangesOp &lock_batch_range);
-#endif
     void Process(ScanOpenOperation &scan_open);
     void PostProcess(ScanOpenOperation &scan_open);
     void Process(ScanNextOperation &scan_next);
@@ -386,10 +375,6 @@ private:
     void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
     void DrainScanner(CcScanner *scanner, const TableName &table_name);
 
-#ifdef RANGE_PARTITION_ENABLED
-    void ReleaseReadRangeLock(ReadOperation &read);
-#endif
-
     static TxErrorCode ConvertCcError(CcErrorCode error);
 
     ScanCloseTxRequest *NextScanCloseTxReq(size_t alias,
@@ -397,6 +382,57 @@ private:
 
     void Process(BatchReadOperation &batch_read_op);
     void PostProcess(BatchReadOperation &batch_read_op);
+
+    TxRequest *DequeueTxRequest()
+    {
+        TxRequest *req = nullptr;
+        if (bind_to_ext_proc_)
+        {
+            if (tx_req_queue_.Size() > 0)
+            {
+                req = tx_req_queue_.Peek();
+                tx_req_queue_.Dequeue();
+            }
+        }
+        else
+        {
+            req_queue_lock_.Lock();
+            if (tx_req_queue_.Size() > 0)
+            {
+                req = tx_req_queue_.Peek();
+                tx_req_queue_.Dequeue();
+            }
+            req_queue_lock_.Unlock();
+        }
+
+        return req;
+    }
+
+    size_t TxRequestCount()
+    {
+        if (bind_to_ext_proc_)
+        {
+            return tx_req_queue_.Size();
+        }
+        else
+        {
+            req_queue_lock_.Lock();
+            size_t cnt = tx_req_queue_.Size();
+            req_queue_lock_.Unlock();
+            return cnt;
+        }
+    }
+
+    LockType DeduceReadLockType(TableType tbl_type,
+                                bool read_for_write,
+                                IsolationLevel iso_level,
+                                bool is_covering_key,
+                                RecordStatus rec = RecordStatus::Normal);
+
+    void AdvanceCommand()
+    {
+        command_id_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     enum struct TxType
     {
@@ -496,16 +532,15 @@ private:
     // Response for UpsertTableTxRequest or UpsertTableIndexOp
     TxResult<UpsertResult> *upsert_resp_;
 
-    // detailed error message which indicates why does the transaction failed.
-    // For example, during write log phase or validation phase.
-    std::string detailed_error_msg_;
-
     // tx_req_queue_ is used to exchange request between runtime and
     // TxProcessor.
-    moodycamel::ReaderWriterQueue<TxRequest *> tx_req_queue_{8};
+    CircularQueue<TxRequest *> tx_req_queue_;
+    SimpleSpinlock req_queue_lock_;
 
     IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
     CcProtocol protocol_{CcProtocol::OCC};
+
+    bool bind_to_ext_proc_{false};
 
     // Initialization phase.
     InitTxnOperation init_txn_;
@@ -513,8 +548,8 @@ private:
     // Execution phase.
 #ifdef RANGE_PARTITION_ENABLED
     ReadLocalOperation lock_range_op_;
-    UnlockReadRangeOperation unlock_range_op_;
-    LockBatchReadRangesOp lock_batch_read_ranges_;
+    RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> lock_range_result_;
 #endif
     ReadOperation read_;
     ScanOpenOperation scan_open_;
@@ -560,7 +595,7 @@ private:
     friend struct ReadLocalOperation;
 #ifdef RANGE_PARTITION_ENABLED
     friend struct UnlockReadRangeOperation;
-    friend struct LockBatchReadRangesOp;
+    friend struct LockReadRangesOp;
 #endif
     friend struct ReadOutsideOperation;
     friend struct LockWriteRangesOp;

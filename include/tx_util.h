@@ -8,18 +8,33 @@
 
 namespace txservice
 {
-static inline void AbortTx(txservice::TransactionExecution *tx,
-                           const std::function<void()> *yield_fptr,
-                           const std::function<void()> *resume_fptr)
+static inline void AbortTx(txservice::TransactionExecution *txm,
+                           const std::function<void()> *yield_func = nullptr,
+                           const std::function<void()> *resume_func = nullptr)
 {
-    if (tx == nullptr)
-        return;
-    txservice::AbortTxRequest abort_req(yield_fptr, resume_fptr);
-    int err = tx->Execute(&abort_req);
-    if (err == 0)
+    if (txm == nullptr)
     {
-        abort_req.Wait();
+        return;
     }
+
+    // Abort tx request.
+    CommitTxRequest req(false, yield_func, resume_func, txm);
+    txm->CommitTx(req);
+}
+
+static inline std::pair<bool, TxErrorCode> CommitTx(
+    txservice::TransactionExecution *txm,
+    const std::function<void()> *yield_func = nullptr,
+    const std::function<void()> *resume_func = nullptr)
+{
+    if (txm == nullptr)
+    {
+        return {true, TxErrorCode::NO_ERROR};
+    }
+
+    CommitTxRequest commit_req(true, yield_func, resume_func, txm);
+    bool success = txm->CommitTx(commit_req);
+    return {success, commit_req.ErrorCode()};
 }
 
 static inline TransactionExecution *NewTxInit(
@@ -27,44 +42,18 @@ static inline TransactionExecution *NewTxInit(
     txservice::IsolationLevel level = txservice::IsolationLevel::ReadCommitted,
     txservice::CcProtocol proto = txservice::CcProtocol::Locking,
     NodeGroupId tx_owner = UINT32_MAX,
-    const std::function<void()> *yield_fptr = nullptr,
-    const std::function<void()> *resume_fptr = nullptr,
-    int retry_count = 8)
+    int16_t group_id = -1,
+    bool start_now = false)
 {
     assert(tx_service != nullptr);
     txservice::TransactionExecution *txm = nullptr;
-    while (retry_count > 0)
-    {
-        txm = tx_service->NewTx();
-        bool init_tx_success = false;
-        txservice::InitTxRequest init_tx_req(
-            level, proto, yield_fptr, resume_fptr, nullptr, tx_owner);
+#ifdef EXT_TX_PROC_ENABLED
+    txm = group_id >= 0 ? tx_service->NewTx(group_id) : tx_service->NewTx();
+#else
+    txm = tx_service->NewTx();
+#endif
+    txm->InitTx(level, proto, tx_owner, start_now);
 
-        txm->Execute(&init_tx_req);
-        init_tx_req.Wait();
-        if (init_tx_req.IsError())
-        {
-            init_tx_success = false;
-        }
-        else
-        {
-            init_tx_success = true;
-        }
-
-        if (!init_tx_success)
-        {
-            txm = nullptr;
-            retry_count--;
-            if (retry_count > 0)
-            {
-                std::this_thread::sleep_for(std::chrono::seconds(4));
-            }
-        }
-        else
-        {
-            break;
-        }
-    }
     return txm;
 }
 

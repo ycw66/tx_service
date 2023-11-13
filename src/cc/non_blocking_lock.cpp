@@ -19,27 +19,20 @@ namespace txservice
  */
 void NonBlockingLock::UpgradeLock(TxNumber tx_number, LockType lock_type)
 {
-    // write lock needs to upgrade write intent as well.
+    assert(write_lk_type_ == WriteLockType::NoWritelock ||
+           write_txn_ == tx_number);
     if (lock_type == LockType::WriteLock)
     {
-        is_write_lock_empty_ = false;
-        write_lock_tx_ = tx_number;
-        if (!is_write_intent_empty_ && write_intent_tx_ == tx_number)
-        {
-            // there is at most one write intent, if the owner is current tx,
-            // release the write intent.
-            is_write_intent_empty_ = true;
-            write_intent_tx_ = 0;
-        }
+        write_txn_ = tx_number;
+        write_lk_type_ = WriteLockType::WriteLock;
     }
     else if (lock_type == LockType::WriteIntent)
     {
-        is_write_intent_empty_ = false;
-        write_intent_tx_ = tx_number;
+        write_txn_ = tx_number;
+        write_lk_type_ = WriteLockType::WriteIntent;
     }
 
-    // both write lock and write intent needs to upgrade read lock and read
-    // intention.
+    // The upgrade removes the read lock or intent, if there is any.
     if (read_intentions_.size() > 0)
     {
         read_intentions_.erase(tx_number);
@@ -75,9 +68,7 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
         TxNumber queued_txn = queue_head.req_->Txn();
         if (queue_head.lk_type_ == LockType::WriteLock)
         {
-            if (NoWriteLockConflict(queued_txn) &&
-                NoWriteIntentConflict(queued_txn) &&
-                NoReadLockConflict(queued_txn))
+            if (NoWriteConflict(queued_txn) && NoReadLockConflict(queued_txn))
             {
                 UpgradeLock(queued_txn, LockType::WriteLock);
 
@@ -92,8 +83,7 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
         }
         else if (queue_head.lk_type_ == LockType::WriteIntent)
         {
-            if (NoWriteLockConflict(queued_txn) &&
-                NoWriteIntentConflict(queued_txn))
+            if (NoWriteConflict(queued_txn))
             {
                 UpgradeLock(queued_txn, LockType::WriteIntent);
 
@@ -193,28 +183,6 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     return lock_status;
 }
 
-void NonBlockingLock::ReleaseLock(TxNumber tx_number,
-                                  CcShard *ccs,
-                                  LockType lock_type)
-{
-    if (lock_type == LockType::ReadLock)
-    {
-        ReleaseReadLock(tx_number, ccs);
-    }
-    else if (lock_type == LockType::WriteIntent)
-    {
-        ReleaseWriteIntent(tx_number, ccs);
-    }
-    else if (lock_type == LockType::WriteLock)
-    {
-        ReleaseWriteLock(tx_number, ccs);
-    }
-    else if (lock_type == LockType::ReadIntent)
-    {
-        ReleaseReadIntent(tx_number);
-    }
-}
-
 /**
  * @brief Acquire the write lock on this object (i.e. ccentry). The algorithm
  * is as follows:
@@ -234,14 +202,13 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
 {
     TxNumber tx_number = cc_req->Txn();
     // fast path for lock is already held.
-    if (!is_write_lock_empty_ && write_lock_tx_ == tx_number)
+    if (write_lk_type_ == WriteLockType::WriteLock && write_txn_ == tx_number)
     {
         return true;
     }
 
     // lock succeeds if there is no conflict.
-    if (NoWriteLockConflict(tx_number) && NoWriteIntentConflict(tx_number) &&
-        NoReadLockConflict(tx_number))
+    if (NoWriteConflict(tx_number) && NoReadLockConflict(tx_number))
     {
         UpgradeLock(tx_number, LockType::WriteLock);
 
@@ -279,8 +246,8 @@ bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req)
     TxNumber tx_number = cc_req->Txn();
     // fast path for lock is already held.
     if (read_locks_.find(tx_number) != read_locks_.end() ||
-        (!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
-        (!is_write_lock_empty_ && write_lock_tx_ == tx_number))
+        (write_lk_type_ != WriteLockType::NoWritelock &&
+         write_txn_ == tx_number))
     {
         return true;
     }
@@ -312,19 +279,24 @@ bool NonBlockingLock::AcquireReadLock(CcRequestBase *cc_req)
  * @param tx_number
  * @param ccs
  */
-void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
+bool NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
 {
-    size_t removed_cnt = read_locks_.erase(tx_number);
+    if (read_locks_.empty())
+    {
+        return false;
+    }
 
+    size_t removed_cnt = read_locks_.erase(tx_number);
     if (removed_cnt == 0)
     {
-        return;
+        return false;
     }
 
     // If releasing the current read lock may unblock anything, it may be the
     // write lock who is the head of the blocking queue, or a no lock pk read
     // directed from a sk scan.
     TryPopBlockingQueue(ccs);
+    return true;
 }
 
 /**
@@ -333,23 +305,23 @@ void NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
  * @param tx_number
  * @param ccs
  */
-void NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
+bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
 {
-    if (is_write_lock_empty_ || write_lock_tx_ != tx_number)
+    if (write_lk_type_ != WriteLockType::WriteLock || write_txn_ != tx_number)
     {
-        return;
+        return false;
     }
 
-    // release the write lock.
-    write_lock_tx_ = 0;
-    is_write_lock_empty_ = true;
+    write_lk_type_ = WriteLockType::NoWritelock;
+    write_txn_ = 0;
 
     if (ccs == nullptr)
     {
-        return;  // warning: just for unit-tests.
+        return true;  // warning: just for unit-tests.
     }
 
     TryPopBlockingQueue(ccs);
+    return true;
 }
 
 /**
@@ -373,17 +345,16 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
 {
     TxNumber tx_number = cc_req->Txn();
     // fast path for lock is already held.
-    if ((!is_write_intent_empty_ && write_intent_tx_ == tx_number) ||
-        (!is_write_lock_empty_ && write_lock_tx_ == tx_number))
+    if (write_lk_type_ != WriteLockType::NoWritelock && write_txn_ == tx_number)
     {
         return true;
     }
+
     // lock succeeds if:
     // 1. no conflict write intent or write locks
     // 2. blocking queue is empty which is used to avoid the starvation of
     // queued write lock.
-    else if (NoWriteIntentConflict(tx_number) &&
-             NoWriteLockConflict(tx_number) && blocking_queue_.Size() == 0)
+    else if (NoWriteConflict(tx_number) && blocking_queue_.Size() == 0)
     {
         UpgradeLock(tx_number, LockType::WriteIntent);
 
@@ -405,18 +376,13 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
 
 void NonBlockingLock::DowngradeWriteLock(TxNumber tx_number, CcShard *ccs)
 {
-    if (is_write_lock_empty_ || write_lock_tx_ != tx_number)
+    if (write_lk_type_ != WriteLockType::WriteLock || write_txn_ != tx_number)
     {
         return;
     }
 
-    // release the write lock.
-    write_lock_tx_ = 0;
-    is_write_lock_empty_ = true;
-
-    // add the write intent
-    write_intent_tx_ = tx_number;
-    is_write_intent_empty_ = false;
+    write_lk_type_ = WriteLockType::WriteIntent;
+    assert(write_txn_ == tx_number);
 
     TryPopBlockingQueue(ccs);
 }
@@ -427,32 +393,42 @@ void NonBlockingLock::DowngradeWriteLock(TxNumber tx_number, CcShard *ccs)
  * @param tx_number
  * @param ccs
  */
-void NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
+bool NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
 {
-    if (is_write_intent_empty_ || write_intent_tx_ != tx_number)
+    if (write_lk_type_ != WriteLockType::WriteIntent || write_txn_ != tx_number)
     {
-        return;
+        return false;
     }
 
-    // release the write intent.
-    write_intent_tx_ = 0;
-    is_write_intent_empty_ = true;
+    write_lk_type_ = WriteLockType::NoWritelock;
+    write_txn_ = 0;
 
     TryPopBlockingQueue(ccs);
+    return true;
 }
 
 bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 {
+    if (read_locks_.find(tx_number) != read_locks_.end() ||
+        (write_lk_type_ != WriteLockType::NoWritelock &&
+         write_txn_ == tx_number))
+    {
+        return true;
+    }
+
     read_intentions_.emplace(tx_number);
     return true;
 }
 
-void NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
+bool NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
 {
-    if (read_intentions_.size() > 0)
+    if (read_intentions_.empty())
     {
-        read_intentions_.erase(tx_number);
+        return false;
     }
+
+    size_t cnt = read_intentions_.erase(tx_number);
+    return cnt > 0;
 }
 
 void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
@@ -464,44 +440,45 @@ void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
 bool NonBlockingLock::IsEmpty() const
 {
     return read_intentions_.empty() && read_locks_.empty() &&
-           is_write_intent_empty_ && is_write_lock_empty_ &&
+           write_lk_type_ == WriteLockType::NoWritelock &&
            blocking_queue_.Size() == 0;
 }
 
 TxNumber NonBlockingLock::WriteLockTx() const
 {
-    return write_lock_tx_;
+    return write_txn_;
 }
 
 bool NonBlockingLock::HasWriteLock() const
 {
-    return !is_write_lock_empty_;
+    return write_lk_type_ == WriteLockType::WriteLock;
 }
 
-TxNumber NonBlockingLock::WriteIntentTx() const
+LockType NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
 {
-    return write_intent_tx_;
-}
-
-bool NonBlockingLock::HasWriteIntent() const
-{
-    return !is_write_intent_empty_;
-}
-
-void NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
-{
-    if (!is_write_lock_empty_ && write_lock_tx_ == tx_number)
+    if (ReleaseReadLock(tx_number, ccs))
     {
-        ReleaseWriteLock(tx_number, ccs);
+        return LockType::ReadLock;
     }
-    else if (!is_write_intent_empty_ && write_intent_tx_ == tx_number)
+    else if (ReleaseReadIntent(tx_number))
     {
-        ReleaseWriteIntent(tx_number, ccs);
+        return LockType::ReadIntent;
+    }
+    else if (write_lk_type_ != WriteLockType::NoWritelock &&
+             write_txn_ == tx_number)
+    {
+        write_lk_type_ = WriteLockType::NoWritelock;
+        write_txn_ = 0;
+
+        TryPopBlockingQueue(ccs);
+
+        return write_lk_type_ == WriteLockType::WriteLock
+                   ? LockType::WriteLock
+                   : LockType::WriteIntent;
     }
     else
     {
-        ReleaseReadIntent(tx_number);
-        ReleaseReadLock(tx_number, ccs);
+        return LockType::NoLock;
     }
 }
 

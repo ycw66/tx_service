@@ -34,7 +34,7 @@ struct AnalyzeTableTxRequest;
 struct BatchReadTxRequest;
 struct DataMigrationStatus;
 
-#define RETRY_NUM 5
+#define RETRY_NUM 3
 
 enum class TxLogType
 {
@@ -101,6 +101,17 @@ struct ReadLocalOperation : TransactionOperation
 {
 public:
     void Reset();
+    void Reset(TableName tbl_name,
+               const TxKey *key,
+               TxRecord *rec,
+               CcHandlerResult<ReadKeyResult> *hd_res)
+    {
+        table_name_ = std::move(tbl_name);
+        key_ = key;
+        rec_ = rec;
+        hd_result_ = hd_res;
+    }
+
     void Forward(TransactionExecution *txm) override;
 
     // in-parameters
@@ -112,26 +123,12 @@ public:
     CcHandlerResult<ReadKeyResult> *hd_result_{};
 };
 
-#ifdef RANGE_PARTITION_ENABLED
-struct UnlockReadRangeOperation : TransactionOperation
-{
-public:
-    explicit UnlockReadRangeOperation(TransactionExecution *txm);
-    void Reset();
-    void ResetHandlerTxm(TransactionExecution *txm);
-    void Forward(TransactionExecution *txm) override;
-
-    // in-parameters
-    const CcEntryAddr *cce_addr_{};
-
-    CcHandlerResult<PostProcessResult> unlock_range_result_;
-};
-#endif
-
 struct ReadOperation : TransactionOperation
 {
 public:
-    explicit ReadOperation(TransactionExecution *txm);
+    explicit ReadOperation(
+        TransactionExecution *txm,
+        CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
 
     void Reset();
     void Forward(TransactionExecution *txm) override;
@@ -145,9 +142,7 @@ public:
     bool local_cache_miss_{false};
 
 #ifdef RANGE_PARTITION_ENABLED
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
-    RangeRecord range_rec_;
-    CcHandlerResult<ReadKeyResult> lock_range_result_;
+    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
 #endif
 };
 
@@ -219,7 +214,8 @@ public:
 struct LockWriteRangesOp : public TransactionOperation
 {
 public:
-    LockWriteRangesOp(TransactionExecution *txm) : lock_range_result_(txm)
+    LockWriteRangesOp(CcHandlerResult<ReadKeyResult> *lock_range_result)
+        : lock_range_result_(lock_range_result)
     {
     }
 
@@ -229,7 +225,6 @@ public:
     {
         init_ = false;
         is_running_ = false;
-        lock_range_result_.Reset();
     }
 
     /**
@@ -240,8 +235,8 @@ public:
     void Advance(TransactionExecution *txm);
 
     TableName range_table_name_{empty_sv, TableType::RangePartition};
-    RangeRecord range_rec_;
-    CcHandlerResult<ReadKeyResult> lock_range_result_;
+    // RangeRecord range_rec_;
+    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
 
     std::unordered_map<TableName, TableWriteSet>::iterator table_it_;
     std::unordered_map<TableName, TableWriteSet>::iterator table_end_;
@@ -1319,51 +1314,26 @@ private:
 struct BatchReadOperation : TransactionOperation
 {
 public:
-    explicit BatchReadOperation(TransactionExecution *txm);
+    explicit BatchReadOperation(
+        TransactionExecution *txm,
+        CcHandlerResult<ReadKeyResult> *lock_range_result = nullptr);
 
     void Reset();
     void Forward(TransactionExecution *txm) override;
 
-    CcProtocol protocol_{CcProtocol::OCC};
-    IsolationLevel iso_level_{IsolationLevel::ReadCommitted};
-    BatchReadTxRequest *batch_read_tx_req_{nullptr};
-    std::vector<CcHandlerResult<ReadKeyResult>> vct_hd_result_;
-    bool local_cache_checked_;        // If checked local cache for this op
-    std::atomic_int32_t atm_cnt_{0};  // The count of unfinished records to read
-    std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
-    TransactionExecution *txm_;
-
-#ifdef RANGE_PARTITION_ENABLED
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
-    std::vector<uint32_t> vct_key_shard_code_;
-    bool range_locked_;
-#endif
-};
-
-#ifdef RANGE_PARTITION_ENABLED
-struct LockBatchReadRangesOp : public TransactionOperation
-{
-public:
-    explicit LockBatchReadRangesOp(TransactionExecution *txm)
-        : range_hd_result_(txm)
+    bool IsFinished() const
     {
+        return unfinished_cnt_.load(std::memory_order_relaxed) == 0;
     }
 
-    void Forward(TransactionExecution *txm) override;
+    BatchReadTxRequest *batch_read_tx_req_{nullptr};
+    std::vector<CcHandlerResult<ReadKeyResult>> hd_result_vec_;
+    bool local_cache_checked_;  // If checked local cache for this op
+    std::atomic<uint32_t> unfinished_cnt_{0};
 
-    void Reset(std::vector<txservice::ScanBatchTuple> &batch_key,
-               std::vector<CcHandlerResult<ReadKeyResult>> &vct_hd_result,
-               std::vector<uint32_t> &vct_key_shard_code,
-               TableName &range_table_name);
-    void FetchResult(TransactionExecution *txm);
-
-    std::vector<txservice::ScanBatchTuple> *batch_key_{nullptr};
-    int32_t curr_pos_;
-    TableName *range_table_name_{nullptr};
-    RangeRecord range_rec_;
-    std::vector<CcHandlerResult<ReadKeyResult>> *vct_hd_result_{nullptr};
-    CcHandlerResult<ReadKeyResult> range_hd_result_;
-    std::vector<uint32_t> *vct_key_shard_code_{nullptr};
-};
+#ifdef RANGE_PARTITION_ENABLED
+    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
+    std::vector<ScanBatchTuple>::iterator lock_it_;
 #endif
+};
 }  // namespace txservice

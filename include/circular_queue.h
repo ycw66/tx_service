@@ -58,7 +58,7 @@ public:
         }
         else if (cnt_ == capacity_)
         {
-            size_t new_capacity = static_cast<size_t>(capacity_ * 1.5);
+            size_t new_capacity = capacity_ << 1;
             std::unique_ptr<T[]> new_vec = std::make_unique<T[]>(new_capacity);
 
             // Before: 0-------Tail-Head---------N-1

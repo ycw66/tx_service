@@ -342,6 +342,21 @@ public:
             cc_op, iso_level_, protocol_, is_covering_keys_);
     }
 
+    bool IsCoveringKey() const
+    {
+        return is_covering_keys_;
+    }
+
+    IsolationLevel Isolation() const
+    {
+        return iso_level_;
+    }
+
+    bool IsReadForWrite() const
+    {
+        return is_for_write_;
+    }
+
     virtual void Reset(const Schema *key_schema) = 0;
 
 protected:

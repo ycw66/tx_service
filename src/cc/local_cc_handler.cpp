@@ -44,6 +44,10 @@ void txservice::LocalCcHandler::AcquireWrite(
     acquire_result.cce_addr_.SetNodeGroupId(ng_id);
     acquire_result.cce_addr_.SetCce(0, -1, 0);
 
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
@@ -61,6 +65,7 @@ void txservice::LocalCcHandler::AcquireWrite(
                    iso_level);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
+
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }
     else
@@ -95,6 +100,10 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     CcProtocol proto,
     CcOperation cc_op)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
@@ -117,6 +126,7 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     }
     else
     {
+        hres.Value().remote_ack_cnt_->fetch_add(1, std::memory_order_acquire);
         remote_hd_.AcquireWriteAll(cc_shards_.node_id_,
                                    table_name,
                                    key,
@@ -128,7 +138,6 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                                    hres,
                                    proto,
                                    cc_op);
-        hres.Value().remote_ack_cnt_->fetch_add(1);
     }
 }
 
@@ -145,6 +154,10 @@ void txservice::LocalCcHandler::PostWriteAll(
     OperationType op_type,
     PostWriteType post_write_type)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
@@ -233,6 +246,10 @@ void txservice::LocalCcHandler::PostWrite(
             return;
         }
 
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
+
         PostWriteCc *req = postwrite_pool.NextRequest();
         req->Reset(&cce_addr,
                    tx_number,
@@ -247,6 +264,9 @@ void txservice::LocalCcHandler::PostWrite(
     }
     else
     {
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
         remote_hd_.PostWrite(cc_shards_.node_id_,
@@ -277,11 +297,13 @@ void txservice::LocalCcHandler::UploadRecord(
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
 
     if (dest_node_id == cc_shards_.node_id_)
     {
         PostWriteCc *req = postwrite_pool.NextRequest();
-
         req->Reset(key,
                    table_name,
                    ng_id,
@@ -342,6 +364,9 @@ void txservice::LocalCcHandler::PostRead(
             return;
         }
 
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
         PostReadCc *req = postread_pool_.NextRequest();
         req->Reset(&cce_addr, tx_number, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
@@ -350,6 +375,9 @@ void txservice::LocalCcHandler::PostRead(
     }
     else
     {
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
         hres.Value().is_local_ = false;
         hres.IncrementRemoteRef();
         remote_hd_.PostRead(cc_shards_.node_id_,
@@ -385,6 +413,9 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
     CcEntryAddr &cce_addr = read_result.cce_addr_;
     cce_addr.SetNodeGroupId(cc_ng_id);
     cce_addr.SetCce(0, -1, 0);
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
 
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(cc_ng_id);
     if (dest_node_id == cc_shards_.node_id_)
@@ -486,6 +517,9 @@ void txservice::LocalCcHandler::ReadOutside(
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
     }
     else
@@ -499,7 +533,7 @@ void txservice::LocalCcHandler::ReadOutside(
     }
 }
 
-void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
+bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           const TxKey &key,
                                           TxRecord &record,
                                           ReadType read_type,
@@ -553,7 +587,7 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        return;
+        return true;
     }
 
     ReadCc *read_req = read_pool.NextRequest();
@@ -576,20 +610,33 @@ void txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     TX_TRACE_DUMP(read_req);
 
     CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
+    bool finished = false;
 
     if (ccm != nullptr && thd_id_ == ccs->core_id_)
     {
         //__catalog table will be preloaded when ccshard constructed
-        bool finished = ccm->Execute(*read_req);
+        finished = ccm->Execute(*read_req);
         if (finished)
         {
             read_req->Free();
         }
+#ifdef EXT_TX_PROC_ENABLED
+        else
+        {
+            hres.SetToBlock();
+        }
+#endif
     }
     else
-    {  // otherwise, let the TemplateCcRequest load in the data
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
+        // otherwise, let the TemplateCcRequest load in the data
         ccs->Enqueue(read_req);
     }
+
+    return finished;
 }
 
 void txservice::LocalCcHandler::ScanOpen(
@@ -736,6 +783,9 @@ void txservice::LocalCcHandler::ScanOpen(
                 continue;
             }
 
+#ifdef EXT_TX_PROC_ENABLED
+            hres.SetToBlock();
+#endif
             for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
             {
                 uint32_t shard_code = (ng_id << 10) + core_id;
@@ -773,6 +823,9 @@ void txservice::LocalCcHandler::ScanOpen(
         }
         else
         {
+#ifdef EXT_TX_PROC_ENABLED
+            hres.SetToBlock();
+#endif
             remote_hd_.ScanOpen(cc_shards_.node_id_,
                                 table_name,
                                 index_type,
@@ -922,9 +975,18 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         {
             scan_open_cc_req->Free();
         }
+        else
+        {
+#ifdef EXT_TX_PROC_ENABLED
+            hd_res.SetToBlock();
+#endif
+        }
     }
     else
     {
+#ifdef EXT_TX_PROC_ENABLED
+        hd_res.SetToBlock();
+#endif
         local_shard.Enqueue(scan_open_cc_req);
     }
 }
@@ -941,6 +1003,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
     ScanCache *blocked_cache = scanner.Cache(shard_code);
     uint32_t node_group_id = shard_code >> 10;
     hd_res.Value().node_group_id_ = node_group_id;
+#ifdef EXT_TX_PROC_ENABLED
+    hd_res.SetToBlock();
+#endif
 
     uint32_t node_id = Sharder::Instance().LeaderNodeId(node_group_id);
     if (node_id == cc_shards_.node_id_)
@@ -999,6 +1064,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
     IsolationLevel iso_level,
     CcProtocol proto)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hd_res.SetToBlock();
+#endif
     hd_res.Value().cc_ng_id_ = range_owner;
     uint32_t node_id = Sharder::Instance().LeaderNodeId(range_owner);
     if (node_id == cc_shards_.node_id_)
@@ -1103,6 +1171,9 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
                scanner.is_covering_keys_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
+#ifdef EXT_TX_PROC_ENABLED
+    hd_res.SetToBlock();
+#endif
     local_shard.Enqueue(req);
 }
 
@@ -1214,6 +1285,9 @@ void txservice::LocalCcHandler::UpdateCommitLowerBound(
     req->Reset(&txid, commit_ts_lower_bound, &hres);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     // The lower 10 bits represent the local core Id. The remaining high
     // bits represent the node Id.
     uint16_t local_core_id = txid.global_core_id_ & 0x3FF;
@@ -1258,6 +1332,9 @@ void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
     }
 
     hres.SetRefCnt(vct_node_id.size());
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     for (int id : vct_node_id)
     {
         uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(id);
@@ -1290,6 +1367,9 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
     CcHandlerResult<Void> &hres,
     const txservice::AlterTableInfo *alter_table_info)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     cc_shards_.store_hd_->UpsertTable(
         schema, op_type, commit_ts, &hres, alter_table_info);
 }
@@ -1301,6 +1381,9 @@ void txservice::LocalCcHandler::AnalyzeTableAll(const TableName &table_name,
                                                 uint16_t command_id,
                                                 CcHandlerResult<Void> &hres)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.NodeId())
     {
@@ -1336,6 +1419,9 @@ void txservice::LocalCcHandler::ObjectCommand(
     const txservice::CcProtocol proto,
     bool commit)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     hres.Value().cce_addr_.SetCce(0, -1, ng_id, 0);
 
@@ -1371,6 +1457,9 @@ void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                                     uint16_t command_id,
                                                     CcHandlerResult<bool> &hres)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     uint32_t shard_code = Sharder::Instance().ShardCode(key.Hash());
     uint32_t shard_id = shard_code >> 10;
 
@@ -1415,6 +1504,9 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                                             const TxKey *start_key,
                                             const TxKey *end_key)
 {
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
     if (dest_node_id == cc_shards_.node_id_)
     {
@@ -1482,6 +1574,9 @@ void txservice::LocalCcHandler::BlockCcReqCheck(uint64_t tx_number,
     // node is stable and and it will always ok or the entire process crash.
     if (dest_node_id != cc_shards_.node_id_)
     {
+#ifdef EXT_TX_PROC_ENABLED
+        hres->SetToBlock();
+#endif
         remote_hd_.BlockCcReqCheck(cc_shards_.node_id_,
                                    tx_number,
                                    tx_term,

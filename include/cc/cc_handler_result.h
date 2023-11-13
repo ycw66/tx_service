@@ -41,6 +41,22 @@ public:
     virtual bool IsFinished() const = 0;
     virtual bool ForceError() = 0;
     virtual bool IsError() const = 0;
+
+#ifdef EXT_TX_PROC_ENABLED
+    void SetToBlock()
+    {
+        is_blocking_ = true;
+    }
+
+protected:
+    /**
+     * @brief True, if the tx is expecting this result and is blocked on it.
+     * Upon finishing, the cc handler result enlists blocked tx to resume
+     * execution.
+     *
+     */
+    bool is_blocking_{false};
+#endif
 };
 
 template <typename T>
@@ -71,13 +87,13 @@ public:
 
     bool IsError() const override
     {
-        return error_code_.load(std::memory_order_acquire) !=
+        return error_code_.load(std::memory_order_relaxed) !=
                CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode() const
     {
-        return error_code_.load(std::memory_order_acquire);
+        return error_code_.load(std::memory_order_relaxed);
     }
 
     const std::string ErrorMsg() const
@@ -116,7 +132,7 @@ public:
 
     void IncrementRemoteRef()
     {
-        remote_ref_cnt_.fetch_add(1, std::memory_order_relaxed);
+        remote_ref_cnt_.fetch_add(1, std::memory_order_acquire);
     }
 
     uint32_t RemoteRefCnt()
@@ -189,9 +205,12 @@ public:
 
     void Reset()
     {
-        is_finished_.store(false, std::memory_order_release);
-        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_release);
+        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         ClearRefCnt();
+#ifdef EXT_TX_PROC_ENABLED
+        is_blocking_ = false;
+#endif
+        is_finished_.store(false, std::memory_order_release);
     }
 
     void ResetTxm(TransactionExecution *txm)
@@ -217,7 +236,7 @@ private:
     // handler result. The handler result is bound to a fixed tx machine. The tx
     // machine, however, may be re-used repeatedly for different user-level
     // tx's.
-    TransactionExecution *txm_;
+    TransactionExecution *txm_{nullptr};
 
 public:
     std::function<void(CcHandlerResult<T> *)> post_lambda_;

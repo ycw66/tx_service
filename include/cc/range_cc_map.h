@@ -44,10 +44,9 @@ public:
     using TemplateCcMap<KeyT, RangeRecord>::Execute;
     using TemplateCcMap<KeyT, RangeRecord>::FindEmplace;
     using TemplateCcMap<KeyT, RangeRecord>::Emplace;
-    using TemplateCcMap<KeyT, RangeRecord>::AcquireCceKeyLock;
-    using TemplateCcMap<KeyT, RangeRecord>::ReleaseCceKeyLock;
+    using CcMap::AcquireCceKeyLock;
+    using CcMap::ReleaseCceLock;
     using TemplateCcMap<KeyT, RangeRecord>::LockHandleForResumedRequest;
-    using TemplateCcMap<KeyT, RangeRecord>::CheckCceKeyLock;
     using TemplateCcMap<KeyT, RangeRecord>::MoveRequest;
     using TemplateCcMap<KeyT, RangeRecord>::shard_;
     using TemplateCcMap<KeyT, RangeRecord>::Floor;
@@ -131,7 +130,11 @@ public:
                     auto bucket_cce = static_cast<
                         CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                         range_cce->payload_->range_owner_rec_);
-                    ReleaseCceKeyLock(bucket_cce, txn, this->cc_ng_id_);
+                    ReleaseCceLock(bucket_cce->key_lock_ptr_,
+                                   bucket_cce,
+                                   txn,
+                                   this->cc_ng_id_,
+                                   LockType::ReadLock);
                 }
             }
         }
@@ -280,8 +283,7 @@ public:
                 // into a new range, release the lock on old range.
                 CcEntry<KeyT, RangeRecord> *prev_cce =
                     static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
-                prev_cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                prev_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
                 // If we're waiting for bucekt lock that means we've alraedy
                 // acquired read lock on range record, so the record cannot be
                 // updated during this time.
@@ -380,9 +382,22 @@ public:
                 cc_entry.payload_->range_owner_rec_);
         bucket_cce->last_read_ts_ =
             std::max(bucket_cce->last_read_ts_, req.CommitTs());
-        ReleaseCceKeyLock(bucket_cce, req.Txn(), req.NodeGroupId());
+        ReleaseCceLock(bucket_cce->key_lock_ptr_,
+                       bucket_cce,
+                       req.Txn(),
+                       req.NodeGroupId(),
+                       LockType::ReadLock);
 
-        return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
+        cc_entry.last_read_ts_ =
+            std::max(cc_entry.last_read_ts_, req.CommitTs());
+        ReleaseCceLock(cc_entry.key_lock_ptr_,
+                       &cc_entry,
+                       req.Txn(),
+                       req.NodeGroupId(),
+                       LockType::ReadLock);
+
+        req.Result()->SetFinished();
+        return true;
     }
 
     bool Execute(AcquireAllCc &req) override
@@ -472,7 +487,8 @@ public:
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (target_cce == nullptr || CheckCceKeyLock(target_cce, req) == false)
+        if (target_cce == nullptr || target_cce->key_lock_ptr_ == nullptr ||
+            !target_cce->key_lock_ptr_->HasWrite(req.Txn()))
         {
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {

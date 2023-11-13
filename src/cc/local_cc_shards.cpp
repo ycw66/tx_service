@@ -148,7 +148,7 @@ void LocalCcShards::TimerRun()
         UpdateTsBase(clock_ts);
 
         timer_terminate_cv_.wait_for(
-            lk, 2s, [this]() { return timer_terminate_ == true; });
+            lk, 1s, [this]() { return timer_terminate_ == true; });
     } while (!timer_terminate_);
 }
 
@@ -435,17 +435,11 @@ void LocalCcShards::CreateSchemaRecoveryTx(
             if (recover_req.IsError() ||
                 recover_req.Result() != UpsertResult::Succeeded)
             {
-                AbortTxRequest abort_req;
-                abort_req.Reset();
-                txm->Execute(&abort_req);
-                abort_req.Wait();
+                txservice::AbortTx(txm);
             }
             else
             {
-                CommitTxRequest commit_req;
-                commit_req.Reset();
-                txm->Execute(&commit_req);
-                commit_req.Wait();
+                txservice::CommitTx(txm);
             }
         });
 
@@ -599,18 +593,13 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             {
                 // Leader transferred away before replay finish. No need
                 // to update StoreRange.
-                AbortTxRequest abort_req;
-                txm->Execute(&abort_req);
-                abort_req.Wait();
+                txservice::AbortTx(txm);
             }
             else
             {
                 range->TrySetDataSync(false, nullptr, commit_ts);
                 range->PopPendingSyncTask();
-                CommitTxRequest commit_req;
-                commit_req.Reset();
-                txm->Execute(&commit_req);
-                commit_req.Wait();
+                txservice::CommitTx(txm);
             }
         });
 
@@ -1869,8 +1858,8 @@ void LocalCcShards::Terminate()
         std::unique_lock<std::mutex> task_worker_lk(task_worker_mux_);
         assert(data_sync_worker_status_ == WorkerStatus::Active);
         data_sync_worker_status_ = WorkerStatus::Terminated;
+        task_worker_cv_.notify_all();
     }
-    task_worker_cv_.notify_all();
 
     for (int idx = 0; idx < data_sync_worker_num_; ++idx)
     {
@@ -1882,8 +1871,8 @@ void LocalCcShards::Terminate()
         std::unique_lock<std::mutex> flush_worker_lk(flush_worker_mux_);
         assert(flush_worker_thd_status_ == WorkerStatus::Active);
         flush_worker_thd_status_ = WorkerStatus::Terminated;
+        flush_worker_cv_.notify_all();
     }
-    flush_worker_cv_.notify_all();
 
     for (int idx = 0; idx < flush_worker_num_; ++idx)
     {
@@ -1893,9 +1882,9 @@ void LocalCcShards::Terminate()
     {
         std::unique_lock<std::mutex> worker_lk(slice_update_mux_);
         slice_thd_status_ = WorkerStatus::Terminated;
+        slice_update_cv_.notify_all();
     }
 
-    slice_update_cv_.notify_all();
     for (int id = 0; id < slice_worker_num_; id++)
     {
         update_slice_spec_thds_.at(id).join();
@@ -1906,8 +1895,9 @@ void LocalCcShards::Terminate()
         {
             std::unique_lock<std::mutex> lk(statistics_mux_);
             statistics_thd_status_ = WorkerStatus::Terminated;
+            statistics_cv_.notify_one();
         }
-        statistics_cv_.notify_one();
+
         statistics_thd_.join();
     }
 }
@@ -2057,20 +2047,13 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
     // Process this task.
     // 1. Get a new txm and init
-    TransactionExecution *data_sync_txm = tx_service_->NewTx();
+    TransactionExecution *data_sync_txm =
+        txservice::NewTxInit(tx_service_,
+                             IsolationLevel::RepeatableRead,
+                             CcProtocol::Locking,
+                             ng_id);
 
-    InitTxRequest init_req;
-    // Set isolation level to RepeatableRead to ensure the readlock
-    // will be set during the execution of the following
-    // ReadTxRequest.
-    init_req.iso_level_ = IsolationLevel::RepeatableRead;
-    init_req.protocol_ = CcProtocol::Locking;
-    init_req.tx_ng_id_ = ng_id;
-    init_req.Reset();
-    data_sync_txm->Execute(&init_req);
-    init_req.Wait();
-
-    if (init_req.IsError())
+    if (data_sync_txm == nullptr)
     {
         LOG(ERROR) << "DataSync init data sync transaction failed.";
         task_worker_lk.lock();
@@ -2109,10 +2092,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     if (read_req.IsError() || rec_status != RecordStatus::Normal)
     {
         // Use AbortTxRequest to release read lock.
-        AbortTxRequest abort_req;
-        data_sync_txm->Execute(&abort_req);
-        abort_req.Wait();
-        assert(abort_req.Result() == false);
+        txservice::AbortTx(data_sync_txm);
 
         if (rec_status != RecordStatus::Normal)
         {
@@ -2188,11 +2168,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                       "bucket id: "
                    << Sharder::Instance().MapRangeIdToBucketId(range_id);
 
-        AbortTxRequest abort_req;
-        abort_req.Reset();
-        data_sync_txm->Execute(&abort_req);
-        abort_req.Wait();
-        assert(abort_req.Result() == false);
+        txservice::AbortTx(data_sync_txm);
         // If read lock acquire failed, retry next time.
         // Put back into the beginning.
         task_worker_lk.lock();
@@ -2215,10 +2191,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     {
         // Skip the range, it might be dropped or migrated away.
         // Use AbortTxRequest to release read lock.
-        AbortTxRequest abort_req;
-        data_sync_txm->Execute(&abort_req);
-        abort_req.Wait();
-        assert(abort_req.Result() == false);
+        txservice::AbortTx(data_sync_txm);
         data_sync_task->SetError();
         return;
     }
@@ -2280,10 +2253,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
                       << table_name.StringView();
             // Update the table data sync status.
             store_range->TrySetDataSync(false);
-            AbortTxRequest abort_req;
-            abort_req.Reset();
-            data_sync_txm->Execute(&abort_req);
-            abort_req.Wait();
+            txservice::AbortTx(data_sync_txm);
             task_worker_lk.lock();
             // Put back into the beginning.
             data_sync_task_queue_.emplace_front(std::move(data_sync_task));
@@ -2391,10 +2361,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
         // Handle the pending tasks for the same range
         store_range->PopPendingSyncTask();
-        AbortTxRequest abort_req;
-        abort_req.Reset();
-        data_sync_txm->Execute(&abort_req);
-        abort_req.Wait();
+        txservice::AbortTx(data_sync_txm);
         data_sync_task->SetError();
 
         return;
@@ -2461,10 +2428,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         store_range->PopPendingSyncTask();
         // Nothing to flush in this range.
         // Commit the data sync txm
-        CommitTxRequest commit_req;
-        commit_req.Reset();
-        data_sync_txm->Execute(&commit_req);
-        commit_req.Wait();
+        txservice::CommitTx(data_sync_txm);
 
         data_sync_task->SetFinish();
     }
@@ -2611,10 +2575,7 @@ void LocalCcShards::SplitFlushRange(
 
             store_range->TrySetDataSync(false);
             store_range->PopPendingSyncTask();
-            AbortTxRequest abort_req;
-            abort_req.Reset();
-            split_txm->Execute(&abort_req);
-            abort_req.Wait();
+            txservice::AbortTx(split_txm);
             data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
 
             return;
@@ -2671,11 +2632,7 @@ void LocalCcShards::SplitFlushRange(
 
         store_range->TrySetDataSync(false);
         store_range->PopPendingSyncTask();
-        AbortTxRequest abort_req;
-        abort_req.Reset();
-        split_txm->Execute(&abort_req);
-        abort_req.Wait();
-        assert(abort_req.Result() == false);
+        txservice::AbortTx(split_txm);
         data_sync_task->SetError();
 
         return;
@@ -2689,10 +2646,7 @@ void LocalCcShards::SplitFlushRange(
     store_range->PopPendingSyncTask();
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
               << " partition " << store_range->PartitionId() << " succeeded.";
-    CommitTxRequest commit_req;
-    commit_req.Reset();
-    split_txm->Execute(&commit_req);
-    commit_req.Wait();
+    txservice::CommitTx(split_txm);
 
     data_sync_task->SetFinish();
 }
@@ -2897,20 +2851,13 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         if (succ)
         {
             // Commit the data sync txm
-            CommitTxRequest commit_req;
-            commit_req.Reset();
-            data_sync_txm->Execute(&commit_req);
-            commit_req.Wait();
-
+            CommitTx(data_sync_txm);
             data_sync_task->SetFinish();
         }
         else
         {
             // Abort the data sync txm
-            AbortTxRequest abort_req;
-            abort_req.Reset();
-            data_sync_txm->Execute(&abort_req);
-            abort_req.Wait();
+            AbortTx(data_sync_txm);
 
             CcErrorCode err_code =
                 Sharder::Instance().LeaderTerm(node_group) > 0
@@ -3193,18 +3140,16 @@ void LocalCcShards::SyncTableStatisticsWorker()
                             updated = false;
                         }
                     }
-                    TransactionExecution *txm = tx_service_->NewTx();
-                    InitTxRequest init_req;
+
                     // Set isolation level to RepeatableRead to ensure the
                     // readlock will be set during the execution of the
                     // following ReadTxRequest.
-                    init_req.iso_level_ = IsolationLevel::RepeatableRead;
-                    init_req.protocol_ = CcProtocol::Locking;
-                    init_req.tx_ng_id_ = node_group;
-                    init_req.Reset();
-                    txm->Execute(&init_req);
-                    init_req.Wait();
-                    if (init_req.IsError())
+                    TransactionExecution *txm =
+                        NewTxInit(tx_service_,
+                                  IsolationLevel::RepeatableRead,
+                                  CcProtocol::Locking,
+                                  node_group);
+                    if (txm == nullptr)
                     {
                         succ = false;
                         continue;
@@ -3230,10 +3175,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
                         rec_status != RecordStatus::Normal)
                     {
                         // Use AbortTxRequest to release read lock.
-                        AbortTxRequest abort_req;
-                        txm->Execute(&abort_req);
-                        abort_req.Wait();
-                        assert(abort_req.Result() == false);
+                        txservice::AbortTx(txm);
+
                         if (read_req.IsError())
                         {
                             succ = false;
@@ -3280,10 +3223,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
                             }
                         }
                     }
-                    CommitTxRequest commit_req;
-                    commit_req.Reset();
-                    txm->Execute(&commit_req);
-                    commit_req.Wait();
+                    txservice::CommitTx(txm);
                 }
             }
             if (succ)

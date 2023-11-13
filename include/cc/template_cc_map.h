@@ -528,7 +528,11 @@ public:
             }
 
             // The insert places a write lock on the prior cc entry's gap.
-            ReleaseCceGapLock(&prior_cce, txn, req.NodeGroupId());
+            ReleaseCceLock(prior_cce.gap_lock_ptr_,
+                           &prior_cce,
+                           txn,
+                           req.NodeGroupId(),
+                           LockType::WriteLock);
             req.Result()->SetFinished();
             return true;
         }
@@ -599,8 +603,7 @@ public:
 
                 if (cce->key_lock_ptr_ == nullptr ||
                     !cce->key_lock_ptr_->HasWriteLock() ||
-                    cce->key_lock_ptr_->HasWriteLock() &&
-                        cce->key_lock_ptr_->WriteLockTx() != txn)
+                    cce->key_lock_ptr_->WriteLockTx() != txn)
                 {
                     req.Result()->SetFinished();
                     return true;
@@ -731,7 +734,11 @@ public:
                 }
             }
 
-            ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
+            ReleaseCceLock(cce->key_lock_ptr_,
+                           cce,
+                           txn,
+                           req.NodeGroupId(),
+                           LockType::WriteLock);
             req.Result()->SetFinished();
             return true;
         }
@@ -1223,7 +1230,11 @@ public:
             if (req.CommitType() != PostWriteType::PrepareCommit)
             {
                 // The insert places a write lock on the prior cc entry's gap.
-                ReleaseCceGapLock(cce_ptr, txn, req.NodeGroupId());
+                ReleaseCceLock(cce_ptr->gap_lock_ptr_,
+                               cce_ptr,
+                               txn,
+                               req.NodeGroupId(),
+                               LockType::WriteLock);
             }
 
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
@@ -1245,15 +1256,19 @@ public:
             if (cce_ptr->key_lock_ptr_ != nullptr)
             {
                 // AcquireAllCc only acquire WriteIntent or WriteLock
-                if (cce_ptr->key_lock_ptr_->HasWriteLock() &&
-                    cce_ptr->key_lock_ptr_->WriteLockTx() == txn)
+                auto [w_tx, w_type] = cce_ptr->key_lock_ptr_->WriteTx();
+
+                if (w_tx == txn)
                 {
-                    lk_type = LockType::WriteLock;
-                }
-                else if (cce_ptr->key_lock_ptr_->HasWriteIntent() &&
-                         cce_ptr->key_lock_ptr_->WriteIntentTx() == txn)
-                {
-                    lk_type = LockType::WriteIntent;
+                    if (w_type == NonBlockingLock::WriteLockType::WriteLock)
+                    {
+                        lk_type = LockType::WriteLock;
+                    }
+                    else if (w_type ==
+                             NonBlockingLock::WriteLockType::WriteIntent)
+                    {
+                        lk_type = LockType::WriteIntent;
+                    }
                 }
             }
 
@@ -1284,10 +1299,14 @@ public:
                 if (req.CommitType() != PostWriteType::PrepareCommit)
                 {
                     // For PostCommit or Commit, the post-write-all request
-                    // releases the write lock/intent.
-                    ReleaseCceKeyLock(cce_ptr, txn, req.NodeGroupId());
+                    // releases the write lock.
+                    ReleaseCceLock(cce_ptr->key_lock_ptr_,
+                                   cce_ptr,
+                                   txn,
+                                   req.NodeGroupId(),
+                                   lk_type);
                 }
-                else
+                else if (req.CommitType() == PostWriteType::PrepareCommit)
                 {
                     // For PrepareCommit, the post-write-all request keeps write
                     // intent or downgrades the write lock to the write intent.
@@ -1378,8 +1397,8 @@ public:
             ((key_ts > 0 && key_ts != cc_entry.commit_ts_) ||
              (gap_ts > 0 && gap_ts != cc_entry.gap_commit_ts_)))
         {
-            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
-            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
+            ReleaseCceLock(
+                cc_entry.key_lock_ptr_, &cc_entry, txn, req.NodeGroupId());
             // broken repeatable read, set error.
             hd_res->SetError(
                 CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH);
@@ -1451,8 +1470,9 @@ public:
                 }
             }
 
-            ReleaseCceKeyLock(&cc_entry, txn, req.NodeGroupId());
-            ReleaseCceGapLock(&cc_entry, txn, req.NodeGroupId());
+            ReleaseCceLock(
+                cc_entry.key_lock_ptr_, &cc_entry, txn, req.NodeGroupId());
+
             if (conflicting_txs.Size() > 0)
             {
                 // Does not perform tx negotiations so far.
@@ -1581,8 +1601,7 @@ public:
                     // request is put into the blocking queue with ReadLock.
                     // After PostWrite finished, this ReadLock should be
                     // released.
-                    cce->key_lock_ptr_->ReleaseLock(
-                        req.Txn(), shard_, LockType::ReadLock);
+                    cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
                     acquired_lock = LockType::NoLock;
                     err_code = CcErrorCode::NO_ERROR;
                 }
@@ -1814,15 +1833,6 @@ public:
             case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
             {
                 req.SetIsWaitForPostWrite(true);
-                // Put the request to top of key lock's blocking queue with
-                // acquiring readlock. And then should release the readlock
-                // before handling this request when PostWriteCc finished.
-                cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                        LockType::ReadLock);
-                shard_->CheckRecoverTx(
-                    cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                // After inserting to blocking queue, the execution of current
-                // ReadCc request should stop.
                 return false;
             }
             case CcErrorCode::NO_ERROR:
@@ -2259,8 +2269,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -2334,15 +2343,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2405,15 +2405,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2473,15 +2464,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2578,8 +2560,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                prior_cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                prior_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -2665,15 +2646,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2751,16 +2723,6 @@ public:
                     case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                     {
                         req.SetIsWaitForPostWrite(true);
-                        // Put the request to top of key lock's blocking queue
-                        // with acquring readlock. And then should release the
-                        // readlock before handling this requst when PostWriteCc
-                        // finished.
-                        cce->key_lock_ptr_->InsertBlockingQueue(
-                            &req, LockType::ReadLock);
-                        shard_->CheckRecoverTx(
-                            cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                        // After inserting to blocking queue, the execution of
-                        // current ReadCc request should stop.
                         return false;
                     }
                     case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2981,8 +2943,7 @@ public:
             if (req.IsWaitForPostWrite(shard_->LocalCoreId()))
             {
                 req.SetIsWaitForPostWrite(false, shard_->LocalCoreId());
-                cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -3053,16 +3014,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
-                    // Put the request to top of key lock's blocking queue
-                    // with acquring readlock. And then should release the
-                    // readlock before handling this requst when PostWriteCc
-                    // finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -3136,16 +3087,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
-                    // Put the request to top of key lock's blocking queue
-                    // with acquring readlock. And then should release the
-                    // readlock before handling this requst when PostWriteCc
-                    // finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -3214,16 +3155,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->LocalCoreId());
-                    // Put the request to top of key lock's blocking queue
-                    // with acquring readlock. And then should release the
-                    // readlock before handling this requst when PostWriteCc
-                    // finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -3316,8 +3247,7 @@ public:
             if (req.IsWaitForPostWrite())
             {
                 req.SetIsWaitForPostWrite(false);
-                prior_cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                prior_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -3399,16 +3329,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true);
-                    // Put the request to top of key lock's blocking queue
-                    // with acquring readlock. And then should release the
-                    // readlock before handling this requst when PostWriteCc
-                    // finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -3484,16 +3404,6 @@ public:
                     case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                     {
                         req.SetIsWaitForPostWrite(true);
-                        // Put the request to top of key lock's blocking queue
-                        // with acquring readlock. And then should release the
-                        // readlock before handling this requst when PostWriteCc
-                        // finished.
-                        cce->key_lock_ptr_->InsertBlockingQueue(
-                            &req, LockType::ReadLock);
-                        shard_->CheckRecoverTx(
-                            cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                        // After inserting to blocking queue, the execution of
-                        // current ReadCc request should stop.
                         return false;
                     }
                     case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -3737,8 +3647,7 @@ public:
             if (req.IsWaitForPostWrite(shard_->core_id_))
             {
                 req.SetIsWaitForPostWrite(false, shard_->core_id_);
-                cce->key_lock_ptr_->ReleaseLock(
-                    req.Txn(), shard_, LockType::ReadLock);
+                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
             }
             else
             {
@@ -3797,16 +3706,14 @@ public:
                 req.PriorCceAddr(core_id));
             scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
 
-            if (LockTypeUtil::DeduceLockType(
-                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
-                LockType::NoLock)
-            {
-                if (cce->key_lock_ptr_->ReadIntents().find(req.Txn()) !=
-                    cce->key_lock_ptr_->ReadIntents().end())
-                {
-                    ReleaseCceKeyLock(cce, req.Txn(), ng_id);
-                }
-            }
+            // Releases the read intent on the last cc entry of the prior scan
+            // batch. If the prior scan put a lock other than read intent, the
+            // function has no effect.
+            ReleaseCceLock(cce->key_lock_ptr_,
+                           cce,
+                           req.Txn(),
+                           ng_id,
+                           LockType::ReadIntent);
         }
         else
         {
@@ -3861,15 +3768,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->core_id_);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -4024,15 +3922,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->core_id_);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -4090,6 +3979,12 @@ public:
                 if (last_cce != nullptr)
                 {
                     last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                    shard_->UpsertLockHoldingTx(req.Txn(),
+                                                tx_term,
+                                                last_cce,
+                                                false,
+                                                ng_id,
+                                                table_name_.Type());
                 }
             }
 
@@ -4263,15 +4158,6 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetIsWaitForPostWrite(true, shard_->core_id_);
-                    // Put the request to top of key lock's blocking queue with
-                    // acquring readlock. And then should release the readlock
-                    // before handling this requst when PostWriteCc finished.
-                    cce->key_lock_ptr_->InsertBlockingQueue(&req,
-                                                            LockType::ReadLock);
-                    shard_->CheckRecoverTx(
-                        cce->key_lock_ptr_->WriteLockTx(), ng_id, ng_term);
-                    // After inserting to blocking queue, the execution of
-                    // current ReadCc request should stop.
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -4329,6 +4215,12 @@ public:
                 if (last_cce != nullptr)
                 {
                     last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                    shard_->UpsertLockHoldingTx(req.Txn(),
+                                                tx_term,
+                                                last_cce,
+                                                false,
+                                                ng_id,
+                                                table_name_.Type());
                 }
             }
 
@@ -5100,7 +4992,11 @@ public:
                     // TODO: it is safer if we ship the tx ID with the
                     // recovering message and match it against the lock holder.
                     TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
-                    ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
+                    ReleaseCceLock(cce->key_lock_ptr_,
+                                   cce,
+                                   txn,
+                                   req.NodeGroupId(),
+                                   LockType::WriteLock);
                 }
             }
         }
@@ -6339,20 +6235,6 @@ protected:
     Iterator Emplace(const KeyT &key)
     {
         return FindEmplace(key);
-    }
-
-    bool CheckCceKeyLock(const CcEntry<KeyT, ValueT> *cce_ptr,
-                         const PostWriteAllCc &req) const
-    {
-        // For PrepareCommit, the post-write-all request keeps write
-        // intent or downgrades the write lock to the write intent.
-        // For PostCommit, the post-write-all request release write
-        // intent or write lock.
-        return cce_ptr->key_lock_ptr_ &&
-               ((cce_ptr->key_lock_ptr_->HasWriteLock() &&
-                 cce_ptr->key_lock_ptr_->WriteLockTx() == req.Txn()) ||
-                (cce_ptr->key_lock_ptr_->HasWriteIntent() &&
-                 cce_ptr->key_lock_ptr_->WriteIntentTx() == req.Txn()));
     }
 
     ScanType GetScanType(bool is_include_floor_cce)

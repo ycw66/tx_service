@@ -360,8 +360,8 @@ CatalogRecord &CatalogRecord::operator=(const CatalogRecord &rhs)
     schema_ = rhs.schema_;
     dirty_schema_ = rhs.dirty_schema_;
     schema_ts_ = rhs.schema_ts_;
-    schema_image_ = rhs.schema_image_;
-    dirty_schema_image_ = rhs.dirty_schema_image_;
+    // schema_image_ = rhs.schema_image_;
+    // dirty_schema_image_ = rhs.dirty_schema_image_;
 
     return *this;
 }

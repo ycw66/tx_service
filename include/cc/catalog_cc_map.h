@@ -144,7 +144,8 @@ public:
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
-        if (cce_ptr == nullptr || CheckCceKeyLock(cce_ptr, req) == false)
+        if (cce_ptr == nullptr || cce_ptr->key_lock_ptr_ == nullptr ||
+            !cce_ptr->key_lock_ptr_->HasWrite(req.Txn()))
         {
             // When the catalog entry is null in the post-write-all
             // phase, it means that (1) the cc req is a resend request and

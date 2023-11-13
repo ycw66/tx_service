@@ -9,18 +9,12 @@ LruEntry::~LruEntry()
     if (key_lock_ptr_ != nullptr && parent_map_)
     {
         CcShard *ccshard = parent_map_->shard_;
-        // Deletes key write lock.
-        if (key_lock_ptr_->HasWriteLock())
-        {
-            ccshard->DeleteLockHoldingTx(
-                key_lock_ptr_->WriteLockTx(), this, parent_map_->cc_ng_id_);
-        }
 
-        // Deletes key write intent.
-        if (key_lock_ptr_->HasWriteIntent())
+        // Deletes the write lock/intent.
+        auto [w_tx, w_type] = key_lock_ptr_->WriteTx();
+        if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
         {
-            ccshard->DeleteLockHoldingTx(
-                key_lock_ptr_->WriteIntentTx(), this, parent_map_->cc_ng_id_);
+            ccshard->DeleteLockHoldingTx(w_tx, this, parent_map_->cc_ng_id_);
         }
 
         // Deletes key read locks.
@@ -45,18 +39,12 @@ LruEntry::~LruEntry()
     if (gap_lock_ptr_ != nullptr && parent_map_)
     {
         CcShard *ccshard = parent_map_->shard_;
-        // Deletes gap write lock.
-        if (gap_lock_ptr_->HasWriteLock())
-        {
-            ccshard->DeleteLockHoldingTx(
-                gap_lock_ptr_->WriteLockTx(), this, parent_map_->cc_ng_id_);
-        }
 
-        // Deletes gap write intent.
-        if (gap_lock_ptr_->HasWriteIntent())
+        // Deletes the gap's write lock/intent.
+        auto [w_tx, w_type] = gap_lock_ptr_->WriteTx();
+        if (w_type != NonBlockingLock::WriteLockType::NoWritelock)
         {
-            ccshard->DeleteLockHoldingTx(
-                gap_lock_ptr_->WriteIntentTx(), this, parent_map_->cc_ng_id_);
+            ccshard->DeleteLockHoldingTx(w_tx, this, parent_map_->cc_ng_id_);
         }
 
         // Deletes gap read locks.
@@ -132,7 +120,6 @@ void LruEntry::RecycleKeyLock()
         parent_map_->shard_->DecreaseLockCount();
         key_lock_ptr_ = nullptr;
     }
-    return;
 }
 
 void LruEntry::RecycleGapLock()

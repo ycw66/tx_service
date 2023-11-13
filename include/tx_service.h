@@ -22,14 +22,17 @@
 #include "catalog_factory.h"
 #include "checkpointer.h"
 #include "circular_queue.h"
+#include "concurrent_queue_wsize.h"
 #include "dead_lock_check.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
 #include "meter.h"
 #include "metrics.h"
 #include "moodycamelqueue.h"
+#include "spinlock.h"
 #include "tx_execution.h"
 #include "tx_request.h"
+#include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
 
@@ -56,13 +59,6 @@ inline const size_t OFFSET_TABLE[] = {
 class TxProcessor
 {
 public:
-    enum struct TxProcessorStatus
-    {
-        Terminated = 0,
-        Busy,
-        Sleep
-    };
-
     static const int64_t t1sec = 1000000L;
     static const int64_t t2sec = 4000000L;
 
@@ -73,7 +69,7 @@ public:
                 metrics::CommonLabels common_labels = {})
         : thd_id_(thd_id),
           terminated_(false),
-          in_sleep_(false),
+          tx_proc_status_(TxProcessorStatus::Busy),
           local_cc_shards_(shards),
           active_tx_cnt_(0),
           new_tx_cnt_(0),
@@ -120,9 +116,18 @@ public:
                                 "scan_next",
                                 "write_log"}}});
         }
-#ifdef EXT_TX_PROC_ENABLED
-        external_processor_func_ = [this]() { RunOneRound(); };
-#endif
+
+        coordi_ = std::make_shared<TxProcCoordinator>();
+    }
+
+    ~TxProcessor()
+    {
+        TxShardStatus expected = TxShardStatus::Free;
+        while (!coordi_->shard_status_.compare_exchange_weak(
+            expected, TxShardStatus::Deconstructed, std::memory_order_acq_rel))
+        {
+            expected = TxShardStatus::Free;
+        }
     }
 
     TransactionExecution *NewTx()
@@ -142,6 +147,8 @@ public:
 
         TransactionExecution *tx_ptr = tx.get();
 
+        // The memory order of new_txs_.enqueue() ensures that the update of
+        // active_tx_cnt_ happens before the new tx appearing in the queue.
         uint32_t prev_tx_cnt =
             active_tx_cnt_.fetch_add(1, std::memory_order_relaxed);
 
@@ -149,160 +156,79 @@ public:
         // Add the new transaction into the new tx set.
         new_txs_.enqueue(std::move(tx));
 
-        // Wakes up the tx processor thread if it is in sleep.
-        if (prev_tx_cnt == 0 && in_sleep_.load(std::memory_order_relaxed))
+        // Wakes up the tx processor thread if it is asleep.
+        if (prev_tx_cnt == 0)
         {
-            std::unique_lock<std::mutex> lk(sleep_mux_);
-            sleep_cv_.notify_one();
+            TxProcessorStatus native_proc_status =
+                tx_proc_status_.load(std::memory_order_relaxed);
+#ifdef EXT_TX_PROC_ENABLED
+            if (native_proc_status == TxProcessorStatus::Sleep ||
+                (coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) ==
+                     0 &&
+                 native_proc_status == TxProcessorStatus::Standby))
+            {
+                Notify(coordi_->sleep_mux_, coordi_->sleep_cv_);
+            }
+#else
+            if (native_proc_status == TxProcessorStatus::Sleep)
+            {
+                Notify(coordi_->sleep_mux_, coordi_->sleep_cv_);
+            }
+#endif
         }
 
         return tx_ptr;
     }
 
-    TransactionExecution::uptr NewTxm()
+#ifdef EXT_TX_PROC_ENABLED
+    TransactionExecution *NewExternalTx()
     {
-        TransactionExecution::uptr txm = nullptr;
-        bool success = free_txs_.try_dequeue(free_consumer_token_, txm);
+        TransactionExecution::uptr tx = nullptr;
+        bool success = free_txs_.try_dequeue(free_consumer_token_, tx);
         if (success)
         {
-            assert(txm != nullptr);
-            txm->Restart(cc_hd_.get(), txlog_hd_, this);
+            assert(tx != nullptr);
+            tx->Restart(cc_hd_.get(), txlog_hd_, this, true);
         }
         else
         {
-            txm = std::make_unique<TransactionExecution>(
-                cc_hd_.get(), txlog_hd_, this);
+            tx = std::make_unique<TransactionExecution>(
+                cc_hd_.get(), txlog_hd_, this, true);
         }
 
-        active_tx_cnt_.fetch_add(1, std::memory_order_relaxed);
+        TransactionExecution *tx_ptr = tx.get();
 
-        return txm;
-    }
+        active_tx_lock_.Lock();
+        active_tx_map_.try_emplace(tx_ptr, std::move(tx));
+        active_tx_lock_.Unlock();
 
-    void RecycleTxm(TransactionExecution::uptr txm)
-    {
-        free_txs_.enqueue(free_prod_token_, std::move(txm));
-        active_tx_cnt_.fetch_sub(1, std::memory_order_relaxed);
-    }
-
-#ifdef EXT_TX_PROC_ENABLED
-    void ExternalForward(TransactionExecution *txm)
-    {
-        external_process_counter_.fetch_add(1);
-
-        bool expected = false;
-        bool success = process_latch_.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel);
-
-        if (!success)
-        {
-            return;
-        }
-
-        for (size_t loop = 0; loop < 3; ++loop)
-        {
-            TxmStatus txm_status = txm->Forward();
-            local_cc_shards_.ProcessRequests(thd_id_);
-
-            if (txm_status != TxmStatus::Busy)
-            {
-                break;
-            }
-        }
-
-        assert(process_latch_.load(std::memory_order_acquire));
-        process_latch_.store(false, std::memory_order_release);
-    }
-
-    void RunOneRound()
-    {
-        std::array<TransactionExecution::uptr, 20> active_txs;
-
-        for (size_t loop = 0; loop < 4; ++loop)
-        {
-            bool expected = false;
-            bool success = process_latch_.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel);
-            if (!success)
-            {
-                return;
-            }
-
-            size_t active_tx_cnt = 0;
-            {
-                std::unique_lock<std::mutex> lk(active_tx_mutex_);
-                while (active_txs_.Size() > 0 &&
-                       active_tx_cnt < active_txs.size())
-                {
-                    active_txs[active_tx_cnt] = std::move(active_txs_.Peek());
-                    active_txs_.Dequeue();
-                    ++active_tx_cnt;
-                }
-            }
-
-            for (size_t idx = 0; idx < active_tx_cnt; ++idx)
-            {
-                TxmStatus txm_status = active_txs[idx]->Forward();
-
-                switch (txm_status)
-                {
-                case TxmStatus::Finished:
-                {
-                    free_txs_.enqueue(free_prod_token_,
-                                      std::move(active_txs[idx]));
-                }
-                break;
-                case TxmStatus::Idle:
-                    active_txs_.Enqueue(std::move(active_txs[idx]));
-                    break;
-                case TxmStatus::Busy:
-                    active_txs_.Enqueue(std::move(active_txs[idx]));
-                    break;
-                default:
-                    break;
-                }
-            }
-
-            local_cc_shards_.ProcessRequests(thd_id_);
-
-            assert(process_latch_.load(std::memory_order_acquire));
-            process_latch_.store(false, std::memory_order_release);
-
-            if (active_tx_cnt == 0)
-            {
-                break;
-            }
-        }
+        return tx_ptr;
     }
 #endif
 
-    void RunOneRound(size_t &active_cnt, size_t &req_cnt, bool &yield)
+    void RunOneRound(size_t &active_cnt,
+                     size_t &req_cnt,
+                     bool &yield
+#ifdef EXT_TX_PROC_ENABLED
+                     ,
+                     std::atomic<TxShardStatus> &shard_status,
+                     bool is_ext_proc
+#endif
+    )
     {
 #ifdef EXT_TX_PROC_ENABLED
-        size_t native_txm_cnt = 0;
+        TxShardStatus expected = TxShardStatus::Free;
+        bool success = shard_status.compare_exchange_strong(
+            expected, TxShardStatus::Occupied, std::memory_order_acq_rel);
+        if (!success)
         {
-            std::unique_lock<std::mutex> lk(active_tx_mutex_);
-            native_txm_cnt = active_txs_.Size() + fly_tx_queue_.Size();
+            active_cnt = 0;
+            req_cnt = 0;
+            yield = true;
+            return;
         }
 
-        uint16_t ext_num =
-            external_processor_num_.load(std::memory_order_relaxed);
-        if (ext_num > 0 && native_txm_cnt == 0)
-        {
-            // When there is one or more external tx processor threads, the
-            // native processor thread sleeps a period (e.g., 10us) before
-            // every run. If the external processor thread(s) are active and
-            // have advanced the the counter since last check, the native
-            // processor thread yields.
-            size_t ext_counter =
-                external_process_counter_.load(std::memory_order_relaxed);
-            if (internal_counter_ < ext_counter)
-            {
-                internal_counter_ = ext_counter;
-                yield = true;
-                return;
-            }
-        }
+        one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
 
         yield = false;
@@ -362,17 +288,61 @@ public:
             is_busy_round_ = false;
         }
 
-        for (size_t loop = 0; loop < 5; ++loop)
+#ifdef EXT_TX_PROC_ENABLED
+        size_t loop_cnt = 3;
+        CheckWaitingTxs();
+#else
+        size_t loop_cnt = 5;
+#endif
+
+        for (size_t loop = 0; loop < loop_cnt; ++loop)
         {
 #ifdef EXT_TX_PROC_ENABLED
-            bool expected = false;
-            bool success = process_latch_.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel);
-            if (!success)
+            if (is_ext_proc)
             {
-                return;
+                size_t resume_cnt = resume_tx_queue_.SizeApprox();
+                while (resume_cnt > 0)
+                {
+                    std::array<TransactionExecution *, 100> tx_bulk;
+                    size_t deque_cap = std::min(resume_cnt, tx_bulk.size());
+                    size_t deque_size = resume_tx_queue_.TryDequeueBulk(
+                        tx_bulk.begin(), deque_cap);
+
+                    for (size_t idx = 0; idx < deque_size; ++idx)
+                    {
+                        TransactionExecution *tx_ptr = tx_bulk[idx];
+                        if (tx_ptr->TxStatus() == TxnStatus::Finished)
+                        {
+                            continue;
+                        }
+
+                        TxmStatus txm_status = tx_ptr->Forward();
+                        if (txm_status == TxmStatus::Finished)
+                        {
+                            active_tx_lock_.Lock();
+                            auto it = active_tx_map_.find(tx_ptr);
+                            if (it == active_tx_map_.end())
+                            {
+                                active_tx_lock_.Unlock();
+                                continue;
+                            }
+
+                            TransactionExecution::uptr tx_uptr =
+                                std::move(it->second);
+                            active_tx_map_.erase(it);
+                            active_tx_lock_.Unlock();
+                            tx_progress_.erase(tx_uptr.get());
+
+                            free_txs_.enqueue(free_prod_token_,
+                                              std::move(tx_uptr));
+                        }
+                    }
+
+                    resume_cnt = resume_tx_queue_.SizeApprox();
+                }
             }
 #endif
+
             size_t fly_size = on_fly_txs_.Size();
             for (size_t idx = 0; idx < fly_size; ++idx)
             {
@@ -407,15 +377,14 @@ public:
 
             // Process CcRequests.
             req_cnt += local_cc_shards_.ProcessRequests(thd_id_);
-
-#ifdef EXT_TX_PROC_ENABLED
-            assert(process_latch_.load(std::memory_order_acquire));
-            process_latch_.store(false, std::memory_order_release);
-#endif
         }
 
         active_cnt =
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
+
+#ifdef EXT_TX_PROC_ENABLED
+        shard_status.store(TxShardStatus::Free, std::memory_order_release);
+#endif
 
         if (metrics::enable_collect_metrics)
         {
@@ -444,35 +413,76 @@ public:
         auto tstart = std::chrono::steady_clock::now();
 
         size_t idle_rnd = 0;
-        local_cc_shards_.ProcessorSleepFlag(
-            thd_id_, &in_sleep_, &sleep_mux_, &sleep_cv_);
+        local_cc_shards_.SetTxProcNotifier(
+            thd_id_, &tx_proc_status_, coordi_.get());
 
-        while (!terminated_.load(std::memory_order_acquire))
+#ifdef EXT_TX_PROC_ENABLED
+        size_t local_round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
+#endif
+
+        while (!terminated_.load(std::memory_order_relaxed))
         {
             size_t tx_cnt = 0, req_cnt = 0;
             bool yield = false;
-            RunOneRound(tx_cnt, req_cnt, yield);
 
 #ifdef EXT_TX_PROC_ENABLED
-            if (external_processor_num_.load(std::memory_order_relaxed) > 0)
+            RunOneRound(tx_cnt, req_cnt, yield, coordi_->shard_status_, false);
+            ++local_round_cnt;
+
+            size_t round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
+            bool has_ext_proc =
+                coordi_->ext_processor_cnt_.load(std::memory_order_relaxed) > 0;
+            bool is_ext_proc_active = local_round_cnt != round_cnt;
+
+            if (yield ||
+                (has_ext_proc && (is_ext_proc_active ||
+                                  (req_cnt + tx_cnt == 0 && idle_rnd > 1000))))
             {
-                if (yield)
+                tx_cnt = 0;
+                req_cnt = 0;
+                idle_rnd = 0;
+
+                tx_proc_status_.store(TxProcessorStatus::Standby,
+                                      std::memory_order_relaxed);
+
+                std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
+                do
                 {
-                    std::this_thread::sleep_for(1ms);
-                }
-                else if (tx_cnt + req_cnt > 0)
-                {
-                    std::this_thread::sleep_for(10us);
-                }
-                else
-                {
-                    std::this_thread::sleep_for(100us);
-                }
+                    local_round_cnt = round_cnt;
+                    // LOG(INFO) << "native thd yield sleeps, round cnt: "
+                    //           << local_round_cnt;
+                    bool no_ext_proc = coordi_->sleep_cv_.wait_for(
+                        lk,
+                        2s,
+                        [this]()
+                        {
+                            return coordi_->ext_processor_cnt_.load(
+                                       std::memory_order_relaxed) == 0 ||
+                                   terminated_.load(std::memory_order_relaxed);
+                        });
+
+                    round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
+                    // LOG(INFO)
+                    //     << "native thd yield wakes up, no ext proc: "
+                    //     << (int) no_ext_proc << ", round cnt: " << round_cnt;
+
+                    // If the round counter is not incremented since last sleep,
+                    // it means that there is no external processor, or the
+                    // external processor has not visited the shard for a while.
+                    // Steps out of the standby mode to forward tx's and process
+                    // cc requests.
+                    if (no_ext_proc || round_cnt == local_round_cnt)
+                    {
+                        local_round_cnt = round_cnt;
+                        break;
+                    }
+                } while (!terminated_.load(std::memory_order_relaxed));
+
+                tx_proc_status_.store(TxProcessorStatus::Busy,
+                                      std::memory_order_relaxed);
             }
-            else
-            {
-                std::this_thread::yield();
-            }
+#else
+            RunOneRound(tx_cnt, req_cnt, yield);
 #endif
 
             if (tx_cnt > 0 || req_cnt > 0)
@@ -498,12 +508,20 @@ public:
                 {
                     idle_rnd = 0;
 
-                    in_sleep_.store(true, std::memory_order_relaxed);
+                    tx_proc_status_.store(TxProcessorStatus::Sleep,
+                                          std::memory_order_relaxed);
 
-                    std::unique_lock<std::mutex> lk(sleep_mux_);
-                    sleep_cv_.wait(lk, [this]() { return !IsIdle(); });
+                    std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
+                    coordi_->sleep_cv_.wait(lk, [this]() { return !IsIdle(); });
 
-                    in_sleep_.store(false, std::memory_order_relaxed);
+#ifdef EXT_TX_PROC_ENABLED
+                    local_round_cnt =
+                        one_round_cnt_.load(std::memory_order_relaxed);
+                    // LOG(INFO) << "native thd long wakes up, round cnt: "
+                    //           << local_round_cnt;
+#endif
+                    tx_proc_status_.store(TxProcessorStatus::Busy,
+                                          std::memory_order_relaxed);
                 }
             }
         }
@@ -523,29 +541,134 @@ public:
         // decrease use_count of share pointer to TableSchema
         cc_hd_ = nullptr;
 
-        terminated_.store(true, std::memory_order_relaxed);
-        std::unique_lock<std::mutex> lk(sleep_mux_);
-        sleep_cv_.notify_one();
+        {
+            std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
+            terminated_.store(true, std::memory_order_relaxed);
+            coordi_->sleep_cv_.notify_one();
+        }
     }
 
 #ifdef EXT_TX_PROC_ENABLED
-    std::function<void()> *ExtProcessorFunctor()
+    std::function<void()> TxProcessorFunctor()
     {
-        return &external_processor_func_;
+        return [this, coordi = coordi_]()
+        {
+            size_t active_cnt = 0, req_cnt = 0;
+            bool yield = false;
+            RunOneRound(
+                active_cnt, req_cnt, yield, coordi->shard_status_, true);
+        };
     }
-#endif
 
-#ifdef EXT_TX_PROC_ENABLED
-    std::function<void()> *ExtProcessorFunctor()
+    std::function<void(int16_t)> UpdateExtProcFunctor()
     {
-        return &external_processor_func_;
+        return [this, coordi = coordi_](int16_t thd_delta)
+        {
+            int16_t ext_thd_cnt = coordi->ext_processor_cnt_.fetch_add(
+                thd_delta, std::memory_order_relaxed);
+
+            ext_thd_cnt += thd_delta;
+            assert(ext_thd_cnt >= 0);
+
+            // There is no external thread anymore. Wakes up the native tx
+            // processor.
+            if (ext_thd_cnt == 0)
+            {
+                Notify(coordi->sleep_mux_, coordi->sleep_cv_);
+            }
+        };
     }
 
-    std::atomic<bool> process_latch_{false};
-    std::atomic<size_t> external_process_counter_{0};
-    size_t internal_counter_{0};
-    std::atomic<uint16_t> external_processor_num_{0};
-    std::function<void()> external_processor_func_;
+    void EnlistTx(TransactionExecution *txm)
+    {
+        resume_tx_queue_.Enqueue(txm);
+    }
+
+    /**
+     * @brief Lets the external processor to forward the tx state machine.
+     * Forwarding needs to hold the latch of the tx shard, because it accesses
+     * thread-unsafe resources (such as cc handler) belonging to the tx shard.
+     *
+     * @param txm
+     * @return true, if the external processor acquires the latch successfully
+     * and forwards the tx state machine.
+     * @return false, if someone else is holding the latch. The tx will be
+     * enlisted into the resume queue for later execution.
+     */
+    bool ForwardTx(TransactionExecution *txm)
+    {
+        TxShardStatus expected = TxShardStatus::Free;
+        bool success = coordi_->shard_status_.compare_exchange_strong(
+            expected, TxShardStatus::Occupied, std::memory_order_acquire);
+        if (!success)
+        {
+            return false;
+        }
+
+        TxmStatus txm_status = txm->Forward();
+        if (txm_status == TxmStatus::Finished)
+        {
+            active_tx_lock_.Lock();
+            auto it = active_tx_map_.find(txm);
+            if (it != active_tx_map_.end())
+            {
+                TransactionExecution::uptr tx_uptr = std::move(it->second);
+                active_tx_map_.erase(it);
+                active_tx_lock_.Unlock();
+                tx_progress_.erase(tx_uptr.get());
+
+                free_txs_.enqueue(free_prod_token_, std::move(tx_uptr));
+            }
+            else
+            {
+                active_tx_lock_.Unlock();
+            }
+        }
+
+        coordi_->shard_status_.store(TxShardStatus::Free,
+                                     std::memory_order_release);
+        return true;
+    }
+
+    void CheckWaitingTxs()
+    {
+        static const uint64_t check_progress_period = 2000000;
+        uint64_t now_ts = LocalCcShards::ClockTs();
+        if (now_ts - progress_check_ts_ <= check_progress_period)
+        {
+            return;
+        }
+
+        for (auto &[tx, progress] : tx_progress_)
+        {
+            // If the tx has been stuck on the same command for a while, enlists
+            // the tx for execution.
+            uint16_t cmd_id = tx->CommandId();
+            if (now_ts - progress.wait_clock_ts_ > check_progress_period &&
+                cmd_id == progress.cmd_id_)
+            {
+                EnlistTx(tx);
+            }
+            else if (cmd_id > progress.cmd_id_)
+            {
+                progress.cmd_id_ = cmd_id;
+            }
+        }
+
+        progress_check_ts_ = now_ts;
+    }
+
+    void EnlistWaitingTx(TransactionExecution *txm)
+    {
+        uint16_t cmd_id = txm->CommandId();
+        uint64_t clock_ts = LocalCcShards::ClockTs();
+        auto tx_it = tx_progress_.try_emplace(txm, cmd_id, clock_ts);
+        if (!tx_it.second)
+        {
+            tx_it.first->second.cmd_id_ = cmd_id;
+            tx_it.first->second.wait_clock_ts_ = clock_ts;
+        }
+    }
 #endif
 
 private:
@@ -555,9 +678,31 @@ private:
                local_cc_shards_.IsIdle(thd_id_) &&
                !terminated_.load(std::memory_order_relaxed);
     }
+
+    /**
+     * @brief Notifies the tx processor that a tx or a cc request waits to be
+     * processed and wakes up the processor if it is asleep and there is no
+     * exteranl thread to process. Even though in general std::mutex is not need
+     * for cv.notify(), the method intentionally places std::mutex before
+     * notify(). This is because tx's or cc requests are managed via lock-free
+     * data structures. The std::mutex in this method creates a barrier, forcing
+     * the lock-free mutations to precede cv.notify(), so that whoever woken up
+     * will see the effects of the mutations. Moreover, it creates a critical
+     * section such that the to-sleep tx processor either precedes cv.notify(),
+     * thereby being woken up by the notify signal, or succeeds cv.notify(),
+     * thereby detecting the tx or cc request mutations and thus not entering
+     * the sleep mode.
+     *
+     */
+    void Notify(std::mutex &sleep_mux, std::condition_variable &sleep_cv)
+    {
+        std::unique_lock<std::mutex> lk(sleep_mux);
+        sleep_cv.notify_one();
+    }
+
     size_t thd_id_;
     std::atomic<bool> terminated_;
-    std::atomic<bool> in_sleep_{false};
+    std::atomic<TxProcessorStatus> tx_proc_status_{TxProcessorStatus::Busy};
 
     LocalCcShards &local_cc_shards_;
     std::unique_ptr<LocalCcHandler> cc_hd_;
@@ -574,10 +719,41 @@ private:
     moodycamel::ProducerToken free_prod_token_;
     moodycamel::ConsumerToken free_consumer_token_;
 
-    std::mutex sleep_mux_;
-    std::condition_variable sleep_cv_;
-
     TxLog *txlog_hd_;
+
+    std::shared_ptr<TxProcCoordinator> coordi_;
+
+#ifdef EXT_TX_PROC_ENABLED
+    /**
+     * @brief The number of rounds this shard has been processed. We use the
+     * number to track if external threads have visited the shard for a certain
+     * amount of time, and if not (because of external threads being occupied),
+     * wake up the native tx processor to process the shard's binding active
+     * tx's and cc requests.
+     *
+     */
+    std::atomic<size_t> one_round_cnt_{0};
+
+    std::unordered_map<TransactionExecution *, TransactionExecution::uptr>
+        active_tx_map_;
+    SimpleSpinlock active_tx_lock_;
+    ConcurrentQueueWSize<TransactionExecution *> resume_tx_queue_;
+
+    struct TxProgress
+    {
+        TxProgress() = delete;
+        TxProgress(uint16_t cmd_id, uint64_t clock_ts)
+            : cmd_id_(cmd_id), wait_clock_ts_(clock_ts)
+        {
+        }
+
+        uint16_t cmd_id_;
+        uint64_t wait_clock_ts_;
+    };
+
+    std::unordered_map<TransactionExecution *, TxProgress> tx_progress_;
+    uint64_t progress_check_ts_{0};
+#endif
 
     metrics::TimePoint busy_round_start_;
     bool is_busy_round_{false};
@@ -752,54 +928,36 @@ public:
         return pool_[sid]->NewTx();
     }
 
-    TransactionExecution::uptr NewTx(size_t shard_id)
+#ifdef EXT_TX_PROC_ENABLED
+    TransactionExecution *NewTx(size_t shard_id)
     {
         size_t sid =
             shard_id < pool_.size() ? shard_id : (shard_id % pool_.size());
-        return pool_[sid]->NewTxm();
+        return pool_[sid]->NewExternalTx();
     }
 
-    void Recycle(size_t shard_id, TransactionExecution::uptr txm)
+    std::function<
+        std::pair<std::function<void()>, std::function<void(int16_t)>>(int16_t)>
+    GetTxProcFunctors()
     {
-        assert(shard_id < pool_.size());
-        pool_[shard_id]->RecycleTxm(std::move(txm));
+        return [this](int16_t group_id)
+        {
+            assert(group_id >= 0);
+            int16_t sid = group_id % pool_.size();
+            return std::make_pair(pool_[sid]->TxProcessorFunctor(),
+                                  pool_[sid]->UpdateExtProcFunctor());
+        };
     }
+#endif
 
     LocalCcShards &CcShards()
     {
         return local_cc_shards_;
     }
 
-    template <typename KeyT, typename ValueT>
-    void CreateCcTable(const TableName &tabname,
-                       const Schema *key_schema = nullptr,
-                       const Schema *rec_schema = nullptr,
-                       uint32_t core_id = 0,
-                       bool is_all = true)
-    {
-        local_cc_shards_.CreateCcTable<KeyT, ValueT>(
-            tabname, key_schema, rec_schema, core_id, is_all);
-    }
-
-    void DropCcTable(const TableName &tabname, uint32_t core_id)
-    {
-        local_cc_shards_.DropCcTable(tabname, core_id);
-    }
-
-    template <typename SkT, typename PkT>
-    void CreateIndexCcTable(const TableName &index_name,
-                            const Schema *sk_schema = nullptr,
-                            const Schema *pk_schema = nullptr,
-                            uint32_t core_id = 0,
-                            bool is_all = true)
-    {
-        local_cc_shards_.CreateSkCcTable<SkT, PkT>(
-            index_name, sk_schema, pk_schema, core_id, is_all);
-    }
-
+    LocalCcShards local_cc_shards_;
     std::vector<std::unique_ptr<TxProcessor>> pool_;
     std::vector<std::thread> thd_pool_;
-    LocalCcShards local_cc_shards_;
     Checkpointer ckpt_;
 
     friend class txservice::fault::ReplayService;

@@ -556,13 +556,13 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
                 hd_res.Reset();
                 hd_res.SetRefCnt(ng_cnt);
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+#endif
                 for (uint32_t nid = 0; nid < ng_cnt; ++nid)
                 {
-                    this->FlushDataIntoDataStore(this->table_key_.Name(),
-                                                 nid,
-                                                 txm->commit_ts_,
-                                                 false,
-                                                 hd_res);
+                    FlushDataIntoDataStore(
+                        table_key_.Name(), nid, txm->commit_ts_, false, hd_res);
                 }
 
                 // Start timing.
@@ -580,25 +580,16 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                if (flush_all_old_tuples_pk_op_.hd_result_.ErrorCode() ==
-                    CcErrorCode::REQUEST_LOST)
-                {
-                    // If the RPC server is not ready yet, wait a moment to
-                    // retry this operation.
-                    StartWaiting();
-                    if (!WaitOver(10))
-                    {
-                        return;
-                    }
-                }
-                LOG(WARNING)
-                    << "Upsert index for table: " << table_key_.Name().String()
+                LOG(ERROR)
+                    << "Upsert index for table: "
+                    << table_key_.Name().StringView()
                     << ", flush all old pk tuples failed with error message: "
                     << flush_all_old_tuples_pk_op_.hd_result_.ErrorMsg()
                     << ", txn: " << txm->TxNumber()
                     << ". Retry flush all old pk data.";
+                flush_all_old_tuples_pk_op_.retry_num_ = 1;
                 txm->PushOperation(&flush_all_old_tuples_pk_op_);
-                txm->Process(flush_all_old_tuples_pk_op_);
+                flush_all_old_tuples_pk_op_.ReRunOp(txm);
             }
             else
             {
@@ -624,11 +615,16 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             fetch_old_tuples_from_kv_gen_sk_data_upload_op_.op_func_ =
                 [this, txm]
             {
+#ifdef EXT_TX_PROC_ENABLED
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_
+                    .SetToBlock();
+                std::atomic_thread_fence(std::memory_order_release);
+#endif
                 // Launch a new thread instead of sending it to tx workpool to
                 // avoid blocking range split workers.
-                this->fetch_old_tuples_from_kv_gen_sk_data_upload_op_
-                    .worker_thread_ = std::thread(
-                    [this, txm] { this->FetchTuplesAndUploadPackedKey(txm); });
+                fetch_old_tuples_from_kv_gen_sk_data_upload_op_.worker_thread_ =
+                    std::thread([this, txm]
+                                { FetchTuplesAndUploadPackedKey(txm); });
             };
 
             op_ = &fetch_old_tuples_from_kv_gen_sk_data_upload_op_;
@@ -671,7 +667,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         CODE_FAULT_INJECTOR(
             "term_AlterTableIndex_GeneratePackedSkOp_Continue", {
                 static uint64_t count = 0;
-                if (count++ % 100000 == 0)
+                size_t step = txm->bind_to_ext_proc_ ? 100000 : 2;
+                if (count++ % step == 0)
                 {
                     DLOG(INFO) << "FaultInject term_AlterTableIndex_Generate"
                                   "PackedSkOp_Continue";
@@ -715,6 +712,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 
             hd_res.Reset();
             hd_res.SetRefCnt(ng_cnt * table_cnt);
+#ifdef EXT_TX_PROC_ENABLED
+            hd_res.SetToBlock();
+#endif
 
             for (uint32_t nid = 0; nid < ng_cnt; ++nid)
             {
@@ -723,12 +723,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                      add_index_it != new_index_names.cend();
                      ++add_index_it)
                 {
-                    this->FlushDataIntoDataStore(add_index_it->first,
-                                                 nid,
-                                                 txm->commit_ts_,
-                                                 true,
-                                                 hd_res,
-                                                 expected_term);
+                    FlushDataIntoDataStore(add_index_it->first,
+                                           nid,
+                                           txm->commit_ts_,
+                                           true,
+                                           hd_res,
+                                           expected_term);
                 }
             }
 
@@ -2438,35 +2438,5 @@ void UpsertTableIndexOp::FetchTuplesAndUploadPackedKey(
         << "Generate packed sk and write into sk ccmap successfully. Txn: "
         << txm->TxNumber();
     fetch_old_tuples_from_kv_gen_sk_data_upload_op_.hd_result_.SetFinished();
-}
-
-void UpsertTableIndexOp::StartWaiting()
-{
-    if (!waiting_to_retry_op_)
-    {
-        start_waiting_ = LocalCcShards::ClockTs();
-        op_forward_cnt_ = 0;
-        waiting_to_retry_op_ = true;
-    }
-}
-bool UpsertTableIndexOp::WaitOver(int wait_secs)
-{
-    ++op_forward_cnt_;
-    if (op_forward_cnt_ == OpLoopCnt)
-    {
-        op_forward_cnt_ = 0;
-        uint64_t now_ts = LocalCcShards::ClockTs();
-        uint64_t duration =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::seconds(wait_secs))
-                .count();
-        if (now_ts - start_waiting_ > duration)
-        {
-            start_waiting_ = now_ts;
-            waiting_to_retry_op_ = false;
-            return true;
-        }
-    }
-    return false;
 }
 }  // namespace txservice

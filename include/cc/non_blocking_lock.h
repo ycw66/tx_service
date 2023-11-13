@@ -27,6 +27,13 @@ class NonBlockingLock
 public:
     using Uptr = std::unique_ptr<NonBlockingLock>;
 
+    enum struct WriteLockType
+    {
+        NoWritelock = 0,
+        WriteLock,
+        WriteIntent
+    };
+
     NonBlockingLock()
     {
     }
@@ -41,10 +48,8 @@ public:
     {
         read_intentions_ = std::move(rhs.read_intentions_);
         read_locks_ = std::move(rhs.read_locks_);
-        write_lock_tx_ = rhs.write_lock_tx_;
-        is_write_lock_empty_ = rhs.is_write_lock_empty_;
-        write_intent_tx_ = rhs.write_intent_tx_;
-        is_write_intent_empty_ = rhs.is_write_intent_empty_;
+        write_lk_type_ = rhs.write_lk_type_;
+        write_txn_ = rhs.write_txn_;
         blocking_queue_ = std::move(rhs.blocking_queue_);
         is_used_ = rhs.is_used_;
     }
@@ -55,10 +60,8 @@ public:
         {
             read_intentions_ = std::move(rhs.read_intentions_);
             read_locks_ = std::move(rhs.read_locks_);
-            write_lock_tx_ = rhs.write_lock_tx_;
-            is_write_lock_empty_ = rhs.is_write_lock_empty_;
-            write_intent_tx_ = rhs.write_intent_tx_;
-            is_write_intent_empty_ = rhs.is_write_intent_empty_;
+            write_lk_type_ = rhs.write_lk_type_;
+            write_txn_ = rhs.write_txn_;
             blocking_queue_ = std::move(rhs.blocking_queue_);
             is_used_ = rhs.is_used_;
         }
@@ -69,10 +72,8 @@ public:
     {
         read_intentions_.clear();
         read_locks_.clear();
-        write_lock_tx_ = 0;
-        is_write_lock_empty_ = true;
-        write_intent_tx_ = 0;
-        is_write_intent_empty_ = true;
+        write_lk_type_ = WriteLockType::NoWritelock;
+        write_txn_ = 0;
         is_used_ = false;
         blocking_queue_.Reset();
         wlock_ts_ = 0;
@@ -103,7 +104,7 @@ public:
      */
     bool AcquireWriteLock(CcRequestBase *cc_req, CcProtocol protocol);
 
-    void ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
+    bool ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
 
     /**
      *  @brief Release the write lock and add the write intent, take effect only
@@ -113,7 +114,7 @@ public:
 
     bool AcquireWriteIntent(CcRequestBase *cc_req, CcProtocol protocol);
 
-    void ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs);
+    bool ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs);
 
     /**
      * @brief Tries to acquire the read lock. Only tx's under 2PL acquire read
@@ -128,7 +129,7 @@ public:
      */
     bool AcquireReadLock(CcRequestBase *cc_req);
 
-    void ReleaseReadLock(TxNumber tx_number, CcShard *ccs);
+    bool ReleaseReadLock(TxNumber tx_number, CcShard *ccs);
 
     /**
      * @brief Acquires a read intent. Tx's under OCC/MVCC acquire read intents
@@ -140,13 +141,11 @@ public:
      */
     bool AcquireReadIntent(TxNumber tx_number);
 
-    void ReleaseReadIntent(TxNumber tx_number);
+    bool ReleaseReadIntent(TxNumber tx_number);
 
     LockOpStatus AcquireLock(CcRequestBase *cc_req,
                              CcProtocol protocol,
                              LockType lock_type);
-
-    void ReleaseLock(TxNumber tx_number, CcShard *ccs, LockType lock_type);
 
     void InsertBlockingQueue(CcRequestBase *cc_req, LockType lock_type);
 
@@ -156,11 +155,18 @@ public:
 
     bool HasWriteLock() const;
 
-    TxNumber WriteIntentTx() const;
+    std::pair<TxNumber, WriteLockType> WriteTx() const
+    {
+        return {write_txn_, write_lk_type_};
+    }
 
-    bool HasWriteIntent() const;
+    bool HasWrite(TxNumber txn)
+    {
+        return write_lk_type_ != WriteLockType::NoWritelock &&
+               write_txn_ == txn;
+    }
 
-    void ClearTx(TxNumber tx_number, CcShard *ccs);
+    LockType ClearTx(TxNumber tx_number, CcShard *ccs);
 
     const std::unordered_set<TxNumber> &ReadLocks() const;
     const std::unordered_set<TxNumber> &ReadIntents() const;
@@ -182,10 +188,8 @@ public:
                      read_intentions_.size() * sizeof(TxNumber);
         mem_size_ +=
             sizeof(read_locks_) + read_locks_.size() * sizeof(TxNumber);
-        mem_size_ += sizeof(write_lock_tx_);
-        mem_size_ += sizeof(is_write_lock_empty_);
-        mem_size_ += sizeof(write_intent_tx_);
-        mem_size_ += sizeof(is_write_intent_empty_);
+        mem_size_ += sizeof(write_lk_type_);
+        mem_size_ += sizeof(write_txn_);
         mem_size_ += blocking_queue_.MemUsage() +
                      blocking_queue_.Capacity() * sizeof(LockQueueEntry);
         mem_size_ += sizeof(is_used_);
@@ -211,22 +215,23 @@ public:
         }
 
         debug_string.append(" ,write_lock: ");
-        if (!is_write_lock_empty_)
+        if (write_lk_type_ != WriteLockType::NoWritelock)
         {
-            debug_string.append(std::to_string(write_lock_tx_));
-            debug_string.append(",");
+            debug_string.append(std::to_string(write_txn_));
+            debug_string.append(":");
+            if (write_lk_type_ == WriteLockType::WriteLock)
+            {
+                debug_string.append("lock");
+            }
+            else
+            {
+                debug_string.append("intent");
+            }
         }
-        debug_string.append(" ,is_write_lock_empty_ ");
-        debug_string.append(std::to_string(is_write_lock_empty_));
-
-        debug_string.append(" ,write_intent: ");
-        if (!is_write_intent_empty_)
+        else
         {
-            debug_string.append(std::to_string(write_intent_tx_));
+            debug_string.append("empty");
         }
-
-        debug_string.append(" ,is_write_intent_empty_: ");
-        debug_string.append(std::to_string(is_write_intent_empty_));
 
         return debug_string;
     }
@@ -288,45 +293,49 @@ private:
 
     bool NoReadLockConflict(TxNumber tx_number) const
     {
-        return (read_locks_.empty() ||
-                (read_locks_.size() == 1 && *read_locks_.begin() == tx_number));
-    }
-
-    bool NoWriteIntentConflict(TxNumber tx_number) const
-    {
-        return is_write_intent_empty_ || write_intent_tx_ == tx_number;
+        return read_locks_.empty() ||
+               (read_locks_.size() == 1 && *read_locks_.begin() == tx_number);
     }
 
     bool NoWriteLockConflict(TxNumber tx_number) const
     {
-        return is_write_lock_empty_ || write_lock_tx_ == tx_number;
+        return write_lk_type_ != WriteLockType::WriteLock ||
+               write_txn_ == tx_number;
     }
 
-    // Read intentions do not block writes. They are used by a tx under OCC/MVCC
-    // protocols to mark that the tx is accessing the data item and to prevent
-    // the cache replacement algorithm from kicking out the item's concurrency
-    // control (cc) entry from the cc map before the tx finishes.
+    bool NoWriteConflict(TxNumber txn) const
+    {
+        return write_lk_type_ == WriteLockType::NoWritelock ||
+               write_txn_ == txn;
+    }
+
+    // Read intentions do not block writes. They are used by a tx under
+    // OCC/MVCC protocols to mark that the tx is accessing the data item and
+    // to prevent the cache replacement algorithm from kicking out the
+    // item's concurrency control (cc) entry from the cc map before the tx
+    // finishes.
     std::unordered_set<TxNumber> read_intentions_;
     // Tx's who have acquired read locks
     std::unordered_set<TxNumber> read_locks_;
-    TxNumber write_lock_tx_{0};
-    bool is_write_lock_empty_{true};
-    TxNumber write_intent_tx_{0};
-    bool is_write_intent_empty_{true};
+
+    WriteLockType write_lk_type_;
+    TxNumber write_txn_{0};
+
     bool is_used_{false};
     // The time when a write tx acquires the write lock on this lock.
     uint64_t wlock_ts_;
 
-    // blocking_queue_ stores the requests that 1) want to acquire lock/intent
-    // but failed due to conflict, or 2) want to read a pk record whose commit
-    // ts is less than the commit ts of the corresponding secondary index the
-    // transaction just read, under which circumstance the pk read should wait
-    // until the pk is updated to maintain the consistency of pk-sk mapping.
-    // There are four types of lock requests can be in blocking queue: Write
-    // Lock(WL), Write Intent(WI), Read Lock(RL) and No Lock(NL). The conflict
-    // map is that WL conflicts with WL/WI/RL, WI conflicts with WL/WI and RL
-    // conflicts with WL. NL denotes a pk read request under read committed
-    // isolation level. NL requests are always inserted to the beginning of
+    // blocking_queue_ stores the requests that 1) want to acquire
+    // lock/intent but failed due to conflict, or 2) want to read a pk
+    // record whose commit ts is less than the commit ts of the
+    // corresponding secondary index the transaction just read, under which
+    // circumstance the pk read should wait until the pk is updated to
+    // maintain the consistency of pk-sk mapping. There are four types of
+    // lock requests can be in blocking queue: Write Lock(WL), Write
+    // Intent(WI), Read Lock(RL) and No Lock(NL). The conflict map is that
+    // WL conflicts with WL/WI/RL, WI conflicts with WL/WI and RL conflicts
+    // with WL. NL denotes a pk read request under read committed isolation
+    // level. NL requests are always inserted to the beginning of
     // blocking_queue_ because it will not introduce any conflict with other
     // tansactions.
     CircularQueue<LockQueueEntry> blocking_queue_;
