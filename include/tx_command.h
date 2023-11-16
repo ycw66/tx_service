@@ -36,8 +36,9 @@ public:
     /**
      * Execute cmd on object to get the result.
      * @param object
+     * @return success
      */
-    virtual void ExecuteOn(TxObject &object) = 0;
+    virtual bool ExecuteOn(TxObject &object) = 0;
 
     // Commit current command on obj_ptr, return the new object if the command
     // changes or deletes the object. Read only command need not commit.

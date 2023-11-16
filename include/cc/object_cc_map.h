@@ -306,15 +306,16 @@ public:
             }
         }
 
+        bool cmd_success = false;
         if (cce->dirty_payload_status_ == RecordStatus::Normal)
         {
             assert(cce->dirty_payload_ != nullptr);
             // Temporary object exists, execute and commit the command on
             // the temporary object.
             ValueT &tmp_object = *cce->dirty_payload_;
-            cmd->ExecuteOn(tmp_object);
+            cmd_success = cmd->ExecuteOn(tmp_object);
             LOG(INFO) << "execute and commit current command on dirty payload";
-            if (!cmd->IsReadOnly())
+            if (cmd_success && !cmd->IsReadOnly())
             {
                 CommitCommandOnDirtyPayload(
                     cce->dirty_payload_, cce->dirty_payload_status_, *cmd);
@@ -327,9 +328,9 @@ public:
             // in PostWriteCc if the txn commits.
             assert(cce->pending_cmd_ == nullptr);
             ValueT &object = *cce->payload_;
-            cmd->ExecuteOn(object);
+            cmd_success = cmd->ExecuteOn(object);
 
-            if (!cmd->IsReadOnly() && !req.apply_and_commit_)
+            if (cmd_success && !cmd->IsReadOnly() && !req.apply_and_commit_)
             {
                 // Copy the command to be committed in PostWriteCc or when
                 // executing subsequent commands of the same txn.
@@ -344,7 +345,7 @@ public:
             }
         }
 
-        if (req.apply_and_commit_ && !cmd->IsReadOnly())
+        if (cmd_success && req.apply_and_commit_ && !cmd->IsReadOnly())
         {
             // Skipping writing log, do the PostWrite and release the lock.
             assert(acquired_lock == LockType::WriteLock);
