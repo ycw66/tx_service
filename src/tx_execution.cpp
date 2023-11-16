@@ -2670,7 +2670,7 @@ void TransactionExecution::ScanClose(
 {
     CcScanner *scanner = nullptr;
     auto scan_it = scans_.find(alias);
-    if (scan_it != scans_.end())
+    if (scan_it == scans_.end())
     {
         return;
     }
