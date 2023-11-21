@@ -1,9 +1,7 @@
 #pragma once
 
-#ifdef ON_KEY_OBJECT
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
-#endif
 
 #include <atomic>
 #include <condition_variable>
@@ -196,18 +194,12 @@ public:
         }
         else
         {
-#ifdef ON_KEY_OBJECT
             std::unique_lock lk(mutex_);
             waiting_ = true;
             while (status_ == TxResultStatus::Unknown)
             {
                 cv_.wait(lk);
             }
-#else
-            std::unique_lock lk(mutex_);
-            waiting_ = true;
-            cv_.wait(lk, [this] { return status_ != TxResultStatus::Unknown; });
-#endif
         }
 
         return 0;
@@ -217,13 +209,8 @@ private:
     T value_;
     TxResultStatus status_;
     TxErrorCode error_code_;
-#ifdef ON_KEY_OBJECT
     bthread::Mutex mutex_;
     bthread::ConditionVariable cv_;
-#else
-    std::mutex mutex_;
-    std::condition_variable cv_;
-#endif
 
     bool waiting_{false};
     const std::function<void()> *yield_func_;

@@ -3661,7 +3661,6 @@ void TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
 void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
 {
 #ifdef ON_KEY_OBJECT
-    //    write_log.log_type_ = TxLogType::COMMAND;
     write_log.log_type_ = TxLogType::DATA;
 
     write_log.log_closure_.LogRequest().Clear();
@@ -3775,7 +3774,6 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
             // serialized key and commands.
             log_ng_blob.replace(
                 key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
-            const std::string &str = log_ng_blob;
         }
     }
 #endif
