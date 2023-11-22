@@ -38,6 +38,7 @@ struct CommitTxRequest;
 struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct ObjectCommandTxRequest;
+struct MultiObjectCommandTxRequest;
 struct ReloadCacheTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
@@ -123,6 +124,7 @@ public:
     void ProcessTxRequest(AbortTxRequest &abort_req);
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(ObjectCommandTxRequest &req);
+    void ProcessTxRequest(MultiObjectCommandTxRequest &req);
     void ProcessTxRequest(ReloadCacheTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
@@ -347,6 +349,9 @@ private:
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);
 
+    void Process(MultiObjectCommandOp &obj_cmd_op);
+    void PostProcess(MultiObjectCommandOp &obj_cmd_op);
+
     void Process(KickoutDataAllOp &kickout_data_all_op);
     void PostProcess(KickoutDataAllOp &kickout_data_all_op);
 
@@ -528,6 +533,9 @@ private:
     TxResult<Void> *void_resp_;
     // Response whose returned result is record, used by ObjectCommandTxRequest
     TxResult<RecordStatus> *rec_resp_;
+    // Response whose returned vector of RecordStatus, used by
+    // MultiObjectCommandTxRequest
+    TxResult<std::vector<RecordStatus>> *vct_rec_resp_;
     // Response whose returned result is record-ts-pair, used by ReadTxRequest
     TxResult<std::pair<RecordStatus, uint64_t>> *rtp_resp_;
     // Response whose returned result is bool
@@ -573,6 +581,7 @@ private:
         scan_close_req_pool_{nullptr};
 
     ObjectCommandOp obj_cmd_;
+    MultiObjectCommandOp multi_obj_cmd_;
 
     // Committing phase.
 #ifdef RANGE_PARTITION_ENABLED
@@ -643,6 +652,7 @@ private:
     friend struct AsyncOp;
     friend struct PostReadOperation;
     friend struct ObjectCommandOp;
+    friend struct MultiObjectCommandOp;
     friend struct KickoutDataAllOp;
     friend struct UpsertTableIndexOp;
     friend struct DataMigrationOp;

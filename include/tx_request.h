@@ -741,6 +741,51 @@ struct ObjectCommandTxRequest
     bool is_cmd_owner_{};
 };
 
+struct MultiObjectCommandTxRequest
+    : public TemplateTxRequest<MultiObjectCommandTxRequest,
+                               std::vector<RecordStatus>>
+{
+    MultiObjectCommandTxRequest(const TableName *table_name,
+                                std::vector<const TxKey *> *vct_key,
+                                std::vector<TxCommand *> *vct_cmd,
+                                bool auto_commit = true)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(table_name),
+          auto_commit_(auto_commit),
+          vct_key_(vct_key),
+          vct_cmd_(vct_cmd)
+    {
+    }
+
+    MultiObjectCommandTxRequest(MultiObjectCommandTxRequest &&rhs)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(rhs.table_name_),
+          auto_commit_(rhs.auto_commit_)
+    {
+        vct_key_ = rhs.vct_key_;
+        rhs.vct_key_ = nullptr;
+        vct_cmd_ = rhs.vct_cmd_;
+        rhs.vct_cmd_ = nullptr;
+    }
+
+    const std::vector<const TxKey *> *VctKey() const
+    {
+        assert(vct_key_ != nullptr);
+        return vct_key_;
+    }
+
+    const std::vector<TxCommand *> *VctCommand() const
+    {
+        assert(vct_cmd_ != nullptr);
+        return vct_cmd_;
+    }
+
+    const TableName *table_name_;
+    bool auto_commit_{};
+    std::vector<const TxKey *> *vct_key_;
+    std::vector<TxCommand *> *vct_cmd_;
+};
+
 struct ClusterScaleTxRequest
     : public TemplateTxRequest<ClusterScaleTxRequest, Void>
 {

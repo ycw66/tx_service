@@ -5034,6 +5034,155 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     }
 }
 
+MultiObjectCommandOp::MultiObjectCommandOp(TransactionExecution *txm)
+    : txm_(txm)
+{
+}
+
+void MultiObjectCommandOp::Reset(const TableName *table_name,
+                                 const std::vector<const TxKey *> *vct_key,
+                                 const std::vector<TxCommand *> *vct_cmd,
+                                 bool auto_commit)
+{
+    table_name_ = table_name;
+    vct_key_ = vct_key;
+    vct_cmd_ = vct_cmd;
+    size_t len = vct_key->size();
+    size_t min_len = std::min(len, vct_hd_result_.size());
+
+    for (size_t i = 0; i < min_len; i++)
+    {
+        auto &hr = vct_hd_result_[i];
+        hr.Reset();
+        hr.Value().Reset();
+    }
+
+    if (len < vct_hd_result_.size())
+    {
+        for (size_t i = min_len; i < vct_hd_result_.size();)
+        {
+            vct_hd_result_.pop_back();
+        }
+    }
+    else if (min_len < len)
+    {
+        for (size_t i = min_len; i < len; i++)
+        {
+            CcHandlerResult<ObjectCommandResult> hr(txm_);
+            hr.Value().Reset();
+            hr.Reset();
+            hr.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
+            {
+                CcErrorCode err = res->ErrorCode();
+                if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                {
+                    if (atm_err_code_.load(std::memory_order_relaxed) !=
+                        CcErrorCode::NO_ERROR)
+                    {
+                        atm_err_code_.store(err, std::memory_order_relaxed);
+                    }
+                }
+                else if (err == CcErrorCode::NO_ERROR)
+                {
+                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    atm_err_code_.store(err, std::memory_order_relaxed);
+                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
+            };
+
+            vct_hd_result_.push_back(std::move(hr));
+        }
+    }
+
+    atm_cnt_.store(len, std::memory_order_relaxed);
+    atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    auto_commit_ = auto_commit;
+
+#ifdef RANGE_PARTITION_ENABLED
+    is_range_locked = false;
+    range_table_name_ =
+        TableName(tab_name_->StringView(), TableType::RangePartition);
+    vct_key_shard_code_.resize(sz);
+#endif
+}
+
+void MultiObjectCommandOp::Forward(TransactionExecution *txm)
+{
+    if (!is_running_)
+    {
+#ifdef RANGE_PARTITION_ENABLED
+        if (atm_err_code_.load(std::memory_order_relaxed) !=
+            CcErrorCode::NO_ERROR)
+        {
+            txm->PostProcess(*this);
+            return;
+        }
+#endif
+        txm->Process(*this);
+        return;
+    }
+
+    CcErrorCode err = atm_err_code_.load(std::memory_order_relaxed);
+    if (err != CcErrorCode::NO_ERROR ||
+        atm_cnt_.load(std::memory_order_relaxed) == 0)
+    {
+        if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+        {
+            if (retry_num_ > 0)
+            {
+                ReRunOp(txm);
+                return;
+            }
+        }
+
+        txm->PostProcess(*this);
+    }
+    else if (txm->IsTimeOut())
+    {
+        for (auto &hd_result : vct_hd_result_)
+        {
+            if (hd_result.IsFinished())
+            {
+                continue;
+            }
+
+            // TO DO
+            // Here should consider 2 cases, 1. cce_addr.Term() < 0 does
+            // not receiver the response from server. 2. cce_addr.Term() > 0 the
+            // ccentry has been blocked by other transaction.
+            const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+            if (cce_addr.Term() < 0)
+            {
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    this,
+                    "Forward.Term<0.IsTimeout",
+                    txm,
+                    (
+                        [txm]() -> std::string
+                        {
+                            return std::string(",\"tx_number\":")
+                                .append(std::to_string(txm->TxNumber()))
+                                .append(",\"term\":")
+                                .append(std::to_string(txm->TxTerm()));
+                        }));
+                // For non-blocking concurrency control protocols, the object
+                // command is expected to return instantly. For 2PL, if the
+                // request is blocked, the cc node will send an acknowledgement
+                // to update the key's term. In either case, if the object's
+                // term is not set, the tx has not received any response or
+                // acknowledgement from the key's cc node group. The request is
+                // forced to be errored upon timeout.
+                // TODO(zkl): ForceError, delete ccrequest
+                //        hd_result_.ForceError();
+                //        txm->PostProcess(*this);
+            }
+        }
+    }
+}
+
 ClusterScaleOp::ClusterScaleOp(
     ClusterScaleOpType event_type,
     std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &&new_ng_config,

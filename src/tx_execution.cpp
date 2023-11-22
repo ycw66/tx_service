@@ -45,6 +45,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       scans_(),
       void_resp_(nullptr),
       rec_resp_(nullptr),
+      vct_rec_resp_(nullptr),
       rtp_resp_(nullptr),
       bool_resp_(nullptr),
       kvp_resp_(nullptr),
@@ -60,6 +61,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       scan_open_(this),
       scan_next_(this),
       obj_cmd_(this),
+      multi_obj_cmd_(this),
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(&lock_range_result_),
 #endif
@@ -105,6 +107,7 @@ void TransactionExecution::Reset()
     command_id_.store(0, std::memory_order_release);
     void_resp_ = nullptr;
     rec_resp_ = nullptr;
+    vct_rec_resp_ = nullptr;
     rtp_resp_ = nullptr;
     bool_resp_ = nullptr;
     kvp_resp_ = nullptr;
@@ -820,6 +823,16 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
 
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
+}
+
+void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
+{
+    vct_rec_resp_ = &req.tx_result_;
+    multi_obj_cmd_.Reset(
+        req.table_name_, req.VctKey(), req.VctCommand(), req.auto_commit_);
+
+    PushOperation(&multi_obj_cmd_);
+    Process(multi_obj_cmd_);
 }
 
 void TransactionExecution::ProcessTxRequest(ReloadCacheTxRequest &req)
@@ -3437,6 +3450,13 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
                 ConvertCcError(validate.hd_result_.ErrorCode()));
             rec_resp_ = nullptr;
         }
+        else if (vct_rec_resp_ != nullptr)
+        {
+            // auto committed MultiObjectCommandTxRequest
+            vct_rec_resp_->FinishError(
+                ConvertCcError(validate.hd_result_.ErrorCode()));
+            vct_rec_resp_ = nullptr;
+        }
 #endif
 
         Abort();
@@ -3881,6 +3901,13 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                         TxErrorCode::LOG_SERVICE_UNREACHABLE);
                     rec_resp_ = nullptr;
                 }
+                else if (vct_rec_resp_ != nullptr)
+                {
+                    // auto committed MultiObjectCommandTxRequest
+                    vct_rec_resp_->FinishError(
+                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
+                    vct_rec_resp_ = nullptr;
+                }
 #endif
                 tx_status_.store(TxnStatus::Unknown, std::memory_order_release);
             }
@@ -3901,7 +3928,14 @@ void TransactionExecution::PostProcess(WriteToLogOp &write_log)
                     rec_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
                     rec_resp_ = nullptr;
                 }
+                else if (vct_rec_resp_ != nullptr)
+                {
+                    // auto committed MultiObjectCommandTxRequest
+                    vct_rec_resp_->SetErrorCode(TxErrorCode::WRITE_LOG_FAIL);
+                    vct_rec_resp_ = nullptr;
+                }
 #endif
+
                 tx_status_.store(TxnStatus::Aborted, std::memory_order_release);
             }
         }
@@ -4270,8 +4304,20 @@ void TransactionExecution::PostProcess(PostProcessOp &post_process)
         rec_resp_->Finish(obj_cmd_.hd_result_.Value().rec_status_);
         rec_resp_ = nullptr;
     }
-#endif
+    else if (vct_rec_resp_ != nullptr)
+    {
+        // auto committed MultiObjectCommandTxRequest
+        std::vector<RecordStatus> vct_rec;
+        vct_rec.reserve(multi_obj_cmd_.vct_hd_result_.size());
+        for (const auto &hresult : multi_obj_cmd_.vct_hd_result_)
+        {
+            vct_rec.push_back(hresult.Value().rec_status_);
+        }
 
+        vct_rec_resp_->Finish(std::move(vct_rec));
+        vct_rec_resp_ = nullptr;
+    }
+#endif
     // transaction can be recycled and put into free list.
     tx_status_.store(TxnStatus::Finished, std::memory_order_release);
 
@@ -5171,6 +5217,162 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // sender once the command finishes.
             rec_resp_->Finish(obj_status);
             rec_resp_ = nullptr;
+        }
+
+        if (obj_cmd_op.auto_commit_)
+        {
+            Commit();
+        }
+    }
+}
+
+void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
+{
+    obj_cmd_op.is_running_ = true;
+#ifdef RANGE_PARTITION_ENABLED
+    if (!obj_cmd_op.is_range_locked_)
+    {
+        obj_cmd_op.is_running_ = false;
+        lock_batch_read_ranges_.Reset(*obj_cmd_op.vct_key_,
+                                      obj_cmd_op.vct_hd_result_,
+                                      obj_cmd_op.vct_key_shard_code_,
+                                      obj_cmd_op.range_table_name_,
+                                      obj_cmd_op.atm_err_code_);
+
+        obj_cmd_op.is_range_locked_ = true;
+        PushOperation(&lock_batch_read_ranges_);
+        Process(lock_batch_read_ranges_);
+        return;
+    }
+#endif
+
+    uint64_t current_ts =
+        dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
+    bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+    bool first_time = (obj_cmd_op.retry_num_ == RETRY_NUM);
+
+    for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
+    {
+        CcHandlerResult<ObjectCommandResult> &hd_res =
+            obj_cmd_op.vct_hd_result_[i];
+        if (!first_time &&
+            hd_res.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            hd_res.IsFinished())
+        {
+            continue;
+        }
+
+        const TxKey &key = *obj_cmd_op.vct_key_->at(i);
+        uint32_t key_shard_code = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+        uint32_t residual = key.Hash() & 0x3FF;
+        key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
+#else
+        key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+#endif
+
+        hd_res.Reset();
+        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                                   key,
+                                   key_shard_code,
+                                   *obj_cmd_op.vct_cmd_->at(i),
+                                   TxNumber(),
+                                   tx_term_,
+                                   current_ts,
+                                   hd_res,
+                                   iso_level_,
+                                   protocol_,
+                                   commit);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &obj_cmd_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    CcErrorCode err = obj_cmd_op.atm_err_code_.load(std::memory_order_relaxed);
+    if (err != CcErrorCode::NO_ERROR)
+    {
+        vct_rec_resp_->FinishError(ConvertCcError(err));
+        vct_rec_resp_ = nullptr;
+        if (obj_cmd_op.auto_commit_)
+        {
+            Abort();
+        }
+    }
+    else
+    {
+        // The command is directly executed and committed on the object if
+        // autocommit and skip wal are both set. In such case, there is no
+        // need to write log and do post write, and no need to add command
+        // into write set.
+        bool directly_commit =
+            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+        bool readonly = true;
+        std::vector<RecordStatus> vct_rec;
+        vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
+
+        for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
+        {
+            const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
+            RecordStatus obj_status = cmd_res.rec_status_;
+            vct_rec.push_back(obj_status);
+            const TxKey *key = obj_cmd_op.vct_key_->at(i);
+            const TxCommand *cmd = obj_cmd_op.vct_cmd_->at(i);
+
+            // For autocommit read-modify-write commands, the
+            // ObjectCommandTxRequest sender will be notified after auto commit
+            // succeeds, i.e. after PostProcess or WritLog.
+
+            LockType lock_acquired = cmd_res.lock_acquired_;
+            if (lock_acquired == LockType::ReadLock)
+            {
+                LOG(INFO) << "txm acquired readlock";
+                // Read lock is acquired under locking protocol. Add the cce to
+                // read set for later PostRead.
+                rw_set_.AddRead(cmd_res.cce_addr_,
+                                cmd_res.commit_ts_,
+                                obj_cmd_op.table_name_);
+            }
+            else if (lock_acquired == LockType::WriteLock)
+            {
+                LOG(INFO) << "txm acquired writelock";
+                // The command modifies the object. Put it into the command set
+                // for writing log and post-processing.
+                rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
+                                         cmd_res.cce_addr_,
+                                         cmd_res.commit_ts_,
+                                         key,
+                                         cmd);
+            }
+
+            if (!cmd->IsReadOnly())
+            {
+                readonly = false;
+            }
+        }
+
+        if (!obj_cmd_op.auto_commit_ || directly_commit || readonly)
+        {
+            // Not autocommit, or autocommit and skip wal, or autocommit and
+            // this is a read only command. Notify the
+            // ObjectCommandTxRequest sender once the command finishes.
+            vct_rec_resp_->Finish(std::move(vct_rec));
+            vct_rec_resp_ = nullptr;
         }
 
         if (obj_cmd_op.auto_commit_)

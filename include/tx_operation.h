@@ -1018,6 +1018,33 @@ struct ObjectCommandOp : TransactionOperation
 #endif
 };
 
+struct MultiObjectCommandOp : TransactionOperation
+{
+    explicit MultiObjectCommandOp(TransactionExecution *txm);
+    void Reset(const TableName *table_name,
+               const std::vector<const TxKey *> *vct_key,
+               const std::vector<TxCommand *> *vct_cmd,
+               bool auto_commit = false);
+
+    void Forward(TransactionExecution *txm) override;
+
+    TransactionExecution *txm_;
+    const TableName *table_name_{};
+    const std::vector<const TxKey *> *vct_key_{};
+    const std::vector<TxCommand *> *vct_cmd_{};
+
+    std::vector<CcHandlerResult<ObjectCommandResult>> vct_hd_result_;
+    std::atomic_int32_t atm_cnt_{0};
+    std::atomic<CcErrorCode> atm_err_code_{CcErrorCode::NO_ERROR};
+    bool auto_commit_{};
+
+#ifdef RANGE_PARTITION_ENABLED
+    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    std::vector<uint32_t> vct_key_shard_code_;
+    bool is_range_locked_;
+#endif
+};
+
 class NotifyMigrationClosure : public google::protobuf::Closure
 {
 public:
