@@ -77,7 +77,7 @@ public:
         return 0;
     }
 
-    virtual double PosInInterval(const Schema *key_schema,
+    virtual double PosInInterval(const KeySchema *key_schema,
                                  const TxKey &min_key,
                                  const TxKey &max_key) const
     {

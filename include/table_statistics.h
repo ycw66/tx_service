@@ -295,7 +295,7 @@ public:
         return records_;
     }
 
-    uint64_t Records(const Schema *key_schema,
+    uint64_t Records(const KeySchema *key_schema,
                      const KeyT &min_key,
                      const KeyT &max_key) const
     {

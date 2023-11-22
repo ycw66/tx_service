@@ -73,7 +73,7 @@ public:
     }
 
     // Return percentage of [min_key, max_key)
-    double Selectivity(const Schema *key_schema,
+    double Selectivity(const KeySchema *key_schema,
                        const KeyT &min_key,
                        const KeyT &max_key) const
     {
@@ -96,7 +96,7 @@ public:
 
 private:
     // Percentage of Selectivity(<key)
-    double Selectivity(const Schema *key_schema, const KeyT &key) const
+    double Selectivity(const KeySchema *key_schema, const KeyT &key) const
     {
         assert(Available());
 
