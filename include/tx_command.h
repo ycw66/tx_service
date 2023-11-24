@@ -59,6 +59,27 @@ public:
     }
 };
 
+/**
+ * Commands that operate on multiple keys, like MSET, DEL.
+ */
+struct MultiObjectTxCommand
+{
+    virtual ~MultiObjectTxCommand() = default;
+
+    std::vector<const TxKey *> *KeyPointers()
+    {
+        return &key_ptrs_;
+    }
+
+    std::vector<TxCommand *> *CommandPointers()
+    {
+        return &cmd_ptrs_;
+    }
+
+    std::vector<const txservice::TxKey *> key_ptrs_;
+    std::vector<txservice::TxCommand *> cmd_ptrs_;
+};
+
 // commands and information of the same txn
 struct TxnCmd
 {
