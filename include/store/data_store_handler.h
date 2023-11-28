@@ -251,14 +251,6 @@ public:
         tx_service_ = tx_service;
     }
 
-    virtual bool CopyRangeData(
-        const txservice::TableName &table_name,
-        int32_t old_partition_id,
-        const TxKey *old_end_key,
-        std::vector<std::pair<TxKey::Uptr, int32_t>> &new_partition_info,
-        uint64_t tx_ts,
-        const TableSchema *table_schema) = 0;
-
     virtual bool DeleteOutOfRangeData(const txservice::TableName &table_name,
                                       int32_t partition_id,
                                       const TxKey *start_key,
@@ -296,6 +288,8 @@ public:
     virtual bool UpdateClusterConfig(
         const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
         uint64_t version) = 0;
+
+    virtual bool NeedCopyRange() const = 0;
 
 protected:
     TxService *tx_service_{nullptr};

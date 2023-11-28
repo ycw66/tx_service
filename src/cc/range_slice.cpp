@@ -8,6 +8,7 @@
 #include "cc_shard.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
+#include "metrics.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_key.h"
@@ -525,6 +526,13 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
     for (size_t idx = slice_first_idx; idx < slice_end_idx; ++idx)
     {
+        if (flush_vec[idx].cce_ == nullptr)
+        {
+            // This record was load from storage. We can't safely access cce,
+            // because it may be kicked out.
+            continue;
+        }
+
         auto hash_value = flush_vec[idx].Key()->Hash();
         int32_t ckpt_size = 0;
         if (flush_vec[idx].payload_status_ != RecordStatus::Deleted)

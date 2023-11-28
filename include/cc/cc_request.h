@@ -2244,7 +2244,8 @@ public:
                    std::vector<std::pair<TxKey::Uptr, bool>> &&resume_pos,
                    size_t scan_batch_size,
                    const TxKey *target_start_key = nullptr,
-                   const TxKey *target_end_key = nullptr)
+                   const TxKey *target_end_key = nullptr,
+                   bool include_flushed_rec = false)
         : table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
@@ -2259,7 +2260,8 @@ public:
           err_(CcErrorCode::NO_ERROR),
           unfinished_cnt_(core_cnt_),
           mux_(),
-          cv_()
+          cv_(),
+          include_flushed_rec_(include_flushed_rec)
     {
         assert(scan_batch_size_ > DataSyncScanBatchSize);
         for (size_t i = 0; i < core_cnt; i++)
@@ -2272,6 +2274,16 @@ public:
             mv_base_idx_vec_.back().reserve(scan_batch_size);
             res_.emplace_back(nullptr, false);
             accumulated_scan_cnt_.emplace_back(0);
+        }
+
+        if (include_flushed_rec)
+        {
+#ifndef RANGE_PARTITION_ENABLED
+            assert(false && "Only range partition");
+            include_flushed_rec_ = false;
+            return;
+#endif
+            slice_ids_.resize(core_cnt_);
         }
     }
 
@@ -2432,6 +2444,11 @@ private:
 
     // scan result
     std::vector<std::pair<TxKey::Uptr, bool>> res_;
+
+    // True means we also need to scan data which has been flushed to storage.
+    // Note: This flag only used for RangePartition.
+    bool include_flushed_rec_{false};
+    std::vector<RangeSliceId> slice_ids_;
 
     template <typename KeyT, typename ValueT>
     friend class TemplateCcMap;

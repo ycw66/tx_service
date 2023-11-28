@@ -4343,8 +4343,13 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        const KeyT *start_key = static_cast<const KeyT *>(req.start_key_);
-        const KeyT *end_key = static_cast<const KeyT *>(req.end_key_);
+        const KeyT *const req_start_key =
+            req.start_key_ ? static_cast<const KeyT *>(req.start_key_)
+                           : NegativeInfinity<KeyT>::Instance();
+        const KeyT *const req_end_key =
+            req.end_key_ ? static_cast<const KeyT *>(req.end_key_)
+                         : PositiveInfinity<KeyT>::Instance();
+
         Iterator it;
         Iterator end_it;
         if (req.pause_key_.at(shard_->core_id_).second)
@@ -4354,44 +4359,189 @@ public:
             req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
             return false;
         }
-        if (req.pause_key_.at(shard_->core_id_).first == nullptr)
+
+        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        if (ng_term < 0)
         {
-            // If this is a new scan cc, start from the specified start key or
-            // negative inf.
-            if (start_key == nullptr ||
-                start_key == NegativeInfinity<KeyT>::Instance())
+            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return false;
+        }
+
+        // Slice_id is not set, We need to pin slice.
+        if (req.include_flushed_rec_ &&
+            nullptr == req.slice_ids_[shard_->core_id_].Slice())
+        {
+            const KeyT *slice_start_key = nullptr;
+            if (req.pause_key_[shard_->core_id_].first != nullptr)
             {
-                it = Begin();
-                it++;
+                // Pin slice failed in the previous execution. Now, retry to pin
+                slice_start_key = static_cast<const KeyT *>(
+                    req.pause_key_[shard_->core_id_].first.get());
             }
             else
             {
-                it = LowerBound(*start_key);
-                if (it->first == NegativeInfinity<KeyT>::Instance())
+                // first enter
+                slice_start_key = req_start_key;
+            }
+
+            bool pin_next_slice = true;
+
+            // FIXME(lokax): Only loop X times to avoid blocking TxProcesser
+            // when the range has many empty slices.
+            while (pin_next_slice)
+            {
+                assert(req.slice_ids_[shard_->core_id_].Slice() == nullptr);
+
+                RangeSliceOpStatus pin_status;
+                RangeSliceId new_slice_id =
+                    shard_->PinRangeSlice(table_name_,
+                                          req.NodeGroupId(),
+                                          ng_term,
+                                          KeySchema(),
+                                          RecordSchema(),
+                                          table_schema_->Version(),
+                                          table_schema_->GetKVCatalogInfo(),
+                                          *slice_start_key,
+                                          true,
+                                          &req,
+                                          pin_status,
+                                          true,
+                                          0);
+
+                switch (pin_status)
                 {
+                case RangeSliceOpStatus::Successful:
+                {
+                    break;
+                }
+                case RangeSliceOpStatus::BlockedOnLoad:
+                {
+                    req.pause_key_.at(shard_->core_id_).first =
+                        slice_start_key->Clone();
+                    return false;
+                }
+                case RangeSliceOpStatus::Retry:
+                {
+                    req.pause_key_.at(shard_->core_id_).first =
+                        slice_start_key->Clone();
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+                default:
+                {
+                    assert(pin_status == RangeSliceOpStatus::Error);
+                    req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                    return true;
+                }
+                }
+
+                // The slice has been pinned.
+                if (slice_start_key == NegativeInfinity<KeyT>::Instance())
+                {
+                    it = Begin();
                     it++;
+                }
+                else
+                {
+                    it = LowerBound(*slice_start_key);
+                    if (it->first == NegativeInfinity<KeyT>::Instance())
+                    {
+                        it++;
+                    }
+                }
+
+                const KeyT *slice_end_key =
+                    new_slice_id.Slice()->EndKey()
+                        ? static_cast<const KeyT *>(
+                              new_slice_id.Slice()->EndKey())
+                        : PositiveInfinity<KeyT>::Instance();
+
+                if (slice_end_key == PositiveInfinity<KeyT>::Instance())
+                {
+                    end_it = End();
+                }
+                else
+                {
+                    std::pair<Iterator, ScanType> end_pair =
+                        ForwardScanStart(*slice_end_key, true);
+                    end_it = end_pair.first;
+                    if (end_pair.second == ScanType::ScanGap)
+                    {
+                        ++end_it;
+                    }
+                }
+
+                if (it == end_it && (!(*slice_end_key == *req_end_key)))
+                {
+                    // This slice is empty, pin next slice.
+                    slice_start_key = slice_end_key;
+                    new_slice_id.Unpin();
+                    new_slice_id.Reset();
+                }
+                else
+                {
+                    // This slice is not empty or this empty slice is last slice
+                    // of range. We stop to loop.
+                    req.slice_ids_[shard_->core_id_] = new_slice_id;
+                    pin_next_slice = false;
                 }
             }
         }
         else
         {
-            const KeyT *pause_key = static_cast<const KeyT *>(
-                req.pause_key_.at(shard_->core_id_).first.get());
-            it = LowerBound(*pause_key);
-        }
-
-        if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
-        {
-            end_it = End();
-        }
-        else
-        {
-            std::pair<Iterator, ScanType> end_pair =
-                ForwardScanStart(*end_key, true);
-            end_it = end_pair.first;
-            if (end_pair.second == ScanType::ScanGap)
+            if (req.pause_key_.at(shard_->core_id_).first == nullptr)
             {
-                ++end_it;
+                // If this is a new scan cc, start from the specified start
+                // key or negative inf.
+                if (req_start_key == NegativeInfinity<KeyT>::Instance())
+                {
+                    it = Begin();
+                    it++;
+                }
+                else
+                {
+                    it = LowerBound(*req_start_key);
+                    if (it->first == NegativeInfinity<KeyT>::Instance())
+                    {
+                        it++;
+                    }
+                }
+            }
+            else
+            {
+                const KeyT *pause_key = static_cast<const KeyT *>(
+                    req.pause_key_.at(shard_->core_id_).first.get());
+                it = LowerBound(*pause_key);
+            }
+
+            const KeyT *search_end_key = req_end_key;
+
+            if (req.include_flushed_rec_)
+            {
+                assert(req.slice_ids_[shard_->core_id_].Slice() != nullptr);
+
+                search_end_key =
+                    req.slice_ids_[shard_->core_id_].Slice()->EndKey()
+                        ? static_cast<const KeyT *>(
+                              req.slice_ids_[shard_->core_id_]
+                                  .Slice()
+                                  ->EndKey())
+                        : PositiveInfinity<KeyT>::Instance();
+            }
+
+            if (search_end_key == PositiveInfinity<KeyT>::Instance())
+            {
+                end_it = End();
+            }
+            else
+            {
+                std::pair<Iterator, ScanType> end_pair =
+                    ForwardScanStart(*search_end_key, true);
+                end_it = end_pair.first;
+                if (end_pair.second == ScanType::ScanGap)
+                {
+                    ++end_it;
+                }
             }
         }
 
@@ -4400,25 +4550,21 @@ public:
         // will be set as the first entry on the next page. Also check if (it ==
         // end_it_next_page_it).
         Iterator end_it_next_page_it = end_it;
-        if (end_it_next_page_it != End())
+        if (!req.include_flushed_rec_)
         {
-            assert(end_it_next_page_it->second->parent_page_ != nullptr);
-            if (end_it->second->parent_page_->next_page_ == PagePosInf())
+            if (end_it_next_page_it != End())
             {
-                end_it_next_page_it = End();
+                assert(end_it_next_page_it->second->parent_page_ != nullptr);
+                if (end_it->second->parent_page_->next_page_ == PagePosInf())
+                {
+                    end_it_next_page_it = End();
+                }
+                else
+                {
+                    end_it_next_page_it = Iterator(
+                        end_it->second->parent_page_->next_page_, 0, &neg_inf_);
+                }
             }
-            else
-            {
-                end_it_next_page_it = Iterator(
-                    end_it->second->parent_page_->next_page_, 0, &neg_inf_);
-            }
-        }
-
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
         }
 
         uint64_t recycle_ts = 1U;
@@ -4438,7 +4584,6 @@ public:
         // DataSyncScanCc is running on TxProcessor thread. To avoid
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
-
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
@@ -4449,18 +4594,23 @@ public:
             const KeyT *key = it->first;
             CcEntry<KeyT, ValueT> *cce = it->second;
             assert(cce->parent_page_);
-            if (cce->parent_page_->last_dirty_commit_ts_ <= from_ts)
+
+            if (!req.include_flushed_rec_)
             {
-                // Skip the pages that have no updates since last data sync.
-                if (cce->parent_page_->next_page_ == PagePosInf())
+                if (cce->parent_page_->last_dirty_commit_ts_ <= from_ts)
                 {
-                    it = End();
+                    // Skip the pages that have no updates since last data sync.
+                    if (cce->parent_page_->next_page_ == PagePosInf())
+                    {
+                        it = End();
+                    }
+                    else
+                    {
+                        it = Iterator(
+                            cce->parent_page_->next_page_, 0, &neg_inf_);
+                    }
+                    continue;
                 }
-                else
-                {
-                    it = Iterator(cce->parent_page_->next_page_, 0, &neg_inf_);
-                }
-                continue;
             }
 
             if (shard_->EnableMvcc())
@@ -4470,6 +4620,7 @@ public:
 
             if (cce->NeedCkpt())
             {
+                bool need_export = true;
 #ifdef RANGE_PARTITION_ENABLED
                 if (cce->data_store_size_.load(std::memory_order_acquire) ==
                     INT32_MAX)
@@ -4528,8 +4679,7 @@ public:
                         // still be replayed on the old ng on recover. Skip the
                         // cc entry and remove it at the end.
                         remove_entries.push_back(cce);
-                        it++;
-                        continue;
+                        need_export = false;
                     }
                     else
                     {
@@ -4545,18 +4695,158 @@ public:
                     }
                 }
 #endif
-                cce->ExportForCkpt(*key,
-                                   req.DataSyncVec(shard_->core_id_),
-                                   req.ArchiveVec(shard_->core_id_),
-                                   req.MoveBaseIdxVec(shard_->core_id_),
-                                   req.previous_scan_ts_,
-                                   req.data_sync_ts_,
-                                   recycle_ts,
-                                   Type(),
-                                   shard_->EnableMvcc(),
-                                   req.accumulated_scan_cnt_[shard_->core_id_]);
+                if (need_export)
+                {
+                    cce->ExportForCkpt(
+                        *key,
+                        req.DataSyncVec(shard_->core_id_),
+                        req.ArchiveVec(shard_->core_id_),
+                        req.MoveBaseIdxVec(shard_->core_id_),
+                        req.previous_scan_ts_,
+                        req.data_sync_ts_,
+                        recycle_ts,
+                        Type(),
+                        shard_->EnableMvcc(),
+                        req.accumulated_scan_cnt_[shard_->core_id_],
+                        req.include_flushed_rec_);
+                }
             }
+            else
+            {
+                if (req.include_flushed_rec_)
+                {
+                    if (cce->commit_ts_ != 1 &&
+                        cce->commit_ts_ == cce->ckpt_ts_ &&
+                        cce->commit_ts_ <= req.data_sync_ts_ &&
+                        (cce->payload_status_ == RecordStatus::Normal ||
+                         cce->payload_status_ == RecordStatus::Deleted))
+                    {
+                        size_t vec_idx =
+                            req.accumulated_scan_cnt_[shard_->core_id_]++;
+                        FlushRecord &ref =
+                            req.DataSyncVec(shard_->core_id_)[vec_idx];
+                        ref.CloneOrCopyKey(*key);
+
+                        // This record was load from storage. We can't safely
+                        // point to CcEntry of CcMap. Because the entry will be
+                        // kickout after UnpinSlice. the pointer will become
+                        // invalidation.
+                        ref.cce_ = nullptr;
+
+                        ref.payload_status_ = cce->payload_status_;
+                        ref.commit_ts_ = cce->commit_ts_;
+
+                        if (cce->payload_status_ == RecordStatus::Normal)
+                        {
+                            ref.SetPayload(cce->payload_);
+                        }
+
+                        // the size of record is not change.
+                        ref.delta_size_ = 0;
+                    }
+                }
+            }
+
+            // Forward iterator
             it++;
+
+            if (req.include_flushed_rec_)
+            {
+                bool pin_next_slice =
+                    it == end_it &&
+                    req.slice_ids_[shard_->core_id_].Slice()->EndKey() !=
+                        nullptr &&
+                    (!(*req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
+                       *req_end_key));
+
+                // FIXME(lokax): Only loop X times to avoid blocking TxProcesser
+                // when the range has many empty slices.
+                while (pin_next_slice)
+                {
+                    const KeyT *slice_start_key = static_cast<const KeyT *>(
+                        req.slice_ids_[shard_->core_id_].Slice()->EndKey());
+
+                    // Unpin current slice
+                    req.slice_ids_[shard_->core_id_].Unpin();
+                    req.slice_ids_[shard_->core_id_].Reset();
+
+                    // Pin next slice
+                    RangeSliceOpStatus pin_status;
+                    RangeSliceId new_slice_id =
+                        shard_->PinRangeSlice(table_name_,
+                                              req.NodeGroupId(),
+                                              ng_term,
+                                              KeySchema(),
+                                              RecordSchema(),
+                                              table_schema_->Version(),
+                                              table_schema_->GetKVCatalogInfo(),
+                                              *slice_start_key,
+                                              true,
+                                              &req,
+                                              pin_status,
+                                              true,
+                                              0);
+
+                    switch (pin_status)
+                    {
+                    case RangeSliceOpStatus::Successful:
+                    {
+                        assert(*slice_start_key ==
+                               *new_slice_id.Slice()->StartKey());
+                        break;
+                    }
+                    case RangeSliceOpStatus::BlockedOnLoad:
+                    {
+                        req.pause_key_.at(shard_->core_id_).first =
+                            slice_start_key->Clone();
+                        return false;
+                    }
+                    case RangeSliceOpStatus::Retry:
+                    {
+                        req.pause_key_.at(shard_->core_id_).first =
+                            slice_start_key->Clone();
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                    default:
+                    {
+                        assert(pin_status == RangeSliceOpStatus::Error);
+
+                        req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                        return true;
+                    }
+                    }
+
+                    const KeyT *slice_end_key =
+                        new_slice_id.Slice()->EndKey()
+                            ? static_cast<const KeyT *>(
+                                  new_slice_id.Slice()->EndKey())
+                            : PositiveInfinity<KeyT>::Instance();
+
+                    it = LowerBound(*slice_start_key);
+                    std::pair<Iterator, ScanType> end_pair =
+                        ForwardScanStart(*slice_end_key, true);
+                    end_it = end_pair.first;
+                    if (end_pair.second == ScanType::ScanGap)
+                    {
+                        ++end_it;
+                    }
+
+                    req.slice_ids_[shard_->core_id_] = new_slice_id;
+
+                    // This slice is not empty or this empty slice is last slice
+                    // of range. We stop to loop.
+                    if (it != end_it ||
+                        req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
+                            nullptr ||
+                        (*req.slice_ids_[shard_->core_id_].Slice()->EndKey() ==
+                         *req_end_key))
+                    {
+                        end_it_next_page_it = end_it;
+                        pin_next_slice = false;
+                    }
+                }
+            }
         }
 
         TxKey::Uptr next_pause_key = nullptr;
@@ -4574,8 +4864,19 @@ public:
         if (no_more_data)
         {
             // scan data drained
+            if (req.include_flushed_rec_ &&
+                req.slice_ids_[shard_->core_id_].Slice() != nullptr)
+            {
+                // Unpin slice
+                req.slice_ids_[shard_->core_id_].Unpin();
+                req.slice_ids_[shard_->core_id_].Reset();
+            }
+
             std::pair<TxKey::Uptr, bool> ckpt_scan_result{nullptr, true};
             req.SetFinish(std::move(ckpt_scan_result), shard_->core_id_);
+            // Access DataSyncScanCc member variable is unsafe after
+            // SetFinished(...).
+
             return false;
         }
         else
@@ -5046,7 +5347,8 @@ public:
                                        1U,
                                        Type(),
                                        shard_->EnableMvcc(),
-                                       tmp_ckpt_vec_size);
+                                       tmp_ckpt_vec_size,
+                                       false);
 
                     assert(tmp_ckpt_vec_size <= 1);
                     size_t offset = 0;
@@ -5086,65 +5388,31 @@ public:
 
     bool Execute(FillStoreSliceCc &req) override
     {
-        const std::vector<SliceDataItem> &slice_vec =
-            req.SliceData(shard_->core_id_);
+        std::vector<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
 
-        for (const SliceDataItem &data_item : slice_vec)
+        size_t index = req.NextIndex(shard_->core_id_);
+        size_t last_index = std::min(index + FillStoreSliceCc::MaxScanBatchSize,
+                                     slice_vec.size());
+
+        bool success =
+            BatchFillSlice(slice_vec, req.ForceLoad(), index, last_index);
+
+        if (!success)
         {
-            const KeyT *key = static_cast<const KeyT *>(data_item.key_.get());
-            const ValueT *record =
-                static_cast<const ValueT *>(data_item.record_.get());
-
-            Iterator it = FindEmplace(*key, req.ForceLoad());
-            const KeyT *cce_key = it->first;
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            if (cce == nullptr)
-            {
-                // Memory reaches capacity while bringing a range slice into
-                // memory.
-                req.SetError(CcErrorCode::OUT_OF_MEMORY);
-                return true;
-            }
-
-            uint32_t rec_store_size =
-                data_item.is_deleted_ ? 0 : cce_key->Size() + record->Size();
-
-            // If the in-memory version is from a upload request (i.e. generated
-            // sk record from pk), the data store version might be newer. Only
-            // overwrite if in memory version is newer.
-            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
-            {
-                // Initialize the data store size if it is unspecified before
-                if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                    INT32_MAX)
-                {
-                    cce->data_store_size_.store(rec_store_size,
-                                                std::memory_order_relaxed);
-                }
-
-                // The cc entry's commit ts is 1 when it is initialized.
-                // Commit ts greater than 1 means that the key is already
-                // cached in memory.
-                continue;
-            }
-
-            shard_->DecrementMemory(cce->PayloadMemUsage());
-            if (cce->payload_ == nullptr)
-            {
-                cce->payload_ = std::make_shared<ValueT>(*record);
-            }
-            cce->commit_ts_ = data_item.version_ts_;
-            cce->ckpt_ts_.store(data_item.version_ts_,
-                                std::memory_order_relaxed);
-            cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
-                                                         : RecordStatus::Normal;
-            cce->data_store_size_.store(rec_store_size,
-                                        std::memory_order_relaxed);
-
-            shard_->mem_usage_ += cce->PayloadMemUsage();
+            req.SetError(CcErrorCode::OUT_OF_MEMORY);
+            return true;
         }
 
-        req.SetFinish();
+        index = last_index;
+        if (index == slice_vec.size())
+        {
+            req.SetFinish();
+        }
+        else
+        {
+            req.SetNextIndex(shard_->core_id_, index);
+            shard_->Enqueue(shard_->LocalCoreId(), &req);
+        }
         return false;
     }
 
@@ -6098,6 +6366,306 @@ protected:
     {
         bool emplace;
         return FindEmplace(key, emplace, force_emplace);
+    }
+
+    bool BatchFillSlice(std::vector<SliceDataItem> &slice_items,
+                        bool force_emplace,
+                        size_t first_index,
+                        size_t end_idx)
+    {
+        if (slice_items.empty() || first_index >= end_idx)
+        {
+            return true;
+        }
+
+        // catalog and range ccmap bypass shard memory limit. since checkpointer
+        // may emplace ccentry into ccmap.
+        if (shard_->Full())
+        {
+            // The shard has reached the maximal capacity. Tries to clean cc
+            // entries that have been checkpointed but are not being
+            // accessed by active tx's.
+            shard_->Clean();
+            if (shard_->Full() && !table_name_.IsMeta() && !force_emplace)
+            {
+                return false;
+            }
+        }
+
+        auto update_cc_entry = [shard = shard_](const SliceDataItem &data_item,
+                                                CcEntry<KeyT, ValueT> *cce)
+        {
+            const ValueT *record =
+                static_cast<const ValueT *>(data_item.record_.get());
+
+            uint32_t rec_store_size =
+                data_item.is_deleted_ ? 0
+                                      : data_item.key_->Size() + record->Size();
+
+            // If the in-memory version is from a upload request (i.e. generated
+            // sk record from pk), the data store version might be newer. Only
+            // overwrite if in memory version is newer.
+            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
+            {
+                // Initialize the data store size if it is unspecified before
+                if (cce->data_store_size_.load(std::memory_order_acquire) ==
+                    INT32_MAX)
+                {
+                    cce->data_store_size_.store(rec_store_size,
+                                                std::memory_order_relaxed);
+                }
+
+                if (shard->EnableMvcc() && cce->ckpt_ts_ == 0)
+                {
+                    cce->ckpt_ts_ = data_item.version_ts_;
+                    cce->AddArchiveRecord(
+                        std::static_pointer_cast<ValueT>(data_item.record_),
+                        data_item.is_deleted_ ? RecordStatus::Deleted
+                                              : RecordStatus::Normal,
+                        data_item.version_ts_);
+                }
+
+                // The cc entry's commit ts is 1 when it is initialized.
+                // Commit ts greater than 1 means that the key is already
+                // cached in memory.
+                return;
+            }
+
+            shard->DecrementMemory(cce->PayloadMemUsage());
+
+            cce->payload_ = std::static_pointer_cast<ValueT>(data_item.record_);
+
+            cce->commit_ts_ = data_item.version_ts_;
+            cce->ckpt_ts_.store(data_item.version_ts_,
+                                std::memory_order_relaxed);
+            cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
+                                                         : RecordStatus::Normal;
+            cce->data_store_size_.store(rec_store_size,
+                                        std::memory_order_relaxed);
+
+            shard->mem_usage_ += cce->PayloadMemUsage();
+        };
+
+        typename decltype(ccmp_)::iterator target_iter;
+        CcPage<KeyT, ValueT> *target_page = nullptr;
+
+        if (ccmp_.begin() == ccmp_.end())
+        {
+            bool inserted;
+            // ccmap is empty, insert a page
+            std::tie(target_iter, inserted) = ccmp_.try_emplace(
+                static_cast<const KeyT &>(*slice_items[first_index].key_),
+                this,
+                &pg_ng_inf_,
+                &pg_ps_inf_);
+            assert(inserted);
+            shard_->mem_usage_ += target_iter->second.MemUsage();
+        }
+        else
+        {
+            target_iter = ccmp_.upper_bound(
+                static_cast<const KeyT &>(*slice_items[first_index].key_));
+
+            if (target_iter != ccmp_.begin())
+            {
+                target_iter--;
+            }
+        }
+
+        target_page = &target_iter->second;
+
+        bool is_emplace = false;
+        std::vector<KeyT> new_keys;
+        new_keys.reserve(CcPage<KeyT, ValueT>::split_threshold_);
+        std::vector<size_t> entry_indexs;
+
+        for (size_t item_idx = first_index; item_idx < end_idx;)
+        {
+            const KeyT *target_key =
+                static_cast<const KeyT *>(slice_items[item_idx].key_.get());
+
+            size_t idx_in_page = target_page->Find(*target_key);
+
+            if (idx_in_page != target_page->Size())
+            {
+                // found
+                assert(idx_in_page < target_page->Size());
+
+                is_emplace = false;
+
+                update_cc_entry(slice_items[item_idx],
+                                target_page->Entry(idx_in_page));
+            }
+            else
+            {
+                // Check whether the key is stored on the next page
+                if (target_page->next_page_->FirstKey() <= *target_key)
+                {
+                    // Batch emplace new keys into this target page.
+                    if (!new_keys.empty())
+                    {
+                        target_page->EmplaceKeys(
+                            new_keys, shard_->mem_usage_, entry_indexs);
+
+                        assert(new_keys.size() == entry_indexs.size());
+
+                        for (size_t i = 0; i < entry_indexs.size(); ++i)
+                        {
+                            size_t slice_item_index =
+                                item_idx - new_keys.size() + i;
+                            update_cc_entry(
+                                slice_items[slice_item_index],
+                                target_page->Entry(entry_indexs[i]));
+                        }
+
+                        TryUpdatePageKey(target_iter);
+
+                        new_keys.clear();
+                    }
+
+                    // Move to next page
+                    target_iter++;
+
+                    if (target_iter == ccmp_.end())
+                    {
+                        target_iter =
+                            ccmp_.try_emplace(target_iter,
+                                              *target_key,
+                                              this,
+                                              target_page,
+                                              target_page->next_page_);
+                        shard_->mem_usage_ += target_iter->second.MemUsage();
+                    }
+                    target_page = &target_iter->second;
+                    continue;
+                }
+
+                // Page will be full soon.
+                if (target_page->Size() + new_keys.size() ==
+                    CcPage<KeyT, ValueT>::split_threshold_)
+                {
+                    // Batch emplace new keys into this target page.
+                    if (!new_keys.empty())
+                    {
+                        target_page->EmplaceKeys(
+                            new_keys, shard_->mem_usage_, entry_indexs);
+
+                        assert(new_keys.size() == entry_indexs.size());
+
+                        for (size_t i = 0; i < entry_indexs.size(); ++i)
+                        {
+                            size_t slice_item_index =
+                                item_idx - new_keys.size() + i;
+                            update_cc_entry(
+                                slice_items[slice_item_index],
+                                target_page->Entry(entry_indexs[i]));
+                        }
+
+                        TryUpdatePageKey(target_iter);
+
+                        new_keys.clear();
+
+                        assert(target_page->Full());
+                    }
+                }
+
+                if (target_page->Full() && target_page->LastKey() < *target_key)
+                {
+                    assert(new_keys.empty());
+
+                    // target page is full, choose the next page if `key` can be
+                    // inserted into next page
+                    target_iter++;
+                    if (target_iter == ccmp_.end())
+                    {
+                        // create a new page
+                        target_iter =
+                            ccmp_.try_emplace(target_iter,
+                                              *target_key,
+                                              this,
+                                              target_page,
+                                              target_page->next_page_);
+                        shard_->mem_usage_ += target_iter->second.MemUsage();
+                    }
+                    target_page = &target_iter->second;
+                }
+
+                if (target_page->Full())
+                {
+                    assert(new_keys.empty());
+
+                    // split this page
+                    std::vector<KeyT> new_page_keys;
+                    std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>>
+                        new_page_entries;
+                    uint64_t new_last_commit_ts = 0;
+                    target_page->Split(
+                        new_page_keys, new_page_entries, new_last_commit_ts);
+
+                    const KeyT &key_of_new_page = *new_page_keys.begin();
+                    auto new_page_it =
+                        ccmp_.try_emplace(target_iter,
+                                          key_of_new_page,
+                                          this,
+                                          std::move(new_page_keys),
+                                          std::move(new_page_entries),
+                                          target_page,
+                                          target_page->next_page_);
+                    CcPage<KeyT, ValueT> *new_page = &new_page_it->second;
+                    new_page->last_dirty_commit_ts_ = new_last_commit_ts;
+                    shard_->mem_usage_ += new_page->MemUsage();
+
+                    // insert new page into lru list right after old
+                    // page
+                    if (target_page->lru_next_ != nullptr)
+                    {
+                        LruPage *next = target_page->lru_next_;
+                        new_page->lru_next_ = next;
+                        next->lru_prev_ = new_page;
+                        target_page->lru_next_ = new_page;
+                        new_page->lru_prev_ = target_page;
+                    }
+
+                    if (new_page->FirstKey() <= *target_key)
+                    {
+                        target_iter = new_page_it;
+                        target_page = new_page;
+                    }
+                }
+
+                // We will insert these keys into the page later. This is to
+                // avoid frequent moving of data during insertion
+                new_keys.emplace_back(*target_key);
+
+                is_emplace = true;
+            }
+
+            shard_->UpdateLruList(target_page, is_emplace);
+            ++item_idx;
+        }
+
+        if (!new_keys.empty())
+        {
+            target_page->EmplaceKeys(
+                new_keys, shard_->mem_usage_, entry_indexs);
+
+            assert(new_keys.size() == entry_indexs.size());
+
+            for (size_t i = 0; i < entry_indexs.size(); ++i)
+            {
+                size_t slice_item_index = end_idx - new_keys.size() + i;
+                update_cc_entry(slice_items[slice_item_index],
+                                target_page->Entry(entry_indexs[i]));
+            }
+
+            TryUpdatePageKey(target_iter);
+
+            new_keys.clear();
+        }
+
+        size_ += (end_idx - first_index);
+
+        return true;
     }
 
     /**

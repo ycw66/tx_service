@@ -884,12 +884,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
      */
     PostReadOperation unlock_cluster_config_op_;
     /**
-     * @brief Copy data from old partition to new partition in KV store.
-     * Flush in-memory data that has smaller ts than commit ts to new KV
-     * store.
-     */
-    AsyncOp<Void> ds_migrate_old_partition_op_;
-    /**
      * @brief Scan for data before commit_ts in the splitting range. We need to
      * make these data available to the new range before we commit the range
      * split.

@@ -589,6 +589,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             txm->Execute(&recover_req);
             recover_req.Wait();
 
+            range->TrySetDataSync(false, nullptr, 0);
+
             if (recover_req.IsError() || !recover_req.Result())
             {
                 // Leader transferred away before replay finish. No need
@@ -597,7 +599,6 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             }
             else
             {
-                range->TrySetDataSync(false, nullptr, commit_ts);
                 range->PopPendingSyncTask();
                 txservice::CommitTx(txm);
             }
@@ -2759,6 +2760,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     for (size_t i = 0; i < data_sync_vec->size(); i++)
                     {
                         auto &ref = data_sync_vec->at(i);
+
+                        assert(ref.cce_ != nullptr);
                         // todo: remove cce_
                         ref.cce_->ckpt_ts_.store(ref.commit_ts_,
                                                  std::memory_order_release);

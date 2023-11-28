@@ -352,6 +352,7 @@ FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
       local_cc_shards_(cc_shards)
 {
     partitioned_slice_data_.resize(cc_shards.Count());
+    next_idxs_.resize(cc_shards.Count(), 0);
     load_slice_req_.post_lambda_ = [this](LoadRangeSliceRequest *req)
     {
         if (req->IsError())
@@ -420,10 +421,11 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     return false;
 }
 
-void FillStoreSliceCc::AddDataItem(txservice::TxKey::Uptr key,
-                                   txservice::TxRecord::Uptr record,
-                                   uint64_t version_ts,
-                                   bool is_deleted)
+void FillStoreSliceCc::AddDataItem(
+    txservice::TxKey::Uptr &&key,
+    std::shared_ptr<txservice::TxRecord> &&record,
+    uint64_t version_ts,
+    bool is_deleted)
 {
     size_t hash = key->Hash();
     // Uses the lower 10 bits of the hash code to shard the key across

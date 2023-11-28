@@ -58,6 +58,16 @@ public:
         assert(req.IsLocal());
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        if (req.IsInRecovering())
+        {
+            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+        }
+
+        if (ng_term < 0)
+        {
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
 
         const RangeBucketKey *bucket_key =
             static_cast<const RangeBucketKey *>(req.Key());

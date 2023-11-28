@@ -199,8 +199,8 @@ struct SliceDataItem
 {
     SliceDataItem() = delete;
 
-    SliceDataItem(txservice::TxKey::Uptr key,
-                  txservice::TxRecord::Uptr rec,
+    SliceDataItem(txservice::TxKey::Uptr &&key,
+                  std::shared_ptr<txservice::TxRecord> &&rec,
                   uint64_t version_ts,
                   bool is_deleted)
         : key_(std::move(key)),
@@ -211,7 +211,7 @@ struct SliceDataItem
     }
 
     txservice::TxKey::Uptr key_;
-    txservice::TxRecord::Uptr record_;
+    std::shared_ptr<txservice::TxRecord> record_;
     uint64_t version_ts_;
     bool is_deleted_;
 };
@@ -252,8 +252,8 @@ public:
         slice_data_.clear();
     }
 
-    void AddDataItem(txservice::TxKey::Uptr key,
-                     txservice::TxRecord::Uptr record,
+    void AddDataItem(txservice::TxKey::Uptr &&key,
+                     std::shared_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted)
     {
@@ -347,6 +347,8 @@ private:
 struct FillStoreSliceCc : public CcRequestBase
 {
 public:
+    static constexpr size_t MaxScanBatchSize = 64;
+
     FillStoreSliceCc(const TableName &table_name,
                      NodeGroupId cc_ng_id,
                      int64_t cc_ng_term,
@@ -363,14 +365,14 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
-    const std::vector<SliceDataItem> &SliceData(uint16_t core_id) const
+    std::vector<SliceDataItem> &SliceData(uint16_t core_id)
     {
         assert(core_id < partitioned_slice_data_.size());
         return partitioned_slice_data_[core_id];
     }
 
-    void AddDataItem(txservice::TxKey::Uptr key,
-                     txservice::TxRecord::Uptr record,
+    void AddDataItem(txservice::TxKey::Uptr &&key,
+                     std::shared_ptr<txservice::TxRecord> &&record,
                      uint64_t version_ts,
                      bool is_deleted);
 
@@ -410,6 +412,19 @@ public:
         force_load_ = force_load;
     }
 
+    size_t NextIndex(size_t core_idx) const
+    {
+        size_t next_idx = next_idxs_[core_idx];
+        assert(next_idx <= partitioned_slice_data_[core_idx].size());
+        return next_idx;
+    }
+
+    void SetNextIndex(size_t core_idx, size_t index)
+    {
+        assert(index <= partitioned_slice_data_[core_idx].size());
+        next_idxs_[core_idx] = index;
+    }
+
 private:
     const TableName *table_name_;
     NodeGroupId cc_ng_id_;
@@ -419,6 +434,7 @@ private:
     std::mutex mux_;
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 
+    std::vector<size_t> next_idxs_;
     std::vector<std::vector<SliceDataItem>> partitioned_slice_data_;
     LoadRangeSliceRequest load_slice_req_;
 

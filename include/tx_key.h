@@ -273,7 +273,7 @@ public:
     {
     }
 
-    CompositeKey(CompositeKey &&other)
+    CompositeKey(CompositeKey &&other) noexcept
         : fields_(other.fields_), field_cnt_(other.field_cnt_)
     {
     }

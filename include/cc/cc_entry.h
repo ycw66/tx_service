@@ -806,6 +806,9 @@ public:
      * @param from_ts - Previous round scan timestamp. We scan the data between
      * (from_ts, to_ts].
      * @param to_ts - Current round checkpoint timestamp.
+     * @param include_flushed_rec - True means we also need to scan data which
+     * has been flushed to storage. Note: This flag only used for
+     * RangePartition.
      * @return the number of exported version records.
      */
     size_t ExportForCkpt(const KeyT &key,
@@ -817,7 +820,8 @@ public:
                          uint64_t oldest_active_tx_ts,
                          TableType tbl_type,
                          bool mvcc_enabled,
-                         size_t &ckpt_vec_size) const
+                         size_t &ckpt_vec_size,
+                         bool include_flushed_rec) const
     {
         size_t exported_count = 0;
         if (commit_ts_ <= ckpt_ts_)
@@ -879,6 +883,44 @@ public:
                     }
                     else
                     {
+                        if (exported_count == 0 && it->commit_ts_ == ckpt_ts_)
+                        {
+                            if (include_flushed_rec)
+                            {
+                                FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                                ref.CloneOrCopyKey(key);
+
+                                // This record was load from storage. We
+                                // can't safely point to CcEntry of CcMap.
+                                // Because the entry will be kickout after
+                                // UnpinSlice. the pointer will become
+                                // invalidation.
+                                ref.cce_ = nullptr;
+
+                                if (it->payload_status_ == RecordStatus::Normal)
+                                {
+                                    if (tbl_type != TableType::Secondary)
+                                    {
+                                        ref.SetPayload(
+                                            it->payload_);  // pk, unique_sk
+                                    }
+                                    else
+                                    {
+                                        ref.SetPayload(payload_);  // sk
+                                    }
+                                }
+                                ref.payload_status_ = it->payload_status_;
+                                ref.commit_ts_ = it->commit_ts_;
+
+                                // the size of record is not change.
+                                ref.delta_size_ = 0;
+
+                                exported_count++;
+                            }
+
+                            break;
+                        }
+
                         if (exported_count == 0)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
@@ -942,12 +984,55 @@ public:
                             ref.payload_status_ = it->payload_status_;
                             ref.commit_ts_ = it->commit_ts_;
                         }
+
                         exported_count++;
                     }
                 }
                 else if (from_ts >= it->commit_ts_)
                 {
-                    assert(from_ts > 0);
+                    if (include_flushed_rec && exported_count == 0)
+                    {
+                        if (it->commit_ts_ > ckpt_ts_)
+                        {
+                            continue;
+                        }
+
+                        if (it->commit_ts_ == ckpt_ts_)
+                        {
+                            FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
+                            ref.CloneOrCopyKey(key);
+
+                            // This record was load from storage. We
+                            // can't safely point to CcEntry of CcMap.
+                            // Because the entry will be kickout after
+                            // UnpinSlice. the pointer will become
+                            // invalidation.
+                            ref.cce_ = nullptr;
+
+                            if (it->payload_status_ == RecordStatus::Normal)
+                            {
+                                if (tbl_type != TableType::Secondary)
+                                {
+                                    ref.SetPayload(
+                                        it->payload_);  // pk, unique_sk
+                                }
+                                else
+                                {
+                                    ref.SetPayload(payload_);  // sk
+                                }
+                            }
+                            ref.payload_status_ = it->payload_status_;
+                            ref.commit_ts_ = it->commit_ts_;
+
+                            // the size of record is not change.
+                            ref.delta_size_ = 0;
+
+                            exported_count++;
+                        }
+                    }
+
+                    assert(!include_flushed_rec || exported_count != 0 ||
+                           it->commit_ts_ < ckpt_ts_);
                     break;
                 }
                 // else: it->commit_ts_ > to_ts
@@ -1146,6 +1231,101 @@ struct CcPage : public LruPage
         }
     }
 
+    // Use two-way merge algrothim to bulk emplace keys to reduce data moving
+    // overhead. Note: new_keys are not exist in keys_
+    void EmplaceKeys(std::vector<KeyT> &new_keys,
+                     size_t &mem_increased,
+                     std::vector<size_t> &idxs_in_page)
+    {
+        if (new_keys.empty())
+        {
+            idxs_in_page.clear();
+            return;
+        }
+
+        idxs_in_page.clear();
+        idxs_in_page.resize(new_keys.size(), 0);
+        assert(!idxs_in_page.empty());
+
+        if (new_keys.size() == 1)
+        {
+            size_t idx_in_page = Emplace(new_keys.front(), mem_increased);
+            idxs_in_page[0] = idx_in_page;
+            return;
+        }
+
+        if (keys_.empty() || keys_.back() < new_keys.front())
+        {
+            for (size_t i = 0; i < new_keys.size(); ++i)
+            {
+                idxs_in_page[i] = keys_.size();
+
+                keys_.push_back(std::move(new_keys[i]));
+                entries_.push_back(
+                    std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this));
+
+                size_t key_mem_increased =
+                    keys_.back().MemUsage() - sizeof(KeyT);
+                size_t entry_mem_increased =
+                    entries_.back()->GetCcEntryMemUsage();
+                mem_increased += key_mem_increased + entry_mem_increased;
+            }
+
+            return;
+        }
+
+        size_t total_size = new_keys.size() + keys_.size();
+        size_t res_index = total_size;
+        size_t old_index = keys_.size();
+        size_t new_index = new_keys.size();
+
+        keys_.resize(total_size);
+        entries_.resize(total_size);
+
+        while (old_index > 0 && new_index > 0)
+        {
+            if (keys_[old_index - 1] < new_keys[new_index - 1])
+            {
+                keys_[res_index - 1] = std::move(new_keys[new_index - 1]);
+                entries_[res_index - 1] =
+                    std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this);
+                idxs_in_page[new_index - 1] = res_index - 1;
+
+                size_t key_mem_increased =
+                    keys_[res_index - 1].MemUsage() - sizeof(KeyT);
+                size_t entry_mem_increased =
+                    entries_[res_index - 1]->GetCcEntryMemUsage();
+                mem_increased += key_mem_increased + entry_mem_increased;
+
+                new_index--;
+            }
+            else
+            {
+                assert(new_keys[new_index - 1] < keys_[old_index - 1]);
+                keys_[res_index - 1] = std::move(keys_[old_index - 1]);
+                entries_[res_index - 1] = std::move(entries_[old_index - 1]);
+                old_index--;
+            }
+
+            res_index--;
+        }
+
+        for (; new_index > 0; --new_index, --res_index)
+        {
+            keys_[res_index - 1] = std::move(new_keys[new_index - 1]);
+            entries_[res_index - 1] =
+                std::make_unique<CcEntry<KeyT, ValueT>>(parent_map_, this);
+
+            idxs_in_page[new_index - 1] = res_index - 1;
+
+            size_t key_mem_increased =
+                keys_[res_index - 1].MemUsage() - sizeof(KeyT);
+            size_t entry_mem_increased =
+                entries_[res_index - 1]->GetCcEntryMemUsage();
+            mem_increased += key_mem_increased + entry_mem_increased;
+        }
+    }
+
     size_t Emplace(const KeyT &key, size_t &mem_increased)
     {
         // append check
@@ -1296,6 +1476,12 @@ struct CcPage : public LruPage
         return &keys_.at(idx_in_page);
     }
 
+    CcEntry<KeyT, ValueT> *Entry(size_t idx_in_page)
+    {
+        assert(idx_in_page < entries_.size());
+        return entries_[idx_in_page].get();
+    }
+
     size_t Remove(size_t idx)
     {
         assert(idx < keys_.size());
@@ -1355,12 +1541,12 @@ struct CcPage : public LruPage
     }
 
     // threshold to trigger page split when inserting
-    inline static size_t split_threshold_ = 64;
+    inline static constexpr size_t split_threshold_ = 64;
     // threshold to trigger page merge
     // needs thorough consideration to configure this as eager merging could
     // lead to thrashing, where a lot of successive delete and insert operations
     // lead to constant splits and merges
-    inline static size_t merge_threshold_ = split_threshold_ / 2;
+    inline static constexpr size_t merge_threshold_ = split_threshold_ / 2;
 
     std::vector<KeyT> keys_;
     std::vector<std::unique_ptr<CcEntry<KeyT, ValueT>>> entries_;
