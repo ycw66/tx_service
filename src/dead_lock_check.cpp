@@ -209,187 +209,205 @@ void DeadLockCheck::GatherLockDependancy()
         return;
     }
 
-    std::vector<std::vector<LockNode>> vct_dead;
-    DetectDeadLock(vct_dead);
+    std::map<TxEdge, int32_t, EdgeLess> map_edge = GenerateTxWaitGraph();
+    std::vector<std::vector<TxEdge>> vct_dead = DetectDeadLock(map_edge);
     RemoveDeadTransaction(vct_dead);
 }
 
-// The algorithm describer for dead lock detect.
-// Txids and all its locked cc entrys saved in map_txid_locked_entry_, cc entrys
-// and its all waited txids saved in map_entry_waited_txid_. Here will traverse
-// map_txid_locked_entry_ and judge if the pair has been visit. If visited,
-// neglect and go to next pair. If not, use depth-first traversal, first mark
-// LockNodeSet.ivisit with "count", then according the cc entry to find waited
-// txids, then according txids to find its locked cc entry. Here use v_set_pos
-// to record the position in set of locked cc entrys or waited txids. if remeet
-// the lock entry (identified by LockEntry.ivisit), it indicate to find dead
-// lock, according to v_set_pos to find the related txid and cc entrys.
-void DeadLockCheck::DetectDeadLock(std::vector<std::vector<LockNode>> &vct_dead)
+// This method will preprocess the data that collected from all nodes. The
+// origin data shows the releations between txid and ccentry. One relation are
+// ccentry and the txids that have locked this ccentry. The other relation are
+// txids and its waited ccentry. This method will convert the relations between
+// txids and ccentrys to edges that txids that have locked the ccentrys and the
+// other txid that is waiting the ccentrys.
+// Every edge is a relation from a transaction that is waiting a ccentry to
+// other transaction that has locked the same ccentry.
+// For the reurn map, the first paramter is the edge itself, the second
+// parameter is to ahow if this edge has been visited in traverse.
+std::map<TxEdge, int32_t, EdgeLess> DeadLockCheck::GenerateTxWaitGraph()
 {
-    // Here will start from a ccentry to vist its locked txid, then from txid to
-    // waited ccentry. To avoid repeate work, if a ccentry has visited, it is
-    // not need to visit again. Here count to make sure the ccentry is not
-    // visited again.
-    int32_t count = 0;
-    for (auto ccety_iter = entry_locked_txid_map_.begin();
-         ccety_iter != entry_locked_txid_map_.end();
-         ccety_iter++)
+    std::map<TxEdge, int32_t, EdgeLess> map_edge;
+    for (auto it_wait = txid_waited_entry_map_.begin();
+         it_wait != txid_waited_entry_map_.end();
+         it_wait++)
     {
-        // If this ccentry has been visited, continue to avoid visit again.
-        if (ccety_iter->second.ivisit != -1)
+        for (auto &it_ety : it_wait->second.lock_node_set)
         {
-            continue;
-        }
-        count++;
-
-        // Here is depth-first traversal. Due to stack can not be traversed, so
-        // here use vector to imitate the stack. Start from root ccentry, it
-        // will first save the set address with locked txids from root ccentry
-        // into v_set, and save the begin position of v_set into v_set_pos.
-        std::vector<LockNodeSet *> v_set;
-        std::vector<std::unordered_set<LockNode, NeHash, NeEqual>::iterator>
-            v_set_pos;
-
-        // To mark this ccentry has been visited
-        ccety_iter->second.ivisit = count;
-        // Push the set from the root ccentry into vector
-        v_set.push_back(&ccety_iter->second);
-        // push the begin iterator of the set from root ccentry into vector
-        v_set_pos.push_back(ccety_iter->second.lock_node_set.begin());
-
-        while (true)
-        {
-            // Get the last layer's set from stack
-            LockNodeSet *lety = *v_set.rbegin();
-            // Get the last layer's set's iterator from stack
-            auto &itpos = *v_set_pos.rbegin();
-            // If has visit the last element in top layer, it will pop this set
-            // and set next layer as top layer.
-            if (itpos == lety->lock_node_set.end())
+            auto it_lock_set = entry_locked_txid_map_.find(it_ety);
+            if (it_lock_set == entry_locked_txid_map_.end())
             {
-                v_set.pop_back();
-                v_set_pos.pop_back();
-                // If the stack is empty, break this search.
-                if (v_set.size() == 0)
-                {
-                    break;
-                }
-                // After pop the last layer and move to next, here will make the
-                // iterator of set move to next position.
-                (*v_set_pos.rbegin())++;
                 continue;
             }
 
-            if (itpos->is_ccentry_addr)
+            for (auto &it_lock : it_lock_set->second.lock_node_set)
             {
-                // If the current node is ccentry type, it will search
-                // entry_locked_txid_map_ to find the the txids that locked this
-                // ccentry.
-                auto itety = entry_locked_txid_map_.find(*itpos);
-                if (itety == entry_locked_txid_map_.end() ||
-                    (itety->second.ivisit > 0 && itety->second.ivisit != count))
+                // Some time a transaction need to upgrade lock from read to
+                // write intend or from write intent to write. If it is blocked
+                // by other lock, it will be added into block queue of the
+                // ccentry. If not except this case, it will generate a circle
+                // from this transaction to this transaction.
+                if (it_wait->first == it_lock)
                 {
-                    // If failed to find the txids or has visited this node,
-                    // move to next element in set.
-                    itpos++;
+                    continue;
                 }
-                else if (itety->second.ivisit == count)
-                {
-                    // ivisit==count means here has find the circle of dead
-                    // lock, save the entire path of circle into a vector for
-                    // next step.
-                    std::vector<LockNode> vct;
-                    auto itp = v_set_pos.rbegin();
-                    auto ite = v_set.rbegin();
-                    for (; itp != v_set_pos.rend(); itp++, ite++)
-                    {
-                        vct.push_back(**itp);
-                        if (*ite == &itety->second)
-                        {
-                            break;
-                        }
-                    }
 
-                    vct_dead.push_back(vct);
-                    itpos++;
-                }
-                else
-                {
-                    // Push the search result into stack
-                    itety->second.ivisit = count;
-                    v_set.push_back(&itety->second);
-                    v_set_pos.push_back(itety->second.lock_node_set.begin());
-                }
-            }
-            else
-            {
-                // If the current node is txid type, search
-                // txid_waited_entry_map_ and find the waited ccentry.
-                auto itety = txid_waited_entry_map_.find(*itpos);
-                if (itety == txid_waited_entry_map_.end() ||
-                    (itety->second.ivisit > 0 && itety->second.ivisit != count))
-                {
-                    // If failed to find the txids or has visited this node,
-                    // move to next element in set.
-                    itpos++;
-                }
-                else if (itety->second.ivisit == count)
-                {
-                    // If ivisit == count, means here find the circle of dead
-                    // lock, save the entire path into a vector.
-                    std::vector<LockNode> vct;
-                    auto itp = v_set_pos.rbegin();
-                    auto ite = v_set.rbegin();
-                    for (; itp != v_set_pos.rend(); itp++, ite++)
-                    {
-                        vct.push_back(**itp);
-                        if (*ite == &itety->second)
-                        {
-                            break;
-                        }
-                    }
-
-                    vct_dead.push_back(vct);
-                    itpos++;
-                }
-                else
-                {
-                    // Push the search result into stack.
-                    itety->second.ivisit = count;
-                    v_set.push_back(&itety->second);
-                    v_set_pos.push_back(itety->second.lock_node_set.begin());
-                }
+                map_edge.emplace(TxEdge(it_wait->first.tx_id, it_lock.tx_id),
+                                 -1);
             }
         }
     }
+
+    return map_edge;
 }
 
-void DeadLockCheck::RemoveDeadTransaction(
-    std::vector<std::vector<LockNode>> &vct_dead)
+// This method will traverse all edge and find if there has circle from one edge
+// to other edge and reback to the visited edge.
+// The input map is the edges and the sign that show if the edge has been
+// visited.
+// The return value is the multi groups of edges that make the dead lock circle.
+std::vector<std::vector<TxEdge>> DeadLockCheck::DetectDeadLock(
+    std::map<TxEdge, int32_t, EdgeLess> &map_edge)
 {
-    for (std::vector<LockNode> &dead : vct_dead)
+    // iround used to show it is which time to traverse map_edge from the first
+    // edge to last edge. this value will save it into the second parameter in
+    // map_edge. Its usage is to show if the edge has been visited at his time.
+    // If not, it can not be a dead lock cycle. If same, it will judge it has
+    // multi paths or dead lock cycle.
+    int32_t iround = 1;
+    std::vector<std::vector<TxEdge>> vct_v_edge;
+    for (auto it_edge = map_edge.begin(); it_edge != map_edge.end(); it_edge++)
     {
-        uint64_t tx_id = 0;
-        uint32_t max_ety = 0;
-
-        for (LockNode &le : dead)
+        // If this edge has been visited, continue.
+        if (it_edge->second > 0)
         {
-            if (le.is_ccentry_addr)
+            continue;
+        }
+
+        // To Judge if here has circle or only it has multi paths from an edge
+        // to other edges.
+        std::unordered_set<TxEdge, EdgeHash, EdgeEqual> set_dup;
+        // Here the traverse is depth-first, this vector will be used as stack
+        // and save the iterators of every layer. It will got to the depth layer
+        // until no edges or visited edges. Then reback upper layer and move to
+        // next edge until all related edges have been visited.
+        std::vector<std::map<TxEdge, int32_t, EdgeLess>::iterator> vct_iter;
+        it_edge->second = iround;
+        // Push the first layer
+        vct_iter.push_back(it_edge);
+        set_dup.insert(it_edge->first);
+        // The current layer's locked transaction will be as the waiting
+        // transaction of next layer.
+        TxNumber tx_id = it_edge->first.tx_lock_;
+        // Get the first edge's iterator of its waiting txid = tx_id
+        auto iter = map_edge.lower_bound(TxEdge(tx_id, 0));
+
+        while (true)
+        {
+            // If the iterator has go to the map's end or edge's waiting txid
+            // has not equal tx_id, it mean it has visited all related edges
+            // with tx_id and need to go to upper layer.
+            if (iter == map_edge.end() || iter->first.tx_wait_ != tx_id)
             {
+                vct_iter.pop_back();
+                if (vct_iter.size() <= 1)
+                {
+                    break;
+                }
+
+                iter = *vct_iter.rbegin();
+                set_dup.erase(iter->first);
+                tx_id = iter->first.tx_wait_;
+                iter++;
                 continue;
             }
 
-            uint32_t cnt = txid_ety_count_map_.find(le.tx_id)->second;
-            if (cnt > max_ety)
+            // iter->second saved which time to visit this edge, if it is not
+            // equal iround, it means that it has been visited previous. If
+            // iter->second < 0, it means it is a new edge and not visit.
+            if (iter->second == iround)
             {
-                max_ety = cnt;
-                tx_id = le.tx_id;
+                // It maybe has multi paths from one edge to other edge, so if
+                // it meet visited edge with same sign, it does not mean here
+                // has dead lock circle. This judgement will dicide is is only
+                // multi paths or dead lock cycle.
+                if (set_dup.find(iter->first) == set_dup.end())
+                {
+                    // Due to it is not circle, it will move next edge and judge
+                    // again, do not need go to next layer.
+                    iter++;
+                }
+                else
+                {
+                    // If find current edge from set_dup, it will make sure here
+                    // has dead lock cycle. Then here will copy the edges into a
+                    // v_e from end of vct_iter, until meet the current edge.
+                    // All edges that make up the cycle will be saved into v_e.
+                    std::vector<TxEdge> v_e;
+                    v_e.push_back(iter->first);
+                    for (auto it = vct_iter.rbegin(); it != vct_iter.rend();
+                         it++)
+                    {
+                        if ((*it)->first == iter->first)
+                        {
+                            break;
+                        }
+
+                        v_e.push_back((*it)->first);
+                    }
+
+                    vct_v_edge.push_back(v_e);
+                    // Save the cycle and move next edge.
+                    iter++;
+                    continue;
+                }
+            }
+            else if (iter->second > 0)
+            {
+                // This edge has been visited previous time, so it does not need
+                // to go to deep layer.
+                iter++;
+            }
+            else
+            {
+                // Save current layer's information into set_dup for dead lock
+                // cycle check and vct_iter and move into
+                // next layer.
+                iter->second = iround;
+                set_dup.insert(iter->first);
+                vct_iter.push_back(iter);
+                tx_id = iter->first.tx_lock_;
+                iter = map_edge.lower_bound(TxEdge(tx_id, 0));
+            }
+        }
+
+        // Next traverse, counter++
+        iround++;
+    }
+
+    return vct_v_edge;
+}
+
+void DeadLockCheck::RemoveDeadTransaction(
+    std::vector<std::vector<TxEdge>> &vct_dead)
+{
+    for (std::vector<TxEdge> &dead : vct_dead)
+    {
+        uint64_t tx_id = 0;
+        uint32_t min_ety = UINT32_MAX;
+
+        for (TxEdge &edge : dead)
+        {
+            uint32_t cnt = txid_ety_count_map_.find(edge.tx_wait_)->second;
+            if (cnt < min_ety)
+            {
+                min_ety = cnt;
+                tx_id = edge.tx_wait_;
             }
             // This brance to ensure the small tx id to be abort and test case
             // will not fail due to uncertainty
-            else if (cnt == max_ety && tx_id > le.tx_id)
+            else if (cnt == min_ety && tx_id > edge.tx_wait_)
             {
-                tx_id = le.tx_id;
+                tx_id = edge.tx_wait_;
             }
         }
 

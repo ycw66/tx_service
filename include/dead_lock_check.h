@@ -1,5 +1,6 @@
 #pragma once
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -83,8 +84,49 @@ struct NeEqual
 
 struct LockNodeSet
 {
-    int32_t ivisit = -1;
     std::unordered_set<LockNode, NeHash, NeEqual> lock_node_set;
+};
+
+/**An edge is from a transaction that is waiting a ccentry to another
+ * transaction that has locked the same ccentry*/
+struct TxEdge
+{
+    TxEdge(uint64_t tx_wait, uint64_t tx_lock)
+        : tx_wait_(tx_wait), tx_lock_(tx_lock)
+    {
+    }
+    bool operator==(const TxEdge &other) const
+    {
+        return (tx_wait_ == other.tx_wait_ && tx_lock_ == other.tx_lock_);
+    }
+
+    uint64_t tx_wait_;
+    uint64_t tx_lock_;
+};
+
+struct EdgeHash
+{
+    std::size_t operator()(const TxEdge &edge) const
+    {
+        return std::hash<uint64_t>{}(edge.tx_wait_ ^ edge.tx_lock_);
+    }
+};
+
+struct EdgeEqual
+{
+    bool operator()(const TxEdge &lhs, const TxEdge &rhs) const
+    {
+        return (lhs == rhs);
+    }
+};
+
+struct EdgeLess
+{
+    bool operator()(const TxEdge &lhs, const TxEdge &rhs) const
+    {
+        return (lhs.tx_wait_ == rhs.tx_wait_ ? lhs.tx_lock_ < rhs.tx_lock_
+                                             : lhs.tx_wait_ < rhs.tx_wait_);
+    }
 };
 
 namespace tr = txservice::remote;
@@ -123,8 +165,10 @@ public:
 protected:
     void Run();
     void GatherLockDependancy();
-    void DetectDeadLock(std::vector<std::vector<LockNode>> &vct_dead);
-    void RemoveDeadTransaction(std::vector<std::vector<LockNode>> &vct_dead);
+    std::vector<std::vector<TxEdge>> DetectDeadLock(
+        std::map<TxEdge, int32_t, EdgeLess> &map_edge);
+    void RemoveDeadTransaction(std::vector<std::vector<TxEdge>> &vct_dead);
+    std::map<TxEdge, int32_t, EdgeLess> GenerateTxWaitGraph();
 
 protected:
     static DeadLockCheck *inst_;
