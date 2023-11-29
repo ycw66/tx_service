@@ -305,6 +305,21 @@ public:
                 cce->pending_cmd_ = nullptr;
             }
         }
+        else
+        {
+            bool proceed = cmd->ProceedOnExistentObject();
+            if (!proceed)
+            {
+                if (req.apply_and_commit_)
+                {
+                    ReleaseCceKeyLock(cce, txn, ng_id);
+                    obj_result.lock_acquired_ = LockType::NoLock;
+                }
+
+                hd_res->SetFinished();
+                return true;
+            }
+        }
 
         bool cmd_success = false;
         if (cce->dirty_payload_status_ == RecordStatus::Normal)

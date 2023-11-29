@@ -33,6 +33,7 @@ public:
         const std::string *image) const = 0;
     virtual std::unique_ptr<TxCommandResult> CreateCommandResult() const = 0;
     virtual bool ProceedOnNonExistentObject() const = 0;
+    virtual bool ProceedOnExistentObject() const = 0;
     /**
      * Execute cmd on object to get the result.
      * @param object
