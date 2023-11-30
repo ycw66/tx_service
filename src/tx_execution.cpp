@@ -819,7 +819,7 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
     rec_resp_ = &req.tx_result_;
     TxCommand *command = req.Command();
     const TxKey *key = req.Key();
-    obj_cmd_.Reset(req.table_name_, key, command, req.auto_commit_);
+    obj_cmd_.Reset(req.table_name_, key, command, &req, req.auto_commit_);
 
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
@@ -1646,6 +1646,13 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     {
         const ReadKeyResult &read_res = read_.hd_result_.Value();
         const ReadTxRequest *read_tx_req = read.read_tx_req_;
+
+        if (read.read_type_ == ReadType::OutsideDeleted ||
+            read.read_type_ == ReadType::OutsideNormal)
+        {
+            rec_resp_->Finish(read_res.rec_status_);
+            return;
+        }
 
         // optimization for case that we read the same key continuously
         // especially speed up remote read. e.g. Read A, Write B, Read A.
@@ -2963,10 +2970,16 @@ void TransactionExecution::Abort()
             }
             acquire_write_cnt -= error_cnt;
         }
+#ifdef RANGE_PARTITION_ENABLED
         else if (lock_write_ranges_.lock_range_result_->IsError())
         {
             acquire_write_cnt = 0;
         }
+#endif
+
+#ifdef ON_KEY_OBJECT
+        acquire_write_cnt += rw_set_.ObjectCommandSize();
+#endif
         post_process_.Reset(acquire_write_cnt,
                             rw_set_.ReadSetSize(),
                             rw_set_.CatalogRangeSetSize());
@@ -3317,11 +3330,13 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
                 {
                     // No need to update txn status since we did not assign
                     // TEntry for recovering tx.
-                    post_process_.Reset(rw_set_.WriteSetSize() +
-                                            rw_set_.ForwardWriteCnt() +
-                                            rw_set_.ObjectCommandSize(),
-                                        0,
-                                        rw_set_.CatalogRangeSetSize());
+                    uint32_t acquire_write_cnt =
+                        rw_set_.WriteSetSize() + rw_set_.ForwardWriteCnt();
+#ifdef ON_KEY_OBJECT
+                    acquire_write_cnt += rw_set_.ObjectCommandSize();
+#endif
+                    post_process_.Reset(
+                        acquire_write_cnt, 0, rw_set_.CatalogRangeSetSize());
                     PushOperation(&post_process_);
                     Process(post_process_);
                 }
@@ -3999,10 +4014,12 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
         }
         acquire_write_cnt -= error_cnt;
     }
+#ifdef RANGE_PARTITION_ENABLED
     else if (lock_write_ranges_.lock_range_result_->IsError())
     {
         acquire_write_cnt = 0;
     }
+#endif
 
     TxnStatus status = TxStatus();
     if (status == TxnStatus::Committed)
@@ -4016,7 +4033,7 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
     }
     else if (status == TxnStatus::Aborted)
     {
-        post_process_.Reset(acquire_write_cnt,
+        post_process_.Reset(acquire_write_cnt + rw_set_.ObjectCommandSize(),
                             rw_set_.ReadSetSize(),
                             rw_set_.CatalogRangeSetSize());
     }
@@ -5131,17 +5148,41 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     // postprocess.
     bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
 
-    cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
-                               *obj_cmd_op.key_,
-                               key_shard_code,
-                               *obj_cmd_op.command_,
-                               TxNumber(),
-                               tx_term_,
-                               current_ts,
-                               hd_res,
-                               iso_level_,
-                               protocol_,
-                               commit);
+    if (obj_cmd_op.cmd_tx_req_->read_type_ != ReadType::Inside)
+    {
+        assert(cache_miss_read_cce_addr_.CcePtr() != 0);
+        assert(obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideDeleted ||
+               obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideNormal);
+        // backfill
+        cc_handler_->ObjectCommandOutside(cache_miss_read_cce_addr_,
+                                          *obj_cmd_op.command_,
+                                          TxNumber(),
+                                          tx_term_,
+                                          current_ts,
+                                          hd_res,
+                                          iso_level_,
+                                          protocol_,
+                                          commit,
+                                          obj_cmd_op.cmd_tx_req_->rec_,
+                                          obj_cmd_op.cmd_tx_req_->version_,
+                                          obj_cmd_op.cmd_tx_req_->read_type_);
+    }
+    else
+    {
+        cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
+
+        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                                   *obj_cmd_op.key_,
+                                   key_shard_code,
+                                   *obj_cmd_op.command_,
+                                   TxNumber(),
+                                   tx_term_,
+                                   current_ts,
+                                   hd_res,
+                                   iso_level_,
+                                   protocol_,
+                                   commit);
+    }
     StartTiming();
 }
 
@@ -5189,16 +5230,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // PostProcess or WritLog.
 
         LockType lock_acquired = cmd_result.lock_acquired_;
-        if (lock_acquired == LockType::ReadLock)
-        {
-            LOG(INFO) << "txm acquired readlock";
-            // Read lock is acquired under locking protocol. Add the cce to
-            // read set for later PostRead.
-            rw_set_.AddRead(cmd_result.cce_addr_,
-                            cmd_result.commit_ts_,
-                            obj_cmd_op.table_name_);
-        }
-        else if (lock_acquired == LockType::WriteLock)
+        if (lock_acquired == LockType::WriteLock)
         {
             LOG(INFO) << "txm acquired writelock";
             // The command modifies the object. Put it into the command set
@@ -5208,6 +5240,15 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                      cmd_result.commit_ts_,
                                      obj_cmd_op.key_,
                                      obj_cmd_op.command_);
+        }
+        else if (lock_acquired != LockType::NoLock)
+        {
+            LOG(INFO) << "txm acquired readlock";
+            // Read lock is acquired under locking protocol. Add the cce to
+            // read set for later PostRead.
+            rw_set_.AddRead(cmd_result.cce_addr_,
+                            cmd_result.commit_ts_,
+                            obj_cmd_op.table_name_);
         }
 
         if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
@@ -5222,6 +5263,10 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         if (obj_cmd_op.auto_commit_)
         {
             Commit();
+        }
+        else if (obj_status == RecordStatus::Unknown)
+        {
+            cache_miss_read_cce_addr_ = cmd_result.cce_addr_;
         }
     }
 }

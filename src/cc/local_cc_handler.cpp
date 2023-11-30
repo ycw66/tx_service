@@ -1489,6 +1489,55 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
 }
 
+void txservice::LocalCcHandler::ObjectCommandOutside(
+    const CcEntryAddr &cce_addr,
+    TxCommand &obj_cmd,
+    TxNumber txn,
+    int64_t tx_term,
+    uint64_t tx_ts,
+    CcHandlerResult<ObjectCommandResult> &hres,
+    IsolationLevel iso_level,
+    CcProtocol proto,
+    bool commit,
+    std::shared_ptr<TxRecord> *rec,
+    uint64_t rec_ts,
+    ReadType read_type)
+{
+    assert(rec != nullptr);
+    uint32_t ng_id = cce_addr.NodeGroupId();
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+
+    hres.Value().cce_addr_.SetCce(cce_addr.CcePtr(),
+                                  cce_addr.Term(),
+                                  cce_addr.NodeGroupId(),
+                                  cce_addr.CoreId());
+    if (dest_node_id == cc_shards_.node_id_)
+    {
+        ApplyCc *req = apply_pool.NextRequest();
+        req->Reset(nullptr,
+                   nullptr,
+                   ng_id << 10,
+                   &obj_cmd,
+                   nullptr,
+                   txn,
+                   tx_term,
+                   tx_ts,
+                   &hres,
+                   proto,
+                   iso_level,
+                   commit,
+                   rec,
+                   rec_ts,
+                   read_type);
+        cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
+    }
+    else
+    {
+        // TODO(zkl): support remote requests.
+        assert(false);
+    }
+}
+
 void txservice::LocalCcHandler::CleanCcEntryForTest(const TableName &table_name,
                                                     const TxKey &key,
                                                     bool only_archives,

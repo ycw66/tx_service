@@ -735,6 +735,11 @@ struct ObjectCommandTxRequest
         std::unique_ptr<TxCommand> command_uptr_;
     };
 
+    // for backfill.
+    std::shared_ptr<TxRecord> *rec_{nullptr};
+    uint64_t version_{0};
+    ReadType read_type_{ReadType::Inside};
+
     bool auto_commit_{};
     // whether this object is pointer owner
     bool is_key_owner_{};

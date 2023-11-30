@@ -453,6 +453,38 @@ public:
                                CcProtocol proto,
                                bool commit) = 0;
 
+    /**
+     * Backfill the object specified by cce_addr and execute obj_cmd on it to
+     * get the result.
+     *
+     * @param cce_addr
+     * @param obj_cmd
+     * @param txn
+     * @param tx_term
+     * @param tx_ts
+     * @param hres
+     * @param proto
+     * @param commit if true, not just execute the command to get the result,
+     * but also commit it on the object
+     *
+     * @param rec Record to be cached
+     * @param read_type OutsideNormal or OutsideDeleted.
+     * @param rec_ts Commit Timestamp of the record
+     */
+    virtual void ObjectCommandOutside(
+        const CcEntryAddr &cce_addr,
+        TxCommand &obj_cmd,
+        TxNumber txn,
+        int64_t tx_term,
+        uint64_t tx_ts,
+        CcHandlerResult<ObjectCommandResult> &hres,
+        IsolationLevel iso_level,
+        CcProtocol proto,
+        bool commit,
+        std::shared_ptr<TxRecord> *rec,
+        uint64_t rec_ts,
+        ReadType read_type) = 0;
+
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,
                                      bool only_archives,

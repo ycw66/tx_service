@@ -824,6 +824,7 @@ void ReplayService::ProcessReplayLogTask(ReplayLogTask &task)
 {
     if (Sharder::Instance().CandidateLeaderTerm(task.cc_ng_id_) < 0)
     {
+        LOG(INFO) << "node group is not recovering, skip replay.";
         // node group is not recovering, skip replay.
         return;
     }

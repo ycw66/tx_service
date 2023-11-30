@@ -44,15 +44,22 @@ public:
     }
 
     using CcMap::AcquireCceKeyLock;
+    using CcMap::cc_ng_id_;
+    using CcMap::ccm_has_full_entries_;
+    using CcMap::last_dirty_commit_ts_;
     using CcMap::LockHandleForResumedRequest;
     using CcMap::MoveRequest;
     using CcMap::ReleaseCceKeyLock;
     using CcMap::schema_ts_;
     using CcMap::shard_;
+    using CcMap::table_name_;
     using CcMap::table_schema_;
+    using TemplateCcMap<KeyT, ValueT>::Find;
     using TemplateCcMap<KeyT, ValueT>::FindEmplace;
     using TemplateCcMap<KeyT, ValueT>::Iterator;
     using TemplateCcMap<KeyT, ValueT>::KeySchema;
+    using TemplateCcMap<KeyT, ValueT>::RecordSchema;
+    using TemplateCcMap<KeyT, ValueT>::Type;
 
     bool Execute(ApplyCc &req)
     {
@@ -74,7 +81,7 @@ public:
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         bool resume = false;
-        const KeyT *target_key = nullptr;
+        const KeyT *look_key = nullptr;
         KeyT decoded_key;
 
         uint32_t ng_id = req.NodeGroupId();
@@ -135,7 +142,7 @@ public:
             const TxKey *req_key = req.Key();
             if (req_key != nullptr)
             {
-                target_key = static_cast<const KeyT *>(req_key);
+                look_key = static_cast<const KeyT *>(req_key);
             }
             else
             {
@@ -143,10 +150,170 @@ public:
                 assert(key_str != nullptr);
                 size_t offset = 0;
                 decoded_key.Deserialize(key_str->data(), offset, KeySchema());
-                target_key = &decoded_key;
+                look_key = &decoded_key;
             }
 
-            auto it = FindEmplace(*target_key);
+#ifdef RANGE_PARTITION_ENABLED
+            cce = Find(*look_key).second;
+
+            // collect metrics: slice cache hits
+            if (metrics::enable_cache_hit_rate)
+            {
+                auto meter = shard_->meter_.get();
+                if (cce != nullptr)
+                {
+                    meter->Collect(
+                        shard_->CACHE_HIT_OR_MISS_TOTAL_NAME_, 1, "hits");
+                }
+            }
+
+            if (cce == nullptr)
+            {
+                if (Type() == TableType::Primary ||
+                    Type() == TableType::UniqueSecondary)
+                {
+                    RangeSliceOpStatus pin_status;
+                    RangeSliceId slice_id =
+                        shard_->PinRangeSlice(table_name_,
+                                              cc_ng_id_,
+                                              ng_term,
+                                              KeySchema(),
+                                              RecordSchema(),
+                                              schema_ts_,
+                                              table_schema_->GetKVCatalogInfo(),
+                                              *look_key,
+                                              true,
+                                              &req,
+                                              pin_status,
+                                              false,
+                                              0);
+
+                    if (pin_status == RangeSliceOpStatus::Successful)
+                    {
+                        // The slice is unpinned immediately. This is
+                        // because the prior pin operation brings all
+                        // records in the slice into memory, including the
+                        // target record sharded to this core. Since cache
+                        // cleaning is done by the tx processor associated
+                        // with this core, the target record cannot be
+                        // kicked out before this read request finishes.
+                        slice_id.Unpin();
+
+                        if (cc_op == CcOperation::Write)
+                        {
+                            auto it = FindEmplace(*look_key);
+                            cce = it->second;
+                            if (cce == nullptr)
+                            {
+                                hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                                return true;
+                            }
+
+                            if (cce->payload_status_ == RecordStatus::Unknown)
+                            {
+                                cce->payload_status_ = RecordStatus::Deleted;
+                                cce->commit_ts_ = 1U;
+                                cce->gap_commit_ts_ = 1U;
+                                cce->ckpt_ts_.store(1U,
+                                                    std::memory_order_relaxed);
+                            }
+                            else
+                            {
+                                assert(cce->commit_ts_ > 1);
+                            }
+                        }
+                        else
+                        {
+                            assert(cc_op == CcOperation::Read);
+                            cce = Find(*look_key).second;
+
+                            if (cce == nullptr)
+                            {
+                                std::unique_ptr<TxCommand> cmd_uptr = nullptr;
+                                TxCommand *cmd = nullptr;
+                                if (req.IsLocal())
+                                {
+                                    cmd = req.CommandPtr();
+                                }
+                                else
+                                {
+                                    if (req.OwnCommand())
+                                    {
+                                        cmd_uptr = req.ReleaseCommand();
+                                    }
+                                    else
+                                    {
+                                        cmd_uptr = CreateTxCommand(
+                                            *req.CommandImage());
+                                    }
+                                    cmd = cmd_uptr.get();
+                                }
+
+                                bool proceed =
+                                    cmd->ProceedOnNonExistentObject();
+                                if (!proceed)
+                                {
+                                    // Del command on a non-existent object also
+                                    // returns directly.
+                                    obj_result.commit_ts_ = 1;
+                                    obj_result.rec_status_ =
+                                        RecordStatus::Deleted;
+                                    hd_res->SetFinished();
+                                    return true;
+                                }
+                                else
+                                {
+                                    assert(false);
+                                    hd_res->ForceError();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
+                    {
+                        return false;
+                    }
+                    else if (pin_status == RangeSliceOpStatus::Retry)
+                    {
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                    else if (pin_status == RangeSliceOpStatus::Delay)
+                    {
+                        if (slice_id.Range()->HasLock())
+                        {
+                            hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                            return true;
+                        }
+                        else
+                        {
+                            shard_->Enqueue(shard_->LocalCoreId(), &req);
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        // If the pin operation returns an error, the data
+                        // store is inaccessible.
+                        hd_res->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                        return true;
+                    }
+                }
+                else
+                {
+                    assert(Type() == TableType::Catalog);
+                    auto it = FindEmplace(*look_key);
+                    cce = it->second;
+                    if (cce == nullptr)
+                    {
+                        hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
+                    }
+                }
+            }
+#else
+            auto it = FindEmplace(*look_key);
             cce = it->second;
 
             if (cce == nullptr)
@@ -158,6 +325,18 @@ public:
                 return false;
             }
 
+            // if ccm contains all the ccentries, then unknown status means
+            // that we can skip accessing kv store and return deleted status
+            // directly.
+            if (ccm_has_full_entries_ &&
+                cce->payload_status_ == RecordStatus::Unknown)
+            {
+                cce->payload_status_ = RecordStatus::Deleted;
+                cce->commit_ts_ = 1U;
+                cce->gap_commit_ts_ = 1U;
+                cce->ckpt_ts_.store(1U);
+            }
+#endif
             req.SetCcePtr(cce);
 
             assert(cce != nullptr);
@@ -188,6 +367,7 @@ public:
         }
         else
         {
+            // backfill
             assert(ng_id == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
         }
@@ -240,15 +420,51 @@ public:
             else
             {
                 cmd_uptr = CreateTxCommand(*req.CommandImage());
-                cmd = cmd_uptr.get();
             }
+            cmd = cmd_uptr.get();
         }
 
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
-            cce->commit_ts_ = 1;
+            // cce->commit_ts_ = 1;
             // TODO(zkl): load slice fom kv
-            cce->payload_status_ = RecordStatus::Deleted;
+            // cce->payload_status_ = RecordStatus::Deleted;
+
+            if (req.read_type_ == ReadType::OutsideNormal)
+            {
+                // backfill
+                if (req.rec_ != nullptr)
+                {
+                    assert(*req.rec_ != nullptr);
+                    // Because cc request is cached in pool, we must use
+                    // std::move to let record release if not used.
+                    cce->payload_ = std::static_pointer_cast<ValueT>(*req.rec_);
+                }
+                else if (req.rec_str_ != nullptr)
+                {
+                    TxRecord::Uptr tmp_rec = cmd->CreateObject(req.rec_str_);
+                    cce->payload_.reset(
+                        static_cast<ValueT *>(tmp_rec.release()));
+                }
+
+                cce->payload_status_ = RecordStatus::Normal;
+                cce->commit_ts_ = req.rec_commit_ts_;
+            }
+            else if (req.read_type_ == ReadType::OutsideDeleted)
+            {
+                // backfill
+                cce->payload_status_ = RecordStatus::Deleted;
+                cce->commit_ts_ = req.rec_commit_ts_;
+            }
+            else
+            {
+                assert(req.read_type_ == ReadType::Inside);
+                obj_result.lock_acquired_ = acquired_lock;
+                obj_result.rec_status_ = cce->payload_status_;
+                obj_result.commit_ts_ = cce->commit_ts_;
+                hd_res->SetFinished();
+                return true;
+            }
         }
 
         // Create the dirty object if there is already a pending command on this
@@ -476,6 +692,14 @@ public:
             }
 
             cce->commit_ts_ = commit_ts;
+            if (last_dirty_commit_ts_ < commit_ts)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+            {
+                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+            }
         }
 
         // Reset the dirty status.
@@ -504,7 +728,7 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
-
+        LOG(INFO) << "==replay log cc";
         // If the log record's commit ts is smaller than that of the cc map,
         // this record is generated before the latest schema of the table
         // and hence should skip the replay process.
@@ -613,6 +837,73 @@ public:
             req.SetFinish();
         }
 
+        return false;
+    }
+
+    bool Execute(FillStoreSliceCc &req) override
+    {
+        const std::vector<SliceDataItem> &slice_vec =
+            req.SliceData(shard_->core_id_);
+
+        for (const SliceDataItem &data_item : slice_vec)
+        {
+            const KeyT *key = static_cast<const KeyT *>(data_item.key_.get());
+            const ValueT *record =
+                static_cast<const ValueT *>(data_item.record_.get());
+
+            typename TemplateCcMap<KeyT, ValueT>::Iterator it =
+                FindEmplace(*key, req.ForceLoad());
+            const KeyT *cce_key = it->first;
+            CcEntry<KeyT, ValueT> *cce = it->second;
+            if (cce == nullptr)
+            {
+                // Memory reaches capacity while bringing a range slice into
+                // memory.
+                req.SetError(CcErrorCode::OUT_OF_MEMORY);
+                return true;
+            }
+
+            uint32_t rec_store_size =
+                data_item.is_deleted_ ? 0 : cce_key->Size() + record->Size();
+
+            // If the in-memory version is from a upload request (i.e. generated
+            // sk record from pk), the data store version might be newer. Only
+            // overwrite if in memory version is newer.
+            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
+            {
+                // Initialize the data store size if it is unspecified before
+                if (cce->data_store_size_.load(std::memory_order_acquire) ==
+                    INT32_MAX)
+                {
+                    cce->data_store_size_.store(rec_store_size,
+                                                std::memory_order_relaxed);
+                }
+
+                // The cc entry's commit ts is 1 when it is initialized.
+                // Commit ts greater than 1 means that the key is already
+                // cached in memory.
+                continue;
+            }
+
+            shard_->DecrementMemory(cce->PayloadMemUsage());
+            if (cce->payload_ == nullptr)
+            {
+                // cce->payload_ = std::make_shared<ValueT>(*record);
+                cce->payload_.reset(
+                    static_cast<ValueT *>(record->Clone().release()));
+            }
+            cce->commit_ts_ = data_item.version_ts_;
+            cce->ckpt_ts_.store(data_item.version_ts_,
+                                std::memory_order_relaxed);
+            cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
+                                                         : RecordStatus::Normal;
+            cce->data_store_size_.store(rec_store_size,
+                                        std::memory_order_relaxed);
+
+            shard_->mem_usage_ += cce->PayloadMemUsage();
+        }
+
+        req.SetFinish();
         return false;
     }
 

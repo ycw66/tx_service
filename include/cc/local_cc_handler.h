@@ -330,6 +330,19 @@ public:
                        CcProtocol proto,
                        bool commit) override;
 
+    void ObjectCommandOutside(const CcEntryAddr &cce_addr,
+                              TxCommand &obj_cmd,
+                              TxNumber txn,
+                              int64_t tx_term,
+                              uint64_t tx_ts,
+                              CcHandlerResult<ObjectCommandResult> &hres,
+                              IsolationLevel iso_level,
+                              CcProtocol proto,
+                              bool commit,
+                              std::shared_ptr<TxRecord> *rec,
+                              uint64_t rec_ts,
+                              ReadType read_type) override;
+
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
                              bool only_archives,

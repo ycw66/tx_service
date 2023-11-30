@@ -30,6 +30,7 @@ struct ScanBatchTuple;
 struct AnalyzeTableTxRequest;
 struct BatchReadTxRequest;
 struct DataMigrationStatus;
+struct ObjectCommandTxRequest;
 
 #define RETRY_NUM 3
 
@@ -1002,12 +1003,15 @@ struct ObjectCommandOp : TransactionOperation
     void Reset(const TableName *table_name,
                const TxKey *key,
                TxCommand *command,
+               ObjectCommandTxRequest *req,
                bool auto_commit = false);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{};
     const TxKey *key_{};
     TxCommand *command_{};
+    ObjectCommandTxRequest *cmd_tx_req_{};
+
     CcHandlerResult<ObjectCommandResult> hd_result_;
 
     bool auto_commit_{};

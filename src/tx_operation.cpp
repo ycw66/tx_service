@@ -4944,6 +4944,7 @@ ObjectCommandOp::ObjectCommandOp(TransactionExecution *txm)
 void ObjectCommandOp::Reset(const TableName *table_name,
                             const TxKey *key,
                             TxCommand *command,
+                            ObjectCommandTxRequest *req,
                             bool auto_commit)
 {
     table_name_ = table_name;
@@ -4952,6 +4953,7 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Reset();
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
+    cmd_tx_req_ = req;
 }
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)

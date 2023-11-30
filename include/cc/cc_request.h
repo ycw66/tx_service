@@ -639,6 +639,8 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        LOG(INFO) << "Reset, cce_addr:" << addr << " ,cce:" << std::hex
+                  << addr->CcePtr();
     }
 
     void Reset(const TxKey *key,
@@ -1051,8 +1053,7 @@ struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
 {
 public:
     ReadCc()
-        : cce_addr_(nullptr),
-          key_(nullptr),
+        : key_(nullptr),
           key_str_(nullptr),
           rec_(nullptr),
           rec_str_(nullptr),
@@ -1078,15 +1079,16 @@ public:
                 Sharder::Instance().CandidateLeaderTerm(node_group_id_);
         }
 
-        if (cce_addr_->CcePtr() != 0)
+        auto &tmp_cce_addr = res_->Value().cce_addr_;
+        if (tmp_cce_addr.CcePtr() != 0)
         {
-            if (cce_addr_->Term() != cc_ng_term)
+            if (tmp_cce_addr.Term() != cc_ng_term)
             {
                 return false;
             }
 
             const LruEntry *lru_entry =
-                reinterpret_cast<const LruEntry *>(cce_addr_->CcePtr());
+                reinterpret_cast<const LruEntry *>(tmp_cce_addr.CcePtr());
             ccm_ = lru_entry->parent_map_;
         }
         else
@@ -1146,8 +1148,7 @@ public:
         is_covering_keys_ = is_covering_keys;
 
         ccm_ = nullptr;
-        cce_addr_ = &res->Value().cce_addr_;
-        if (cce_addr_->CcePtr() != 0)
+        if (res->Value().cce_addr_.CcePtr() != 0)
         {
             table_name_ = nullptr;
         }
@@ -1193,8 +1194,7 @@ public:
         is_covering_keys_ = is_covering_keys;
 
         ccm_ = nullptr;
-        cce_addr_ = &res->Value().cce_addr_;
-        if (cce_addr_->CcePtr() != 0)
+        if (res->Value().cce_addr_.CcePtr() != 0)
         {
             table_name_ = nullptr;
         }
@@ -1305,7 +1305,6 @@ public:
     }
 
 private:
-    const CcEntryAddr *cce_addr_;
     const TxKey *key_;
     const std::string *key_str_;
     /**
@@ -3952,6 +3951,41 @@ public:
         }
     };
 
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        auto &tmp_cce_addr = res_->Value().cce_addr_;
+        if (tmp_cce_addr.CcePtr() != 0)
+        {
+            if (tmp_cce_addr.Term() != cc_ng_term)
+            {
+                return false;
+            }
+
+            const LruEntry *lru_entry =
+                reinterpret_cast<const LruEntry *>(tmp_cce_addr.CcePtr());
+            ccm_ = lru_entry->parent_map_;
+        }
+        else
+        {
+            if (ng_term_ < 0)
+            {
+                ng_term_ = cc_ng_term;
+            }
+
+            if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+            {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+
+        return true;
+    }
+
     void Reset(const TableName *table_name,
                const TxKey *key,
                const uint32_t key_shard_code,
@@ -3963,7 +3997,10 @@ public:
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool commit)
+               bool commit,
+               std::shared_ptr<TxRecord> *rec = nullptr,
+               uint64_t rec_ts = 0,
+               ReadType read_type = ReadType::Inside)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -3990,6 +4027,21 @@ public:
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
+
+        ccm_ = nullptr;
+        if (res->Value().cce_addr_.CcePtr() != 0)
+        {
+            table_name_ = nullptr;
+        }
+        else
+        {
+            table_name_ = table_name;
+        }
+
+        rec_ = rec;
+        rec_str_ = nullptr;
+        rec_commit_ts_ = rec_ts;
+        read_type_ = read_type;
     }
 
     void Reset(const TableName *table_name,
@@ -4000,7 +4052,10 @@ public:
                int64_t tx_term,
                uint64_t tx_ts,
                CcHandlerResult<ObjectCommandResult> *res,
-               CcProtocol proto)
+               CcProtocol proto,
+               std::string *rec_str = nullptr,
+               uint64_t rec_ts = 0,
+               ReadType read_type = ReadType::Inside)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -4025,6 +4080,20 @@ public:
         tx_term_ = tx_term;
         tx_ts_ = tx_ts;
         cce_ptr_ = nullptr;
+
+        ccm_ = nullptr;
+        if (res->Value().cce_addr_.CcePtr() != 0)
+        {
+            table_name_ = nullptr;
+        }
+        else
+        {
+            table_name_ = table_name;
+        }
+        rec_ = nullptr;
+        rec_str_ = rec_str;
+        rec_commit_ts_ = rec_ts;
+        read_type_ = read_type;
     }
 
     bool IsLocal() const
@@ -4138,6 +4207,12 @@ public:
     // acquiring lock and writing log. If false, just execute the command to
     // get the result.
     bool apply_and_commit_{};
+
+    // for backfill
+    std::shared_ptr<TxRecord> *rec_{nullptr};
+    std::string *rec_str_{nullptr};
+    uint64_t rec_commit_ts_{0};
+    ReadType read_type_{ReadType::Inside};
 };
 
 struct RequestAborterCc : public CcRequestBase
