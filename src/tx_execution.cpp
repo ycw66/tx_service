@@ -2711,9 +2711,11 @@ void TransactionExecution::ScanClose(
     // them and should append them into itself. 2) If last_tuple.lk_type is not
     // NoLock, then drain_batch_ has include them, and should skip them.
     // Non-repetition and non-omission.
-    for (uint32_t core_id = 0; core_id < scanner->CacheCount(); core_id++)
+    std::vector<const ScanTuple *> last_tuples;
+    last_tuples.reserve(scanner->CacheCount());
+    scanner->ShardCacheLastTuples(&last_tuples);
+    for (const ScanTuple *last_tuple : last_tuples)
     {
-        const ScanTuple *last_tuple = scanner->Cache(core_id)->LastTuple();
         if (last_tuple)
         {
             LockType lk_type =

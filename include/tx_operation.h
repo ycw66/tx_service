@@ -211,6 +211,7 @@ public:
     bool rset_has_expired_{false};
 };
 
+#ifdef RANGE_PARTITION_ENABLED
 struct LockWriteRangesOp : public TransactionOperation
 {
 public:
@@ -244,6 +245,7 @@ public:
     TableWriteSet::iterator write_key_end_;
     bool init_;
 };
+#endif
 
 struct FaultInjectOp : TransactionOperation
 {

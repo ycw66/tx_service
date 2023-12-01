@@ -278,8 +278,10 @@ public:
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
     virtual ScanCache *AddShard(uint32_t shard_code) = 0;
     virtual void ResetShards(size_t shard_cnt) = 0;
-    virtual void ShardCacheSizes(
-        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) = 0;
+    virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
+                                     *shard_code_and_sizes) const = 0;
+    virtual void ShardCacheLastTuples(
+        std::vector<const ScanTuple *> *last_tuples) const = 0;
 
     virtual const ScanTuple *Current() = 0;
     virtual CcmScannerType Type() const = 0;
@@ -401,6 +403,8 @@ public:
 
     void ResetShards(size_t shard_cnt) override
     {
+        assert(false &&
+               "ResetShards is designed for RangePartitionedCcmScanner.");
     }
 
     uint32_t BlockedShard() const override
@@ -410,16 +414,27 @@ public:
 
     ScanCache *Cache(uint32_t shard_code) override
     {
+        // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
         return &scans_.at(shard_code);
     }
 
-    void ShardCacheSizes(
-        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) override
+    void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
+                             *shard_code_and_sizes) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
         for (const auto &[shard_code, cache] : scans_)
         {
             shard_code_and_sizes->emplace_back(shard_code, cache.Size());
+        }
+    }
+
+    void ShardCacheLastTuples(
+        std::vector<const ScanTuple *> *last_tuples) const override
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (const auto &[shard_code, cache] : scans_)
+        {
+            last_tuples->emplace_back(cache.LastTuple());
         }
     }
 
@@ -566,7 +581,7 @@ private:
     const TemplateScanTuple<KeyT, ValueT> *curr_tuple_;
 
     const Schema *key_schema_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
 
 template <typename KeyT, typename ValueT, bool IsForward>
@@ -636,15 +651,25 @@ public:
 
     ScanCache *Cache(uint32_t shard_code) override
     {
+        // For RangePartitionedCcmScanner, shard_code is core_id.
         return &scans_[shard_code];
     }
 
-    void ShardCacheSizes(
-        std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes) override
+    void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
+                             *shard_code_and_sizes) const override
     {
         for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
         {
             shard_code_and_sizes->emplace_back(core_id, scans_[core_id].Size());
+        }
+    }
+
+    void ShardCacheLastTuples(
+        std::vector<const ScanTuple *> *last_tuples) const override
+    {
+        for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
+        {
+            last_tuples->emplace_back(scans_[core_id].LastTuple());
         }
     }
 
@@ -793,6 +818,8 @@ private:
         CompareFunc>
         heap_;
 
+    // Scan caches of the target node group. Its size is core count of the
+    // target node.
     std::vector<TemplateScanCache<KeyT, ValueT>> scans_;
 
     const Schema *key_schema_;

@@ -571,6 +571,7 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     }
 }
 
+#ifdef RANGE_PARTITION_ENABLED
 void LockWriteRangesOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
@@ -611,6 +612,7 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
         }
     }
 }
+#endif
 
 SetCommitTsOperation::SetCommitTsOperation(TransactionExecution *txm)
     : hd_result_(txm)
