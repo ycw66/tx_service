@@ -436,7 +436,16 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
         int64_t term = addr.Term();
         if (term < 0)
         {
+            DLOG(INFO) << "txm fails to acquire write lock and term < 0, txn: "
+                       << txm->TxNumber();
             write_entry->cce_addr_.SetCce(0, -1, 0);
+            continue;
+        }
+        else if (acquire_key_res.commit_ts_ == 0)
+        {
+            write_entry->cce_addr_.SetCce(0, -1, 0);
+            DLOG(INFO) << "txm fails to acquire write lock, txn: "
+                       << txm->TxNumber();
             continue;
         }
         else
@@ -453,6 +462,10 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
                 // mismatches the prior version, this is not a
                 // repeatable read.
                 rset_has_expired_ = true;
+                DLOG(INFO) << "set rset_has_expired_, txn: " << txm->TxNumber()
+                           << "; read_version: " << read_version
+                           << "; acquire_key_res.commit_ts_: "
+                           << acquire_key_res.commit_ts_;
             }
         }
 

@@ -415,6 +415,9 @@ void DeadLockCheck::RemoveDeadTransaction(
         LockNodeSet &lety = txid_waited_entry_map_.find(le)->second;
         for (const LockNode &lent : lety.lock_node_set)
         {
+            LOG(INFO) << "Deadlock detected, going to abort transaction: "
+                      << tx_id;
+
             if (lent.node_id == Sharder::Instance().NodeId())
             {
                 AbortTransactionCc *atcc = abort_tran_pool.NextRequest();

@@ -43,6 +43,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
     acquire_result.cce_addr_.SetNodeGroupId(ng_id);
     acquire_result.cce_addr_.SetCce(0, -1, 0);
+    acquire_result.commit_ts_ = 0;
+    acquire_result.last_vali_ts_ = 0;
 
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();

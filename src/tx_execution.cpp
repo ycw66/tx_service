@@ -1602,7 +1602,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     if (read_.hd_result_.IsError())
     {
         DLOG(ERROR) << "ReadOperation failed for cc error:"
-                    << read_.hd_result_.ErrorMsg();
+                    << read_.hd_result_.ErrorMsg() << "; txn: " << TxNumber();
         rtp_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
     }
     else
@@ -3087,21 +3087,21 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (acquire_write.hd_result_.IsError() || acquire_write.rset_has_expired_)
+    if (acquire_write.rset_has_expired_)
     {
-        if (acquire_write.rset_has_expired_)
-        {
-            bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
-        }
-        else
-        {
-            DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
-                        << acquire_write.hd_result_.ErrorMsg() << "  "
-                        << (int) acquire_write.hd_result_.ErrorCode();
-            bool_resp_->SetErrorCode(
-                ConvertCcError(acquire_write.hd_result_.ErrorCode()));
-        }
-
+        DLOG(ERROR) << "AcquireWriteOperation failed for rset has expired."
+                    << "; txn: " << TxNumber();
+        bool_resp_->SetErrorCode(TxErrorCode::WRITE_WRITE_CONFLICT);
+        Abort();
+    }
+    else if (acquire_write.hd_result_.IsError())
+    {
+        DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
+                    << acquire_write.hd_result_.ErrorMsg() << "  "
+                    << static_cast<int>(acquire_write.hd_result_.ErrorCode())
+                    << "; txn: " << TxNumber();
+        bool_resp_->SetErrorCode(
+            ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         Abort();
     }
     else

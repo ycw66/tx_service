@@ -164,15 +164,14 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     }
     case LockType::WriteLock:
     {
+        bool success = AcquireWriteLock(cc_req, cc_protocol);
         if (cc_protocol == CcProtocol::OCC)
         {
-            bool success = AcquireWriteLock(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Failed;
         }
         else
         {
-            bool success = AcquireWriteLock(cc_req, cc_protocol);
             lock_status =
                 success ? LockOpStatus::Successful : LockOpStatus::Blocked;
         }
