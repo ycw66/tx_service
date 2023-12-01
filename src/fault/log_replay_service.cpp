@@ -351,45 +351,47 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             // based on the cluster scale log.
 
             // Replay cluster topology first
-            // std::unique_ptr<ReplayLogCc> &cc_req =
-            //    cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-            //        cc_ng_id,
-            //        cluster_config_ccm_name_sv,
-            //        TableType::ClusterConfig,
-            //        std::string_view(scale_op_blob.data(),
-            //                         scale_op_blob.length()),
-            //        msg.cluster_scale_op_msg().commit_ts(),
-            //        msg.cluster_scale_op_msg().txn(),
-            //        mux,
-            //        cv,
-            //        finish_log_cnt,
-            //        recovery_error));
+            ReplayLogCc *cc_req =
+                cc_req_vec
+                    .emplace_back(std::make_unique<ReplayLogCc>(
+                        cc_ng_id,
+                        cluster_config_ccm_name_sv,
+                        TableType::ClusterConfig,
+                        std::string_view(scale_op_blob.data(),
+                                         scale_op_blob.length()),
+                        msg.cluster_scale_op_msg().commit_ts(),
+                        msg.cluster_scale_op_msg().txn(),
+                        mux,
+                        cv,
+                        finish_log_cnt,
+                        recovery_error))
+                    .get();
 
-            // local_shards_.EnqueueCcRequest(0, cc_req.get());
-            // WaitAndClearRequests(
-            //     stream_id, cc_req_vec, mux, cv, finish_log_cnt,
-            //     recovery_error);
-            // if (recovery_error)
-            //{
-            //     return 0;
-            // }
+            local_shards_.EnqueueCcRequest(0, cc_req);
+            WaitAndClearRequests(
+                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+            if (recovery_error)
+            {
+                return 0;
+            }
 
             // Recover bucket owner to correct state
-            std::unique_ptr<ReplayLogCc> &cc_req =
-                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                    cc_ng_id,
-                    range_bucket_ccm_name_sv,
-                    TableType::RangeBucket,
-                    std::string_view(scale_op_blob.data(),
-                                     scale_op_blob.length()),
-                    msg.cluster_scale_op_msg().commit_ts(),
-                    msg.cluster_scale_op_msg().txn(),
-                    mux,
-                    cv,
-                    finish_log_cnt,
-                    recovery_error));
+            cc_req = cc_req_vec
+                         .emplace_back(std::make_unique<ReplayLogCc>(
+                             cc_ng_id,
+                             range_bucket_ccm_name_sv,
+                             TableType::RangeBucket,
+                             std::string_view(scale_op_blob.data(),
+                                              scale_op_blob.length()),
+                             msg.cluster_scale_op_msg().commit_ts(),
+                             msg.cluster_scale_op_msg().txn(),
+                             mux,
+                             cv,
+                             finish_log_cnt,
+                             recovery_error))
+                         .get();
 
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
+            local_shards_.EnqueueCcRequest(0, cc_req);
             WaitAndClearRequests(
                 stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
@@ -839,38 +841,46 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
         std::string tx_ip;
         uint16_t tx_port;
         Sharder::Instance().GetNodeAddress(tx_leader, tx_ip, tx_port);
-
-        brpc::Channel channel;
-        if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+        if (tx_ip.empty())
         {
-            // Fails to establish the channel to the tx node.
-            // Silently returns. The tx will be recovered again
-            // by next conflicting tx.
-            LOG(ERROR) << "Fail to init the channel to the "
-                          "leader of ng#"
-                       << tx_ng << " for tx lock recovery.";
-            return;
+            // node is already removed from cluster. We should ask log
+            // for tx status.
+            tx_status = remote::CheckTxStatusResponse_TxStatus_RESULT_UNKNOWN;
         }
-
-        remote::CcRpcService_Stub stub(&channel);
-
-        remote::CheckTxStatusRequest req;
-        req.set_tx_number(task.tx_number_);
-        req.set_tx_term(task.tx_term_);
-        remote::CheckTxStatusResponse res;
-
-        brpc::Controller cntl;
-        stub.CheckTxStatus(&cntl, &req, &res, nullptr);
-
-        if (cntl.Failed())
+        else
         {
-            LOG(ERROR) << "Fail to check the tx status in ng#" << tx_ng
-                       << ". Error code: " << cntl.ErrorCode()
-                       << ". Msg: " << cntl.ErrorText();
-            return;
-        }
+            brpc::Channel channel;
+            if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+            {
+                // Fails to establish the channel to the tx node.
+                // Silently returns. The tx will be recovered again
+                // by next conflicting tx.
+                LOG(ERROR) << "Fail to init the channel to the "
+                              "leader of ng#"
+                           << tx_ng << " for tx lock recovery.";
+                return;
+            }
 
-        tx_status = res.tx_status();
+            remote::CcRpcService_Stub stub(&channel);
+
+            remote::CheckTxStatusRequest req;
+            req.set_tx_number(task.tx_number_);
+            req.set_tx_term(task.tx_term_);
+            remote::CheckTxStatusResponse res;
+
+            brpc::Controller cntl;
+            stub.CheckTxStatus(&cntl, &req, &res, nullptr);
+
+            if (cntl.Failed())
+            {
+                LOG(ERROR) << "Fail to check the tx status in ng#" << tx_ng
+                           << ". Error code: " << cntl.ErrorCode()
+                           << ". Msg: " << cntl.ErrorText();
+                return;
+            }
+
+            tx_status = res.tx_status();
+        }
     }
 
     if (tx_status == remote::CheckTxStatusResponse_TxStatus_ONGOING)
@@ -953,6 +963,13 @@ void ReplayService::RequestLeaderTransfer()
         uint16_t leader_port;
         Sharder::Instance().GetNodeAddress(
             leader_node_id, leader_ip, leader_port);
+        if (leader_ip.empty())
+        {
+            LOG(ERROR) << "Fail to init the channel to the "
+                          "leader of ng#"
+                       << node_id << " for leader transfer.";
+            return;
+        }
         brpc::Channel channel;
         if (channel.Init(leader_ip.c_str(), leader_port + 1, nullptr) != 0)
         {

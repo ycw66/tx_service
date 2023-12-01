@@ -71,11 +71,6 @@ message ClusterRemoveNodeRequest
 	int32 remove_node_count = 1;
 }
 
-message ClusterScaleStatusRequest
-{
-	uint64 tx_number = 1;
-}
-
 enum ClusterScaleWriteLogResult
 {
 	SUCCESS = 0;
@@ -91,23 +86,34 @@ message ClusterAddNodeResponse{
 message ClusterRemoveNodeResponse{
 	uint64 tx_number = 1;
 	ClusterScaleWriteLogResult result = 2;
-
-	// Removed node info
-	repeated string host_list = 3;
-	repeated int32 port_list = 4;
 }
+
 enum ClusterScaleStatus
 {
-	NOT_IN_PROGRESS = 0;
-	WRITE_PREPARE_LOG = 1;
-	CLUSTER_CONFIG_UPDATE = 2;
-	DATA_MIGRATION = 3;
-	FINISHED = 4;
-	UNKNOWN = 5;
+	IN_PROGRESS = 0;
+	CLUSTER_CONFIG_UPDATE = 1;
+	FINISHED = 2;
+	INVALID_TXN = 3;
+	UNKNOWN = 4;
 }
+
+message ClusterScaleStatusRequest
+{
+	uint64 tx_number = 1;
+}
+
 message ClusterScaleStatusResponse
 {
 	ClusterScaleStatus status = 1;
+}
+
+message GetClusterNodesRequest{
+}
+
+message GetClusterNodesResponse{
+	repeated string host_list = 1;
+	repeated int32 port_list = 2;
+	bool error = 3;
 }
 
 message AcquireNodeGroupTermRequest{
@@ -117,15 +123,6 @@ message AcquireNodeGroupTermRequest{
 message AcquireNodeGroupTermResponse{
 	uint32 node_group_id = 1;
 	int64 node_group_term = 2;
-}
-message NotifyNewNodeReadyRequest
-{
-	uint64 tx_number = 1;
-}
-
-message NotifyNewNodeReadyResponse
-{
-	bool error = 1;
 }
 
 service CcStreamService {
@@ -140,7 +137,7 @@ service CcRpcService {
 	rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
 	rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
 	rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
-	rpc NotifyNewNodeReady(NotifyNewNodeReadyRequest) returns (NotifyNewNodeReadyResponse);
+	rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
 	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
 	rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
 	rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);

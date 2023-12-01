@@ -48,7 +48,7 @@ void PrepareCcMap(
 
 TEST_CASE("CcPage clean tests", "[cc-page]")
 {
-    std::map<uint32_t, std::vector<NodeConfig>> ng_configs{
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
         {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
     LocalCcShards local_cc_shards(0,
                                   1,

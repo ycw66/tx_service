@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -10,7 +9,6 @@
 
 #include "catalog_key_record.h"
 #include "cc_entry.h"
-#include "cc_handler.h"
 #include "cluster_config_record.h"
 #include "log_closure.h"
 #include "metrics.h"
@@ -20,7 +18,6 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
-#include "tx_req_result.h"
 
 namespace txservice
 {
@@ -1101,41 +1098,81 @@ struct CheckMigrationIsFinishedOp : public TransactionOperation
 
     CheckMigrationIsFinishedClosure closure_;
 };
+
+/**
+ * Cluster scale op consists of 2 parts, changing cluster config and migrating
+ * data. Changing cluster config will only modify peers and cc node group
+ * configs, but it does not rebalance data among node groups. Data migration
+ * will rebalance data among node groups after the cluster config change.
+ */
 struct ClusterScaleOp : public CompositeTransactionOperation
 {
 public:
     ClusterScaleOp() = delete;
     ClusterScaleOp(ClusterScaleOpType event_type,
-                   std::vector<std::pair<std::string, uint16_t>> *new_nodes,
-                   std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
-                   uint16_t *remove_node_count,
+                   std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+                       &&new_ng_config,
                    TransactionExecution *txm);
     void Reset(ClusterScaleOpType event_type,
-               std::vector<std::pair<std::string, uint16_t>> *new_nodes,
-               std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
-               uint16_t *remove_node_count,
+               std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+                   &&new_ng_config,
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-    remote::ClusterScaleStatus GetStatus(TxNumber txn);
+    remote::ClusterScaleStatus GetStatus(TxNumber txn)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (txn != txn_)
+        {
+            return remote::ClusterScaleStatus::INVALID_TXN;
+        }
+        return status_;
+    }
 
-    TxNumber txn_;
-    ClusterScaleOpType event_type_;
-    // New node info when adding nodes or deleted node info when removing nodes.
-    std::vector<std::pair<std::string, uint16_t>> delta_nodes_;
-    // Used when removing node, to indicate how many nodes to be removed
-    uint16_t remove_node_count_{0};
-    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
-    ClusterConfigRecord cluster_config_rec_;
-    std::vector<std::pair<std::string, uint16_t>> *removed_nodes_{nullptr};
+    bool SetStatus(TxNumber txn, remote::ClusterScaleStatus status)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (txn != txn_)
+        {
+            return false;
+        }
+        status_ = status;
+        return true;
+    }
 
+    std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
     /**
-     * Acquire write intent on cluster config ccm. This is to prevent other
-     * cluster scale tx is already in progress.
-     * TODO{liunyl}: Do we need this phase if cp can guarantee there's only
-     * 1 scale tx at a time?
+     * Cluster scale tx has different op processing order based on the event
+     * type. For add node, the order is
+     * 1. prepare_log_op_
+     * 2. acquire_cluster_config_write_op_
+     * 3. update_cluster_config_log_op_
+     * 4. flush_new_cluster_config_op_
+     * 5. install_cluster_config_op_
+     * 6. notify_migration_op_
+     * 7. check_migration_is_finished_op_
+     * 8. clean_log_op_
+     *
+     * For remove node, the order is
+     * 1. prepare_log_op_
+     * 2. notify_migration_op_
+     * 3. check_migration_is_finished_op_
+     * 4. acquire_cluster_config_write_op_
+     * 5. update_cluster_config_log_op_
+     * 6. flush_new_cluster_config_op_
+     * 7. install_cluster_config_op_
+     * 8. clean_log_op_
+     *
+     * Basically for add node we're adding new nodes into the cluster first,
+     * then migrate data to the new nodes. For remove node we're migrating data
+     * from the to be removed nodes, then actually removing them from the
+     * cluster.
+     * When a new node is just added into the cluster, we can start tx
+     * on it but it does not hold any data yet. We need to migrate data
+     * ownership to the new ngs separately through data migration.
+     * When a node is removed from the cluster, we need to make sure that all
+     * data owned by that node group is migrated to other node groups.
      */
-    AcquireAllOp acquire_cluster_config_intent_op_;
 
     /**
      * Write prepare log for the scale event. This log should contain the new
@@ -1160,8 +1197,6 @@ public:
      * started, they be starting with the new cluster config.
      */
     AsyncOp<Void> flush_new_cluster_config_op_;
-
-    AsyncOp<Void> wait_for_new_node_ready_op_;
 
     /**
      * Release the cluster config lock. Install the new cluster config on all
@@ -1188,28 +1223,23 @@ private:
     void FillCleanLogRequest(TransactionExecution *txm);
 
     void ForceToFinish(TransactionExecution *txm);
-    void SetStatus(remote::ClusterScaleStatus);
 
     void ClearContainer();
 
-    // used to protect status_. It will be updated by tx processor thread and
-    // visited by rpc thread that queries scale event status.
-    std::mutex status_mux_;
+    ClusterConfigRecord cluster_config_rec_;
+
+    ClusterScaleOpType event_type_;
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config_;
+    // mutex protects txn_ and finished_, which are used when control plane
+    // queries for current cluster scale event status for a specific txn.
+    std::mutex mux_;
+    TxNumber txn_;
     remote::ClusterScaleStatus status_;
-    std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
 };
 
 struct DataMigrationOp : public CompositeTransactionOperation
 {
 public:
-    enum class BucketMigrateStatus
-    {
-        Started = 1,
-        Prepared = 2,
-        Commited = 3,
-        Cleaned = 4,
-    };
-
     DataMigrationOp() = delete;
 
     DataMigrationOp(TransactionExecution *txm,
@@ -1220,18 +1250,6 @@ public:
 
     void Forward(TransactionExecution *txm) override;
 
-    void FillLogRequest(TransactionExecution *txm,
-                        WriteToLogOp *log_op,
-                        TxLogType log_type,
-                        txlog::BucketMigrateMessage_Stage migrate_stage);
-
-    void FillFirstLogRequest(TransactionExecution *txm,
-                             std::vector<uint64_t> &migration_txns);
-    void FillLastLogRequest(TransactionExecution *txm);
-
-    void ForceToFinish(TransactionExecution *txm);
-
-private:
     /**
      * @brief Write the first prepare log. This log request will check if the
      * ClusterScaleTx log is exsit. If not, log service will reject this write
@@ -1241,8 +1259,12 @@ private:
      * DataMigration Tx. Empty log just used by RecoverTx.
      */
     WriteToLogOp write_first_prepare_log_op_;
-
-    WriteToLogOp write_migrate_txn_log_op_;
+    /**
+     * @brief Write a log to indicate that this data migrate tx is going to be
+     * migrating this bucket. This is to make sure the write lock acquired by
+     * prepare_bucket_lock_op_ can be correctly recovered.
+     */
+    WriteToLogOp write_before_locking_log_op_;
     /**
      * @brief Acquire bucket write lock on all node groups.
      */
@@ -1256,7 +1278,10 @@ private:
      * write intent lock.
      */
     PostWriteAllOp install_dirty_bucket_op_;
-
+    /**
+     * @brief Flush data in this bucket into data store so that after bucket
+     * is migrated the new bucket owner can access latest data from data store.
+     */
     AsyncOp<Void> data_sync_op_;
     /**
      * @brief Upgrade write intent lock to write lock on all node group.
@@ -1266,7 +1291,10 @@ private:
      * @brief Write commit log for bucket migration
      */
     WriteToLogOp commit_log_op_;
-
+    /**
+     * @brief Kick out data in this bucket from memory before switching bucket
+     * owner.
+     */
     KickoutDataOp kickout_data_op_;
     /**
      * @brief Commit dirty bucket record and release bucket write lock
@@ -1286,6 +1314,24 @@ private:
      */
     WriteToLogOp write_last_clean_log_op_;
 
+    size_t migrate_bucket_idx_{0};
+    RangeBucketKey bucket_key_;
+    RangeBucketRecord bucket_record_;
+    BucketInfo bucket_info_;
+
+private:
+    void FillLogRequest(TransactionExecution *txm,
+                        WriteToLogOp *log_op,
+                        TxLogType log_type,
+                        txlog::BucketMigrateMessage_Stage migrate_stage);
+
+    void FillFirstLogRequest(TransactionExecution *txm,
+                             std::vector<uint64_t> &migration_txns);
+    void FillLastLogRequest(TransactionExecution *txm);
+
+    void ForceToFinish(TransactionExecution *txm);
+    void Clear();
+
     // the snapshot of the ranges that we need to migrate for current bucket.
     // Note that the table name here is of type range partition.
     std::unordered_map<TableName, std::unordered_set<int32_t>>
@@ -1295,16 +1341,7 @@ private:
     std::unordered_set<int32_t>::const_iterator kickout_range_it_;
     TableName kickout_table_{std::string(""), TableType::Primary};
 
-    RangeBucketKey bucket_key_;
-    RangeBucketRecord bucket_record_;
-    BucketInfo bucket_info_;
-
-    size_t migrate_ts_{0};
-
-    size_t migrate_bucket_idx_{0};
     std::shared_ptr<DataMigrationStatus> status_;
-
-    void Clear();
 };
 
 struct BatchReadOperation : TransactionOperation

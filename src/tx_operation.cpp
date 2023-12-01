@@ -10,7 +10,6 @@
 #include "../log_service/include/log_type.h"
 #include "cc/cc_handler_result.h"
 #include "cc_handler.h"
-#include "checkpointer.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
@@ -3150,6 +3149,19 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
+    if (txm->TxStatus() == TxnStatus::Recovering &&
+        Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+    {
+        // This is a recovered tx and replay is not done yet. We should wait for
+        // replay finish before forwarding tx machine.
+        if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
+            txm->TxTerm())
+        {
+            // term is invalid
+            ForceToFinish(txm);
+        }
+        return;
+    }
     if (op_ == nullptr)
     {
         // Initialize commit ts as the start time of tx. This value will
@@ -4132,10 +4144,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ds_upsert_range_op_.handle_timeout_ = false;
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
-             old_range = old_range,
              range_info = std::move(splitted_range_info),
              tx_ts = txm->commit_ts_,
-             table_schema = table_schema_,
              &hd_res = ds_upsert_range_op_.hd_result_,
              &worker = ds_upsert_range_op_.worker_thread_]
         {
@@ -4148,12 +4158,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // Launch a new thread instead of sending it to workerpool to
             // avoid being blocked during write lock is held.
             worker = std::thread(
-                [table_name,
-                 old_range,
-                 range_info = std::move(range_info),
-                 tx_ts,
-                 table_schema,
-                 &hd_res]
+                [table_name, range_info = std::move(range_info), tx_ts, &hd_res]
                 {
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
@@ -4838,42 +4843,23 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 
 ClusterScaleOp::ClusterScaleOp(
     ClusterScaleOpType event_type,
-    std::vector<std::pair<std::string, uint16_t>> *new_nodes,
-    std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
-    uint16_t *remove_node_count,
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &&new_ng_config,
     TransactionExecution *txm)
     : CompositeTransactionOperation(),
-      txn_(txm->TxNumber()),
-      event_type_(event_type),
-      removed_nodes_(removed_nodes),
-      acquire_cluster_config_intent_op_(txm),
       prepare_log_op_(txm),
       acquire_cluster_config_write_op_(txm),
       update_cluster_config_log_op_(txm),
       flush_new_cluster_config_op_(txm),
-      wait_for_new_node_ready_op_(txm),
       install_cluster_config_op_(txm),
       notify_migration_op_(txm),
       check_migration_is_finished_op_(txm),
       clean_log_op_(txm),
-      status_mux_(),
-      status_(remote::ClusterScaleStatus::NOT_IN_PROGRESS)
+      event_type_(event_type),
+      new_ng_config_(std::move(new_ng_config)),
+      mux_(),
+      txn_(txm->TxNumber()),
+      status_(remote::ClusterScaleStatus::IN_PROGRESS)
 {
-    if (event_type == ClusterScaleOpType::AddNode)
-    {
-        delta_nodes_ = *new_nodes;
-    }
-    else if (event_type == ClusterScaleOpType::RemoveNode)
-    {
-        remove_node_count_ = *remove_node_count;
-    }
-
-    acquire_cluster_config_intent_op_.table_name_ = &cluster_config_ccm_name;
-    acquire_cluster_config_intent_op_.key_ =
-        NegativeInfinity<VoidKey>::Instance();
-    acquire_cluster_config_intent_op_.cc_op_ = CcOperation::ReadForWrite;
-    acquire_cluster_config_intent_op_.protocol_ = CcProtocol::OCC;
-
     acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
     acquire_cluster_config_write_op_.key_ =
         NegativeInfinity<VoidKey>::Instance();
@@ -4890,30 +4876,18 @@ ClusterScaleOp::ClusterScaleOp(
 
 void ClusterScaleOp::Reset(
     ClusterScaleOpType event_type,
-    std::vector<std::pair<std::string, uint16_t>> *new_nodes,
-    std::vector<std::pair<std::string, uint16_t>> *removed_nodes,
-    uint16_t *remove_node_count,
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &&new_ng_config,
     TransactionExecution *txm)
 {
     op_ = nullptr;
     event_type_ = event_type;
-    delta_nodes_.clear();
-    remove_node_count_ = 0;
-    removed_nodes_ = nullptr;
-    if (event_type == ClusterScaleOpType::AddNode)
-    {
-        delta_nodes_ = *new_nodes;
-    }
-    else if (event_type == ClusterScaleOpType::RemoveNode)
-    {
-        remove_node_count_ = *remove_node_count;
-        removed_nodes_ = removed_nodes;
-    }
+    new_ng_config_ = std::move(new_ng_config);
 
-    status_ = remote::ClusterScaleStatus::NOT_IN_PROGRESS;
-    txn_ = txm->TxNumber();
-
-    acquire_cluster_config_intent_op_.ResetHandlerTxm(txm);
+    {
+        std::lock_guard<std::mutex> lock(mux_);
+        txn_ = txm->TxNumber();
+        status_ = remote::ClusterScaleStatus::IN_PROGRESS;
+    }
 
     prepare_log_op_.Reset();
     prepare_log_op_.ResetHandlerTxm(txm);
@@ -4926,9 +4900,6 @@ void ClusterScaleOp::Reset(
     update_cluster_config_log_op_.Reset();
     update_cluster_config_log_op_.ResetHandlerTxm(txm);
 
-    wait_for_new_node_ready_op_.Reset();
-    wait_for_new_node_ready_op_.ResetHandlerTxm(txm);
-
     install_cluster_config_op_.ResetHandlerTxm(txm);
 
     auto ng_count = Sharder::Instance().NodeGroupCount();
@@ -4938,19 +4909,10 @@ void ClusterScaleOp::Reset(
 
     check_migration_is_finished_op_.Reset();
 
-    // check_migration_is_finished_op_.ResetHandlerTxm(txm);
-
     clean_log_op_.Reset();
     clean_log_op_.ResetHandlerTxm(txm);
 
-    assert(new_ng_config_.empty());
     assert(bucket_migrate_infos_.empty());
-
-    acquire_cluster_config_intent_op_.table_name_ = &cluster_config_ccm_name;
-    acquire_cluster_config_intent_op_.key_ =
-        NegativeInfinity<VoidKey>::Instance();
-    acquire_cluster_config_intent_op_.cc_op_ = CcOperation::ReadForWrite;
-    acquire_cluster_config_intent_op_.protocol_ = CcProtocol::OCC;
 
     acquire_cluster_config_write_op_.table_name_ = &cluster_config_ccm_name;
     acquire_cluster_config_write_op_.key_ =
@@ -4965,25 +4927,6 @@ void ClusterScaleOp::Reset(
     install_cluster_config_op_.write_type_ = PostWriteType::Commit;
 }
 
-void ClusterScaleOp::SetStatus(remote::ClusterScaleStatus status)
-{
-    std::unique_lock<std::mutex> lock(status_mux_);
-    status_ = status;
-}
-
-remote::ClusterScaleStatus ClusterScaleOp::GetStatus(TxNumber txn)
-{
-    std::unique_lock<std::mutex> lock(status_mux_);
-    if (txn == txn_)
-    {
-        return status_;
-    }
-    else
-    {
-        return remote::ClusterScaleStatus::NOT_IN_PROGRESS;
-    }
-}
-
 void ClusterScaleOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
@@ -4991,62 +4934,11 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         LOG(INFO) << "Cluster Scale transaction prepare acquire write all on "
                      "cluster scale table, txn: "
                   << txm->TxNumber();
-        SetStatus(remote::ClusterScaleStatus::WRITE_PREPARE_LOG);
-        op_ = &acquire_cluster_config_intent_op_;
-        ForwardToSubOperation(txm, &acquire_cluster_config_intent_op_);
-    }
-    else if (op_ == &acquire_cluster_config_intent_op_)
-    {
-        if (acquire_cluster_config_intent_op_.fail_cnt_.load(
-                std::memory_order_relaxed) > 0)
-        {
-            LOG(ERROR) << "Cluster scale transaction failed to obtain write "
-                          "intent on all node groups "
-                          ", tx_number:"
-                       << txm->TxNumber();
 
-            // Set commit ts to 0 to indicate transaction failure.
-            // install_cluster_config_op_ will release locks acquired.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            ForwardToSubOperation(txm, &install_cluster_config_op_);
-            return;
-        }
-
-        // Now we have acquired lock on cluster config table, we must be the
-        // only ongoing cluster scale tx. Generate migrate plan and new
-        // cluster config.
-        if (event_type_ == ClusterScaleOpType::AddNode)
-        {
-            new_ng_config_ = Sharder::Instance().AddNodeToCluster(delta_nodes_);
-        }
-        else if (event_type_ == ClusterScaleOpType::RemoveNode)
-        {
-            new_ng_config_ = Sharder::Instance().RemoveNodeFromCluster(
-                remove_node_count_, delta_nodes_);
-            if (removed_nodes_)
-            {
-                *removed_nodes_ = delta_nodes_;
-            }
-        }
-
+        txm->commit_ts_ = txm->commit_ts_bound_ + 1;
         bucket_migrate_infos_ =
             Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
                 new_ng_config_.size(), 9001);
-
-        txm->commit_ts_ = txm->commit_ts_bound_ + 1;
-
-        // TODO{liunyl}: what ts should we use as the commit ts of the cluster
-        // scale tx?
-        for (size_t idx = 0;
-             idx < acquire_cluster_config_intent_op_.upload_cnt_;
-             ++idx)
-        {
-            const AcquireAllResult &acq_all_res =
-                acquire_cluster_config_intent_op_.hd_results_[idx].Value();
-            uint64_t ts = std::max(acq_all_res.commit_ts_ + 1,
-                                   acq_all_res.last_vali_ts_ + 1);
-            txm->commit_ts_ = std::max(txm->commit_ts_, ts);
-        }
 
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Cluster Scale transaction write prepare log, txn: "
@@ -5110,13 +5002,15 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         }
 
         // Notify caller that log has been written.
-        txm->void_resp_->Finish(void_);
+        if (txm->TxStatus() != TxnStatus::Recovering)
+        {
+            txm->void_resp_->Finish(void_);
+        }
 
         if (event_type_ == ClusterScaleOpType::AddNode)
         {
             // If we're adding new nodes, add new nodes into cluster
             // before migrating data
-            SetStatus(remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
             LOG(INFO) << "Cluster scale transaction acquire write lock on all "
                          "nodes, txn "
                       << txm->TxNumber();
@@ -5157,6 +5051,8 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        txm->commit_ts_ =
+            std::max(txm->commit_ts_, acquire_cluster_config_write_op_.MaxTs());
         FillUpdateClusterConfigLogRequest(txm);
         LOG(INFO) << "Cluster Scale transaction write update cluster config "
                      "log, txn: "
@@ -5180,6 +5076,8 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &update_cluster_config_log_op_);
             return;
         }
+
+        ACTION_FAULT_INJECTOR("cluster_config_after_cluster_config_log");
         // flush the new cluster config to kv storage
         flush_new_cluster_config_op_.handle_timeout_ = false;
         flush_new_cluster_config_op_.op_func_ =
@@ -5221,40 +5119,17 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         if (flush_new_cluster_config_op_.hd_result_.IsError())
         {
             RetrySubOperation(txm, &flush_new_cluster_config_op_);
-        }
-        SetStatus(remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
-
-        if (event_type_ == ClusterScaleOpType::AddNode)
-        {
-            LOG(INFO)
-                << "Cluster Scale transaction wait for new node ready, txn "
-                << txm->TxNumber();
-            ForwardToSubOperation(txm, &wait_for_new_node_ready_op_);
-        }
-        else
-        {
-            // Broadcast the new cluster config to all nodes through post write
-            // all.
-            cluster_config_rec_.SetVersion(txm->commit_ts_);
-            cluster_config_rec_.SetNodeGroupConfigs(&new_ng_config_);
-
-            LOG(INFO) << "Cluster Scale transaction update cluster config, txn "
-                      << txm->TxNumber();
-            ForwardToSubOperation(txm, &install_cluster_config_op_);
-        }
-    }
-    else if (op_ == &wait_for_new_node_ready_op_)
-    {
-        if (!txm->CheckLeaderTerm())
-        {
-            ForceToFinish(txm);
             return;
         }
 
-        // This op should never fail.
-        assert(!wait_for_new_node_ready_op_.hd_result_.IsError());
-        // Broadcast the new cluster config to all nodes through post write
-        // all.
+        {
+            // set the status so that control plane can start new nodes.
+            std::lock_guard<std::mutex> lk(mux_);
+            status_ = remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE;
+        }
+
+        //  Broadcast the new cluster config to all nodes through post write
+        //  all.
         cluster_config_rec_.SetVersion(txm->commit_ts_);
         cluster_config_rec_.SetNodeGroupConfigs(&new_ng_config_);
 
@@ -5326,7 +5201,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         });
 
-        SetStatus(remote::ClusterScaleStatus::DATA_MIGRATION);
+        // SetStatus(remote::ClusterScaleStatus::DATA_MIGRATION);
         assert(notify_migration_op_.unfinished_req_cnt_.load(
                    std::memory_order_relaxed) == 0);
 
@@ -5363,35 +5238,11 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         else
         {
             assert(event_type_ == ClusterScaleOpType::RemoveNode);
-            // First flush the new cluster config to kv storage so that
-            // when the new node starts, it will know the latest config.
-            flush_new_cluster_config_op_.op_func_ =
-                [&ng_config = new_ng_config_,
-                 version = txm->commit_ts_,
-                 &hd_res = flush_new_cluster_config_op_.hd_result_]
-            {
-                std::thread worker = std::thread(
-                    [&ng_config, version, &hd_res]
-                    {
-                        store::DataStoreHandler *const store_hd =
-                            Sharder::Instance().GetLocalCcShards()->store_hd_;
-                        bool succ =
-                            store_hd->UpdateClusterConfig(ng_config, version);
-                        if (succ)
-                        {
-                            hd_res.SetFinished();
-                        }
-                        else
-                        {
-                            hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
-                        }
-                    });
-                worker.detach();
-            };
-            LOG(INFO) << "Cluster Scale transaction updating cluster config in "
-                         "data store, txn: "
-                      << txm->TxNumber();
-            ForwardToSubOperation(txm, &flush_new_cluster_config_op_);
+            LOG(INFO)
+                << "Cluster Scale transaction acquire cluster config write "
+                   "lock, txn: "
+                << txm->TxNumber();
+            ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
         }
     }
     else if (op_ == &clean_log_op_)
@@ -5407,7 +5258,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        SetStatus(remote::ClusterScaleStatus::FINISHED);
         ClearContainer();
         txm->state_stack_.pop_back();
 
@@ -5416,12 +5266,21 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             LOG(INFO) << "Cluster scale transaction succeeded, txn: "
                       << txm->TxNumber() << ", tx_term: " << txm->TxTerm()
                       << ", tx_ng_id: " << txm->TxCcNodeId();
+            {
+                std::lock_guard<std::mutex> lk(mux_);
+                status_ = remote::ClusterScaleStatus::FINISHED;
+            }
             // There is no one waiting on the tx request anymore, commit
             // and recycle the tx machine on our own.
             txm->Commit();
         }
         else
         {
+            {
+                // The cluster scale event failed.
+                std::lock_guard<std::mutex> lk(mux_);
+                status_ = remote::ClusterScaleStatus::INVALID_TXN;
+            }
             txm->Abort();
         }
     }
@@ -5436,9 +5295,6 @@ void ClusterScaleOp::ForceToFinish(TransactionExecution *txm)
 
 void ClusterScaleOp::ClearContainer()
 {
-    delta_nodes_.clear();
-    delta_nodes_.shrink_to_fit();
-
     new_ng_config_.clear();
 
     bucket_migrate_infos_.clear();
@@ -5458,8 +5314,6 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
     prepare_log_rec->set_tx_term(txm->tx_term_);
     prepare_log_rec->set_txn_number(txm->TxNumber());
 
-    // TODO{liunyl}: commit ts should not matter with cluster scale, need
-    // double check
     prepare_log_rec->set_commit_timestamp(txm->commit_ts_);
     ::txlog::ClusterScaleOpMessage *cluster_scale_msg =
         prepare_log_rec->mutable_log_content()->mutable_cluster_scale_log();
@@ -5522,6 +5376,7 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
                     {bucket_ids[idx], ::txlog::BucketMigrateMessage()});
             assert(inserted);
             bucket_migrate_process_iter->second.set_bucket_id(bucket_ids[idx]);
+            bucket_migrate_process_iter->second.set_migration_txn(0);
             bucket_migrate_process_iter->second.set_migrate_ts(0);
             bucket_migrate_process_iter->second.set_old_owner(ng_id);
             bucket_migrate_process_iter->second.set_new_owner(
@@ -5815,7 +5670,7 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
             LOG(ERROR) << "NotifyMigration RPC: Fail to init the channel to the"
                           " leader of ng#"
                        << old_owner_id;
-            unfinished_req_cnt_.fetch_sub(std::memory_order_release);
+            unfinished_req_cnt_.fetch_sub(1, std::memory_order_release);
             return;
         }
 
@@ -5850,7 +5705,7 @@ DataMigrationOp::DataMigrationOp(TransactionExecution *txm,
                                  std::shared_ptr<DataMigrationStatus> status)
     : CompositeTransactionOperation(),
       write_first_prepare_log_op_(txm),
-      write_migrate_txn_log_op_(txm),
+      write_before_locking_log_op_(txm),
       prepare_bucket_lock_op_(txm),
       prepare_log_op_(txm),
       install_dirty_bucket_op_(txm),
@@ -5884,6 +5739,8 @@ DataMigrationOp::DataMigrationOp(TransactionExecution *txm,
     post_all_bucket_lock_op_.op_type_ = OperationType::Update;
     post_all_bucket_lock_op_.key_ = &bucket_key_;
     post_all_bucket_lock_op_.rec_ = &bucket_record_;
+
+    bucket_record_.SetBucketInfo(&bucket_info_);
 }
 
 void DataMigrationOp::Reset(TransactionExecution *txm,
@@ -5897,7 +5754,6 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     // Reset CompositeTransactionOperation
     op_ = nullptr;
 
-    migrate_ts_ = 0;
     migrate_bucket_idx_ = 0;
 
     status_ = status;
@@ -5905,8 +5761,8 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     write_first_prepare_log_op_.Reset();
     write_first_prepare_log_op_.ResetHandlerTxm(txm);
 
-    write_migrate_txn_log_op_.Reset();
-    write_migrate_txn_log_op_.ResetHandlerTxm(txm);
+    write_before_locking_log_op_.Reset();
+    write_before_locking_log_op_.ResetHandlerTxm(txm);
 
     prepare_bucket_lock_op_.ResetHandlerTxm(txm);
 
@@ -5937,6 +5793,7 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     assert(migrate_bucket_idx_ == 0);
 
     bucket_info_.Reset();
+    bucket_record_.SetBucketInfo(&bucket_info_);
 
     prepare_bucket_lock_op_.table_name_ = &range_bucket_ccm_name;
     prepare_bucket_lock_op_.key_ = &bucket_key_;
@@ -5965,6 +5822,19 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
 
 void DataMigrationOp::Forward(TransactionExecution *txm)
 {
+    if (txm->TxStatus() == TxnStatus::Recovering &&
+        Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+    {
+        // This is a recovered tx and replay is not done yet. We should wait for
+        // replay finish before forwarding tx machine.
+        if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
+            txm->TxTerm())
+        {
+            // term is invalid
+            ForceToFinish(txm);
+        }
+        return;
+    }
     if (op_ == nullptr)
     {
         migrate_bucket_idx_ = status_->next_bucket_idx_.fetch_add(1);
@@ -5993,10 +5863,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         // Prepare next bucket key
         bucket_key_ = RangeBucketKey(status_->bucket_ids_[migrate_bucket_idx_]);
-        prepare_bucket_lock_op_.key_ = &bucket_key_;
-        acquire_bucket_lock_op_.key_ = &bucket_key_;
-        install_dirty_bucket_op_.key_ = &bucket_key_;
-        post_all_bucket_lock_op_.key_ = &bucket_key_;
 
         if (migrate_bucket_idx_ == 0 &&
             txm->TxStatus() != TxnStatus::Recovering)
@@ -6014,11 +5880,11 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                       << status_->new_owner_ngs_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
             FillLogRequest(txm,
-                           &write_migrate_txn_log_op_,
+                           &write_before_locking_log_op_,
                            TxLogType::COMMIT,
                            txlog::BucketMigrateMessage_Stage::
-                               BucketMigrateMessage_Stage_NotStarted);
-            ForwardToSubOperation(txm, &write_migrate_txn_log_op_);
+                               BucketMigrateMessage_Stage_BeforeLocking);
+            ForwardToSubOperation(txm, &write_before_locking_log_op_);
         }
     }
     else if (op_ == &write_first_prepare_log_op_)
@@ -6097,13 +5963,13 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                   << ", txn: " << txm->TxNumber();
 
         FillLogRequest(txm,
-                       &write_migrate_txn_log_op_,
+                       &write_before_locking_log_op_,
                        TxLogType::COMMIT,
                        txlog::BucketMigrateMessage_Stage::
-                           BucketMigrateMessage_Stage_NotStarted);
-        ForwardToSubOperation(txm, &write_migrate_txn_log_op_);
+                           BucketMigrateMessage_Stage_BeforeLocking);
+        ForwardToSubOperation(txm, &write_before_locking_log_op_);
     }
-    else if (op_ == &write_migrate_txn_log_op_)
+    else if (op_ == &write_before_locking_log_op_)
     {
         if (!txm->CheckLeaderTerm())
         {
@@ -6111,7 +5977,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (write_migrate_txn_log_op_.hd_result_.IsError())
+        if (write_before_locking_log_op_.hd_result_.IsError())
         {
             LOG(WARNING) << "Data migration: fail to write migrate txn log, "
                             "bucket id: "
@@ -6120,13 +5986,17 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                          << ", keep retrying";
             // set retry flag and retry commit log
             ::txlog::WriteLogRequest *log_req =
-                write_migrate_txn_log_op_.log_closure_.LogRequest()
+                write_before_locking_log_op_.log_closure_.LogRequest()
                     .mutable_write_log_request();
             log_req->set_retry(true);
-            RetrySubOperation(txm, &write_migrate_txn_log_op_);
+            RetrySubOperation(txm, &write_before_locking_log_op_);
             return;
         }
 
+        if (migrate_bucket_idx_ == 20)
+        {
+            ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
+        }
         LOG(INFO) << "Data migration: prepare bucket lock"
                   << ", bucket id: "
                   << status_->bucket_ids_[migrate_bucket_idx_]
@@ -6155,13 +6025,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         txm->commit_ts_ =
             std::max(txm->commit_ts_, prepare_bucket_lock_op_.MaxTs());
-        migrate_ts_ = txm->commit_ts_;
-
-        const BucketInfo *bucket_info =
-            Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
-                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
-        bucket_info_ = *bucket_info;
-        ranges_in_bucket_snapshot_ = bucket_info->CloneRangesInBucket();
 
         LOG(INFO) << "Data migration: write prepare log"
                   << ", bucket id: "
@@ -6199,6 +6062,12 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        const BucketInfo *bucket_info =
+            Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
+                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
+        ranges_in_bucket_snapshot_ = bucket_info->CloneRangesInBucket();
+        bucket_info_ = *bucket_info;
+
         if (ranges_in_bucket_snapshot_.empty())
         {
             // There's no range that needs to be flushed to data store.
@@ -6207,9 +6076,10 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                       << ", bucket id: "
                       << status_->bucket_ids_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
-            assert(migrate_ts_ > bucket_info_.Version());
+            assert(txm->CommitTs() > bucket_info_.Version());
+            bucket_info_.Reset();
             bucket_info_.Set(status_->new_owner_ngs_[migrate_bucket_idx_],
-                             migrate_ts_);
+                             txm->CommitTs());
             bucket_record_.SetBucketInfo(&bucket_info_);
             post_all_bucket_lock_op_.write_type_ = PostWriteType::Commit;
             ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
@@ -6220,9 +6090,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                       << status_->bucket_ids_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
 
-            assert(migrate_ts_ > bucket_info_.Version());
+            assert(txm->CommitTs() > bucket_info_.Version());
             bucket_info_.SetDirty(status_->new_owner_ngs_[migrate_bucket_idx_],
-                                  migrate_ts_);
+                                  txm->CommitTs());
             bucket_record_.SetBucketInfo(&bucket_info_);
             ForwardToSubOperation(txm, &install_dirty_bucket_op_);
         }
@@ -6270,9 +6140,11 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             shard->EnqueueDataSyncTaskForBucket(ranges_in_bucket_snapshot_,
                                                 txm->TxCcNodeId(),
                                                 txm->TxTerm(),
-                                                migrate_ts_,
+                                                txm->CommitTs(),
                                                 &data_sync_op_.hd_result_);
         };
+
+        ACTION_FAULT_INJECTOR("data_migrate_after_install_dirty");
         ForwardToSubOperation(txm, &data_sync_op_);
     }
     else if (op_ == &data_sync_op_)
@@ -6354,6 +6226,19 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &commit_log_op_);
             return;
         }
+
+        // Remove all data in this bucket. We need to retake another snapshot of
+        // ranges in bucket here since new data could be inserted into this
+        // bucket since when we took the first snapshot in the first phase of
+        // commit.
+        const BucketInfo *bucket_info =
+            Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
+                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
+        bucket_info_.Reset();
+        bucket_info_.Set(status_->new_owner_ngs_[migrate_bucket_idx_],
+                         txm->CommitTs());
+        bucket_record_.SetBucketInfo(&bucket_info_);
+        ranges_in_bucket_snapshot_ = bucket_info->CloneRangesInBucket();
 
         if (ranges_in_bucket_snapshot_.size())
         {
@@ -6488,6 +6373,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                        << ", bucket id: "
                        << status_->bucket_ids_[migrate_bucket_idx_]
                        << ", tx number: " << txm->TxNumber();
+            bucket_record_.SetBucketInfo(&bucket_info_);
             RetrySubOperation(txm, &post_all_bucket_lock_op_);
             return;
         }
@@ -6638,32 +6524,12 @@ void DataMigrationOp::FillLogRequest(
         migration_tx_log_message->mutable_bucket_migrate_msg();
     bucket_migrate_message->set_bucket_id(
         status_->bucket_ids_[migrate_bucket_idx_]);
-    bucket_migrate_message->set_migrate_ts(migrate_ts_);
+    bucket_migrate_message->set_migrate_ts(txm->CommitTs());
     bucket_migrate_message->set_old_owner(txm->TxCcNodeId());
     bucket_migrate_message->set_new_owner(
         status_->new_owner_ngs_[migrate_bucket_idx_]);
     bucket_migrate_message->set_migration_txn(txm->TxNumber());
     bucket_migrate_message->set_stage(migrate_stage);
-
-    if (migrate_stage == ::txlog::BucketMigrateMessage_Stage::
-                             BucketMigrateMessage_Stage_PrepareMigrate)
-    {
-        bucket_migrate_message->clear_table_ranges();
-
-        for (const auto &table_ranges : ranges_in_bucket_snapshot_)
-        {
-            ::txlog::BucketTableRangesMessage *table_ranges_msg =
-                bucket_migrate_message->add_table_ranges();
-            const auto &table_name = table_ranges.first;
-            const auto &range_ids = table_ranges.second;
-
-            table_ranges_msg->set_table_name(table_name.String());
-            for (const auto &range_id : range_ids)
-            {
-                table_ranges_msg->add_range_ids(range_id);
-            }
-        }
-    }
 }
 
 void DataMigrationOp::ForceToFinish(TransactionExecution *txm)

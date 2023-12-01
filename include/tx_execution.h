@@ -234,6 +234,13 @@ public:
     void Enlist();
     void ExternalForward();
 #endif
+    void RecoverDataMigration(const ::txlog::BucketMigrateMessage *migrate_msg,
+                              size_t cur_idx,
+                              std::shared_ptr<DataMigrationStatus> status);
+
+    void RecoverClusterScale(const ::txlog::ClusterScaleOpMessage &scale_msg,
+                             bool dm_started,
+                             bool dm_finished);
 
 private:
     /**

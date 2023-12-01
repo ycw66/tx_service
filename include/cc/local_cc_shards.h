@@ -147,11 +147,11 @@ struct DataMigrationStatus
 public:
     DataMigrationStatus(TxNumber cluster_scale_txn,
                         std::vector<uint16_t> &&bucket_ids,
-                        std::vector<NodeGroupId> &&new_owner_ids,
+                        std::vector<NodeGroupId> &&new_owner_ngs,
                         std::vector<TxNumber> &&migration_txns)
         : cluster_scale_txn_(cluster_scale_txn),
           bucket_ids_(std::move(bucket_ids)),
-          new_owner_ngs_(std::move(new_owner_ids)),
+          new_owner_ngs_(std::move(new_owner_ngs)),
           migration_txns_(std::move(migration_txns)),
           next_bucket_idx_(0),
           unfinished_worker_(migration_txns_.size())
@@ -170,21 +170,21 @@ class LocalCcShards
 public:
     static const size_t DATA_SYNC_SCAN_BATCH_SIZE = 3 * 1024;
 
-    LocalCcShards(
-        uint32_t node_id,                                         // = 0,
-        uint16_t core_cnt,                                        // = 1,
-        uint32_t memory_limit_mb,                                 // = 1000,
-        uint32_t log_limit_mb,                                    // = 1000,
-        bool realtime_sampling,                                   // = false,
-        CatalogFactory *catalog_factory,                          // = nullptr,
-        std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,  // = nullptr,
-        int32_t range_bucket_seed,                                // = -1,
-        uint64_t cluster_config_version,                          // = 0,
-        store::DataStoreHandler *store_hd,                        // = nullptr,
-        TxService *tx_service,                                    // = nullptr,
-        bool enable_mvcc = true,
-        metrics::MetricsRegistry *metrics_registry = nullptr,
-        metrics::CommonLabels common_labels = {});
+    LocalCcShards(uint32_t node_id,                 // = 0,
+                  uint16_t core_cnt,                // = 1,
+                  uint32_t memory_limit_mb,         // = 1000,
+                  uint32_t log_limit_mb,            // = 1000,
+                  bool realtime_sampling,           // = false,
+                  CatalogFactory *catalog_factory,  // = nullptr,
+                  std::unordered_map<uint32_t, std::vector<NodeConfig>>
+                      *ng_configs,                    // = nullptr,
+                  int32_t range_bucket_seed,          // = -1,
+                  uint64_t cluster_config_version,    // = 0,
+                  store::DataStoreHandler *store_hd,  // = nullptr,
+                  TxService *tx_service,              // = nullptr,
+                  bool enable_mvcc = true,
+                  metrics::MetricsRegistry *metrics_registry = nullptr,
+                  metrics::CommonLabels common_labels = {});
 
     ~LocalCcShards();
 
@@ -697,11 +697,10 @@ public:
 
     void DropBucketInfo(NodeGroupId ng_id);
 
-    void InitRangeBuckets(
-        NodeGroupId ng_id,
-        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-        uint64_t version,
-        int32_t seed);
+    void InitRangeBuckets(NodeGroupId ng_id,
+                          uint32_t ng_cnt,
+                          uint64_t version,
+                          int32_t seed);
 
     bool IsRangeBucketsInitialized(NodeGroupId ng_id);
 

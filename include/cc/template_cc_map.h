@@ -3611,7 +3611,8 @@ public:
             {
                 return false;
             }
-            else if (pin_status == RangeSliceOpStatus::Error)
+            else if (pin_status == RangeSliceOpStatus::Error ||
+                     pin_status == RangeSliceOpStatus::NotOwner)
             {
                 // If the pin operation returns an error, the data store
                 // is inaccessible.

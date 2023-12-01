@@ -4,14 +4,13 @@
 #include <braft/util.h>  // braft::AsyncClosureGuard
 #include <brpc/channel.h>
 
+#include <filesystem>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <unordered_set>
 #include <vector>
 
 #include "log_replay_service.h"
-#include "proto/cc_request.pb.h"
 #include "sharder.h"
 
 namespace txservice::fault
@@ -57,6 +56,15 @@ public:
     void Join();
 
     int TransferLeader();
+
+    // This should only be called when ng is deleted from cluster. This will
+    // shutdown cc node in this ng and delete cc ng log of this ng.
+    void Remove()
+    {
+        Shutdown();
+        Join();
+        std::filesystem::remove_all(std::filesystem::path(storage_path_));
+    }
 
     int64_t Term() const
     {
@@ -106,8 +114,10 @@ public:
      */
     bool UpdateNodeGroupConfig(const std::vector<std::string> &ng_ips,
                                const std::vector<uint16_t> &ng_ports,
-                               CcRequestBase *cc_req,
-                               CcShard *cc_shard);
+                               std::mutex &mux,
+                               std::condition_variable &cv,
+                               bool &finished,
+                               bool &succ);
 
 private:
     static braft::NodeOptions BaseNodeOptions()
@@ -197,11 +207,18 @@ private:
 class ChangePeerClosure : public braft::Closure
 {
 public:
-    explicit ChangePeerClosure(CcRequestBase *req,
-                               CcShard *shard,
+    explicit ChangePeerClosure(std::mutex &mux,
+                               std::condition_variable &cv,
+                               bool &finished,
+                               bool &succ,
                                braft::Configuration &config,
                                braft::Node *node)
-        : cc_req_(req), shard_(shard), new_config_(config), node_(node)
+        : mux_(mux),
+          cv_(cv),
+          finished_(finished),
+          succ_(succ),
+          new_config_(config),
+          node_(node)
     {
     }
     ~ChangePeerClosure()
@@ -211,8 +228,10 @@ public:
     void Run() override;
 
 private:
-    CcRequestBase *cc_req_;
-    CcShard *shard_;
+    std::mutex &mux_;
+    std::condition_variable &cv_;
+    bool &finished_;
+    bool &succ_;
     braft::Configuration new_config_;
     braft::Node *node_;
 };

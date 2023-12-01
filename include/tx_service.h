@@ -787,22 +787,22 @@ public:
 class TxService
 {
 public:
-    TxService(
-        const std::string &local_path,
-        CatalogFactory *catalog_factory,
-        const std::map<std::string, uint32_t> &conf,
-        uint32_t node_id,                                         // = 0,
-        std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,  // = nullptr,
-        int32_t range_bucket_seed,                                // = -1,
-        uint64_t cluster_config_version,                          // = 0,
-        std::vector<std::string> *txlog_ips,                      // = nullptr,
-        std::vector<uint16_t> *txlog_ports,                       // = nullptr,
-        store::DataStoreHandler *store_hd,                        // = nullptr,
-        std::unique_ptr<TxLog> log_hd,                            // = nullptr,
-        bool enable_mvcc = true,
-        bool skip_redo_log = false,
-        metrics::MetricsRegistry *metrics_registry = nullptr,
-        metrics::CommonLabels common_labels = {})
+    TxService(const std::string &local_path,
+              CatalogFactory *catalog_factory,
+              const std::map<std::string, uint32_t> &conf,
+              uint32_t node_id,  // = 0,
+              std::unordered_map<uint32_t, std::vector<NodeConfig>>
+                  *ng_configs,                      // = nullptr,
+              int32_t range_bucket_seed,            // = -1,
+              uint64_t cluster_config_version,      // = 0,
+              std::vector<std::string> *txlog_ips,  // = nullptr,
+              std::vector<uint16_t> *txlog_ports,   // = nullptr,
+              store::DataStoreHandler *store_hd,    // = nullptr,
+              std::unique_ptr<TxLog> log_hd,        // = nullptr,
+              bool enable_mvcc = true,
+              bool skip_redo_log = false,
+              metrics::MetricsRegistry *metrics_registry = nullptr,
+              metrics::CommonLabels common_labels = {})
         : local_cc_shards_(node_id,
                            conf.find("core_num")->second,
                            conf.find("node_memory_limit_mb")->second,

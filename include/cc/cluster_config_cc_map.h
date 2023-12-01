@@ -2,9 +2,11 @@
 
 #include "cc_map.h"
 #include "cluster_config_record.h"
+#include "raft_log.pb.h"
 #include "template_cc_map.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "tx_service.h"
 
 namespace txservice
 {
@@ -28,7 +30,7 @@ public:
         // We only store one record in ClusterConfigCcMap as neg_inf_ key. It is
         // is only used for concurrency control purpose.
         neg_inf_.payload_ = std::make_shared<ClusterConfigRecord>();
-        neg_inf_.commit_ts_ = 0;
+        neg_inf_.commit_ts_ = Sharder::Instance().ClusterConfigVersion();
         neg_inf_.payload_status_ = RecordStatus::Normal;
     }
 
@@ -162,9 +164,10 @@ public:
         ClusterConfigRecord *config_rec = nullptr;
         if (req.Key() != nullptr)
         {
-            // request comes from same node group.
+            // request comes from same node.
             assert(req.Key() == NegativeInfinity<VoidKey>::Instance());
             config_rec = static_cast<ClusterConfigRecord *>(req.Payload());
+            ACTION_FAULT_INJECTOR("cluster_config_PostWriteAll_local");
         }
         else
         {
@@ -177,16 +180,18 @@ public:
             decoded_rec->Deserialize(req.PayloadStr()->c_str(), offset);
             config_rec = decoded_rec.get();
             req.SetDecodedPayload(std::move(decoded_rec));
+            ACTION_FAULT_INJECTOR("cluster_config_PostWriteAll_remote");
         }
         // First we need to update cluster configs in Sharder.
-        if (Sharder::Instance().UpdateClusterConfig(
-                config_rec->GetNodeGroupConfigs(),
-                req.CommitTs(),
-                &req,
-                this->shard_))
+        if (Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
         {
             // async braft change_peers call is made. cc req will be put
             // back in queue once it's done.
+            Sharder::Instance().UpdateClusterConfig(
+                config_rec->GetNodeGroupConfigs(),
+                req.CommitTs(),
+                &req,
+                this->shard_);
             return false;
         }
 
@@ -221,6 +226,190 @@ public:
         // stored on core 0.
         req.Result()->SetFinished();
         req.SetDecodedPayload(nullptr);
+        return true;
+    }
+
+    bool Execute(ReplayLogCc &req) override
+    {
+        int64_t tx_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+        if (tx_candidate_term < 0)
+        {
+            // No longer candidate leader, stop immediately
+            req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+        const std::string_view &content = req.LogContentView();
+        ::txlog::ClusterScaleOpMessage scale_op_msg;
+        scale_op_msg.ParseFromArray(content.data(), content.length());
+        TxNumber cluster_scale_txn = req.Txn();
+        bool is_coordinator =
+            ((cluster_scale_txn >> 32L) >> 10) == req.NodeGroupId();
+        bool dm_started = false, dm_finished = true;
+
+        auto &migrate_process =
+            scale_op_msg.node_group_bucket_migrate_process();
+        // Check the data migrate process of each node group.
+        for (auto &[ng_id, ng_process] : migrate_process)
+        {
+            // If any node group has started migration, we will replay from
+            // the data migrate stage.
+            dm_started =
+                ng_process.stage() !=
+                    ::txlog::NodeGroupMigrateMessage_Stage_NotStarted ||
+                dm_started;
+
+            if (ng_process.stage() !=
+                ::txlog::NodeGroupMigrateMessage_Stage_Cleaned)
+            {
+                dm_finished = false;
+            }
+        }
+
+        bool locked = false, update_local_config = false;
+        if (is_coordinator)
+        {
+            if (scale_op_msg.event_type() ==
+                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode)
+            {
+                // If we see cluster config log and data migration has not
+                // started on any node group, we should replay from cluster
+                // config update log.
+                if (scale_op_msg.stage() ==
+                        ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate &&
+                    !dm_started)
+                {
+                    locked = true;
+                }
+            }
+            else if (scale_op_msg.event_type() ==
+                     ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode)
+            {
+                // During remove node cluster config is done after data
+                // migration. If we see config update log, that means we've
+                // already acquired write lock on cluster config cc map.
+                if (scale_op_msg.stage() ==
+                    ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                {
+                    locked = true;
+                }
+            }
+        }
+        else
+        {
+            // As coordinator we should recover the state of right before
+            // writing the next log.
+            if (scale_op_msg.event_type() ==
+                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode)
+            {
+                if (scale_op_msg.stage() ==
+                    ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+                {
+                    // For add node if we only see prepare log, then recover to
+                    // the state of before writing cluster config update log.
+                    locked = true;
+                }
+                else if (scale_op_msg.stage() ==
+                             ::txlog::
+                                 ClusterScaleOpMessage_Stage_ConfigUpdate &&
+                         !dm_started)
+                {
+                    update_local_config = true;
+                }
+            }
+            else if (scale_op_msg.event_type() ==
+                     ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode)
+            {
+                if (scale_op_msg.stage() ==
+                        ::txlog::ClusterScaleOpMessage_Stage_PrepareScale &&
+                    dm_finished)
+                {
+                    // For remove node, cluster config update is done after data
+                    // migrate. We only need to recover the lock if data
+                    // migration is finished.
+                    locked = true;
+                }
+                else if (scale_op_msg.stage() ==
+                         ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+                {
+                    update_local_config = true;
+                }
+            }
+        }
+
+        if (locked)
+        {
+            auto lock_pair = AcquireCceKeyLock(&neg_inf_,
+                                               RecordStatus::Normal,
+                                               &req,
+                                               req.NodeGroupId(),
+                                               tx_candidate_term,
+                                               0,
+                                               CcOperation::Write,
+                                               IsolationLevel::RepeatableRead,
+                                               CcProtocol::Locking,
+                                               0,
+                                               false);
+            // When a cc node recovers, no one should be holding read
+            // locks. So, the acquire operation should always
+            // succeed.
+            assert(lock_pair.first == LockType::WriteLock &&
+                   lock_pair.second == CcErrorCode::NO_ERROR);
+        }
+
+        if (update_local_config &&
+            Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
+        {
+            // Read new cluster config from log
+            int ng_cnt = scale_op_msg.new_ng_configs_size();
+            std::unordered_map<uint32_t, std::vector<NodeConfig>>
+                new_ng_configs;
+            std::unordered_map<uint32_t, NodeConfig> node_configs;
+            for (int idx = 0; idx < scale_op_msg.node_configs_size(); idx++)
+            {
+                auto &node_config = scale_op_msg.node_configs(idx);
+                node_configs.try_emplace(node_config.node_id(),
+                                         node_config.node_id(),
+                                         node_config.host_name(),
+                                         node_config.port());
+            }
+            for (int ng_idx = 0; ng_idx < ng_cnt; ng_idx++)
+            {
+                int node_cnt =
+                    scale_op_msg.new_ng_configs(ng_idx).member_nodes_size();
+                int ng_id = scale_op_msg.new_ng_configs(ng_idx).ng_id();
+                std::vector<NodeConfig> ng_nodes;
+                for (int nid = 0; nid < node_cnt; nid++)
+                {
+                    int member_nid =
+                        scale_op_msg.new_ng_configs(ng_idx).member_nodes(nid);
+                    auto &member_node_msg = node_configs[member_nid];
+                    ng_nodes.emplace_back(member_node_msg.node_id_,
+                                          member_node_msg.host_name_,
+                                          member_node_msg.port_);
+                }
+                new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
+            }
+            // This will update cluster config in sharder asynchronouslly
+            Sharder::Instance().UpdateClusterConfig(
+                new_ng_configs, req.CommitTs(), &req, shard_);
+            return false;
+        }
+
+        // Restore cluster scale tx if ng is coordinator
+        if (is_coordinator)
+        {
+            LOG(INFO) << "Recovering cluster scale tx, txn: "
+                      << cluster_scale_txn << ", term: " << tx_candidate_term;
+            TxService *tx_service = shard_->local_shards_.GetTxService();
+            TransactionExecution *txm = tx_service->NewTx();
+            txm->SetRecoverTxState(
+                cluster_scale_txn, tx_candidate_term, req.CommitTs());
+            txm->RecoverClusterScale(scale_op_msg, dm_started, dm_finished);
+        }
+        neg_inf_.commit_ts_ = Sharder::Instance().ClusterConfigVersion();
+
+        req.SetFinish();
         return true;
     }
 };

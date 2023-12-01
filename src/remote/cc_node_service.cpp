@@ -3,6 +3,7 @@
 #include "cc/local_cc_shards.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
+#include "tx_request.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -171,6 +172,10 @@ void CcNodeService::ClusterAddNode(
     // ReadTxRequest.
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
+    // Write all cluster scale log to log group 0. Log group will check
+    // if there's another cluster scale event in progress and reject
+    // the prepare log request if so.
+    init_req.log_group_id_ = 0;
     init_req.Reset();
     txm->Execute(&init_req);
     init_req.Wait();
@@ -184,7 +189,7 @@ void CcNodeService::ClusterAddNode(
     }
 
     ClusterScaleTxRequest scale_req(
-        ClusterScaleOpType::AddNode, &delta_nodes, nullptr, nullptr);
+        ClusterScaleOpType::AddNode, &delta_nodes, nullptr);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -239,6 +244,10 @@ void CcNodeService::ClusterRemoveNode(
     // ReadTxRequest.
     init_req.iso_level_ = IsolationLevel::RepeatableRead;
     init_req.protocol_ = CcProtocol::Locking;
+    // Write all cluster scale log to log group 0. Log group will check
+    // if there's another cluster scale event in progress and reject
+    // the prepare log request if so.
+    init_req.log_group_id_ = 0;
     init_req.Reset();
     txm->Execute(&init_req);
     init_req.Wait();
@@ -252,11 +261,8 @@ void CcNodeService::ClusterRemoveNode(
     }
 
     uint16_t remove_node_count = request->remove_node_count();
-    std::vector<std::pair<std::string, uint16_t>> removed_nodes;
-    ClusterScaleTxRequest scale_req(ClusterScaleOpType::RemoveNode,
-                                    nullptr,
-                                    &removed_nodes,
-                                    &remove_node_count);
+    ClusterScaleTxRequest scale_req(
+        ClusterScaleOpType::RemoveNode, nullptr, &remove_node_count);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -280,11 +286,6 @@ void CcNodeService::ClusterRemoveNode(
     response->set_result(
         ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
     response->set_tx_number(txm->TxNumber());
-    for (auto &node : removed_nodes)
-    {
-        response->add_host_list(node.first);
-        response->add_port_list(node.second);
-    }
 }
 
 /**
@@ -587,57 +588,6 @@ void CcNodeService::InitDataMigration(
     thd.detach();
 }
 
-void CcNodeService::NotifyNewNodeReady(
-    ::google::protobuf::RpcController *controller,
-    const ::txservice::remote::NotifyNewNodeReadyRequest *request,
-    ::txservice::remote::NotifyNewNodeReadyResponse *response,
-    ::google::protobuf::Closure *done)
-{
-    brpc::ClosureGuard done_guard(done);
-    auto shards = Sharder::Instance().GetLocalCcShards();
-    TxNumber txn = request->tx_number();
-    NodeGroupId tx_ng_id = (txn >> 32L) >> 10;
-    if (Sharder::Instance().LeaderTerm(tx_ng_id) >= 0)
-    {
-        std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
-        auto scale_op = shards->cluster_scale_op_.get();
-        if (scale_op->GetStatus(txn) ==
-            remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE)
-        {
-            assert(scale_op->op_ == &scale_op->wait_for_new_node_ready_op_);
-            scale_op->wait_for_new_node_ready_op_.hd_result_.SetFinished();
-            // TODO{liunyl}: Wait until we write log to confirm new nodes are
-            // ready.
-            response->set_error(false);
-        }
-        else
-        {
-            // Invalid state for notify new node ready
-            response->set_error(true);
-        }
-    }
-    else
-    {
-        // Redirect rpc to leader node of tx ng.
-        int32_t node_id = Sharder::Instance().LeaderNodeId(tx_ng_id);
-        std::string node_ip;
-        uint16_t node_port;
-        Sharder::Instance().GetNodeAddress(node_id, node_ip, node_port);
-
-        brpc::Channel channel;
-        if (channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
-        {
-            response->set_error(true);
-            return;
-        }
-
-        remote::CcRpcService_Stub stub(&channel);
-        brpc::Controller cntl;
-        stub.NotifyNewNodeReady(&cntl, request, response, nullptr);
-    }
-}
-
 void CcNodeService::CheckClusterScaleStatus(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::ClusterScaleStatusRequest *request,
@@ -648,11 +598,22 @@ void CcNodeService::CheckClusterScaleStatus(
     auto shards = Sharder::Instance().GetLocalCcShards();
     TxNumber txn = request->tx_number();
     NodeGroupId tx_ng_id = (txn >> 32L) >> 10;
-    if (Sharder::Instance().LeaderTerm(tx_ng_id) >= 0)
+    int64_t term = Sharder::Instance().LeaderTerm(tx_ng_id);
+    if (term >= 0)
     {
         std::unique_lock<std::mutex> lk(shards->cluster_scale_op_mux_);
         auto scale_op = shards->cluster_scale_op_.get();
-        response->set_status(scale_op->GetStatus(txn));
+        auto status = scale_op->GetStatus(txn);
+        // Once term changes, status will be set to invalid. So make sure
+        // the term hasn't changed when we're reading the status.
+        if (term == Sharder::Instance().LeaderTerm(tx_ng_id))
+        {
+            response->set_status(status);
+        }
+        else
+        {
+            response->set_status(remote::ClusterScaleStatus::UNKNOWN);
+        }
     }
     else
     {
@@ -674,6 +635,76 @@ void CcNodeService::CheckClusterScaleStatus(
         brpc::Controller cntl;
         stub.CheckClusterScaleStatus(&cntl, request, response, nullptr);
     }
+}
+
+void CcNodeService::GetClusterNodes(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::GetClusterNodesRequest *request,
+    ::txservice::remote::GetClusterNodesResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    // First make sure we're the preferred leader of ng since we'll need to
+    // put read lock on cluster config cc map when reading cluster config.
+    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NodeId()) < 0)
+    {
+        response->set_error(true);
+        return;
+    }
+
+    // Put a read lock on cluster config first before reading the node list.
+    TxService *tx_service =
+        Sharder::Instance().GetLocalCcShards()->GetTxservice();
+    auto txm = tx_service->NewTx();
+    InitTxRequest init_req;
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    init_req.Reset();
+    txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        response->set_error(true);
+        return;
+    }
+    ReadTxRequest read_req;
+    ClusterConfigRecord rec;
+    read_req.Set(&cluster_config_ccm_name,
+                 NegativeInfinity<VoidKey>::Instance(),
+                 &rec,
+                 false,
+                 false,
+                 true);
+    txm->Execute(&read_req);
+    read_req.Wait();
+    RecordStatus rec_status = read_req.Result().first;
+
+    if (read_req.IsError() || rec_status != RecordStatus::Normal)
+    {
+        CommitTxRequest commit_req;
+        txm->CommitTx(commit_req);
+        response->set_error(true);
+        return;
+    }
+
+    // Now read node list from sharder
+    std::string ip;
+    uint16_t port;
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+    for (uint32_t i = 0; i < ng_cnt; i++)
+    {
+        Sharder::Instance().GetNodeAddress(i, ip, port);
+        if (!ip.empty())
+        {
+            response->add_host_list(ip);
+            response->add_port_list(port);
+        }
+    }
+    CommitTxRequest commit_req;
+    txm->Execute(&commit_req);
+    commit_req.Wait();
+    response->set_error(false);
 }
 }  // namespace remote
 }  // namespace txservice

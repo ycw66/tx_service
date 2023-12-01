@@ -1326,7 +1326,8 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
 
         brpc::Channel channel;
-        if (channel.Init(
+        if (node_ip.empty() ||
+            channel.Init(
                 node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
         {
             // Fail to establish the channel to the target node.
@@ -1431,7 +1432,8 @@ void UpsertTableIndexOp::AcquireNodeGroupLeaderTerm(
         Sharder::Instance().GetNodeAddress(leader_node_id, node_ip, node_port);
 
         brpc::Channel channel;
-        if (channel.Init(
+        if (node_ip.empty() ||
+            channel.Init(
                 node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
         {
             // Fail to establish the channel to the tx node. Do not update the

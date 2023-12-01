@@ -43,6 +43,12 @@ public:
         ranges_in_bucket_.clear();
     }
 
+    void ClearDirty()
+    {
+        dirty_bucket_owner_ = UINT32_MAX;
+        dirty_version_ = 0;
+    }
+
     NodeGroupId BucketOwner() const
     {
         return bucket_owner_;

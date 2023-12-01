@@ -72,7 +72,7 @@ public:
     bool InitializeClusterConfig(
         const std::vector<std::string> &ips,
         const std::vector<uint16_t> &ports,
-        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) override
     {
         assert(false);
@@ -80,7 +80,7 @@ public:
     }
 
     bool ReadClusterConfig(
-        std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         uint64_t &version,
         int32_t &seed,
         bool &uninitialized) override

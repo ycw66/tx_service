@@ -21,7 +21,7 @@ LocalCcShards::LocalCcShards(
     uint32_t log_limit_mb,
     bool realtime_sampling,
     CatalogFactory *catalog_factory,
-    std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     int32_t range_bucket_seed,
     uint64_t cluster_config_version,
     store::DataStoreHandler *store_hd,
@@ -56,7 +56,7 @@ LocalCcShards::LocalCcShards(
     timer_thd_ = std::thread([this] { TimerRun(); });
 
     InitRangeBuckets(
-        node_id, *ng_configs, cluster_config_version, range_bucket_seed);
+        node_id, ng_configs->size(), cluster_config_version, range_bucket_seed);
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
@@ -478,7 +478,8 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
          node_group_id,
          split_tx_started = replay_log_cc.RangeSplitStarted()]() mutable
         {
-            if (Sharder::Instance().TryPinNodeGroupData(node_group_id) < 0)
+            if (Sharder::Instance().TryPinNodeGroupData(node_group_id) !=
+                tx_term)
             {
                 replay_log_cc.AbortCcRequest(
                     CcErrorCode::REQUESTED_NODE_NOT_LEADER);
@@ -1486,11 +1487,10 @@ bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
            bucket_info->second.size() == total_range_buckets;
 }
 
-void LocalCcShards::InitRangeBuckets(
-    NodeGroupId ng_id,
-    std::map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-    uint64_t version,
-    int32_t seed)
+void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
+                                     uint32_t ng_cnt,
+                                     uint64_t version,
+                                     int32_t seed)
 {
     // Construct bucket info map on startup
     // Generate 64 random numbers for each node group as virtual nodes on
@@ -1499,7 +1499,7 @@ void LocalCcShards::InitRangeBuckets(
     std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> ng_bucket_infos;
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
     srand(seed);
-    for (auto config : ng_configs)
+    for (uint32_t ng = 0; ng < ng_cnt; ng++)
     {
         size_t generated = 0;
         while (generated < 64)
@@ -1508,7 +1508,7 @@ void LocalCcShards::InitRangeBuckets(
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
-                rand_num_to_ng.emplace(rand_num, config.first);
+                rand_num_to_ng.emplace(rand_num, ng);
             }
         }
     }
@@ -1554,6 +1554,9 @@ const BucketInfo *LocalCcShards::UploadBucketInfo(NodeGroupId ng_id,
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     BucketInfo *bucket_info = GetBucketInfoInternal(bucket_id, ng_id);
+    assert(version > bucket_info->Version() &&
+           version >= bucket_info->DirtyVersion());
+    bucket_info->ClearDirty();
     bucket_info->Set(owner_ng, version);
     return bucket_info;
 }

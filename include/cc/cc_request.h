@@ -1130,7 +1130,6 @@ public:
         is_wait_for_post_write_ = false;
         is_in_recovering_ = is_in_recovering;
         is_covering_keys_ = is_covering_keys;
-        is_wait_for_bucket_record_read_ = false;
 
         ccm_ = nullptr;
         cce_addr_ = &res->Value().cce_addr_;
@@ -1178,7 +1177,6 @@ public:
         is_wait_for_post_write_ = false;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
-        is_wait_for_bucket_record_read_ = false;
 
         ccm_ = nullptr;
         cce_addr_ = &res->Value().cce_addr_;
@@ -1292,16 +1290,6 @@ public:
         return is_covering_keys_;
     }
 
-    bool IsWaitForBucketRecordRead() const
-    {
-        return is_wait_for_bucket_record_read_;
-    }
-
-    void SetIsWaitForBucketRecordRead(bool is_wait)
-    {
-        is_wait_for_bucket_record_read_ = is_wait;
-    }
-
 private:
     const CcEntryAddr *cce_addr_;
     const TxKey *key_;
@@ -1339,9 +1327,6 @@ private:
     bool is_in_recovering_{false};
     // Reserved for unique sk read
     bool is_covering_keys_{false};
-    // Used during range cc map read to indicate if bucket record read
-    // is blocked by lock
-    bool is_wait_for_bucket_record_read_{false};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
 };
@@ -2886,6 +2871,11 @@ public:
     uint64_t Txn() const
     {
         return tx_number_;
+    }
+
+    void ResetTxn(uint64_t txn)
+    {
+        tx_number_ = txn;
     }
 
     void ResetCcm()

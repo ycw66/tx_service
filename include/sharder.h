@@ -117,8 +117,8 @@ class Sharder
 public:
     static Sharder &Instance(
         uint32_t node_id = 0,
-        const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs =
-            nullptr,
+        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+            *ng_configs = nullptr,
         uint64_t config_version = 0,
         const std::vector<std::string> *txlog_ips = nullptr,
         const std::vector<uint16_t> *txlog_ports = nullptr,
@@ -182,6 +182,11 @@ public:
         return cpy->ng_configs_.size();
     }
 
+    /**
+     * @brief Gets the ip and port of the input node. Result is saved in ip and
+     * port. If the node id is not found in cluster, set ip as empty string.
+     *
+     */
     void GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port);
 
     /**
@@ -194,7 +199,8 @@ public:
      * @return int Error code.
      */
     int Init(uint32_t node_id,
-             const std::map<NodeGroupId, std::vector<NodeConfig>> *ng_configs,
+             const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+                 *ng_configs,
              uint64_t config_version,
              const std::vector<std::string> *txlog_ips,
              const std::vector<uint16_t> *txlog_ports,
@@ -417,28 +423,35 @@ public:
     /**
      * @brief Calculate new node group config after removing nodes from current
      * cluster.
-     * @param removed_nodes The node info of the nodes removed. Filled in by
-     * this func.
      * @return New cluster node group configs.
      */
     std::unordered_map<uint32_t, std::vector<NodeConfig>> RemoveNodeFromCluster(
-        uint16_t removed_node_count,
-        std::vector<std::pair<std::string, uint16_t>> &removed_nodes);
+        uint16_t removed_node_count);
 
     /**
      * @brief Update current cluster config to the new_ng_configs. The config
      * will only be updated if current config version is older than given
      * version.
-     *
-     * @return If async braft api is called. If so caller cc_req will be put
-     * back in queue once the braft call is done.
      */
-    bool UpdateClusterConfig(
+    void UpdateClusterConfig(
         const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
             &new_ng_configs,
         uint64_t version,
         CcRequestBase *cc_req,
         CcShard *cc_shard);
+
+    uint64_t ClusterConfigVersion()
+    {
+        auto cluster_config = cluster_config_;
+        if (cluster_config)
+        {
+            return cluster_config->version_;
+        }
+        else
+        {
+            return 0;
+        }
+    }
 
     /**
      * @brief Should accept the cc requests from remote node after the
@@ -477,9 +490,6 @@ private:
     std::atomic<uint32_t> ng_leader_cache_[1000];
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
-
-    // Used to protect Sharder::UpdateLeader.
-    std::mutex mux_;
 
     // Used to protect recovered_leader_set
     std::mutex recovery_state_mux_;
@@ -530,6 +540,9 @@ private:
 
     // Worker pool for doing various aync works
     std::unique_ptr<TxWorkerPool> tx_worker_pool_;
+
+    // Worker thread that update braft config/info in sharder
+    std::unique_ptr<TxWorkerPool> sharder_worker_;
 
     LocalCcShards *local_shards_;
     std::unique_ptr<TxLog> log_agent_;

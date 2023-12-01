@@ -969,23 +969,30 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
 
     void_resp_ = &req.tx_result_;
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
-    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
-    if (local_shards->cluster_scale_op_)
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> new_ng_config;
+    if (req.scale_type_ == ClusterScaleOpType::AddNode)
     {
-        local_shards->cluster_scale_op_->Reset(req.scale_type_,
-                                               req.new_nodes_,
-                                               req.removed_nodes_,
-                                               req.remove_node_count_,
-                                               this);
+        new_ng_config = Sharder::Instance().AddNodeToCluster(*req.new_nodes_);
+    }
+    else if (req.scale_type_ == ClusterScaleOpType::RemoveNode)
+    {
+        new_ng_config =
+            Sharder::Instance().RemoveNodeFromCluster(*req.remove_node_count_);
     }
     else
     {
-        local_shards->cluster_scale_op_ =
-            std::make_unique<ClusterScaleOp>(req.scale_type_,
-                                             req.new_nodes_,
-                                             req.removed_nodes_,
-                                             req.remove_node_count_,
-                                             this);
+        assert(false);
+    }
+    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
+    if (local_shards->cluster_scale_op_)
+    {
+        local_shards->cluster_scale_op_->Reset(
+            req.scale_type_, std::move(new_ng_config), this);
+    }
+    else
+    {
+        local_shards->cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+            req.scale_type_, std::move(new_ng_config), this);
     }
     lk.unlock();
 
@@ -3249,6 +3256,7 @@ void TransactionExecution::Process(ValidateOperation &validate)
     size_t read_data_cnt = rw_set_.ReadSetSize();
     validate.Reset(read_data_cnt);
     validate.is_running_ = true;
+    bool empty_rset = true;
 
     for (const auto &[tbl_name, tbl_read_set] : rset)
     {
@@ -3260,6 +3268,7 @@ void TransactionExecution::Process(ValidateOperation &validate)
 
         for (const auto &[cce_addr, read_entry] : tbl_read_set)
         {
+            empty_rset = false;
             cc_handler_->PostRead(tx_number_.load(std::memory_order_relaxed),
                                   tx_term_,
                                   command_id_.load(std::memory_order_relaxed),
@@ -3280,7 +3289,15 @@ void TransactionExecution::Process(ValidateOperation &validate)
         validate.op_start_ = metrics::Clock::now();
     }
 
-    StartTiming();
+    if (empty_rset)
+    {
+        validate.hd_result_.SetFinished();
+        Forward();
+    }
+    else
+    {
+        StartTiming();
+    }
 }
 
 void TransactionExecution::PostProcess(ValidateOperation &validate)
@@ -5386,6 +5403,218 @@ LockType TransactionExecution::DeduceReadLockType(TableType tbl_type,
 
     return LockTypeUtil::DeduceLockType(
         cc_op, iso_level, protocol_, is_covering_key);
+}
+
+void TransactionExecution::RecoverDataMigration(
+    const ::txlog::BucketMigrateMessage *migrate_msg,
+    size_t cur_idx,
+    std::shared_ptr<DataMigrationStatus> status)
+{
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+
+    std::lock_guard<std::mutex> lk(local_shards->data_migration_op_pool_mux_);
+
+    if (local_shards->migration_op_pool_.empty())
+    {
+        migration_op_ = std::make_unique<DataMigrationOp>(this, status);
+    }
+    else
+    {
+        migration_op_ = std::move(local_shards->migration_op_pool_.back());
+        local_shards->migration_op_pool_.pop_back();
+        migration_op_->Reset(this, status);
+    }
+    if (migrate_msg)
+    {
+        migration_op_->migrate_bucket_idx_ = cur_idx;
+        migration_op_->bucket_key_ =
+            RangeBucketKey(status->bucket_ids_[cur_idx]);
+
+        switch (migrate_msg->stage())
+        {
+        case ::txlog::BucketMigrateMessage_Stage::
+            BucketMigrateMessage_Stage_BeforeLocking:
+        {
+            migration_op_->op_ = &migration_op_->write_before_locking_log_op_;
+            migration_op_->write_before_locking_log_op_.hd_result_
+                .SetFinished();
+            break;
+        }
+        case ::txlog::BucketMigrateMessage_Stage::
+            BucketMigrateMessage_Stage_PrepareMigrate:
+        {
+            migration_op_->op_ = &migration_op_->prepare_log_op_;
+            migration_op_->prepare_log_op_.hd_result_.SetFinished();
+            break;
+        }
+        case ::txlog::BucketMigrateMessage_Stage::
+            BucketMigrateMessage_Stage_CommitMigrate:
+        {
+            migration_op_->op_ = &migration_op_->commit_log_op_;
+            migration_op_->commit_log_op_.hd_result_.SetFinished();
+            break;
+        }
+        default:
+        {
+            assert(false);
+        }
+        }
+    }
+
+    PushOperation(migration_op_.get());
+}
+
+void TransactionExecution::RecoverClusterScale(
+    const ::txlog::ClusterScaleOpMessage &scale_op_msg,
+    bool dm_started,
+    bool dm_finished)
+{
+    // Read new cluster config from log
+    int ng_cnt = scale_op_msg.new_ng_configs_size();
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs;
+    std::unordered_map<uint32_t, NodeConfig> node_configs;
+    for (int idx = 0; idx < scale_op_msg.node_configs_size(); idx++)
+    {
+        auto &node_config = scale_op_msg.node_configs(idx);
+        node_configs.try_emplace(node_config.node_id(),
+                                 node_config.node_id(),
+                                 node_config.host_name(),
+                                 node_config.port());
+    }
+    for (int ng_idx = 0; ng_idx < ng_cnt; ng_idx++)
+    {
+        int node_cnt = scale_op_msg.new_ng_configs(ng_idx).member_nodes_size();
+        int ng_id = scale_op_msg.new_ng_configs(ng_idx).ng_id();
+        std::vector<NodeConfig> ng_nodes;
+        for (int nidx = 0; nidx < node_cnt; nidx++)
+        {
+            int member_nid =
+                scale_op_msg.new_ng_configs(ng_idx).member_nodes(nidx);
+            auto &member_node_msg = node_configs[member_nid];
+            ng_nodes.emplace_back(member_node_msg.node_id_,
+                                  member_node_msg.host_name_,
+                                  member_node_msg.port_);
+        }
+        new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
+    }
+
+    LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
+    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
+    ClusterScaleOpType op_type =
+        scale_op_msg.event_type() ==
+                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode
+            ? ClusterScaleOpType::AddNode
+            : ClusterScaleOpType::RemoveNode;
+    if (local_shards->cluster_scale_op_)
+    {
+        local_shards->cluster_scale_op_->Reset(
+            op_type, std::move(new_ng_configs), this);
+    }
+    else
+    {
+        local_shards->cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+            op_type, std::move(new_ng_configs), this);
+    }
+    ClusterScaleOp *op = local_shards->cluster_scale_op_.get();
+
+    if (op_type == ClusterScaleOpType::AddNode)
+    {
+        if (scale_op_msg.stage() ==
+            ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+        {
+            op->op_ = &op->prepare_log_op_;
+            op->prepare_log_op_.hd_result_.SetFinished();
+        }
+        else if (scale_op_msg.stage() ==
+                 ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+        {
+            if (dm_finished)
+            {
+                op->op_ = &op->check_migration_is_finished_op_;
+                op->check_migration_is_finished_op_.migration_is_finished_ =
+                    true;
+                op->check_migration_is_finished_op_.rpc_is_finished_.store(
+                    true);
+                op->SetStatus(
+                    TxNumber(),
+                    remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
+            }
+            else if (dm_started)
+            {
+                op->op_ = &op->install_cluster_config_op_;
+                op->install_cluster_config_op_.Reset(1);
+                op->install_cluster_config_op_.hd_result_.SetFinished();
+                op->SetStatus(
+                    TxNumber(),
+                    remote::ClusterScaleStatus::CLUSTER_CONFIG_UPDATE);
+            }
+            else
+            {
+                op->op_ = &op->update_cluster_config_log_op_;
+                op->update_cluster_config_log_op_.hd_result_.SetFinished();
+            }
+        }
+        else
+        {
+            assert(false);
+        }
+    }
+    else
+    {
+        if (scale_op_msg.stage() ==
+            ::txlog::ClusterScaleOpMessage_Stage_PrepareScale)
+        {
+            if (dm_finished)
+            {
+                op->op_ = &op->check_migration_is_finished_op_;
+                op->check_migration_is_finished_op_.migration_is_finished_ =
+                    true;
+                op->check_migration_is_finished_op_.rpc_is_finished_.store(
+                    true);
+            }
+            else
+            {
+                op->op_ = &op->prepare_log_op_;
+                op->prepare_log_op_.hd_result_.SetFinished();
+            }
+        }
+        else if (scale_op_msg.stage() ==
+                 ::txlog::ClusterScaleOpMessage_Stage_ConfigUpdate)
+        {
+            op->op_ = &op->update_cluster_config_log_op_;
+            op->update_cluster_config_log_op_.hd_result_.SetFinished();
+        }
+        else
+        {
+            assert(false);
+        }
+    }
+    // Read migration plan from log. This is only needed if data migrate
+    // is not finished.
+    if (!dm_finished)
+    {
+        std::unordered_map<NodeGroupId, BucketMigrateInfo> migrate_plan;
+        for (auto &[ng_id, ng_process] :
+             scale_op_msg.node_group_bucket_migrate_process())
+        {
+            BucketMigrateInfo ng_plan;
+
+            ng_plan.has_migration_tx_ =
+                ng_process.stage() !=
+                ::txlog::NodeGroupMigrateMessage_Stage_NotStarted;
+            for (auto &[bucket, bucket_msg] :
+                 ng_process.bucket_migrate_process())
+            {
+                ng_plan.bucket_ids_.push_back(bucket);
+                ng_plan.new_owner_ngs_.push_back(bucket_msg.new_owner());
+                assert(bucket_msg.bucket_id() == bucket);
+                assert(bucket_msg.old_owner() == ng_id);
+            }
+            migrate_plan.try_emplace(ng_id, std::move(ng_plan));
+        }
+        op->bucket_migrate_infos_ = std::move(migrate_plan);
+    }
+    PushOperation(op);
 }
 
 }  // namespace txservice

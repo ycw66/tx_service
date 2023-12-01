@@ -55,17 +55,17 @@ public:
         ::txservice::remote::ClusterRemoveNodeResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void GetClusterNodes(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::GetClusterNodesRequest *request,
+        ::txservice::remote::GetClusterNodesResponse *response,
+        ::google::protobuf::Closure *done) override;
+
     void CheckClusterScaleStatus(
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::ClusterScaleStatusRequest *request,
         ::txservice::remote::ClusterScaleStatusResponse *response,
-        ::google::protobuf::Closure *done) override;
-
-    void NotifyNewNodeReady(
-        ::google::protobuf::RpcController *controller,
-        const ::txservice::remote::NotifyNewNodeReadyRequest *request,
-        ::txservice::remote::NotifyNewNodeReadyResponse *response,
-        ::google::protobuf::Closure *done) override;
+        ::google::protobuf::Closure *done);
 
     void AcquireNodeGroupLeaderTerm(
         ::google::protobuf::RpcController *controller,

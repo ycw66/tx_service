@@ -3,6 +3,7 @@
 #include "cc_request.h"
 #include "range_bucket_key_record.h"
 #include "template_cc_map.h"
+#include "tx_service.h"
 
 namespace txservice
 {
@@ -242,16 +243,35 @@ public:
                 const BucketInfo *bucket_info = shard_->GetBucketInfo(
                     target_key->bucket_id_, this->cc_ng_id_);
                 assert(bucket_info != nullptr);
-                if (req.CommitType() == PostWriteType::PostCommit &&
-                    bucket_info->DirtyVersion() > 0)
+                if ((req.CommitType() == PostWriteType::PostCommit &&
+                     bucket_info->DirtyVersion() > 0) ||
+                    (req.CommitType() == PostWriteType::Commit &&
+                     bucket_info->Version() <
+                         upload_bucket_rec->GetBucketInfo()->Version()))
                 {
                     // First time processing post write all. Commit the dirty
                     // version and drop store ranges if is old bucket owner.
                     NodeGroupId orig_owner = bucket_info->BucketOwner();
-                    // Commit the dirty bucket info first so that store range
-                    // can be loaded into memory on the dirty bucket owner ng.
-                    bucket_info = shard_->local_shards_.CommitDirtyBucketInfo(
-                        this->cc_ng_id_, target_key->bucket_id_);
+                    if (req.CommitType() == PostWriteType::PostCommit)
+                    {
+                        // Commit the dirty bucket info first so that store
+                        // range can be loaded into memory on the dirty bucket
+                        // owner ng.
+                        bucket_info =
+                            shard_->local_shards_.CommitDirtyBucketInfo(
+                                this->cc_ng_id_, target_key->bucket_id_);
+                    }
+                    else
+                    {
+                        // This is a one phase commit, just overwrite with the
+                        // passed in bucket info.
+                        assert(req.CommitType() == PostWriteType::Commit);
+                        bucket_info = shard_->local_shards_.UploadBucketInfo(
+                            this->cc_ng_id_,
+                            target_key->bucket_id_,
+                            upload_bucket_rec->GetBucketInfo()->BucketOwner(),
+                            upload_bucket_rec->GetBucketInfo()->Version());
+                    }
                     if (this->cc_ng_id_ == orig_owner)
                     {
                         // If this ng is the original owner of the bucket,
@@ -259,26 +279,6 @@ public:
                         // now migrated to other ng. Do this after dirty
                         // bucket info is committed to make sure all ranges
                         // are removed.
-                        shard_->local_shards_.DropStoreRangesInBucket(
-                            this->cc_ng_id_, target_key->bucket_id_);
-                    }
-                }
-                else if (req.CommitType() == PostWriteType::Commit &&
-                         bucket_info->Version() <
-                             upload_bucket_rec->GetBucketInfo()->Version())
-                {
-                    // We skipped prepare commit, so there's no dirty bucket
-                    // info. upload new bucket info directly.
-                    bucket_info = shard_->local_shards_.UploadBucketInfo(
-                        this->cc_ng_id_,
-                        target_key->bucket_id_,
-                        upload_bucket_rec->GetBucketInfo()->BucketOwner(),
-                        upload_bucket_rec->GetBucketInfo()->Version());
-                    if (this->cc_ng_id_ == bucket_info->BucketOwner())
-                    {
-                        // If this ng is the original owner of the bucket, drop
-                        // store ranges in this bucket since they are now
-                        // migrated to other ng.
                         shard_->local_shards_.DropStoreRangesInBucket(
                             this->cc_ng_id_, target_key->bucket_id_);
                     }
@@ -311,14 +311,31 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
+        int64_t tx_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+        if (tx_candidate_term < 0)
+        {
+            // No longer candidate leader, stop immediately
+            req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
         const std::string_view &content = req.LogContentView();
         ::txlog::ClusterScaleOpMessage scale_op_msg;
         scale_op_msg.ParseFromArray(content.data(), content.length());
+        TxNumber cluster_scale_txn = req.Txn();
 
         // Restore bucket info
         auto &migrate_process =
             scale_op_msg.node_group_bucket_migrate_process();
         auto bucket_map = shard_->GetAllBucketInfos(req.NodeGroupId());
+
+        // Only used on first core to restore migrate tx.
+        // map from tx number to cur bucket each migrate tx is working on.
+        std::unordered_map<TxNumber, const ::txlog::BucketMigrateMessage *>
+            migrate_tx_state;
+        // list of buckets that haven't started migrating.
+        std::vector<const ::txlog::BucketMigrateMessage *> pending_buckets;
+
         for (auto &[ng_id, ng_process] : migrate_process)
         {
             for (auto &[bucket_id, bucket_process] :
@@ -334,33 +351,62 @@ public:
                         BucketMigrateMessage_Stage_NotStarted:
                     {
                         info->bucket_owner_ = bucket_process.old_owner();
+                        if (ng_id == req.NodeGroupId())
+                        {
+                            pending_buckets.push_back(&bucket_process);
+                        }
+                        break;
+                    }
+                    case ::txlog::BucketMigrateMessage_Stage::
+                        BucketMigrateMessage_Stage_BeforeLocking:
+                    {
+                        info->bucket_owner_ = bucket_process.old_owner();
+                        if (ng_id == req.NodeGroupId())
+                        {
+                            // A worker tx has started on migrating this bucket,
+                            // and might have acquired lock on other ngs, so we
+                            // need to assign this bucket to the specified
+                            // migration worker tx, since the acquired write
+                            // lock on only be released by the same tx number.
+                            migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn(),
+                                &bucket_process);
+                        }
                         break;
                     }
                     case ::txlog::BucketMigrateMessage_Stage::
                         BucketMigrateMessage_Stage_PrepareMigrate:
                     {
-                        // TODO
-                        assert(false);
                         info->bucket_owner_ = bucket_process.old_owner();
                         assert(bucket_process.migrate_ts() > info->Version());
                         info->SetDirty(bucket_process.new_owner(),
                                        bucket_process.migrate_ts());
+                        if (ng_id == req.NodeGroupId())
+                        {
+                            migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn(),
+                                &bucket_process);
+                        }
                         break;
                     }
                     case ::txlog::BucketMigrateMessage_Stage::
                         BucketMigrateMessage_Stage_CommitMigrate:
                     {
-                        // TODO
-                        assert(false);
                         info->Set(bucket_process.new_owner(),
                                   bucket_process.migrate_ts());
+                        if (ng_id == req.NodeGroupId())
+                        {
+                            migrate_tx_state.try_emplace(
+                                bucket_process.migration_txn(),
+                                &bucket_process);
+                        }
                         break;
                     }
                     case ::txlog::BucketMigrateMessage_Stage::
                         BucketMigrateMessage_Stage_CleanMigrate:
                     {
-                        // no op
-                        assert(false);
+                        info->Set(bucket_process.new_owner(),
+                                  bucket_process.migrate_ts());
                         break;
                     }
                     default:
@@ -369,11 +415,173 @@ public:
                     }
                     }
                 }
+
+                // Restore lock on bucket record
+                LockType lock_type = LockType::NoLock;
+                if (ng_id == req.NodeGroupId())
+                {
+                    // Coordinator of migrate tx. We need to restore the lock
+                    // state just after the log is written.
+                    if (bucket_process.stage() ==
+                            ::txlog::BucketMigrateMessage_Stage::
+                                BucketMigrateMessage_Stage_PrepareMigrate ||
+                        bucket_process.stage() ==
+                            ::txlog::BucketMigrateMessage_Stage::
+                                BucketMigrateMessage_Stage_CommitMigrate)
+                    {
+                        lock_type = LockType::WriteLock;
+                    }
+                }
+                else
+                {
+                    // Participant of migrate tx. We need to restore the lock
+                    // state just before writing the next log.
+                    if ((bucket_process.stage() ==
+                         ::txlog::BucketMigrateMessage_Stage::
+                             BucketMigrateMessage_Stage_BeforeLocking) ||
+                        bucket_process.stage() ==
+                            ::txlog::BucketMigrateMessage_Stage::
+                                BucketMigrateMessage_Stage_PrepareMigrate)
+                    {
+                        lock_type = LockType::WriteLock;
+                    }
+                }
+
+                if (lock_type == LockType::WriteLock)
+                {
+                    RangeBucketKey key(bucket_process.bucket_id());
+                    auto bucket_cce = Find(key).second;
+                    assert(bucket_cce != nullptr);
+                    // We need to set the req txn to the data migrate txn so
+                    // that the acquired lock records the correct lock owner tx.
+                    req.ResetTxn(bucket_process.migration_txn());
+                    assert(bucket_process.migration_txn() != 0);
+                    auto lock_pair =
+                        AcquireCceKeyLock(bucket_cce,
+                                          RecordStatus::Normal,
+                                          &req,
+                                          req.NodeGroupId(),
+                                          tx_candidate_term,
+                                          0,
+                                          CcOperation::Write,
+                                          IsolationLevel::RepeatableRead,
+                                          CcProtocol::Locking,
+                                          0,
+                                          false);
+                    req.ResetTxn(cluster_scale_txn);
+                    // When a cc node recovers, no one should be holding
+                    // read
+                    // locks. So, the acquire operation should always
+                    // succeed.
+                    assert(lock_pair.first == LockType::WriteLock &&
+                           lock_pair.second == CcErrorCode::NO_ERROR);
+                }
             }
         }
 
-        req.SetFinish();
-        return true;
+        // Start migration worker tx if this node group is doing data migration
+        if (shard_->core_id_ == 0)
+        {
+            auto ng_migrate_iter = migrate_process.find(req.NodeGroupId());
+            if (ng_migrate_iter != migrate_process.end() &&
+                ng_migrate_iter->second.stage() ==
+                    ::txlog::NodeGroupMigrateMessage_Stage::
+                        NodeGroupMigrateMessage_Stage_Prepared)
+            {
+                std::unordered_map<TxNumber, size_t>
+                    migrate_tx_current_bucket_idx;
+                std::vector<uint16_t> bucket_ids;
+                std::vector<NodeGroupId> new_owner_ngs;
+                std::vector<TxNumber> migrate_txns;
+                // Put in progress buckets into todo bucket list first and
+                // record the idx of which bucket each migrate tx is working on.
+                for (int idx = 0;
+                     idx < ng_migrate_iter->second.migration_txns_size();
+                     idx++)
+                {
+                    TxNumber migrate_txn =
+                        ng_migrate_iter->second.migration_txns(idx);
+                    migrate_txns.push_back(migrate_txn);
+                    if (migrate_tx_state.find(migrate_txn) !=
+                        migrate_tx_state.end())
+                    {
+                        migrate_tx_current_bucket_idx.try_emplace(
+                            migrate_txn, bucket_ids.size());
+                        bucket_ids.push_back(
+                            migrate_tx_state[migrate_txn]->bucket_id());
+                        new_owner_ngs.push_back(
+                            migrate_tx_state[migrate_txn]->new_owner());
+                    }
+                }
+                // Idle migrate tx should fetch bucket from next_bucket_idx.
+                size_t next_bucket_idx = bucket_ids.size();
+
+                // Now put buckets that have not been picked up by any migrate
+                // tx into the todo list.
+                for (auto pending_bucket : pending_buckets)
+                {
+                    bucket_ids.push_back(pending_bucket->bucket_id());
+                    new_owner_ngs.push_back(pending_bucket->new_owner());
+                }
+
+                std::shared_ptr<DataMigrationStatus> status =
+                    std::make_shared<DataMigrationStatus>(
+                        cluster_scale_txn,
+                        std::move(bucket_ids),
+                        std::move(new_owner_ngs),
+                        std::move(migrate_txns));
+                status->next_bucket_idx_ = next_bucket_idx;
+
+                // Now we have all the infos needed, restore the migrate txs.
+                TxService *tx_service = shard_->local_shards_.GetTxService();
+                for (TxNumber migrate_txn : status->migration_txns_)
+                {
+                    const ::txlog::BucketMigrateMessage *migrate_msg;
+                    uint64_t commit_ts;
+                    size_t cur_bucket_idx;
+                    auto msg_iter = migrate_tx_state.find(migrate_txn);
+                    if (msg_iter == migrate_tx_state.end())
+                    {
+                        // this tx is not working on any bucket now. Use current
+                        // clock as its ts and pass in empty stage. It will
+                        // fetch the next pending bucket from status on start.
+                        migrate_msg = nullptr;
+                        commit_ts = shard_->local_shards_.ClockTs();
+                        // cur idx is ignored if migrate_msg is null
+                        cur_bucket_idx = 0;
+                    }
+                    else
+                    {
+                        // pass down the log message of the current bucket this
+                        // migrate tx is working on.
+                        migrate_msg = migrate_tx_state[migrate_txn];
+                        commit_ts = migrate_msg->migrate_ts();
+                        cur_bucket_idx =
+                            migrate_tx_current_bucket_idx[migrate_txn];
+                    }
+                    LOG(INFO)
+                        << "Recovering data migration tx, txn: " << migrate_txn
+                        << ", term: " << tx_candidate_term;
+                    TransactionExecution *txm = tx_service->NewTx();
+                    txm->SetRecoverTxState(
+                        migrate_txn, tx_candidate_term, commit_ts);
+                    txm->RecoverDataMigration(
+                        migrate_msg, cur_bucket_idx, status);
+                }
+            }
+        }
+
+        if (shard_->core_id_ != shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+        }
+        else
+        {
+            req.SetFinish();
+        }
+
+        return false;
     }
 
     // Get bucket record of bucket id in cc map. This is used

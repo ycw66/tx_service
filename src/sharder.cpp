@@ -64,6 +64,8 @@ void Sharder::Shutdown()
 
     tx_worker_pool_->Shutdown();
     tx_worker_pool_ = nullptr;
+    sharder_worker_->Shutdown();
+    sharder_worker_ = nullptr;
 
     LOG(INFO) << "The sharder at node #" << node_id_ << " shut down.";
 }
@@ -92,20 +94,27 @@ void Sharder::CloseBraft()
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
     auto cluster_config = cluster_config_;
-    assert(node_id < cluster_config->ng_configs_.size());
+    if (node_id >= cluster_config->ng_configs_.size())
+    {
+        // Node is already removed from cluster
+        ip = "";
+        port = 0;
+        return;
+    }
 
     ip = cluster_config->ng_configs_.at(node_id).front().host_name_;
     port = cluster_config->ng_configs_.at(node_id).front().port_;
 }
 
-int Sharder::Init(uint32_t node_id,
-                  const std::map<uint32_t, std::vector<NodeConfig>> *ng_configs,
-                  uint64_t config_version,
-                  const std::vector<std::string> *txlog_ips,
-                  const std::vector<uint16_t> *txlog_ports,
-                  LocalCcShards *local_shards,
-                  std::unique_ptr<TxLog> log_agent,
-                  const std::string &local_path)
+int Sharder::Init(
+    uint32_t node_id,
+    const std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
+    uint64_t config_version,
+    const std::vector<std::string> *txlog_ips,
+    const std::vector<uint16_t> *txlog_ports,
+    LocalCcShards *local_shards,
+    std::unique_ptr<TxLog> log_agent,
+    const std::string &local_path)
 {
     node_id_ = node_id;
     local_shards_ = local_shards;
@@ -149,6 +158,7 @@ int Sharder::Init(uint32_t node_id,
     }
 
     tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_->Count());
+    sharder_worker_ = std::make_unique<TxWorkerPool>(1);
     // there shouldn't be any concurrent visit before Init retruns so we
     // can directly modify ng_configs_ without doing copy on write.
     // construct log_replay_service_ before cc_nodes_
@@ -346,43 +356,49 @@ void Sharder::UpdateLeaders()
 
 void Sharder::UpdateLeader(uint32_t ng_id)
 {
-    std::string node_group_id("ng");
-    node_group_id.append(std::to_string(ng_id));
-
-    std::lock_guard<std::mutex> lk(mux_);
-    // Blocking the thread until query_leader finishes
-    butil::Status st = braft::rtb::refresh_leader(node_group_id, 1000);
-    if (!st.ok())
-    {
-        std::cout << "Fail to refresh leader. " << st.error_str() << std::endl;
-        return;
-    }
-
-    braft::PeerId leader;
-    // Get the cached leader of the target group from RouteTable
-    if (braft::rtb::select_leader(node_group_id, &leader) != 0)
-    {
-        std::cout << "Fail to select the leader." << std::endl;
-        return;
-    }
-
-    std::string leader_ip_port(butil::endpoint2str(leader.addr).c_str());
-    size_t comma_pos = leader_ip_port.find(':');
-    assert(comma_pos != std::string::npos);
-    std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
-    uint16_t leader_port = leader.addr.port;
-
-    auto cluster_config = cluster_config_;
-    for (auto &node : cluster_config->ng_configs_.at(ng_id))
-    {
-        if (node.host_name_ == leader_ip_str &&
-            GET_CCNODE_RPC_PORT(node.port_) == leader_port)
+    // Hand it off to worker thread since braft refresh leader blocks the
+    // thread.
+    sharder_worker_->SubmitWork(
+        [this, ng_id]
         {
-            ng_leader_cache_[ng_id].store(node.node_id_,
-                                          std::memory_order_release);
-            break;
-        }
-    }
+            std::string node_group_id("ng");
+            node_group_id.append(std::to_string(ng_id));
+
+            // Blocking the thread until query_leader finishes
+            butil::Status st = braft::rtb::refresh_leader(node_group_id, 1000);
+            if (!st.ok())
+            {
+                std::cout << "Fail to refresh leader. " << st.error_str()
+                          << std::endl;
+                return;
+            }
+
+            braft::PeerId leader;
+            // Get the cached leader of the target group from RouteTable
+            if (braft::rtb::select_leader(node_group_id, &leader) != 0)
+            {
+                std::cout << "Fail to select the leader." << std::endl;
+                return;
+            }
+
+            std::string leader_ip_port(
+                butil::endpoint2str(leader.addr).c_str());
+            size_t comma_pos = leader_ip_port.find(':');
+            assert(comma_pos != std::string::npos);
+            std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
+            uint16_t leader_port = leader.addr.port;
+
+            for (auto &node : cluster_config_->ng_configs_.at(ng_id))
+            {
+                if (node.host_name_ == leader_ip_str &&
+                    GET_CCNODE_RPC_PORT(node.port_) == leader_port)
+                {
+                    ng_leader_cache_[ng_id].store(node.node_id_,
+                                                  std::memory_order_release);
+                    break;
+                }
+            }
+        });
 }
 
 void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id)
@@ -688,9 +704,7 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
 }
 
 std::unordered_map<uint32_t, std::vector<NodeConfig>>
-Sharder::RemoveNodeFromCluster(
-    uint16_t removed_node_count,
-    std::vector<std::pair<std::string, uint16_t>> &removed_nodes)
+Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
 {
     // Make a copy of the current ng configs.
     auto cluster_config = cluster_config_;
@@ -708,9 +722,6 @@ Sharder::RemoveNodeFromCluster(
     for (int i = 0; i < removed_node_count; i++)
     {
         // Remove the node groups where these nodes are preferred leader.
-        removed_nodes.emplace_back(
-            new_ng_configs[largest_node_id].front().host_name_,
-            new_ng_configs[largest_node_id].front().port_);
         new_ng_configs.erase(largest_node_id);
         largest_node_id--;
     }
@@ -783,159 +794,226 @@ Sharder::RemoveNodeFromCluster(
     return new_ng_configs;
 }
 
-bool Sharder::UpdateClusterConfig(
+void Sharder::UpdateClusterConfig(
     const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
         &new_ng_configs,
     uint64_t version,
     CcRequestBase *cc_req,
     CcShard *cc_shard)
 {
-    // TODO{liunyl}: We still need to think about error handling in this
-    // functions. actions like starting raft server and starting cc stream
-    // server could fail, how are we going to deal with it? Retry until succeed?
-
-    auto cluster_config = cluster_config_;
-    if (cluster_config->version_ >= version)
-    {
-        // If the given version is older than current version, do
-        // nothing.
-        return false;
-    }
-
-    std::shared_ptr<ClusterConfig> dirty_cluster_config =
-        std::make_shared<ClusterConfig>();
-    dirty_cluster_config->version_ = version;
-    dirty_cluster_config->ng_configs_ = new_ng_configs;
-    bool braft_group_updated = false;
-
-    for (auto &ng_pair : new_ng_configs)
-    {
-        bool is_member = false;
-        for (auto &node : ng_pair.second)
+    // Since sharder worker is a single thread worker, we don't need to worry
+    // about cluster config being updated by multiple threads at the same time.
+    sharder_worker_->SubmitWork(
+        [this, new_ng_configs, cc_req, cc_shard, version]
         {
-            if (node.node_id_ == node_id_)
+            auto cluster_config = cluster_config_;
+            if (cluster_config->version_ >= version)
             {
-                is_member = true;
-                break;
+                // If the given version is older than current version, do
+                // nothing.
+                cc_shard->Enqueue(cc_req);
+                return;
             }
-        }
-
-        // If this node group already exists in the current cluster
-        // config
-        auto find_it = cluster_config->ng_configs_.find(ng_pair.first);
-        if (find_it != cluster_config->ng_configs_.end())
-        {
-            if (is_member)
+            // Shutdown the cc nodes for the deleted node groups.
+            for (auto &pair : cluster_config->cc_nodes_)
             {
-                auto cc_node_it = cluster_config->cc_nodes_.find(ng_pair.first);
-                if (cc_node_it != cluster_config->cc_nodes_.end())
+                auto ng_iter = new_ng_configs.find(pair.first);
+                if (ng_iter == new_ng_configs.end())
                 {
-                    // Reuse original cc_node_ object
-                    auto ins_pair = dirty_cluster_config->cc_nodes_.try_emplace(
-                        ng_pair.first, cc_node_it->second);
-
-                    // Use cc node port + 1 for cc node raft port
-                    std::vector<uint16_t> group_ports;
-                    std::vector<std::string> group_ips;
-                    for (auto &config : new_ng_configs.at(ng_pair.first))
-                    {
-                        group_ports.emplace_back(config.port_ + 1);
-                        group_ips.emplace_back(config.host_name_);
-                    }
-                    // Update node group config in cc_node_, this will
-                    // also update raft config if this node is preferred
-                    // leader.
-                    braft_group_updated =
-                        ins_pair.first->second->UpdateNodeGroupConfig(
-                            group_ips, group_ports, cc_req, cc_shard) ||
-                        braft_group_updated;
+                    pair.second->Remove();
                 }
                 else
                 {
-                    std::string store_path(raft_local_path_);
-                    store_path.append("/cc_ng/");
-                    store_path.append(std::to_string(ng_pair.first));
-
-                    // Use cc node port + 1 for cc node raft port
-                    std::vector<uint16_t> group_ports;
-                    std::vector<std::string> group_ips;
-                    for (auto &config : new_ng_configs.at(ng_pair.first))
+                    bool is_member = false;
+                    for (auto &node : ng_iter->second)
                     {
-                        group_ports.emplace_back(config.port_ + 1);
-                        group_ips.emplace_back(config.host_name_);
+                        if (node.node_id_ == node_id_)
+                        {
+                            is_member = true;
+                            break;
+                        }
                     }
-                    auto ins_pair = dirty_cluster_config->cc_nodes_.try_emplace(
-                        ng_pair.first,
-                        std::make_shared<fault::CcNode>(
-                            ng_pair.first,
-                            node_id_,
-                            new_ng_configs.at(node_id_).front().host_name_,
-                            new_ng_configs.at(node_id_).front().port_ + 1,
-                            group_ips,
-                            group_ports,
-                            store_path,
-                            *local_shards_,
-                            log_replay_service_.get(),
-                            log_agent_->LogGroupCount()));
-                    ins_pair.first->second->Start();
+
+                    if (!is_member)
+                    {
+                        pair.second->Remove();
+                    }
                 }
             }
-        }
-        else
-        {
-            // Node does not exists in the old cluster config.
-            if (is_member)
+            std::mutex mux;
+            std::condition_variable cv;
+            bool finished = false;
+            bool succ = true;
+
+            std::shared_ptr<ClusterConfig> dirty_cluster_config =
+                std::make_shared<ClusterConfig>();
+            dirty_cluster_config->version_ = version;
+            dirty_cluster_config->ng_configs_ = new_ng_configs;
+            bool braft_group_updated = false;
+
+            for (auto &ng_pair : new_ng_configs)
             {
-                std::string store_path(raft_local_path_);
-                store_path.append("/cc_ng/");
-                store_path.append(std::to_string(ng_pair.first));
-
-                // Use cc node port + 1 for cc node raft port
-                std::vector<uint16_t> group_ports;
-                std::vector<std::string> group_ips;
-                for (auto &config : new_ng_configs.at(ng_pair.first))
+                bool is_member = false;
+                for (auto &node : ng_pair.second)
                 {
-                    group_ports.emplace_back(config.port_ + 1);
-                    group_ips.emplace_back(config.host_name_);
+                    if (node.node_id_ == node_id_)
+                    {
+                        is_member = true;
+                        break;
+                    }
                 }
-                auto ins_pair = dirty_cluster_config->cc_nodes_.try_emplace(
-                    ng_pair.first,
-                    std::make_shared<fault::CcNode>(
-                        ng_pair.first,
-                        node_id_,
-                        new_ng_configs.at(node_id_).front().host_name_,
-                        new_ng_configs.at(node_id_).front().port_ + 1,
-                        group_ips,
-                        group_ports,
-                        store_path,
-                        *local_shards_,
-                        log_replay_service_.get(),
-                        log_agent_->LogGroupCount()));
-                ins_pair.first->second->Start();
+
+                // If this node group already exists in the current cluster
+                // config
+                auto find_it = cluster_config->ng_configs_.find(ng_pair.first);
+                if (find_it != cluster_config->ng_configs_.end())
+                {
+                    if (is_member)
+                    {
+                        auto cc_node_it =
+                            cluster_config->cc_nodes_.find(ng_pair.first);
+                        if (cc_node_it != cluster_config->cc_nodes_.end())
+                        {
+                            // Reuse original cc_node_ object
+                            auto ins_pair =
+                                dirty_cluster_config->cc_nodes_.try_emplace(
+                                    ng_pair.first, cc_node_it->second);
+
+                            // Use cc node port + 1 for cc node raft port
+                            std::vector<uint16_t> group_ports;
+                            std::vector<std::string> group_ips;
+                            for (auto &config :
+                                 new_ng_configs.at(ng_pair.first))
+                            {
+                                group_ports.emplace_back(config.port_ + 1);
+                                group_ips.emplace_back(config.host_name_);
+                            }
+                            // Update node group config in cc_node_, this will
+                            // also update raft config if this node is preferred
+                            // leader.
+                            braft_group_updated =
+                                ins_pair.first->second->UpdateNodeGroupConfig(
+                                    group_ips,
+                                    group_ports,
+                                    mux,
+                                    cv,
+                                    finished,
+                                    succ) ||
+                                braft_group_updated;
+                        }
+                        else
+                        {
+                            std::string store_path(raft_local_path_);
+                            store_path.append("/cc_ng/");
+                            store_path.append(std::to_string(ng_pair.first));
+
+                            // Use cc node port + 1 for cc node raft port
+                            std::vector<uint16_t> group_ports;
+                            std::vector<std::string> group_ips;
+                            for (auto &config :
+                                 new_ng_configs.at(ng_pair.first))
+                            {
+                                group_ports.emplace_back(config.port_ + 1);
+                                group_ips.emplace_back(config.host_name_);
+                            }
+                            auto ins_pair =
+                                dirty_cluster_config->cc_nodes_.try_emplace(
+                                    ng_pair.first,
+                                    std::make_shared<fault::CcNode>(
+                                        ng_pair.first,
+                                        node_id_,
+                                        new_ng_configs.at(node_id_)
+                                            .front()
+                                            .host_name_,
+                                        new_ng_configs.at(node_id_)
+                                                .front()
+                                                .port_ +
+                                            1,
+                                        group_ips,
+                                        group_ports,
+                                        store_path,
+                                        *local_shards_,
+                                        log_replay_service_.get(),
+                                        log_agent_->LogGroupCount()));
+
+                            if (ins_pair.first->second->Start() < 0)
+                            {
+                                cc_req->AbortCcRequest(
+                                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                                return;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Node does not exists in the old cluster config.
+                    if (is_member)
+                    {
+                        std::string store_path(raft_local_path_);
+                        store_path.append("/cc_ng/");
+                        store_path.append(std::to_string(ng_pair.first));
+
+                        // Use cc node port + 1 for cc node raft port
+                        std::vector<uint16_t> group_ports;
+                        std::vector<std::string> group_ips;
+                        for (auto &config : new_ng_configs.at(ng_pair.first))
+                        {
+                            group_ports.emplace_back(config.port_ + 1);
+                            group_ips.emplace_back(config.host_name_);
+                        }
+                        auto ins_pair =
+                            dirty_cluster_config->cc_nodes_.try_emplace(
+                                ng_pair.first,
+                                std::make_shared<fault::CcNode>(
+                                    ng_pair.first,
+                                    node_id_,
+                                    new_ng_configs.at(node_id_)
+                                        .front()
+                                        .host_name_,
+                                    new_ng_configs.at(node_id_).front().port_ +
+                                        1,
+                                    group_ips,
+                                    group_ports,
+                                    store_path,
+                                    *local_shards_,
+                                    log_replay_service_.get(),
+                                    log_agent_->LogGroupCount()));
+                        if (ins_pair.first->second->Start() < 0)
+                        {
+                            cc_req->AbortCcRequest(
+                                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                            return;
+                        }
+                    }
+                }
             }
-        }
-    }
 
-    cc_stream_sender_->UpdateRemoteNodes(dirty_cluster_config->ng_configs_);
+            cc_stream_sender_->UpdateRemoteNodes(
+                dirty_cluster_config->ng_configs_);
 
-    ConfigRouteTable(dirty_cluster_config->ng_configs_);
+            ConfigRouteTable(dirty_cluster_config->ng_configs_);
 
-    // Shutdown the cc nodes for the deleted node groups.
-    for (auto &pair : cluster_config->cc_nodes_)
-    {
-        if (dirty_cluster_config->cc_nodes_.find(pair.first) ==
-            dirty_cluster_config->cc_nodes_.end())
-        {
-            // braft node is no longer needed in the new cluster config.
-            pair.second->Shutdown();
-            pair.second->Join();
-        }
-    }
+            // Wait until braft node group config update is done
+            // before actually switching the cluster config.
+            if (braft_group_updated)
+            {
+                std::unique_lock<std::mutex> lk(mux);
+                cv.wait(lk, [&finished] { return finished; });
+                if (!succ)
+                {
+                    // If update config has failed due to this node
+                    // no longer being leader, abort the cc request
+                    cc_req->AbortCcRequest(
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    return;
+                }
+            }
 
-    // Make the copy on write switch
-    cluster_config_ = dirty_cluster_config;
-
-    return braft_group_updated;
+            // Make the copy on write switch
+            cluster_config_ = dirty_cluster_config;
+            cc_shard->Enqueue(cc_req);
+        });
 }
 
 void Sharder::StartCcStreamReceiver()
