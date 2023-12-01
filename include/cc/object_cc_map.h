@@ -49,7 +49,7 @@ public:
     using CcMap::last_dirty_commit_ts_;
     using CcMap::LockHandleForResumedRequest;
     using CcMap::MoveRequest;
-    using CcMap::ReleaseCceKeyLock;
+    using CcMap::ReleaseCceLock;
     using CcMap::schema_ts_;
     using CcMap::shard_;
     using CcMap::table_name_;
@@ -502,7 +502,8 @@ public:
             {
                 if (req.apply_and_commit_)
                 {
-                    ReleaseCceKeyLock(cce, txn, ng_id);
+                    ReleaseCceLock(
+                        cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
@@ -528,7 +529,8 @@ public:
             {
                 if (req.apply_and_commit_)
                 {
-                    ReleaseCceKeyLock(cce, txn, ng_id);
+                    ReleaseCceLock(
+                        cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
@@ -603,7 +605,7 @@ public:
 
             shard_->mem_usage_ += cce->PayloadMemUsage();
 
-            ReleaseCceKeyLock(cce, txn, ng_id);
+            ReleaseCceLock(cce->key_lock_ptr_, cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
         }
 
@@ -709,7 +711,11 @@ public:
 
         shard_->mem_usage_ += cce->PayloadMemUsage();
 
-        ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
+        ReleaseCceLock(cce->key_lock_ptr_,
+                       cce,
+                       txn,
+                       req.NodeGroupId(),
+                       LockType::WriteLock);
         req.Result()->SetFinished();
         return true;
     }
@@ -823,7 +829,11 @@ public:
                 // TODO: it is safer if we ship the tx ID with the
                 // recovering message and match it against the lock holder.
                 TxNumber txn = cce->key_lock_ptr_->WriteLockTx();
-                ReleaseCceKeyLock(cce, txn, req.NodeGroupId());
+                ReleaseCceLock(cce->key_lock_ptr_,
+                               cce,
+                               txn,
+                               req.NodeGroupId(),
+                               LockType::WriteLock);
             }
         }
 

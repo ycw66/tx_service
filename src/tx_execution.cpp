@@ -2990,6 +2990,7 @@ void TransactionExecution::Abort()
 
 void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
 {
+#ifdef RANGE_PARTITION_ENABLED
     if (!lock_write_ranges.init_)
     {
         std::unordered_map<TableName, TableWriteSet> &wset = rw_set_.WriteSet();
@@ -3037,10 +3038,12 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
     {
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
+#endif
 }
 
 void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
 {
+#ifdef RANGE_PARTITION_ENABLED
     if (lock_write_ranges.lock_range_result_->IsError())
     {
         DLOG(ERROR) << "LockWriteRangesOp failed for cc error:"
@@ -3087,6 +3090,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         lock_write_ranges.execute_immediately_ = true;
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
+#endif
 }
 
 void TransactionExecution::Process(AcquireWriteOperation &acquire_write)

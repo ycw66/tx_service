@@ -672,6 +672,7 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
 
 void LockWriteRangesOp::Advance(TransactionExecution *txm)
 {
+#ifdef RANGE_PARTITION_ENABLED
     AdvanceWriteKeyForRangeInfo(txm->range_rec_,
                                 table_it_->second,
                                 write_key_it_,
@@ -689,6 +690,7 @@ void LockWriteRangesOp::Advance(TransactionExecution *txm)
             write_key_end_ = table_it_->second.end();
         }
     }
+#endif
 }
 #endif
 
@@ -6992,7 +6994,9 @@ void DataMigrationOp::Clear()
 BatchReadOperation::BatchReadOperation(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_result)
+#ifdef RANGE_PARTITION_ENABLED
     : lock_range_result_(lock_range_result)
+#endif
 {
     CcHandlerResult<ReadKeyResult> &hd_res = hd_result_vec_.emplace_back(txm);
     hd_res.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)

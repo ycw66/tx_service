@@ -37,21 +37,6 @@ static inline std::pair<bool, TxErrorCode> CommitTx(
     return {success, commit_req.ErrorCode()};
 }
 
-static inline std::pair<bool, TxErrorCode> CommitTx(
-    txservice::TransactionExecution *txm,
-    const std::function<void()> *yield_func = nullptr,
-    const std::function<void()> *resume_func = nullptr)
-{
-    if (txm == nullptr)
-    {
-        return {true, TxErrorCode::NO_ERROR};
-    }
-
-    CommitTxRequest commit_req(yield_func, resume_func, txm);
-    bool success = txm->CommitTx(commit_req);
-    return {success, commit_req.ErrorCode()};
-}
-
 static inline TransactionExecution *NewTxInit(
     txservice::TxService *tx_service,
     txservice::IsolationLevel level = txservice::IsolationLevel::ReadCommitted,
