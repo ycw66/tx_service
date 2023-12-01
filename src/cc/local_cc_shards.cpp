@@ -2642,11 +2642,7 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    // The split flush tx will flush all records older than commit_ts in this
-    // range into data store. This commit ts will be bigger than
-    // data_sync_task->data_sync_ts_. So for this range specifically, use the
-    // newer commit ts from split flush tx.
-    store_range->TrySetDataSync(false, nullptr, split_txm->CommitTs());
+    store_range->TrySetDataSync(false, nullptr, data_sync_task->data_sync_ts_);
     store_range->PopPendingSyncTask();
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
               << " partition " << store_range->PartitionId() << " succeeded.";
