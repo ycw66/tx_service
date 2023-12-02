@@ -2951,7 +2951,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     }
 
     const TxKey *range_start_key = range_rec_.GetRangeInfo()->StartKey();
-    const TxKey *range_end_key = range_rec_.end_key_;
+    const TxKey *range_end_key = range_rec_.GetRangeInfo()->EndKey();
 
     const ReadKeyResult &read_res =
         lock_write_ranges.lock_range_result_->Value();
@@ -5497,7 +5497,6 @@ void TransactionExecution::RecoverClusterScale(
         }
         new_ng_configs.try_emplace(ng_id, std::move(ng_nodes));
     }
-
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
     ClusterScaleOpType op_type =

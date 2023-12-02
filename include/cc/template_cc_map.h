@@ -4961,17 +4961,25 @@ public:
             first_enter = false;
         }
 
-        if (first_enter)
+        if (!req.built_slice_sample_pool_)
         {
             TableName range_table_name(table_name_.StringView(),
                                        TableType::RangePartition);
 
             // All ranges has been added read lock. It is safe to access them.
-            const std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+            // Also since all ranges are locked, the range map in local cc
+            // shards will not change so we can trust the map iterator after cc
+            // req resumes.
+            std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
                 *range_map = shard_->GetTableRangesForATable(range_table_name,
                                                              cc_ng_id_);
-            for (const auto &[range_start_key, range_entry] : *range_map)
+            if (first_enter)
             {
+                req.range_it_ = range_map->begin();
+            }
+            for (; req.range_it_ != range_map->end(); req.range_it_++)
+            {
+                auto &range_entry = req.range_it_->second;
                 if (shard_
                         ->GetRangeOwner(
                             range_entry.GetRangeInfo()->PartitionId(),
@@ -4979,7 +4987,12 @@ public:
                         ->BucketOwner() == cc_ng_id_)
                 {
                     const StoreRange *store_range = range_entry.RangeSlices();
-                    assert(store_range != nullptr);
+                    if (store_range == nullptr)
+                    {
+                        range_entry.FetchRangeSlices(
+                            range_table_name, &req, cc_ng_id_, ng_term, shard_);
+                        return false;
+                    }
                     for (const std::unique_ptr<StoreSlice> &store_slice :
                          store_range->Slices())
                     {
@@ -4989,6 +5002,7 @@ public:
                 }
             }
 
+            req.built_slice_sample_pool_ = true;
             assert(req.next_pin_slice_idx_ == 0);
         }
 
@@ -5004,8 +5018,6 @@ public:
         {
             const auto [range_id, store_slice] =
                 slice_sample_pool->SampleKeys().at(req.next_pin_slice_idx_);
-            assert(store_slice->StartKey() != nullptr);
-
             const KeyT *slice_start_key =
                 store_slice->StartKey()
                     ? static_cast<const KeyT *>(store_slice->StartKey())
@@ -5191,6 +5203,37 @@ public:
                     rec.Deserialize(log_blob.data(), offset);
                 }
                 continue;
+            }
+
+            // Skip records that no longer belong to this ng.
+            const TableRangeEntry *range_entry =
+                shard_->GetTableRangeEntry(table_name_, cc_ng_id_, &key);
+
+            const BucketInfo *bucket_info = shard_->GetBucketInfo(
+                Sharder::MapRangeIdToBucketId(
+                    range_entry->GetRangeInfo()->PartitionId()),
+                cc_ng_id_);
+            // Check if range bucket belongs to this ng or is migrating
+            // to this ng.
+            if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                bucket_info->DirtyBucketOwner() != cc_ng_id_)
+            {
+                int32_t new_range_id =
+                    range_entry->GetRangeInfo()->GetKeyNewRangeId(&key);
+                // If range is splitting, check if new range belongs to this ng.
+                if (new_range_id >= 0)
+                {
+                    const BucketInfo *new_bucket_info = shard_->GetBucketInfo(
+                        Sharder::MapRangeIdToBucketId(
+                            range_entry->GetRangeInfo()->PartitionId()),
+                        cc_ng_id_);
+                    if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
+                        new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                    {
+                        rec.Deserialize(log_blob.data(), offset);
+                        continue;
+                    }
+                }
             }
 
             Iterator it = FindEmplace(key);

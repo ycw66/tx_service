@@ -108,8 +108,6 @@ public:
                     Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
-                it--;
-                it->second->payload_->end_key_ = range_info->start_key_.get();
             }
         }
     }
@@ -269,8 +267,11 @@ public:
                     auto prev_bucket_cce = static_cast<
                         CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                         req.CcePtr());
-                    prev_bucket_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(),
-                                                                    shard_);
+                    ReleaseCceLock(prev_bucket_cce->key_lock_ptr_,
+                                   prev_bucket_cce,
+                                   req.Txn(),
+                                   this->cc_ng_id_,
+                                   LockType::ReadLock);
                     req.SetCcePtr(nullptr);
                 }
             }
@@ -315,7 +316,11 @@ public:
                     // different range.
                     CcEntry<KeyT, RangeRecord> *prev_cce =
                         static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
-                    prev_cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                    ReleaseCceLock(prev_cce->key_lock_ptr_,
+                                   prev_cce,
+                                   req.Txn(),
+                                   this->cc_ng_id_,
+                                   LockType::ReadLock);
                     // Check if the new range is in the same bucket
                     if (bucket_cce == prev_cce->payload_->range_owner_rec_)
                     {
@@ -329,8 +334,11 @@ public:
                         auto prev_bucket_cce = static_cast<
                             CcEntry<RangeBucketKey, RangeBucketRecord> *>(
                             prev_cce->payload_->range_owner_rec_);
-                        prev_bucket_cce->key_lock_ptr_->ReleaseReadLock(
-                            req.Txn(), shard_);
+                        ReleaseCceLock(prev_bucket_cce->key_lock_ptr_,
+                                       prev_bucket_cce,
+                                       req.Txn(),
+                                       this->cc_ng_id_,
+                                       LockType::ReadLock);
                         req.SetCcePtr(nullptr);
                         acquired_bucket_lock = false;
                     }
@@ -640,18 +648,22 @@ public:
                 // it could be a pointer to the coordinator ng range key if
                 // multiple ng lands on a single cc node. Find the next cce and
                 // use the key ptr in range info.
-                if (upload_range_rec->end_key_ !=
-                    PositiveInfinity<KeyT>::Instance())
+                const TxKey *old_end_key =
+                    upload_range_rec->range_info_->end_key_;
+                if (old_end_key == nullptr)
+                {
+                    old_end_key = PositiveInfinity<KeyT>::Instance();
+                }
+                if (old_end_key != PositiveInfinity<KeyT>::Instance())
                 {
                     CcEntry<KeyT, RangeRecord> *next_cce =
                         Find(*static_cast<const KeyT *>(
-                                 upload_range_rec->end_key_))
+                                 upload_range_rec->range_info_->end_key_))
                             .second;
                     assert(next_cce != nullptr);
-                    upload_range_rec->end_key_ =
+                    old_end_key =
                         next_cce->payload_->range_info_->start_key_.get();
                 }
-                const TxKey *old_end_key = upload_range_rec->end_key_;
 
                 // Split the StoreRange struct in old TableRangeEntry and get
                 // the removed slice keys and sizes. These keys will be reused
@@ -686,7 +698,7 @@ public:
                             old_info->partition_id_,
                             range_owner,
                             *Sharder::Instance().GetLocalCcShards());
-                    store_range->InitSlices(range_slices);
+                    store_range->InitSlices(std::move(range_slices));
                     split_range_res = store_range->SplitRange(
                         old_info->new_key_.front().get(), new_slice_keys);
                 }
@@ -776,16 +788,13 @@ public:
                 // deleted yet because we need to pass them to other cores to
                 // update range cc map.
                 old_info->CommitDirty();
-                upload_range_rec->end_key_ =
-                    new_range_infos.front()->StartKey();
+                old_entry->SetRangeEndKey(new_range_infos.front()->StartKey());
                 upload_range_rec->SetRangeInfo(old_info);
                 upload_range_rec->SetNewRangeOwnerRec(nullptr);
 
                 if (range_owner == this->cc_ng_id_)
                 {
                     ACTION_FAULT_INJECTOR("range_split_post_commit");
-                    old_entry->RangeSlices()->SetRangeEndKey(
-                        new_range_infos.front()->StartKey());
                     old_entry->RangeSlices()->Unlock();
                 }
                 else
@@ -831,31 +840,6 @@ public:
                 cce->payload_->range_owner_rec_ = new_range_owner_rec.at(idx);
 
                 // update previous cce's end key
-                it--;
-                it->second->payload_->end_key_ = new_range_info->StartKey();
-                it++;
-
-                if (idx != new_range_infos.size() - 1)
-                {
-                    cce->payload_.get()->end_key_ =
-                        new_range_infos.at(idx + 1)->start_key_.get();
-                }
-                else
-                {
-                    // Do not point end key to the map key (it->first) since
-                    // it does not have pointer stability.
-                    it++;
-                    if (it->second)
-                    {
-                        cce->payload_.get()->end_key_ =
-                            it->second->payload_->range_info_->start_key_.get();
-                    }
-                    else
-                    {
-                        // end key is pos inf
-                        cce->payload_.get()->end_key_ = it->first;
-                    }
-                }
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
@@ -975,7 +959,7 @@ public:
             // We can safely use the end key of the old range ccentry,
             // since we know for sure that the new range ccentries have
             // not been inserted into ccmap yet.
-            old_end_key = old_range_cce->payload_->end_key_;
+            old_end_key = old_range_cce->payload_->range_info_->end_key_;
         }
         else if (stage == ::txlog::SplitRangeOpMessage_Stage_CommitSplit)
         {
@@ -983,7 +967,7 @@ public:
             // don't know if the new range cce has been created or not.
             auto it = Floor(static_cast<const KeyT &>(*new_range_keys.back()));
             CcEntry<KeyT, RangeRecord> *prev_cce = it->second;
-            old_end_key = prev_cce->payload_->end_key_;
+            old_end_key = prev_cce->payload_->range_info_->end_key_;
         }
         else
         {
@@ -1014,6 +998,16 @@ public:
                     // range for us.
                     old_table_range_entry = shard_->GetTableRangeEntry(
                         this->table_name_, this->cc_ng_id_, old_range_key_ptr);
+                    if (old_table_range_entry->RangeSlices() == nullptr)
+                    {
+                        old_table_range_entry->FetchRangeSlices(
+                            this->table_name_,
+                            &req,
+                            this->cc_ng_id_,
+                            ng_term,
+                            this->shard_);
+                        return false;
+                    }
                     old_table_range_entry->RangeSlices()->Lock();
                 }
             }
@@ -1056,7 +1050,7 @@ public:
                             old_info->partition_id_,
                             tx_node_id,
                             *Sharder::Instance().GetLocalCcShards());
-                    store_range->InitSlices(range_slices);
+                    store_range->InitSlices(std::move(range_slices));
                     std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
                         new_slice_keys;
                     store_range->SplitRange(new_range_keys.front().get(),
@@ -1066,7 +1060,7 @@ public:
                     {
                         // If all current slices should stay in old range,
                         // assign empty slice for new range
-                        for (auto &new_key : old_info->new_key_)
+                        for (auto &new_key : new_range_keys)
                         {
                             new_slice_keys.emplace_back(
                                 new_key->Clone(), 0, SliceStatus::FullyCached);
@@ -1075,8 +1069,7 @@ public:
 
                     // Create new range entries in local cc shard
                     size_t cur_slice_idx = 0;
-                    for (uint new_range_idx = 0;
-                         new_range_idx < old_info->new_partition_id_.size();
+                    for (uint new_range_idx = 0; new_range_idx < new_range_cnt;
                          new_range_idx++)
                     {
                         std::vector<
@@ -1091,29 +1084,27 @@ public:
                             std::move(new_slice_keys.at(cur_slice_idx)));
                         cur_slice_idx++;
                         // Move the range slices that falls into the new range.
-                        while (
-                            cur_slice_idx != new_slice_keys.size() &&
-                            (new_range_idx + 1 == old_info->new_key_.size() ||
-                             *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
-                                 *old_info->new_key_.at(new_range_idx + 1)))
+                        while (cur_slice_idx != new_slice_keys.size() &&
+                               (new_range_idx + 1 == new_range_cnt ||
+                                *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
+                                    *new_range_keys.at(new_range_idx + 1)))
                         {
                             cur_range_slices.push_back(
                                 std::move(new_slice_keys.at(cur_slice_idx++)));
                         }
 
-                        if (new_range_idx <
-                                old_info->new_partition_id_.size() - 1 &&
+                        if (new_range_idx < new_range_cnt - 1 &&
                             cur_slice_idx == new_slice_keys.size())
                         {
                             // If we run out of slice before we reach last new
                             // range, insert an empty slice for the next new
                             // range
                             for (size_t idx = new_range_idx + 1;
-                                 idx < old_info->new_key_.size();
+                                 idx < new_range_cnt;
                                  ++idx)
                             {
                                 new_slice_keys.emplace_back(
-                                    old_info->new_key_.at(idx)->Clone(),
+                                    new_range_keys.at(idx)->Clone(),
                                     0,
                                     SliceStatus::FullyCached);
                             }
@@ -1123,7 +1114,7 @@ public:
                             shard_->CreateTableRange(
                                 this->table_name_,
                                 this->cc_ng_id_,
-                                old_info->new_partition_id_.at(new_range_idx),
+                                new_range_ids.at(new_range_idx),
                                 std::move(range_start_key),
                                 cur_slice_idx == new_slice_keys.size()
                                     ? old_end_key
@@ -1150,8 +1141,8 @@ public:
                     // Restore range slice specs from log message. the range
                     // slice specs we read from data store is unreliable since
                     // it could've already been updated before the crash.
-                    old_table_range_entry->RangeSlices()->InitSlices(
-                        range_slices);
+                    old_table_range_entry->InitRangeSlices(
+                        std::move(range_slices), this->cc_ng_id_);
                     old_table_range_entry->RangeSlices()->Lock();
                 }
             }
@@ -1216,33 +1207,6 @@ public:
                 cce->payload_->range_owner_rec_ =
                     bucket_map->GetBucketRecord(Sharder::MapRangeIdToBucketId(
                         new_range_info->PartitionId()));
-
-                // update previous cce's end key
-                it--;
-                it->second->payload_->end_key_ = new_range_info->StartKey();
-                it++;
-
-                if (idx != new_range_infos.size() - 1)
-                {
-                    cce->payload_.get()->end_key_ =
-                        new_range_infos.at(idx + 1)->start_key_.get();
-                }
-                else
-                {
-                    // Do not point end key to the map key (it->first)
-                    // since it does not have pointer stability.
-                    it++;
-                    if (it->second)
-                    {
-                        cce->payload_.get()->end_key_ =
-                            it->second->payload_->range_info_->start_key_.get();
-                    }
-                    else
-                    {
-                        // end key is pos inf
-                        cce->payload_.get()->end_key_ = it->first;
-                    }
-                }
                 cce->payload_status_ = RecordStatus::Normal;
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
@@ -1359,7 +1323,7 @@ private:
         DesrializeFrom(buf, offset, &partition_id);
         DesrializeFrom(buf, offset, &version_ts);
         std::unique_ptr<RangeInfo> range_info = std::make_unique<RangeInfo>(
-            std::move(start_key), version_ts, partition_id);
+            std::move(start_key), nullptr, version_ts, partition_id);
         uint16_t new_part_size;
         DesrializeFrom(buf, offset, &new_part_size);
         if (new_part_size > 0)
@@ -1387,13 +1351,12 @@ private:
             end_key.Deserialize(buf, offset, nullptr);
             CcEntry<KeyT, RangeRecord> *cce = Find(end_key).second;
             assert(cce != nullptr);
-            range_record->end_key_ =
-                cce->payload_->range_info_->start_key_.get();
-            assert(range_record->end_key_ != nullptr);
+            range_info->end_key_ = cce->payload_->range_info_->start_key_.get();
+            assert(range_info->end_key_ != nullptr);
         }
         else
         {
-            range_record->end_key_ = PositiveInfinity<KeyT>::Instance();
+            range_info->end_key_ = PositiveInfinity<KeyT>::Instance();
         }
         range_record->SetRangeInfo(std::move(range_info));
 

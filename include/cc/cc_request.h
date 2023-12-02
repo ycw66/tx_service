@@ -3012,9 +3012,14 @@ public:
         Clear();
     }
 
+    bool built_slice_sample_pool_{false};
+    std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>::iterator
+        range_it_;
+
 private:
     void Clear()
     {
+        built_slice_sample_pool_ = false;
         key_sample_pool_.reset(nullptr);
         slice_sample_pool_.reset(nullptr);
         next_pin_slice_idx_ = 0;

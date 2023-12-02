@@ -150,6 +150,12 @@ public:
 
     bool Execute(PostWriteAllCc &req) override
     {
+        if (req.NodeGroupId() != shard_->node_id_)
+        {
+            // We only process cluster config update on preferred leader node
+            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
+        }
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
         {
             // transaction failed before prepare log. Release lock and return.

@@ -107,46 +107,6 @@ StoreRange::StoreRange(const TxKey *start_key,
     slices_.emplace_back(std::move(slice));
 }
 
-bool StoreRange::TrySetDataSync(bool ongoing,
-                                std::shared_ptr<DataSyncTask> task,
-                                uint64_t last_sync_ts)
-{
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    if (ongoing && sync_ongoing_)
-    {
-        // Another task is processing this range.
-        // To avoid the possible busy loop when there are fewer tasks, put
-        // this task into `pending_task` instead of put back into
-        // `data_sync_task_queue_`.
-        pending_sync_task_.push(task);
-        return false;
-    }
-    if (!ongoing && last_sync_ts > last_sync_ts_)
-    {
-        // data sync succeeded, update last sync ts
-        last_sync_ts_ = last_sync_ts;
-    }
-    sync_ongoing_ = ongoing;
-    return true;
-}
-
-void StoreRange::PopPendingSyncTask()
-{
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    if (!pending_sync_task_.empty())
-    {
-        pending_sync_task_.front()->on_remove_pending_queue_lambda_(
-            pending_sync_task_.front());
-        pending_sync_task_.pop();
-    }
-}
-
-void StoreRange::PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
-{
-    std::unique_lock<std::shared_mutex> lk(mux_);
-    pending_sync_task_.emplace(task);
-}
-
 RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
                                   int64_t ng_term,
                                   const TxKey &search_key,
@@ -400,19 +360,6 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
         wait_cv_.notify_all();
     }
 }
-void StoreRange::UpdateRange(const TxKey *start_key,
-                             const TxKey *end_key,
-                             int32_t partition_id)
-{
-    range_start_key_ = start_key;
-    range_end_key_ = end_key;
-    partition_id_ = partition_id;
-    if (slices_.size())
-    {
-        slices_.front()->start_key_ = start_key;
-        slices_.back()->end_key_ = end_key;
-    }
-}
 
 bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  const TableName &table_name,
@@ -422,8 +369,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                  uint64_t flush_ts,
                                  const std::vector<FlushRecord> &flush_vec,
                                  size_t slice_first_idx,
-                                 size_t slice_end_idx,
-                                 bool range_locked)
+                                 size_t slice_end_idx)
 {
     std::vector<SliceChangeInfo> item_vec;
 
@@ -1041,7 +987,7 @@ size_t StoreRange::PostCkptSize()
 }
 
 void StoreRange::InitSlices(
-    std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys,
+    std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slice_keys,
     bool fully_cached)
 {
     slices_.clear();

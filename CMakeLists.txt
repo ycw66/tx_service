@@ -128,6 +128,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/tx_start_ts_collector.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/sharder.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/catalog_key_record.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/range_record.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/range_bucket_key_record.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_entry.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_map.cpp

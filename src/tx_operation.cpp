@@ -34,7 +34,7 @@ void AdvanceWriteKeyForRangeInfo(const RangeRecord &range_record,
 {
     // Advances the write key iterator such that it points to the first key
     // belonging to the next range.
-    const TxKey *range_end_key = range_record.end_key_;
+    const TxKey *range_end_key = range_record.GetRangeInfo()->EndKey();
     auto next_range_start = write_key_it;
     if (range_end_key == nullptr ||
         range_end_key->Type() == KeyType::PositiveInf)
@@ -2903,8 +2903,9 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       ds_clean_old_range_op_(txm),
       clean_log_op_(txm)
 {
-    range_record_ = std::make_unique<RangeRecord>(
-        &range_info_, nullptr, old_end_key, nullptr);
+    range_info_.end_key_ = old_end_key;
+    range_record_ =
+        std::make_unique<RangeRecord>(&range_info_, nullptr, nullptr);
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
 
@@ -2991,10 +2992,11 @@ void SplitFlushRangeOp::Reset(
            old_range_info->new_key_.size());
 
     range_info_ = *old_range_info;
+    range_info_.end_key_ = old_end_key;
     assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
 
-    range_record_ = std::make_unique<RangeRecord>(
-        &range_info_, nullptr, old_end_key, nullptr);
+    range_record_ =
+        std::make_unique<RangeRecord>(&range_info_, nullptr, nullptr);
 
     old_end_key_ = old_end_key;
 
@@ -4246,7 +4248,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // PostWriteAll. New ranges might land on other nodes.
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
-            range_record_->end_key_ = old_end_key_;
             range_record_->SetRangeInfo(&range_info_);
 
             LOG(INFO) << "Split Flush transaction post all lock, range id "
@@ -4315,7 +4316,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // ranges might land on other nodes.
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
-            range_record_->end_key_ = old_end_key_;
             range_record_->SetRangeInfo(&range_info_);
             LOG(INFO) << "Split Flush transaction post all lock, range id "
                       << range_info_.PartitionId()
@@ -4346,7 +4346,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << post_all_lock_op_.hd_result_.ErrorMsg();
                 post_all_lock_op_.rec_ = range_record_.get();
                 range_record_->range_slices_ = &slice_info_;
-                range_record_->end_key_ = old_end_key_;
                 range_record_->SetRangeInfo(&range_info_);
                 RetrySubOperation(txm, &post_all_lock_op_);
             }
@@ -4931,7 +4930,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 {
     if (op_ == nullptr)
     {
-        LOG(INFO) << "Cluster Scale transaction prepare acquire write all on "
+        LOG(INFO) << "Cluster scale transaction prepare acquire write all on "
                      "cluster scale table, txn: "
                   << txm->TxNumber();
 
@@ -4941,7 +4940,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                 new_ng_config_.size(), 9001);
 
         FillPrepareLogRequest(txm);
-        LOG(INFO) << "Cluster Scale transaction write prepare log, txn: "
+        LOG(INFO) << "Cluster scale transaction write prepare log, txn: "
                   << txm->TxNumber();
         ForwardToSubOperation(txm, &prepare_log_op_);
     }
@@ -5025,7 +5024,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             notify_migration_op_.migrate_plans_ = bucket_migrate_infos_;
 
             LOG(INFO)
-                << "Cluster Scale transaction notify data migration, txn: "
+                << "Cluster scale transaction notify data migration, txn: "
                 << txm->TxNumber();
             ForwardToSubOperation(txm, &notify_migration_op_);
         }
@@ -5054,7 +5053,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         txm->commit_ts_ =
             std::max(txm->commit_ts_, acquire_cluster_config_write_op_.MaxTs());
         FillUpdateClusterConfigLogRequest(txm);
-        LOG(INFO) << "Cluster Scale transaction write update cluster config "
+        LOG(INFO) << "Cluster scale transaction write update cluster config "
                      "log, txn: "
                   << txm->TxNumber();
         ForwardToSubOperation(txm, &update_cluster_config_log_op_);
@@ -5103,7 +5102,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                     }
                 });
         };
-        LOG(INFO) << "Cluster Scale transaction updating cluster config in "
+        LOG(INFO) << "Cluster scale transaction updating cluster config in "
                      "data store, txn: "
                   << txm->TxNumber();
         ForwardToSubOperation(txm, &flush_new_cluster_config_op_);
@@ -5133,7 +5132,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         cluster_config_rec_.SetVersion(txm->commit_ts_);
         cluster_config_rec_.SetNodeGroupConfigs(&new_ng_config_);
 
-        LOG(INFO) << "Cluster Scale transaction update cluster config, txn "
+        LOG(INFO) << "Cluster scale transaction update cluster config, txn "
                   << txm->TxNumber();
         ForwardToSubOperation(txm, &install_cluster_config_op_);
     }
@@ -5162,7 +5161,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             // We should not start the data migration process.
             LOG(INFO)
-                << "Cluster Scale transaction notify data migration, txn: "
+                << "Cluster scale transaction notify data migration, txn: "
                 << txm->TxNumber() << ", tx_term: " << txm->TxTerm()
                 << ", tx_ng_id: " << txm->TxCcNodeId();
 
@@ -5171,7 +5170,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Cluster Scale transaction write clean log, txn "
+            LOG(INFO) << "Cluster scale transaction write clean log, txn "
                       << txm->TxNumber();
             // Now the deleted nodes are removed from cluster. We can not
             // write clean log and finish the tx.
@@ -5239,7 +5238,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             assert(event_type_ == ClusterScaleOpType::RemoveNode);
             LOG(INFO)
-                << "Cluster Scale transaction acquire cluster config write "
+                << "Cluster scale transaction acquire cluster config write "
                    "lock, txn: "
                 << txm->TxNumber();
             ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
@@ -5545,7 +5544,7 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
 
     if (dest_node_id == shards->NodeId())
     {
-        auto thd = std::thread(
+        Sharder::Instance().GetTxWorkerPool()->SubmitWork(
             [cluster_scale_txn = tx_number,
              old_owner_id = old_owner_id,
              bucket_ids = iter->second.bucket_ids_,        // Copy
@@ -5652,8 +5651,6 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                 }
                 unfinished_cnt->fetch_sub(1, std::memory_order_release);
             });
-
-        thd.detach();
     }
     else
     {
@@ -6062,11 +6059,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        const BucketInfo *bucket_info =
-            Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
-                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
-        ranges_in_bucket_snapshot_ = bucket_info->CloneRangesInBucket();
-        bucket_info_ = *bucket_info;
+        auto local_shards = Sharder::Instance().GetLocalCcShards();
+        ranges_in_bucket_snapshot_ = local_shards->GetStoreRangesInBucket(
+            status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
 
         if (ranges_in_bucket_snapshot_.empty())
         {
@@ -6076,7 +6071,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                       << ", bucket id: "
                       << status_->bucket_ids_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
-            assert(txm->CommitTs() > bucket_info_.Version());
             bucket_info_.Reset();
             bucket_info_.Set(status_->new_owner_ngs_[migrate_bucket_idx_],
                              txm->CommitTs());
@@ -6090,6 +6084,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                       << status_->bucket_ids_[migrate_bucket_idx_]
                       << ", txn: " << txm->TxNumber();
 
+            const BucketInfo *bucket_info = local_shards->GetBucketInfo(
+                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
+            bucket_info_ = *bucket_info;
             assert(txm->CommitTs() > bucket_info_.Version());
             bucket_info_.SetDirty(status_->new_owner_ngs_[migrate_bucket_idx_],
                                   txm->CommitTs());
@@ -6231,14 +6228,13 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         // ranges in bucket here since new data could be inserted into this
         // bucket since when we took the first snapshot in the first phase of
         // commit.
-        const BucketInfo *bucket_info =
-            Sharder::Instance().GetLocalCcShards()->GetBucketInfo(
-                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
         bucket_info_.Reset();
         bucket_info_.Set(status_->new_owner_ngs_[migrate_bucket_idx_],
                          txm->CommitTs());
         bucket_record_.SetBucketInfo(&bucket_info_);
-        ranges_in_bucket_snapshot_ = bucket_info->CloneRangesInBucket();
+        ranges_in_bucket_snapshot_ =
+            Sharder::Instance().GetLocalCcShards()->GetStoreRangesInBucket(
+                status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
 
         if (ranges_in_bucket_snapshot_.size())
         {
@@ -6268,16 +6264,14 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             kickout_table_ =
                 TableName{kickout_tbl_it_->first.StringView(), type};
             kickout_data_op_.table_name_ = &kickout_table_;
-
-            const StoreRange *range =
-                Sharder::Instance().GetLocalCcShards()->FindRange(
+            const TableRangeEntry *range =
+                Sharder::Instance().GetLocalCcShards()->GetTableRangeEntry(
                     *kickout_data_op_.table_name_,
                     kickout_data_op_.node_group_,
                     *kickout_range_it_);
             assert(range != nullptr);
-            kickout_data_op_.start_key_ = range->RangeStartKey();
-            kickout_data_op_.end_key_ = range->RangeEndKey();
-
+            kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
+            kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
             LOG(INFO) << "Data migration: kickout bucket data"
                       << ", bucket id: "
                       << status_->bucket_ids_[migrate_bucket_idx_]
@@ -6347,14 +6341,14 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             kickout_data_op_.table_name_ = &kickout_table_;
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
         }
-        const StoreRange *range =
-            Sharder::Instance().GetLocalCcShards()->FindRange(
+        const TableRangeEntry *range =
+            Sharder::Instance().GetLocalCcShards()->GetTableRangeEntry(
                 *kickout_data_op_.table_name_,
                 kickout_data_op_.node_group_,
                 *kickout_range_it_);
         assert(range != nullptr);
-        kickout_data_op_.start_key_ = range->RangeStartKey();
-        kickout_data_op_.end_key_ = range->RangeEndKey();
+        kickout_data_op_.start_key_ = range->GetRangeInfo()->StartKey();
+        kickout_data_op_.end_key_ = range->GetRangeInfo()->EndKey();
 
         ForwardToSubOperation(txm, &kickout_data_op_);
     }
@@ -6642,7 +6636,7 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             // keys belonging to this range.
             const RangeRecord *range_rec =
                 static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            const TxKey *range_end_key = range_rec->end_key_;
+            const TxKey *range_end_key = range_rec->GetRangeInfo()->EndKey();
             NodeGroupId range_ng = range_rec->GetRangeOwnerNg()->BucketOwner();
 
             auto cmp = [](const ScanBatchTuple &tuple, const TxKey *end_key)

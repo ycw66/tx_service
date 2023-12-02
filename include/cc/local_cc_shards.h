@@ -716,11 +716,8 @@ public:
 
     void DropStoreRangesInBucket(NodeGroupId ng_id, uint16_t bucket_id);
 
-    bool LoadStoreRangesInBucket(NodeGroupId ng_id,
-                                 uint16_t bucket_id,
-                                 CcShard *shard,
-                                 CcRequestBase *cc_request,
-                                 int64_t term);
+    std::unordered_map<TableName, std::unordered_set<int>>
+    GetStoreRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id);
 
     const BucketInfo *CommitDirtyBucketInfo(NodeGroupId ng_id,
                                             uint16_t bucket_id);
@@ -939,7 +936,7 @@ private:
                          const TableSchema *schema,
                          NodeGroupId node_group,
                          TransactionExecution *txm,
-                         StoreRange *store_range,
+                         TableRangeEntry *range_entry,
                          std::vector<const TxKey *> &&split_keys,
                          std::shared_ptr<DataSyncTask> data_sync_task,
                          std::vector<FlushRecord> &&previous_data_sync_vec,

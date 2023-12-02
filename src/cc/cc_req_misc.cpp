@@ -230,18 +230,6 @@ bool FetchTableRangesCc::Execute(CcShard &ccs)
     return false;
 }
 
-void FetchTableRangesCc::SetFinish(std::vector<InitRangeEntry> &&ranges)
-{
-    ranges_vec_ = std::move(ranges);
-    error_code_ = 0;
-
-    CODE_FAULT_INJECTOR("FetchTableRangesCc_SetFinish_Error", {
-        error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
-        ranges_vec_.clear();
-    });
-    ccs_.Enqueue(this);
-}
-
 void FetchTableRangesCc::AppendTableRanges(std::vector<InitRangeEntry> &&ranges)
 {
     for (auto &range : ranges)
@@ -268,6 +256,52 @@ void FetchTableRangesCc::SetFinish(int err)
         ranges_vec_.clear();
     });
     ccs_.Enqueue(this);
+}
+
+bool FetchRangeSlicesCc::Execute(CcShard &ccs)
+{
+    std::lock_guard<std::mutex> lk(range_entry_->mux_);
+    if (error_code_ == 0)
+    {
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
+        {
+            // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
+            // time, the creating catalog will be cleaned by ClearCcNodeGroup,
+            // and the running cc_requests will check term invalid.
+            range_entry_->InitRangeSlices(std::move(slice_info_), cc_ng_id_);
+            for (auto [req, ccs] : requesters_)
+            {
+                ccs->Enqueue(req);
+            }
+        }
+        else
+        {
+            for (auto [req, ccs] : requesters_)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
+        }
+    }
+    else
+    {
+        for (auto [req, ccs] : requesters_)
+        {
+            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        }
+    }
+
+    range_entry_->fetch_range_slices_req_ = nullptr;
+    return false;
+}
+
+void FetchRangeSlicesCc::SetFinish(int err)
+{
+    error_code_ = err;
+    Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(0, this);
 }
 
 bool ClearCcNodeGroup::Execute(CcShard &ccs)

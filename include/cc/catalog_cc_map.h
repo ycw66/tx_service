@@ -296,6 +296,10 @@ public:
                                                              ng_term);
                                     return false;
                                 }
+                                for (auto &range : *ranges)
+                                {
+                                    range.second.SetVersion(req.CommitTs());
+                                }
                             }
                         }
                     }

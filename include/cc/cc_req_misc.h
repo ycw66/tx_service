@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "cc_req_base.h"
-#include "range_record.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
@@ -22,6 +21,13 @@ class LocalCcShards;
 class StoreSlice;
 class StoreRange;
 struct RangeSliceId;
+struct InitRangeEntry;
+struct TableRangeEntry;
+struct SliceChangeInfo;
+namespace store
+{
+class DataStoreHandler;
+};
 
 struct FetchCc : public CcRequestBase
 {
@@ -153,13 +159,46 @@ public:
     void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
     void AppendTableRange(InitRangeEntry &&range);
     bool EmptyRanges() const;
-    void SetFinish(std::vector<InitRangeEntry> &&ranges);
     void SetFinish(int err);
 
 public:
     const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
+};
+
+struct FetchRangeSlicesCc : public CcRequestBase
+{
+public:
+    FetchRangeSlicesCc(const TableName &table_name,
+                       TableRangeEntry *range_entry,
+                       NodeGroupId ng_id,
+                       int64_t cc_ng_term)
+        : table_name_(table_name),
+          cc_ng_id_(ng_id),
+          cc_ng_term_(cc_ng_term),
+          range_entry_(range_entry)
+    {
+    }
+
+    bool Execute(CcShard &ccs) override;
+    void SetFinish(int err);
+    void AddRequester(CcRequestBase *requester, CcShard *ccs)
+    {
+        requesters_.emplace_back(requester, ccs);
+    }
+    size_t RequesterCount() const
+    {
+        return requesters_.size();
+    }
+
+    const TableName table_name_;
+    NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
+    TableRangeEntry *range_entry_;
+    std::vector<std::pair<CcRequestBase *, CcShard *>> requesters_;
+    int error_code_{0};
+    std::vector<std::pair<TxKey::Uptr, uint32_t>> slice_info_;
 };
 
 /**

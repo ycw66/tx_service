@@ -117,6 +117,10 @@ public:
     {
     }
 
+    void FetchRangeSlices(FetchRangeSlicesCc *fetch_cc) override
+    {
+    }
+
     bool Read(const txservice::TableName &table_name,
               const txservice::TxKey &key,
               txservice::TxRecord &rec,
@@ -214,7 +218,7 @@ public:
         std::vector<
             std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
             range_info,
-        uint64_t version)
+        uint64_t version) override
     {
         return true;
     }

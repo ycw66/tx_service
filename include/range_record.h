@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "cc_req_misc.h"
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
 #include "tx_key.h"
@@ -14,6 +16,8 @@
 
 namespace txservice
 {
+struct DataSyncTask;
+struct FetchRangeSlicesCc;
 // struct that stores range related info that we read from
 // KV storage during table range initialization.
 struct InitRangeEntry
@@ -34,40 +38,28 @@ struct InitRangeEntry
     {
     }
 
-    InitRangeEntry(
-        std::unique_ptr<TxKey> start_key,
-        int32_t partition_id,
-        uint64_t version_ts,
-        std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> keys)
-        : key_(std::move(start_key)),
-          partition_id_(partition_id),
-          version_ts_(version_ts),
-          slice_keys_(std::move(keys))
-    {
-    }
-
     InitRangeEntry(InitRangeEntry &&rhs)
         : key_(std::move(rhs.key_)),
           partition_id_(rhs.partition_id_),
-          version_ts_(rhs.version_ts_),
-          slice_keys_(std::move(rhs.slice_keys_))
+          version_ts_(rhs.version_ts_)
     {
     }
 
     std::unique_ptr<TxKey> key_{nullptr};
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
-    std::vector<std::pair<std::unique_ptr<TxKey>, uint32_t>> slice_keys_;
 };
 
 struct RangeInfo
 {
     RangeInfo() = delete;
     RangeInfo(std::unique_ptr<TxKey> start_key,
+              const TxKey *end_key,
               uint64_t version_ts,
               uint32_t partition_id,
               bool is_dirty = false)
         : start_key_(std::move(start_key)),
+          end_key_(end_key),
           partition_id_(partition_id),
           version_ts_(version_ts),
           dirty_ts_(0),
@@ -76,7 +68,8 @@ struct RangeInfo
     }
 
     RangeInfo(const RangeInfo &other)
-        : partition_id_(other.partition_id_),
+        : end_key_(other.end_key_),
+          partition_id_(other.partition_id_),
           version_ts_(other.version_ts_),
           new_partition_id_(other.new_partition_id_),
           dirty_ts_(other.dirty_ts_),
@@ -99,6 +92,7 @@ struct RangeInfo
     void Clear()
     {
         start_key_ = nullptr;
+        end_key_ = nullptr;
         partition_id_ = 0;
         version_ts_ = 1;
         new_key_.clear();
@@ -111,6 +105,7 @@ struct RangeInfo
     {
         if (this != &other)
         {
+            end_key_ = other.end_key_;
             partition_id_ = other.partition_id_;
             version_ts_ = other.version_ts_;
             new_partition_id_ = other.new_partition_id_;
@@ -142,7 +137,7 @@ struct RangeInfo
         std::unique_ptr<TxKey> start_key_clone =
             start_key_ == nullptr ? nullptr : start_key_->Clone();
         RangeInfo *that = new RangeInfo(
-            std::move(start_key_clone), version_ts_, partition_id_);
+            std::move(start_key_clone), end_key_, version_ts_, partition_id_);
         for (auto &key : new_key_)
         {
             that->new_key_.push_back(key->Clone());
@@ -241,6 +236,11 @@ struct RangeInfo
         return start_key_.get();
     }
 
+    const TxKey *EndKey() const
+    {
+        return end_key_;
+    }
+
     int32_t PartitionId() const
     {
         return partition_id_;
@@ -287,6 +287,7 @@ struct RangeInfo
 
 private:
     std::unique_ptr<TxKey> start_key_;
+    const TxKey *end_key_;
     int32_t partition_id_{0};
     uint64_t version_ts_{1};
 
@@ -309,21 +310,31 @@ struct TableRangeEntry
 {
 public:
     TableRangeEntry() = default;
+    TableRangeEntry(const TableRangeEntry &) = delete;
+    TableRangeEntry &operator=(const TableRangeEntry &) = delete;
 
     TableRangeEntry(std::unique_ptr<TxKey> start_key,
+                    const TxKey *end_key,
                     uint64_t version_ts,
                     int64_t partition_id,
                     std::unique_ptr<StoreRange> slices = nullptr)
         : range_info_(std::make_unique<RangeInfo>(
-              std::move(start_key), version_ts, partition_id)),
-          range_slices_(std::move(slices))
+              std::move(start_key), end_key, version_ts, partition_id)),
+          mux_(),
+          range_slices_(std::move(slices)),
+          fetch_range_slices_req_(nullptr),
+          sync_info_(nullptr)
     {
     }
 
+    ~TableRangeEntry();
+
     void UpdateRangeEntry(uint64_t version_ts,
-                          std::unique_ptr<StoreRange> slices = nullptr)
+                          const TxKey *end_key,
+                          std::unique_ptr<StoreRange> slices)
     {
         range_info_->version_ts_ = version_ts;
+        range_info_->end_key_ = end_key;
         range_slices_ = std::move(slices);
     }
 
@@ -364,22 +375,131 @@ public:
         return range_slices_.get();
     }
 
-    void DropStoreRange()
+    void DropStoreRangeAndSyncInfo();
+
+    void SetRangeEndKey(const TxKey *end_key)
     {
-        range_slices_ = nullptr;
+        range_info_->end_key_ = end_key;
+        if (range_slices_)
+        {
+            range_slices_->SetRangeEndKey(end_key);
+        }
     }
 
-    void SetStoreRange(std::unique_ptr<StoreRange> store_range)
+    void SetVersion(uint64_t version)
     {
-        range_slices_ = std::move(store_range);
+        range_info_->version_ts_ = version;
     }
+
+    void InitRangeSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
+                         NodeGroupId ng_id)
+    {
+        auto range_slices = std::make_unique<StoreRange>(
+            range_info_->StartKey(),
+            range_info_->EndKey(),
+            range_info_->PartitionId(),
+            ng_id,
+            *Sharder::Instance().GetLocalCcShards());
+        range_slices->InitSlices(std::move(slices));
+        range_slices_ = std::move(range_slices);
+    }
+
+    uint64_t GetLastSyncTs()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (sync_info_)
+        {
+            return sync_info_->last_sync_ts_;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    bool TrySetDataSync(bool ongoing,
+                        std::shared_ptr<DataSyncTask> task = nullptr,
+                        uint64_t last_sync_ts = 0)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (!sync_info_)
+        {
+            // Only initialize sync_info_ when it is needed.
+            // If we're setting ongoing to false that means
+            // sync_info_ is deleted when data sync worker tries
+            // to sync this range, which means either term has
+            // changed or range is migrated away.
+            if (!ongoing)
+            {
+                return true;
+            }
+            sync_info_ = std::make_unique<RangeSyncInfo>();
+        }
+        if (ongoing && sync_info_->sync_ongoing_)
+        {
+            // Another task is processing this range.
+            // To avoid the possible busy loop when there are fewer tasks, put
+            // this task into `pending_task` instead of put back into
+            // `data_sync_task_queue_`.
+            sync_info_->pending_sync_task_.push(task);
+            return false;
+        }
+        if (!ongoing && last_sync_ts > sync_info_->last_sync_ts_)
+        {
+            // data sync succeeded, update last sync ts
+            sync_info_->last_sync_ts_ = last_sync_ts;
+        }
+        sync_info_->sync_ongoing_ = ongoing;
+        return true;
+    }
+
+    void PopPendingSyncTask();
+
+    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (!sync_info_)
+        {
+            sync_info_ = std::make_unique<RangeSyncInfo>();
+        }
+        sync_info_->pending_sync_task_.emplace(task);
+    }
+
+    void FetchRangeSlices(const TableName &range_tbl_name,
+                          CcRequestBase *requester,
+                          NodeGroupId ng_id,
+                          int64_t ng_term,
+                          CcShard *cc_shard);
 
 private:
+    struct RangeSyncInfo
+    {
+        bool sync_ongoing_{false};
+        uint64_t last_sync_ts_{0};
+        // Multiple tasks on the same range are executed sequentially, so the
+        // subsequence tasks for this range should wait here.
+        std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
+    };
     std::unique_ptr<RangeInfo> range_info_{nullptr};
-    std::unique_ptr<StoreRange> range_slices_;
+
+    // Protects range_slices_, fetch_range_slices_cc_ and sync_info_
+    // Note that since we initialize range_slices_ atomically, and bucket write
+    // lock of range is held when dropping range_slices_, there's no need to
+    // acquire lock when reading range_slices_. The mutex is used to protect
+    // consistency between range_slices_ and fetch_range_slices_req_ and make
+    // sure range_slices_ is only initialized once when multiple cc requests
+    // want to load it from data store.
+    std::mutex mux_;
+    // range_slices_ stores the slice info in this range. This is only
+    // initialized on the node group that owns this range, and it is initialized
+    // lazily when needed.
+    std::unique_ptr<StoreRange> range_slices_{nullptr};
+    std::unique_ptr<FetchRangeSlicesCc> fetch_range_slices_req_{nullptr};
+    std::unique_ptr<RangeSyncInfo> sync_info_{nullptr};
 
     template <typename KeyT>
     friend class RangeCcMap;
+    friend struct FetchRangeSlicesCc;
 };
 struct RangeRecord : public TxRecord
 {
@@ -388,7 +508,6 @@ public:
         : range_info_{nullptr},
           is_info_owner_(false),
           range_slices_(nullptr),
-          end_key_(nullptr),
           range_owner_rec_(nullptr),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
@@ -399,7 +518,6 @@ public:
         : range_info_(nullptr),
           is_info_owner_(rhs.is_info_owner_),
           range_slices_(rhs.range_slices_),
-          end_key_(rhs.end_key_),
           is_read_result_(rhs.is_read_result_)
     {
         if (rhs.is_info_owner_)
@@ -450,12 +568,10 @@ public:
 
     RangeRecord(const RangeInfo *info,
                 const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                const TxKey *end_key,
                 LruEntry *range_owner)
         : range_info_(info),
           is_info_owner_(false),
           range_slices_(slices),
-          end_key_(end_key),
           range_owner_rec_(range_owner),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
@@ -464,12 +580,10 @@ public:
 
     RangeRecord(std::unique_ptr<RangeInfo> info,
                 const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                const TxKey *end_key,
                 LruEntry *range_owner)
         : range_info_uptr_(std::move(info)),
           is_info_owner_(true),
           range_slices_(slices),
-          end_key_(end_key),
           range_owner_rec_(range_owner),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
@@ -524,11 +638,12 @@ public:
         }
         SerializeToStr(&range_info_->dirty_ts_, str);
         // Serialize end key
-        is_normal = end_key_ != nullptr && end_key_->Type() == KeyType::Normal;
+        is_normal = range_info_->end_key_ != nullptr &&
+                    range_info_->end_key_->Type() == KeyType::Normal;
         SerializeToStr(&is_normal, str);
         if (is_normal)
         {
-            end_key_->Serialize(str);
+            range_info_->end_key_->Serialize(str);
         }
         uint16_t slice_cnt;
         if (range_slices_ == nullptr)
@@ -643,7 +758,6 @@ public:
         is_info_owner_ = rhs.is_info_owner_;
 
         range_slices_ = rhs.range_slices_;
-        end_key_ = rhs.end_key_;
 
         // Free own unique ptr.
         if (!is_read_result_ && new_range_owner_rec_)
@@ -732,7 +846,6 @@ public:
         is_info_owner_ = other.is_info_owner_;
 
         range_slices_ = other.range_slices_;
-        end_key_ = other.end_key_;
 
         // Free own unique ptr.
         if (is_read_result_ && new_range_owner_bucket_)
@@ -827,13 +940,6 @@ public:
     // Only used in range split tx to broadcast slice
     // info to all nodes.
     const std::vector<std::pair<TxKey::Uptr, size_t>> *range_slices_{nullptr};
-    /**
-     * @brief The exclusive end of the range, which is also the start of the
-     * next range. Null, if this is the last range and end key points to
-     * positive infinity.
-     *
-     */
-    const TxKey *end_key_{nullptr};
 
     /**
      * @brief The bucket record that owns this range.

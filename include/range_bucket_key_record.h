@@ -30,7 +30,6 @@ public:
         version_ = rhs.version_;
         dirty_bucket_owner_ = rhs.dirty_bucket_owner_;
         dirty_version_ = rhs.dirty_version_;
-        ranges_in_bucket_ = rhs.ranges_in_bucket_;
         return *this;
     }
 
@@ -40,7 +39,6 @@ public:
         version_ = 0;
         dirty_bucket_owner_ = UINT32_MAX;
         dirty_version_ = 0;
-        ranges_in_bucket_.clear();
     }
 
     void ClearDirty()
@@ -69,21 +67,10 @@ public:
         return dirty_version_;
     }
 
-    std::unordered_map<TableName, std::unordered_set<int32_t>> &RangesInBucket()
-    {
-        return ranges_in_bucket_;
-    }
-
-    std::unordered_map<TableName, std::unordered_set<int32_t>>
-    CloneRangesInBucket() const
-    {
-        return ranges_in_bucket_;
-    }
     std::unique_ptr<BucketInfo> Clone() const
     {
         std::unique_ptr<BucketInfo> clone =
             std::make_unique<BucketInfo>(bucket_owner_, version_);
-        clone->ranges_in_bucket_ = ranges_in_bucket_;
         clone->SetDirty(dirty_bucket_owner_, dirty_version_);
         return clone;
     }
@@ -120,11 +107,6 @@ public:
 
 private:
     NodeGroupId bucket_owner_{UINT32_MAX};
-    // Keep track of the ranges in this bucket. We only track
-    // the ranges that are loaded into memory.
-    // Note that the table name here is of type RangePartition.
-    std::unordered_map<TableName, std::unordered_set<int32_t>>
-        ranges_in_bucket_;
     uint64_t version_{0};
 
     NodeGroupId dirty_bucket_owner_{UINT32_MAX};

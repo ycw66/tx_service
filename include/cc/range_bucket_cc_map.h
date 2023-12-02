@@ -283,25 +283,6 @@ public:
                             this->cc_ng_id_, target_key->bucket_id_);
                     }
                 }
-
-                // The dirty version is already committed. If this ng is the
-                // current owner of bucket, load store ranges into memory.
-                if (this->cc_ng_id_ == bucket_info->BucketOwner())
-                {
-                    // Load store range if this ng is the new owner of the
-                    // bucket.
-                    int64_t term =
-                        Sharder::Instance().LeaderTerm(this->cc_ng_id_);
-                    if (!shard_->local_shards_.LoadStoreRangesInBucket(
-                            this->cc_ng_id_,
-                            target_key->bucket_id_,
-                            shard_,
-                            &req,
-                            term))
-                    {
-                        return false;
-                    }
-                }
                 upload_bucket_rec->SetBucketInfo(bucket_info);
             }
         }

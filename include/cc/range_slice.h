@@ -18,7 +18,6 @@ class CcMap;
 class LocalCcShards;
 struct FillStoreSliceCc;
 class StoreRange;
-struct DataSyncTask;
 struct LoadRangeSliceRequest;
 
 namespace store
@@ -441,10 +440,6 @@ public:
 
     void UnpinSlice(StoreSlice *slice);
 
-    void UpdateRange(const TxKey *start_key,
-                     const TxKey *end_key,
-                     int32_t partition_id);
-
     bool UpdateRangeSlicesInStore(const TableName &table_name,
                                   uint64_t schema_ts,
                                   bool update_slice_keys,
@@ -458,8 +453,7 @@ public:
                          uint64_t flush_ts,
                          const std::vector<FlushRecord> &flush_vec,
                          size_t start_idx,
-                         size_t end_idx,
-                         bool range_locked = false);
+                         size_t end_idx);
 
     /**
      * This function is NOT THREAD SAFE. Only checkpointer should be calling
@@ -500,7 +494,7 @@ public:
         return slices_.at(idx).get();
     }
 
-    void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &slice_keys,
+    void InitSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slice_keys,
                     bool fully_cached = false);
 
     void InitSlices(std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
@@ -595,20 +589,6 @@ public:
         slices_.back()->end_key_ = end_key;
     }
 
-    bool TrySetDataSync(bool ongoing,
-                        std::shared_ptr<DataSyncTask> task = nullptr,
-                        uint64_t last_sync_ts = 0);
-
-    void PopPendingSyncTask();
-
-    void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task);
-
-    uint64_t GetLastSyncTs()
-    {
-        std::shared_lock<std::shared_mutex> lk(mux_);
-        return last_sync_ts_;
-    }
-
 private:
     static size_t LowerBound(
         const std::vector<std::unique_ptr<TxKey>> &slice_key_,
@@ -659,14 +639,6 @@ private:
      */
     std::vector<std::unique_ptr<TxKey>> boundary_keys_;
 
-    std::vector<std::unique_ptr<StoreSlice>> slices_;
-
-    bool sync_ongoing_{false};
-    uint64_t last_sync_ts_{0};
-    // Multiple tasks on the same range are executed sequentially, so the
-    // subsequence tasks for this range should wait here.
-    std::queue<std::shared_ptr<DataSyncTask>> pending_sync_task_;
-
     /**
      * @brief A collection of slices the checkpointer intends to alter. The
      * checkpointer adds a slice to this collection, when it detects that the
@@ -679,6 +651,7 @@ private:
      * vector is fast enough.
      *
      */
+    std::vector<std::unique_ptr<StoreSlice>> slices_;
 
     std::shared_mutex mux_;
 
