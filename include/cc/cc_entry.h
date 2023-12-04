@@ -844,6 +844,7 @@ public:
 
             ref.payload_status_ = payload_status_;
             ref.commit_ts_ = commit_ts_;
+
             int32_t data_store_size =
                 data_store_size_.load(std::memory_order_acquire);
             if (data_store_size != INT32_MAX)
@@ -997,7 +998,7 @@ public:
                             continue;
                         }
 
-                        if (it->commit_ts_ == ckpt_ts_)
+                        if (it->commit_ts_ == ckpt_ts_ && it->commit_ts_ != 1)
                         {
                             FlushRecord &ref = ckpt_vec[ckpt_vec_size++];
                             ref.CloneOrCopyKey(key);
@@ -1032,7 +1033,7 @@ public:
                     }
 
                     assert(!include_flushed_rec || exported_count != 0 ||
-                           it->commit_ts_ < ckpt_ts_);
+                           it->commit_ts_ < ckpt_ts_ || it->commit_ts_ == 1);
                     break;
                 }
                 // else: it->commit_ts_ > to_ts
