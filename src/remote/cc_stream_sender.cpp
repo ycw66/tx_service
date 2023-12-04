@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "braft/util.h"
 #include "sharder.h"
 #include "tx_trace.h"
 
@@ -474,10 +475,32 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     options.protocol = brpc::PROTOCOL_BAIDU_STD;
     options.timeout_ms = 100;
     options.max_retry = 3;
-    int err = channel.Init(ip_addr.c_str(), &options);
-    if (err != 0)
+    size_t comma_pos = ip_addr.find(':');
+    assert(comma_pos != std::string::npos);
+    std::string node_ip_str = ip_addr.substr(0, comma_pos);
+    uint16_t node_port = std::stoi(ip_addr.substr(comma_pos + 1));
+    butil::ip_t ip_t;
+    int err;
+    if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
     {
-        return err;
+        // for case `node_ip_str` is hostname format.
+        std::string naming_service_url;
+        braft::HostNameAddr hostname_addr(node_ip_str, node_port);
+        braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+        err = channel.Init(
+            naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, &options);
+        if (err != 0)
+        {
+            return err;
+        }
+    }
+    else
+    {
+        err = channel.Init(ip_addr.c_str(), &options);
+        if (err != 0)
+        {
+            return err;
+        }
     }
 
     auto stream_it = outbound_streams_.find(node_id);

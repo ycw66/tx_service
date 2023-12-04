@@ -380,13 +380,21 @@ void Sharder::UpdateLeader(uint32_t ng_id)
                 std::cout << "Fail to select the leader." << std::endl;
                 return;
             }
+            std::string leader_ip_port;
+            if (leader.type_ == braft::PeerId::Type::EndPoint)
+            {
+                leader_ip_port.append(butil::endpoint2str(leader.addr).c_str());
+            }
+            else
+            {
+                leader_ip_port.append(leader.hostname_addr.to_string());
+            }
 
-            std::string leader_ip_port(
-                butil::endpoint2str(leader.addr).c_str());
             size_t comma_pos = leader_ip_port.find(':');
             assert(comma_pos != std::string::npos);
             std::string leader_ip_str = leader_ip_port.substr(0, comma_pos);
-            uint16_t leader_port = leader.addr.port;
+            uint16_t leader_port =
+                std::stoi(leader_ip_port.substr(comma_pos + 1));
 
             for (auto &node : cluster_config_->ng_configs_.at(ng_id))
             {

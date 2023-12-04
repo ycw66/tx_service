@@ -52,8 +52,7 @@ CcNode::CcNode(const uint32_t ng_id,
 int CcNode::Start()
 {
     braft::NodeOptions node_options = BaseNodeOptions();
-    butil::EndPoint addr;
-    butil::str2endpoint(ip_.c_str(), port_, &addr);
+    braft::PeerId local_node;
 
     std::string raft_conf;
     for (size_t nid = 0; nid < ng_ips_.size(); ++nid)
@@ -93,8 +92,22 @@ int CcNode::Start()
     std::string group_id("ng");
     group_id.append(std::to_string(ng_id_));
 
-    braft::Node *node =
-        new braft::Node(group_id, braft::PeerId(addr, node_idx_));
+    if (0 != butil::str2ip(ip_.c_str(), &local_node.addr.ip))
+    {
+        // for case `ip_` is hostname format
+        local_node.type_ = braft::PeerId::Type::HostName;
+        local_node.hostname_addr.hostname = ip_;
+        local_node.hostname_addr.port = port_;
+        // node init process would check ip addr is not butil::IP_ANY
+        local_node.addr.ip = butil::my_ip();
+        local_node.addr.port = port_;
+    }
+    else
+    {
+        butil::str2endpoint(ip_.c_str(), port_, &local_node.addr);
+    }
+    local_node.idx = node_idx_;
+    braft::Node *node = new braft::Node(group_id, local_node);
 
     if (node->init(node_options) != 0)
     {
@@ -148,10 +161,21 @@ int CcNode::TransferLeader()
     std::shared_lock<std::shared_mutex> config_lk(config_mux_);
     if (node_idx_ > 0 && node_->is_leader())
     {
-        butil::EndPoint addr;
+        braft::PeerId first_peer;
         // ng_ips[0]/ng_ports[0] stores the addr of the preferred leader.
-        butil::str2endpoint(ng_ips_.at(0).c_str(), ng_ports_.at(0), &addr);
-        braft::PeerId first_peer(addr, 0);
+        if (0 != butil::str2ip(ng_ips_.at(0).c_str(), &first_peer.addr.ip))
+        {
+            // for case `ng_ips_` is hostname format.
+            first_peer.type_ = braft::PeerId::Type::HostName;
+            first_peer.hostname_addr.hostname = ng_ips_.at(0);
+            first_peer.hostname_addr.port = ng_ports_.at(0);
+        }
+        else
+        {
+            butil::str2endpoint(
+                ng_ips_.at(0).c_str(), ng_ports_.at(0), &first_peer.addr);
+        }
+        first_peer.idx = 0;
 
         int err = node_->transfer_leadership_to(first_peer);
 
@@ -301,15 +325,40 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
         }
 
         brpc::Channel channel;
-        if (channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        butil::EndPoint addr;
+        butil::ip_t ip_t;
+        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
         {
-            // Fails to establish the channel to the tx node. Silently
-            // returns. The tx will be recovered again by next
-            // conflicting tx.
-            LOG(ERROR) << "Fail to init the channel to the leader of ng#"
-                       << leader_ng_id << " for tx lock recovery.";
-            continue;
+            // for case `node_ip` is hostname format
+            std::string naming_service_url;
+            braft::HostNameAddr hostname_addr(node_ip,
+                                              GET_CCNODE_RPC_PORT(node_port));
+            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+            if (channel.Init(naming_service_url.c_str(),
+                             braft::LOAD_BALANCER_NAME,
+                             nullptr) != 0)
+            {
+                // Fails to establish the channel to the tx node. Silently
+                // returns. The tx will be recovered again by next
+                // conflicting tx.
+                LOG(ERROR) << "Fail to init the channel to the leader of ng#"
+                           << leader_ng_id << " for tx lock recovery.";
+                continue;
+            }
+        }
+        else
+        {
+            if (channel.Init(node_ip.c_str(),
+                             GET_CCNODE_RPC_PORT(node_port),
+                             nullptr) != 0)
+            {
+                // Fails to establish the channel to the tx node. Silently
+                // returns. The tx will be recovered again by next
+                // conflicting tx.
+                LOG(ERROR) << "Fail to init the channel to the leader of ng#"
+                           << leader_ng_id << " for tx lock recovery.";
+                continue;
+            }
         }
 
         remote::CcRpcService_Stub stub(&channel);
@@ -323,8 +372,8 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
         cntl.set_timeout_ms(100);
         stub.NotifyNewLeaderStart(&cntl, &req, &res, nullptr);
 
-        // Retry is not needed at here, the remote nodes will also refresh their
-        // leader caches passively.
+        // Retry is not needed at here, the remote nodes will also
+        // refresh their leader caches passively.
         if (cntl.Failed())
         {
             LOG(ERROR) << "Fail the NotifyNewLeaderStart RPC of ng#"

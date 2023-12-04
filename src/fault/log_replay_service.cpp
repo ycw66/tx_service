@@ -840,6 +840,7 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
     {
         std::string tx_ip;
         uint16_t tx_port;
+        butil::ip_t ip_t;
         Sharder::Instance().GetNodeAddress(tx_leader, tx_ip, tx_port);
         if (tx_ip.empty())
         {
@@ -850,15 +851,37 @@ void ReplayService::ProcessRecoverTxTask(RecoverTxTask &task)
         else
         {
             brpc::Channel channel;
-            if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+            if (0 != butil::str2ip(tx_ip.c_str(), &ip_t))
             {
-                // Fails to establish the channel to the tx node.
-                // Silently returns. The tx will be recovered again
-                // by next conflicting tx.
-                LOG(ERROR) << "Fail to init the channel to the "
-                              "leader of ng#"
-                           << tx_ng << " for tx lock recovery.";
-                return;
+                // for case `tx_ip` is hostname format
+                std::string naming_service_url;
+                braft::HostNameAddr hostname_addr(tx_ip, tx_port + 1);
+                braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+                if (channel.Init(naming_service_url.c_str(),
+                                 braft::LOAD_BALANCER_NAME,
+                                 nullptr) != 0)
+                {
+                    // Fails to establish the channel to the tx node.
+                    // Silently returns. The tx will be recovered again
+                    // by next conflicting tx.
+                    LOG(ERROR) << "Fail to init the channel to the "
+                                  "leader of ng#"
+                               << tx_ng << " for tx lock recovery.";
+                    return;
+                }
+            }
+            else
+            {
+                if (channel.Init(tx_ip.c_str(), tx_port + 1, nullptr) != 0)
+                {
+                    // Fails to establish the channel to the tx node.
+                    // Silently returns. The tx will be recovered again
+                    // by next conflicting tx.
+                    LOG(ERROR) << "Fail to init the channel to the "
+                                  "leader of ng#"
+                               << tx_ng << " for tx lock recovery.";
+                    return;
+                }
             }
 
             remote::CcRpcService_Stub stub(&channel);
@@ -971,15 +994,38 @@ void ReplayService::RequestLeaderTransfer()
             return;
         }
         brpc::Channel channel;
-        if (channel.Init(leader_ip.c_str(), leader_port + 1, nullptr) != 0)
+        butil::ip_t ip_t;
+        if (0 != butil::str2ip(leader_ip.c_str(), &ip_t))
         {
-            // Fails to establish the channel to the leader. Silently returns.
-            // LeaderTransfer will be retried if this node is still not
-            // preferred group leader.
-            LOG(ERROR) << "Fail to init the channel to the "
-                          "leader of ng#"
-                       << node_id << " for leader transfer.";
-            return;
+            // for case `leader_ip` is hostname format
+            std::string naming_service_url;
+            braft::HostNameAddr hostname_addr(leader_ip, leader_port + 1);
+            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+            if (channel.Init(naming_service_url.c_str(),
+                             braft::LOAD_BALANCER_NAME,
+                             nullptr) != 0)
+            {
+                // Fails to establish the channel to the leader. Silently
+                // returns. LeaderTransfer will be retried if this node is still
+                // not preferred group leader.
+                LOG(ERROR) << "Fail to init the channel to the "
+                              "leader of ng#"
+                           << node_id << " for leader transfer.";
+                return;
+            }
+        }
+        else
+        {
+            if (channel.Init(leader_ip.c_str(), leader_port + 1, nullptr) != 0)
+            {
+                // Fails to establish the channel to the leader. Silently
+                // returns. LeaderTransfer will be retried if this node is still
+                // not preferred group leader.
+                LOG(ERROR) << "Fail to init the channel to the "
+                              "leader of ng#"
+                           << node_id << " for leader transfer.";
+                return;
+            }
         }
 
         remote::CcRpcService_Stub stub(&channel);

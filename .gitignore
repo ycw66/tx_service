@@ -358,3 +358,5 @@ mono_metrics
 # Emacs
 compile_commands.json
 .dir-locals.el
+
+cmake-build-debug/

@@ -91,15 +91,35 @@ uint64_t TxStartTsCollector::CollectMinTxStartTs()
         Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
 
         brpc::Channel channel;
-        if (channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        butil::ip_t ip_t;
+        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
         {
-            LOG(ERROR) << "Fail to init the channel to the node("
-                       << dest_node_id << ") .";
-
-            continue;
+            // for case `node_ip` is hostname format
+            std::string naming_service_url;
+            braft::HostNameAddr hostname_addr(node_ip,
+                                              GET_CCNODE_RPC_PORT(node_port));
+            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+            if (channel.Init(naming_service_url.c_str(),
+                             braft::LOAD_BALANCER_NAME,
+                             nullptr) != 0)
+            {
+                LOG(ERROR) << "Fail to init the channel to the node("
+                           << dest_node_id << ") .";
+                continue;
+            }
         }
+        else
+        {
+            if (channel.Init(node_ip.c_str(),
+                             GET_CCNODE_RPC_PORT(node_port),
+                             nullptr) != 0)
+            {
+                LOG(ERROR) << "Fail to init the channel to the node("
+                           << dest_node_id << ") .";
 
+                continue;
+            }
+        }
         remote::CcRpcService_Stub stub(&channel);
         remote::GetMinTxStartTsRequest req;
         req.set_ng_id(ng_id);
