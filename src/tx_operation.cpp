@@ -429,22 +429,30 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
     size_t res_idx = 0;
     for (WriteSetEntry *write_entry : acquire_write_entries_)
     {
-        const AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
-        const CcEntryAddr &addr = acquire_key_res.cce_addr_;
+        AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
+        CcEntryAddr &addr = acquire_key_res.cce_addr_;
 
         int64_t term = addr.Term();
         if (term < 0)
         {
-            DLOG(INFO) << "txm fails to acquire write lock and term < 0, txn: "
+            DLOG(INFO) << "txm fails to acquire write lock due to node crash "
+                          "or leader change, txn: "
                        << txm->TxNumber();
             write_entry->cce_addr_.SetCce(0, -1, 0);
             continue;
         }
         else if (acquire_key_res.commit_ts_ == 0)
         {
-            write_entry->cce_addr_.SetCce(0, -1, 0);
-            DLOG(INFO) << "txm fails to acquire write lock, txn: "
+            DLOG(INFO) << "txm fails to acquire write lock due to network "
+                          "partition or deadlock, txn: "
                        << txm->TxNumber();
+            // This branch is for acquiring write lock fails. We need to set
+            // term to -1 in wset because we do not want to do
+            // CcHandler::PostWrite() on this entry, also set term in
+            // AcquireKeyResult because we want to update acquire_write_cnt
+            // during TransactionExecution::Abort().
+            write_entry->cce_addr_.SetCce(0, -1, 0);
+            addr.SetTerm(-1);
             continue;
         }
         else
