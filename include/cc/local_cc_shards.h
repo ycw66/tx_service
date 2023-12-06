@@ -481,7 +481,7 @@ public:
     void InitTableRanges(const TableName &range_table_name,
                          std::vector<InitRangeEntry> &init_ranges,
                          const NodeGroupId ng_id,
-                         bool fully_cached = false);
+                         bool empty_table = false);
 
     /**
      * @brief Get the All Table Ranges for a table.

@@ -475,8 +475,7 @@ public:
                             nullptr, init_partition_id, req.CommitTs());
                         shard_->InitTableRanges(index_range_table_name,
                                                 range_init_vec,
-                                                req.NodeGroupId(),
-                                                true);
+                                                req.NodeGroupId());
                     }
                     shard_->InitTableStatistics(
                         catalog_entry->dirty_schema_.get(), cc_ng_id_);

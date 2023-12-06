@@ -609,7 +609,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
 void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                     std::vector<InitRangeEntry> &init_ranges,
                                     NodeGroupId ng_id,
-                                    bool fully_cached)
+                                    bool empty_table)
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -681,6 +681,13 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                   nullptr,
                                   last_range_entry.version_ts_,
                                   last_range_entry.partition_id_);
+    if (empty_table)
+    {
+        assert(init_ranges.size() == 1);
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> slices;
+        slices.emplace_back(nullptr, 0);
+        res.first->second.InitRangeSlices(std::move(slices), ng_id, true);
+    }
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
 

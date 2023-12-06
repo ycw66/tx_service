@@ -392,7 +392,8 @@ public:
     }
 
     void InitRangeSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
-                         NodeGroupId ng_id)
+                         NodeGroupId ng_id,
+                         bool fully_cached = false)
     {
         auto range_slices = std::make_unique<StoreRange>(
             range_info_->StartKey(),
@@ -400,7 +401,7 @@ public:
             range_info_->PartitionId(),
             ng_id,
             *Sharder::Instance().GetLocalCcShards());
-        range_slices->InitSlices(std::move(slices));
+        range_slices->InitSlices(std::move(slices), fully_cached);
         range_slices_ = std::move(range_slices);
     }
 
