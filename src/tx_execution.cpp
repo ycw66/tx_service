@@ -60,8 +60,13 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 #endif
       scan_open_(this),
       scan_next_(this),
+#ifdef RANGE_PARTITION_ENABLED
+      obj_cmd_(this, &lock_range_result_),
+      multi_obj_cmd_(this, &lock_range_result_),
+#else
       obj_cmd_(this),
       multi_obj_cmd_(this),
+#endif
 #ifdef RANGE_PARTITION_ENABLED
       lock_write_ranges_(&lock_range_result_),
 #endif
@@ -828,8 +833,11 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
 void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
 {
     vct_rec_resp_ = &req.tx_result_;
-    multi_obj_cmd_.Reset(
-        req.table_name_, req.VctKey(), req.VctCommand(), req.auto_commit_);
+    multi_obj_cmd_.Reset(req.table_name_,
+                         req.VctKey(),
+                         req.VctCommand(),
+                         &req,
+                         req.auto_commit_);
 
     PushOperation(&multi_obj_cmd_);
     Process(multi_obj_cmd_);
@@ -5102,19 +5110,18 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     uint32_t key_shard_code = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
-    if (obj_cmd_op.lock_range_result_.IsFinished())
+    if (lock_range_result_.IsFinished())
     {
         // If there is an error when getting the key's range ID, the error would
         // be caught when forwarding the operation, which forces the tx state
         // machine to move to post-processing of the operation and returns an
         // error to the ObjectCommandTxRequest.
-        assert(!obj_cmd_op.lock_range_result_.IsError());
+        assert(!lock_range_result_.IsError());
 
         // Uses the lower 10 bits of the key's hash code to shard the
         // key across CPU cores in a cc node.
         uint32_t residual = key.Hash() & 0x3FF;
-        NodeGroupId range_ng =
-            obj_cmd_op.range_rec_.GetRangeOwnerNg()->BucketOwner();
+        NodeGroupId range_ng = range_rec_.GetRangeOwnerNg()->BucketOwner();
         key_shard_code = range_ng << 10 | residual;
     }
     else
@@ -5123,13 +5130,13 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         // First read and lock the range the key located in through
         // lock_range_op_.
         lock_range_op_.Reset();
-        obj_cmd_op.lock_range_result_.Reset();
+        lock_range_result_.Reset();
 
         lock_range_op_.key_ = &key;
         lock_range_op_.table_name_ = TableName(
             obj_cmd_op.table_name_->StringView(), TableType::RangePartition);
-        lock_range_op_.rec_ = &obj_cmd_op.range_rec_;
-        lock_range_op_.hd_result_ = &obj_cmd_op.lock_range_result_;
+        lock_range_op_.rec_ = &range_rec_;
+        lock_range_op_.hd_result_ = &lock_range_result_;
 
         // Control flow jumps to lock_range_op_, do not execute further
         // after `Process(lock_range_op_)` returns.
@@ -5233,26 +5240,34 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WritLog.
 
-        LockType lock_acquired = cmd_result.lock_acquired_;
-        if (lock_acquired == LockType::WriteLock)
+        if (obj_cmd_op.cmd_tx_req_->read_type_ != ReadType::Inside)
         {
-            LOG(INFO) << "txm acquired writelock";
-            // The command modifies the object. Put it into the command set
-            // for writing log and post-processing.
-            rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
-                                     cmd_result.cce_addr_,
-                                     cmd_result.commit_ts_,
-                                     obj_cmd_op.key_,
-                                     obj_cmd_op.command_);
-        }
-        else if (lock_acquired != LockType::NoLock)
-        {
-            LOG(INFO) << "txm acquired readlock";
-            // Read lock is acquired under locking protocol. Add the cce to
-            // read set for later PostRead.
-            rw_set_.AddRead(cmd_result.cce_addr_,
-                            cmd_result.commit_ts_,
-                            obj_cmd_op.table_name_);
+            LockType lock_acquired = cmd_result.lock_acquired_;
+            if (lock_acquired == LockType::WriteLock)
+            {
+                LOG(INFO) << "txm acquired writelock";
+                // The command modifies the object. Put it into the command set
+                // for writing log and post-processing.
+                rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
+                                         cmd_result.cce_addr_,
+                                         cmd_result.commit_ts_,
+                                         obj_cmd_op.key_,
+                                         obj_cmd_op.command_);
+            }
+            else if (lock_acquired != LockType::NoLock)
+            {
+                LOG(INFO) << "txm acquired readlock";
+                // Read lock is acquired under locking protocol. Add the cce to
+                // read set for later PostRead.
+                bool b = rw_set_.AddRead(cmd_result.cce_addr_,
+                                         cmd_result.commit_ts_,
+                                         obj_cmd_op.table_name_);
+                if (!b && iso_level_ == IsolationLevel::RepeatableRead)
+                {
+                    Abort();
+                    return;
+                }
+            }
         }
 
         if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
@@ -5277,62 +5292,96 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 
 void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 {
-    obj_cmd_op.is_running_ = true;
 #ifdef RANGE_PARTITION_ENABLED
-    if (!obj_cmd_op.is_range_locked_)
+    while (obj_cmd_op.range_lock_cur_ < obj_cmd_op.vct_key_->size())
     {
         obj_cmd_op.is_running_ = false;
-        lock_batch_read_ranges_.Reset(*obj_cmd_op.vct_key_,
-                                      obj_cmd_op.vct_hd_result_,
-                                      obj_cmd_op.vct_key_shard_code_,
-                                      obj_cmd_op.range_table_name_,
-                                      obj_cmd_op.atm_err_code_);
+        lock_range_result_.Value().Reset();
+        lock_range_result_.Reset();
 
-        obj_cmd_op.is_range_locked_ = true;
-        PushOperation(&lock_batch_read_ranges_);
-        Process(lock_batch_read_ranges_);
+        lock_range_op_.Reset(
+            TableName(obj_cmd_op.table_name_->StringView(),
+                      TableType::RangePartition),
+            obj_cmd_op.vct_key_->at(obj_cmd_op.range_lock_cur_),
+            &range_rec_,
+            &lock_range_result_);
+        PushOperation(&lock_range_op_);
+        Process(lock_range_op_);
         return;
     }
 #endif
 
+    obj_cmd_op.is_running_ = true;
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
     bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-    bool first_time = (obj_cmd_op.retry_num_ == RETRY_NUM);
+    auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
 
-    for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
+    if (vct_refill.size() > 0)
     {
-        CcHandlerResult<ObjectCommandResult> &hd_res =
-            obj_cmd_op.vct_hd_result_[i];
-        if (!first_time &&
-            hd_res.ErrorCode() != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
-            hd_res.IsFinished())
+        for (size_t i = 0; i < vct_refill.size(); i++)
         {
-            continue;
-        }
+            RefillRec &refill_rec = vct_refill[i];
+            CcHandlerResult<ObjectCommandResult> &hd_res =
+                obj_cmd_op.vct_hd_result_[i];
 
-        const TxKey &key = *obj_cmd_op.vct_key_->at(i);
-        uint32_t key_shard_code = 0;
+            const TxKey &key = *obj_cmd_op.vct_key_->at(refill_rec.pos_);
+            uint32_t key_shard_code = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
-        uint32_t residual = key.Hash() & 0x3FF;
-        key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
+            uint32_t residual = key.Hash() & 0x3FF;
+            key_shard_code = obj_cmd_op.vct_key_shard_code_[refill_rec.pos_]
+                                 << 10 |
+                             residual;
 #else
-        key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+            key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+#endif
+            hd_res.Reset();
+
+            cc_handler_->ObjectCommandOutside(
+                refill_rec.ety_addr_,
+                *obj_cmd_op.vct_cmd_->at(refill_rec.pos_),
+                TxNumber(),
+                tx_term_,
+                current_ts,
+                hd_res,
+                iso_level_,
+                protocol_,
+                commit,
+                &refill_rec.rec_,
+                refill_rec.version_,
+                refill_rec.read_type_);
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
+        {
+            auto &hd_res = obj_cmd_op.vct_hd_result_[i];
+
+            const TxKey &key = *obj_cmd_op.vct_key_->at(i);
+            uint32_t key_shard_code = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+            uint32_t residual = key.Hash() & 0x3FF;
+            key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
+#else
+            key_shard_code = Sharder::Instance().ShardCode(key.Hash());
 #endif
 
-        hd_res.Reset();
-        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
-                                   key,
-                                   key_shard_code,
-                                   *obj_cmd_op.vct_cmd_->at(i),
-                                   TxNumber(),
-                                   tx_term_,
-                                   current_ts,
-                                   hd_res,
-                                   iso_level_,
-                                   protocol_,
-                                   commit);
+            hd_res.Reset();
+            cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                                       key,
+                                       key_shard_code,
+                                       *obj_cmd_op.vct_cmd_->at(i),
+                                       TxNumber(),
+                                       tx_term_,
+                                       current_ts,
+                                       hd_res,
+                                       iso_level_,
+                                       protocol_,
+                                       commit);
+        }
     }
 
     StartTiming();
@@ -5353,6 +5402,19 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
+#ifdef RANGE_PARTITION_ENABLED
+    if (lock_range_result_.IsError())
+    {
+        DLOG(ERROR) << "MultiObjectCommandOp failed when acquire range locks. "
+                       "Error code: "
+                    << static_cast<int>(lock_range_result_.ErrorCode());
+        vct_rec_resp_->FinishError(
+            ConvertCcError(lock_range_result_.ErrorCode()));
+        vct_rec_resp_ = nullptr;
+        return;
+    }
+#endif
+
     CcErrorCode err = obj_cmd_op.atm_err_code_.load(std::memory_order_relaxed);
     if (err != CcErrorCode::NO_ERROR)
     {
@@ -5371,47 +5433,70 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         // into write set.
         bool directly_commit =
             obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-        bool readonly = true;
+        bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
-        vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
+        auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
 
-        for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
+        if (vct_refill.size() > 0)
         {
-            const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
-            RecordStatus obj_status = cmd_res.rec_status_;
-            vct_rec.push_back(obj_status);
-            const TxKey *key = obj_cmd_op.vct_key_->at(i);
-            const TxCommand *cmd = obj_cmd_op.vct_cmd_->at(i);
-
-            // For autocommit read-modify-write commands, the
-            // ObjectCommandTxRequest sender will be notified after auto commit
-            // succeeds, i.e. after PostProcess or WritLog.
-
-            LockType lock_acquired = cmd_res.lock_acquired_;
-            if (lock_acquired == LockType::ReadLock)
+            vct_rec = obj_cmd_op.tx_req_->Result();
+            for (size_t i = 0; i < vct_refill.size(); i++)
             {
-                LOG(INFO) << "txm acquired readlock";
-                // Read lock is acquired under locking protocol. Add the cce to
-                // read set for later PostRead.
-                rw_set_.AddRead(cmd_res.cce_addr_,
-                                cmd_res.commit_ts_,
-                                obj_cmd_op.table_name_);
+                RefillRec &refill_rec = vct_refill[i];
+                const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
+                vct_rec[refill_rec.pos_] = cmd_res.rec_status_;
             }
-            else if (lock_acquired == LockType::WriteLock)
-            {
-                LOG(INFO) << "txm acquired writelock";
-                // The command modifies the object. Put it into the command set
-                // for writing log and post-processing.
-                rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
-                                         cmd_res.cce_addr_,
-                                         cmd_res.commit_ts_,
-                                         key,
-                                         cmd);
-            }
+        }
+        else
+        {
+            vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
+            auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
+            vct_refill.reserve(obj_cmd_op.vct_hd_result_.size());
 
-            if (!cmd->IsReadOnly())
+            for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
             {
-                readonly = false;
+                const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
+                RecordStatus obj_status = cmd_res.rec_status_;
+                vct_rec.push_back(obj_status);
+                const TxKey *key = obj_cmd_op.vct_key_->at(i);
+                const TxCommand *cmd = obj_cmd_op.vct_cmd_->at(i);
+
+                // For autocommit read-modify-write commands, the
+                // ObjectCommandTxRequest sender will be notified after auto
+                // commit succeeds, i.e. after PostProcess or WritLog.
+
+                LockType lock_acquired = cmd_res.lock_acquired_;
+                if (lock_acquired == LockType::WriteLock)
+                {
+                    LOG(INFO) << "txm acquired writelock";
+                    // The command modifies the object. Put it into the command
+                    // set for writing log and post-processing.
+                    rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
+                                             cmd_res.cce_addr_,
+                                             cmd_res.commit_ts_,
+                                             key,
+                                             cmd);
+                }
+                else if (lock_acquired != LockType::NoLock)
+                {
+                    LOG(INFO)
+                        << "txm acquired readlock, ReadIntent or WriteIntent";
+                    // Read lock is acquired under locking protocol. Add the cce
+                    // to read set for later PostRead.
+                    bool b = rw_set_.AddRead(cmd_res.cce_addr_,
+                                             cmd_res.commit_ts_,
+                                             obj_cmd_op.table_name_);
+                    if (!b && iso_level_ == IsolationLevel::RepeatableRead)
+                    {
+                        Abort();
+                        return;
+                    }
+                }
+
+                if (obj_status == RecordStatus::Unknown)
+                {
+                    vct_refill.emplace_back(i, cmd_res.cce_addr_);
+                }
             }
         }
 

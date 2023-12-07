@@ -4933,11 +4933,13 @@ void AnalyzeTableAllOp::Forward(TransactionExecution *txm)
     }
 }
 
-ObjectCommandOp::ObjectCommandOp(TransactionExecution *txm)
+ObjectCommandOp::ObjectCommandOp(
+    TransactionExecution *txm,
+    CcHandlerResult<ReadKeyResult> *lock_range_result)
     : hd_result_(txm)
 #ifdef RANGE_PARTITION_ENABLED
       ,
-      lock_range_result_(txm)
+      lock_range_result_(lock_range_result)
 #endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
@@ -4956,6 +4958,10 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
     cmd_tx_req_ = req;
+#ifdef RANGE_PARTITION_ENABLED
+    lock_range_result_->Value().Reset();
+    lock_range_result_->Reset();
+#endif
 }
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
@@ -4964,12 +4970,12 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     {
 #ifdef RANGE_PARTITION_ENABLED
         // Just returned from LockReadRangeOp, check lock_range_result_.
-        assert(lock_range_result_.IsFinished());
-        if (lock_range_result_.IsError())
+        assert(lock_range_result_->IsFinished());
+        if (lock_range_result_->IsError())
         {
             // There is an error when getting the input key's range. The
             // read operation is set to be errored.
-            hd_result_.SetError(lock_range_result_.ErrorCode());
+            hd_result_.SetError(lock_range_result_->ErrorCode());
 
             bool force_error = hd_result_.ForceError();
             assert(force_error);
@@ -5038,20 +5044,29 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     }
 }
 
-MultiObjectCommandOp::MultiObjectCommandOp(TransactionExecution *txm)
+MultiObjectCommandOp::MultiObjectCommandOp(
+    TransactionExecution *txm,
+    CcHandlerResult<ReadKeyResult> *lock_range_result)
     : txm_(txm)
+#ifdef RANGE_PARTITION_ENABLED
+      ,
+      lock_range_result_(lock_range_result)
+#endif
 {
 }
 
 void MultiObjectCommandOp::Reset(const TableName *table_name,
                                  const std::vector<const TxKey *> *vct_key,
                                  const std::vector<TxCommand *> *vct_cmd,
+                                 MultiObjectCommandTxRequest *tx_req,
                                  bool auto_commit)
 {
     table_name_ = table_name;
     vct_key_ = vct_key;
     vct_cmd_ = vct_cmd;
-    size_t len = vct_key->size();
+    tx_req_ = tx_req;
+    auto &vct_refill = tx_req_->vct_refill_;
+    size_t len = (vct_refill.size() == 0 ? vct_key->size() : vct_refill.size());
     size_t min_len = std::min(len, vct_hd_result_.size());
 
     for (size_t i = 0; i < min_len; i++)
@@ -5078,15 +5093,7 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
             hr.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
             {
                 CcErrorCode err = res->ErrorCode();
-                if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-                {
-                    if (atm_err_code_.load(std::memory_order_relaxed) !=
-                        CcErrorCode::NO_ERROR)
-                    {
-                        atm_err_code_.store(err, std::memory_order_relaxed);
-                    }
-                }
-                else if (err == CcErrorCode::NO_ERROR)
+                if (err == CcErrorCode::NO_ERROR)
                 {
                     atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
                 }
@@ -5106,10 +5113,10 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
     auto_commit_ = auto_commit;
 
 #ifdef RANGE_PARTITION_ENABLED
-    is_range_locked = false;
-    range_table_name_ =
-        TableName(tab_name_->StringView(), TableType::RangePartition);
-    vct_key_shard_code_.resize(sz);
+    vct_key_shard_code_.resize(vct_key->size());
+    range_lock_cur_ = 0;
+    lock_range_result_->Value().Reset();
+    lock_range_result_->Reset();
 #endif
 }
 
@@ -5118,30 +5125,67 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     if (!is_running_)
     {
 #ifdef RANGE_PARTITION_ENABLED
-        if (atm_err_code_.load(std::memory_order_relaxed) !=
-            CcErrorCode::NO_ERROR)
+        assert(lock_range_result_->IsFinished());
+        if (lock_range_result_->IsError())
         {
             txm->PostProcess(*this);
-            return;
         }
-#endif
+        else if (!txm->CheckLeaderTerm())
+        {
+            // If the current node is not the leader of the node group, the
+            // range and bucket info returned by the lock-range request should
+            // not be accessed. Hence, the lock range result is reset to be
+            // errored.
+            lock_range_result_->Reset();
+            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            txm->PostProcess(*this);
+        }
+        else if (range_lock_cur_ < vct_key_->size())
+        {
+            // A range has been locked. Assigns the range's node group to all
+            // keys belonging to this range.
+            const RangeRecord *range_rec =
+                static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
+            const TxKey *range_end_key = range_rec->end_key_;
+            uint32_t key_shard = range_rec->GetRangeOwnerNg()->BucketOwner();
+
+            auto cmp = [](const TxKey *start_key, const TxKey *end_key)
+            {
+                if (end_key == nullptr ||
+                    end_key->Type() == KeyType::PositiveInf)
+                {
+                    return true;
+                }
+                else
+                {
+                    return *start_key < *end_key;
+                }
+            };
+
+            for (; range_lock_cur_ < vct_key_->size() &&
+                   cmp(vct_key_->at(range_lock_cur_), range_end_key);
+                 ++range_lock_cur_)
+            {
+                vct_key_shard_code_[range_lock_cur_] = key_shard;
+            }
+
+            txm->Process(*this);
+        }
+        else
+        {
+            // Range locks have been acquired and go to next step
+            txm->Process(*this);
+        }
+#else
         txm->Process(*this);
+#endif
         return;
     }
 
-    CcErrorCode err = atm_err_code_.load(std::memory_order_relaxed);
-    if (err != CcErrorCode::NO_ERROR ||
+    if (atm_err_code_.load(std::memory_order_relaxed) !=
+            CcErrorCode::NO_ERROR ||
         atm_cnt_.load(std::memory_order_relaxed) == 0)
     {
-        if (err == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-        {
-            if (retry_num_ > 0)
-            {
-                ReRunOp(txm);
-                return;
-            }
-        }
-
         txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
