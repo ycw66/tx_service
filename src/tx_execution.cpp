@@ -5240,34 +5240,37 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WritLog.
 
-        if (obj_cmd_op.cmd_tx_req_->read_type_ != ReadType::Inside)
+        LockType lock_acquired = cmd_result.lock_acquired_;
+        if (lock_acquired == LockType::WriteLock)
         {
-            LockType lock_acquired = cmd_result.lock_acquired_;
-            if (lock_acquired == LockType::WriteLock)
-            {
-                LOG(INFO) << "txm acquired writelock";
-                // The command modifies the object. Put it into the command set
-                // for writing log and post-processing.
-                rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
-                                         cmd_result.cce_addr_,
-                                         cmd_result.commit_ts_,
-                                         obj_cmd_op.key_,
-                                         obj_cmd_op.command_);
-            }
-            else if (lock_acquired != LockType::NoLock)
-            {
-                LOG(INFO) << "txm acquired readlock";
-                // Read lock is acquired under locking protocol. Add the cce to
-                // read set for later PostRead.
-                bool b = rw_set_.AddRead(cmd_result.cce_addr_,
-                                         cmd_result.commit_ts_,
-                                         obj_cmd_op.table_name_);
-                if (!b && iso_level_ == IsolationLevel::RepeatableRead)
-                {
-                    Abort();
-                    return;
-                }
-            }
+            LOG(INFO) << "txm acquired writelock";
+            // The command modifies the object. Put it into the command set
+            // for writing log and post-processing.
+            rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
+                                     cmd_result.cce_addr_,
+                                     cmd_result.commit_ts_,
+                                     obj_cmd_op.key_,
+                                     obj_cmd_op.command_);
+        }
+        else if (lock_acquired != LockType::NoLock)
+        {
+            LOG(INFO) << "txm acquired readlock";
+            // Read lock is acquired under locking protocol. Add the cce to
+            // read set for later PostRead.
+            rw_set_.AddRead(cmd_result.cce_addr_,
+                            cmd_result.commit_ts_,
+                            obj_cmd_op.table_name_);
+        }
+
+        if (obj_status == RecordStatus::Unknown)
+        {
+            // If obj_status == RecordStatus::Unknown, means the object is not
+            // in memory, it will finish this request and rerun it soon. It will
+            // be reload after refill the data read from cassandra.
+            cache_miss_read_cce_addr_ = cmd_result.cce_addr_;
+            rec_resp_->Finish(obj_status);
+            rec_resp_ = nullptr;
+            return;
         }
 
         if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
@@ -5282,10 +5285,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         if (obj_cmd_op.auto_commit_)
         {
             Commit();
-        }
-        else if (obj_status == RecordStatus::Unknown)
-        {
-            cache_miss_read_cce_addr_ = cmd_result.cce_addr_;
         }
     }
 }
@@ -5436,6 +5435,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
         auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
+        bool need_refill = false;
 
         if (vct_refill.size() > 0)
         {
@@ -5483,21 +5483,27 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         << "txm acquired readlock, ReadIntent or WriteIntent";
                     // Read lock is acquired under locking protocol. Add the cce
                     // to read set for later PostRead.
-                    bool b = rw_set_.AddRead(cmd_res.cce_addr_,
-                                             cmd_res.commit_ts_,
-                                             obj_cmd_op.table_name_);
-                    if (!b && iso_level_ == IsolationLevel::RepeatableRead)
-                    {
-                        Abort();
-                        return;
-                    }
+                    rw_set_.AddRead(cmd_res.cce_addr_,
+                                    cmd_res.commit_ts_,
+                                    obj_cmd_op.table_name_);
                 }
 
                 if (obj_status == RecordStatus::Unknown)
                 {
                     vct_refill.emplace_back(i, cmd_res.cce_addr_);
+                    need_refill = true;
                 }
             }
+        }
+
+        if (need_refill)
+        {
+            // If this request has the objects that are not in memory, it will
+            // finish soon, then it will be refill data read from cassandra and
+            // reload again.
+            vct_rec_resp_->Finish(std::move(vct_rec));
+            vct_rec_resp_ = nullptr;
+            return;
         }
 
         if (!obj_cmd_op.auto_commit_ || directly_commit || readonly)
