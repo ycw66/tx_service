@@ -2880,6 +2880,10 @@ void TransactionExecution::Abort()
             }
             acquire_write_cnt -= error_cnt;
         }
+        else if (lock_write_ranges_.lock_range_result_->IsError())
+        {
+            acquire_write_cnt = 0;
+        }
         post_process_.Reset(acquire_write_cnt,
                             rw_set_.ReadSetSize(),
                             rw_set_.CatalogRangeSetSize());
@@ -2904,8 +2908,6 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
         lock_write_ranges.init_ = true;
     }
 
-    // TODO{liunyl}: find in readset? no need to read the range again if
-    // already in rset.
     assert(lock_write_ranges.table_it_ != lock_write_ranges.table_end_);
     assert(lock_write_ranges.write_key_it_ != lock_write_ranges.write_key_end_);
 
@@ -3892,6 +3894,10 @@ void TransactionExecution::PostProcess(UpdateTxnStatus &update_txn)
             }
         }
         acquire_write_cnt -= error_cnt;
+    }
+    else if (lock_write_ranges_.lock_range_result_->IsError())
+    {
+        acquire_write_cnt = 0;
     }
 
     TxnStatus status = TxStatus();

@@ -1075,6 +1075,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
+            txm->index_op_->catalog_rec_.Reset();
             LocalCcShards *local_cc_shards =
                 Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> lk(
@@ -1107,9 +1108,10 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     // 2. Reset SchemaOp
     table_key_.Name() = TableName(
         table_name_str.data(), table_name_str.size(), TableType::Primary);
+    catalog_rec_.Reset();
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
-    catalog_rec_.ClearDirtySchema();
+
     image_str_ = current_image;
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = curr_schema_ts;
@@ -1699,6 +1701,86 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
     return true;
 }
 
+void UpsertTableIndexOp::UploadRecord(TxNumber tx_number,
+                                      int64_t tx_term,
+                                      uint16_t command_id,
+                                      uint64_t commit_ts,
+                                      const TableName &table_name,
+                                      const TxKey *key,
+                                      const TxRecord *record,
+                                      OperationType operation_type,
+                                      uint32_t key_shard_code,
+                                      CcHandlerResult<PostProcessResult> &hres,
+                                      int64_t expected_term)
+{
+    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    uint32_t local_node_id = Sharder::Instance().NodeId();
+
+    if (dest_node_id == local_node_id)
+    {
+        PostWriteCc *req = upload_pool_.NextRequest();
+        req->Reset(key,
+                   table_name,
+                   ng_id,
+                   tx_number,
+                   commit_ts,
+                   record,
+                   operation_type,
+                   key_shard_code,
+                   &hres,
+                   (operation_type == OperationType::Insert),
+                   expected_term);
+
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(key_shard_code,
+                                                                 req);
+    }
+    else
+    {
+        hres.Value().is_local_ = false;
+        hres.IncrementRemoteRef();
+
+        remote::CcMessage send_msg;
+
+        send_msg.set_type(remote::CcMessage::MessageType::
+                              CcMessage_MessageType_ForwardPostCommitRequest);
+        send_msg.set_tx_number(tx_number);
+        send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+        send_msg.set_tx_term(tx_term);
+        send_msg.set_command_id(command_id);
+
+        remote::ForwardPostCommitRequest *post_commit =
+            send_msg.mutable_forward_post_commit_req();
+        post_commit->set_src_node_id(local_node_id);
+        uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
+        post_commit->set_node_group_id(ng_id);
+        post_commit->set_node_group_term(expected_term);
+        key->Serialize(*post_commit->mutable_key());
+        post_commit->set_table_name_str(table_name.String());
+        post_commit->set_table_type(
+            remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        post_commit->clear_record();
+        if (commit_ts > 0 && operation_type != OperationType::Delete)
+        {
+            // The commit ts is 0, if the post-write request is used to clear
+            // the write lock when the tx aborts.
+            if (record != nullptr)
+            {
+                record->Serialize(*post_commit->mutable_record());
+            }
+        }
+
+        post_commit->set_commit_ts(commit_ts);
+        post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
+        post_commit->set_key_shard_code(key_shard_code);
+
+        auto *stream_sender = Sharder::Instance().GetCcStreamSender();
+        stream_sender->SendMessageToNg(ng_id, send_msg, &hres);
+    }
+}
+
 void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
                                       ReadWriteSet &rw_set)
 {
@@ -1741,18 +1823,17 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
                 int64_t expected_term = expected_ng_terms.at(ng_id);
                 assert(expected_term > 0);
 
-                txm->cc_handler_->UploadRecord(
-                    txm->tx_number_.load(std::memory_order_relaxed),
-                    txm->tx_term_,
-                    txm->command_id_.load(std::memory_order_relaxed),
-                    txm->commit_ts_,
-                    table_name,
-                    key,
-                    write_entry.rec_.get(),
-                    write_entry.op_,
-                    write_entry.key_shard_code_,
-                    post_write_result_,
-                    expected_term);
+                UploadRecord(txm->tx_number_.load(std::memory_order_relaxed),
+                             txm->tx_term_,
+                             txm->command_id_.load(std::memory_order_relaxed),
+                             txm->commit_ts_,
+                             table_name,
+                             key,
+                             write_entry.rec_.get(),
+                             write_entry.op_,
+                             write_entry.key_shard_code_,
+                             post_write_result_,
+                             expected_term);
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Double write if the target range is splitting.
@@ -1766,7 +1847,7 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
                         expected_ng_terms.at(forward_ng_id);
                     assert(forward_expected_term > 0);
 
-                    txm->cc_handler_->UploadRecord(
+                    UploadRecord(
                         txm->tx_number_.load(std::memory_order_relaxed),
                         txm->tx_term_,
                         txm->command_id_.load(std::memory_order_relaxed),

@@ -5,6 +5,7 @@
 #include <cassert>
 
 #include "cc/cc_shard.h"
+#include "error_messages.h"
 
 namespace txservice
 {
@@ -508,14 +509,14 @@ std::vector<TxNumber> NonBlockingLock::GetBlockTxIds(TxNumber exclude_id)
     return vct;
 }
 
-void NonBlockingLock::AbortQueueRequest(TxNumber txid)
+void NonBlockingLock::AbortQueueRequest(TxNumber txid, CcErrorCode err)
 {
     for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)
     {
         const LockQueueEntry &ety = blocking_queue_.Get(i);
         if (ety.req_->Txn() == txid)
         {
-            ety.req_->AbortCcRequest(CcErrorCode::DEAD_LOCK_ABORT);
+            ety.req_->AbortCcRequest(err);
             blocking_queue_.Erase(i);
             i--;
         }

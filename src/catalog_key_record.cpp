@@ -345,6 +345,15 @@ void CatalogRecord::ClearDirtySchema()
     dirty_schema_ = nullptr;
 }
 
+void CatalogRecord::Reset()
+{
+    schema_ = nullptr;
+    dirty_schema_ = nullptr;
+    schema_ts_ = 0;
+    schema_image_.clear();
+    dirty_schema_image_.clear();
+}
+
 uint64_t CatalogRecord::SchemaTs() const
 {
     return schema_ts_;

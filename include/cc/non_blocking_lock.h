@@ -10,6 +10,7 @@
 #include "cc_protocol.h"
 #include "cc_req_base.h"
 #include "circular_queue.h"
+#include "error_messages.h"
 #include "tx_id.h"
 #include "type.h"
 
@@ -236,7 +237,8 @@ public:
         return debug_string;
     }
     std::vector<TxNumber> GetBlockTxIds(TxNumber exclude_id);
-    void AbortQueueRequest(TxNumber txid);
+    void AbortQueueRequest(TxNumber txid,
+                           CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
     bool FindQueueRequest(TxNumber txid);
 
 private:

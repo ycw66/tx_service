@@ -338,9 +338,40 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
 {
     if (hd_result_->IsFinished())
     {
-        // Pop out this LockRangeOperation from the stack and return control to
-        // the caller operation by forwarding the transaction state machine.
-        txm->PostProcess(*this);
+        if (!txm->CheckLeaderTerm())
+        {
+            hd_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            hd_result_->ForceError();
+            txm->PostProcess(*this);
+        }
+        else if (hd_result_->IsError())
+        {
+            assert(hd_result_->ErrorCode() ==
+                   CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
+            // If acquire range read lock blocked by DDL, check if tx has
+            // already acquired other range read lock. If so we need to abort
+            // tx since it might cause dead lock with range split. If this tx
+            // has not acquired any range read lock, we can safely retry here.
+            const auto &rset = txm->rw_set_.ReadSet();
+            for (const auto &[table, tbl_rset] : rset)
+            {
+                if (table.Type() == TableType::RangePartition &&
+                    !tbl_rset.empty())
+                {
+                    // Abort tx.
+                    txm->PostProcess(*this);
+                    return;
+                }
+            }
+            hd_result_->Reset();
+            txm->Process(*this);
+            return;
+        }
+        else
+        {
+            // Read local succeeded
+            txm->PostProcess(*this);
+        }
     }
     else
     {
@@ -594,8 +625,35 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
         {
             lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             lock_range_result_->ForceError();
+            txm->PostProcess(*this);
         }
-        txm->PostProcess(*this);
+        else if (lock_range_result_->IsError())
+        {
+            assert(lock_range_result_->ErrorCode() ==
+                   CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
+            // If acquire range read lock blocked by DDL, check if tx has
+            // already acquired other range read lock. If so we need to abort
+            // tx since it might cause dead lock with range split. If this tx
+            // has not acquired any range read lock, we can safely retry here.
+            const auto &rset = txm->rw_set_.ReadSet();
+            for (const auto &[table, tbl_rset] : rset)
+            {
+                if (table.Type() == TableType::RangePartition &&
+                    !tbl_rset.empty())
+                {
+                    // Abort tx.
+                    txm->PostProcess(*this);
+                    return;
+                }
+            }
+            lock_range_result_->Reset();
+            txm->Process(*this);
+            return;
+        }
+        else
+        {
+            txm->PostProcess(*this);
+        }
     }
 }
 
@@ -2460,6 +2518,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
+            txm->schema_op_->catalog_rec_.Reset();
             std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
             shards->table_schema_op_pool_.emplace_back(
                 std::move(txm->schema_op_));

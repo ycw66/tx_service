@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cc_req_pool.h"
 #include "store/data_store_scanner.h"
 #include "tx_operation.h"
 
@@ -231,6 +232,17 @@ private:
         NodeGroupId ng_id, CcHandlerResult<std::vector<int64_t>> &hd_res);
 
     // Upload sk record from local write set into sk ccmap
+    void UploadRecord(TxNumber tx_number,
+                      int64_t tx_term,
+                      uint16_t command_id,
+                      uint64_t commit_ts,
+                      const TableName &table_name,
+                      const TxKey *key,
+                      const TxRecord *record,
+                      OperationType operation_type,
+                      uint32_t key_shard_code,
+                      CcHandlerResult<PostProcessResult> &hres,
+                      int64_t expected_term);
     void UploadSkData(TransactionExecution *txm, ReadWriteSet &rw_set);
     bool UploadWithoutDataLog(TransactionExecution *upload_txm);
     // Scan pk from data store
@@ -311,6 +323,7 @@ private:
     bool waiting_to_retry_op_{false};
     uint64_t start_waiting_{0};
     uint32_t op_forward_cnt_{0};
+    CcRequestPool<PostWriteCc> upload_pool_;
 };
 
 }  // namespace txservice

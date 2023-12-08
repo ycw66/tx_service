@@ -589,6 +589,7 @@ public:
         }
         else
         {
+            assert(table_name_ != nullptr);
             if (ng_term_ < 0)
             {
                 ng_term_ = cc_ng_term;

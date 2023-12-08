@@ -209,6 +209,7 @@ public:
     const TableSchema *DirtySchema() const;
     std::shared_ptr<const TableSchema> CopyDirtySchema();
     void ClearDirtySchema();
+    void Reset();
     uint64_t SchemaTs() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);

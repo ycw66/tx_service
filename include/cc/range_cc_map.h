@@ -203,179 +203,46 @@ public:
         // is never a read-outside request that brings an individual range into
         // memory for caching.
         assert(req.Type() != ReadType::OutsideNormal);
+        // We directly abort cc request if blocked by write lock. So we should
+        // not have any resumed range read cc.
+        assert(req.CcePtr() == nullptr);
 
         LockType acquired_lock;
         CcErrorCode err_code;
-        bool is_blocked_by_bucket_cce = false, acquired_bucket_lock = false;
-        // If this is a resumed request, check if it was blocked by bucket
-        // record lock acquire or range record lock acquire.
-        if (req.CcePtr() != nullptr)
-        {
-            LruEntry *entry = static_cast<LruEntry *>(req.CcePtr());
-            if (entry->parent_map_->table_name_.Type() ==
-                TableType::RangeBucket)
-            {
-                is_blocked_by_bucket_cce = true;
-            }
-            else
-            {
-                assert(entry->parent_map_ == this);
-            }
-        }
-
         // Rather than looking for an exact match, looks up the floor key
         // that represents the range containing the input key.
         const KeyT *look_key = static_cast<const KeyT *>(req.Key());
         auto it = Floor(*look_key);
         CcEntry<KeyT, RangeRecord> *floor_cce = it->second;
 
-        if (req.CcePtr() != nullptr)
-        {
-            // The request was blocked before. This is execution resumption
-            // after the request is unblocked. The read lock/intention must
-            // have been acquired. But we need to check if the key still falls
-            // in the range that the read lock is acquired on.
-            auto bucket_cce =
-                static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                    floor_cce->payload_->range_owner_rec_);
-            assert(bucket_cce != nullptr);
-            if (is_blocked_by_bucket_cce)
-            {
-                if (req.CcePtr() == bucket_cce)
-                {
-                    std::tie(acquired_lock, err_code) =
-                        LockHandleForResumedRequest(
-                            bucket_cce,
-                            bucket_cce->payload_status_,
-                            &req,
-                            req.NodeGroupId(),
-                            ng_term,
-                            req.TxTerm(),
-                            CcOperation::Read,
-                            IsolationLevel::RepeatableRead,
-                            CcProtocol::Locking,
-                            req.ReadTimestamp(),
-                            false);
-                    assert(acquired_lock == LockType::ReadLock &&
-                           err_code == CcErrorCode::NO_ERROR);
-                    acquired_bucket_lock = true;
-                }
-                else
-                {
-                    // The searching key must has fallen on a different range.
-                    // The new range does not belong to this bucket anymore.
-                    auto prev_bucket_cce = static_cast<
-                        CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                        req.CcePtr());
-                    ReleaseCceLock(prev_bucket_cce->key_lock_ptr_,
-                                   prev_bucket_cce,
-                                   req.Txn(),
-                                   this->cc_ng_id_,
-                                   LockType::ReadLock);
-                    req.SetCcePtr(nullptr);
-                }
-            }
-            else
-            {
-                if (req.CcePtr() == floor_cce)
-                {
-                    // If the searching key is still in the same range, we don't
-                    // need to reacquire the key.
-                    CcOperation cc_op = req.IsForWrite()
-                                            ? CcOperation::ReadForWrite
-                                            : CcOperation::Read;
-                    std::tie(acquired_lock, err_code) =
-                        LockHandleForResumedRequest(floor_cce,
-                                                    floor_cce->payload_status_,
-                                                    &req,
-                                                    req.NodeGroupId(),
-                                                    ng_term,
-                                                    req.TxTerm(),
-                                                    cc_op,
-                                                    req.Isolation(),
-                                                    req.Protocol(),
-                                                    req.ReadTimestamp(),
-                                                    false);
-                    CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
-                    cce_addr.SetCce(reinterpret_cast<uint64_t>(floor_cce),
-                                    ng_term,
-                                    req.NodeGroupId(),
-                                    shard_->LocalCoreId());
-                    RangeRecord *range_rec =
-                        static_cast<RangeRecord *>(req.Record());
-                    range_rec->CopyForReadResult(*(floor_cce->payload_));
-                    hd_result->Value().ts_ = floor_cce->commit_ts_;
-                    hd_result->Value().rec_status_ = RecordStatus::Normal;
-                    hd_result->Value().lock_type_ = acquired_lock;
-                    hd_result->SetFinished();
-                    return true;
-                }
-                else
-                {
-                    // The acquired range lock has expired, key now belongs to a
-                    // different range.
-                    CcEntry<KeyT, RangeRecord> *prev_cce =
-                        static_cast<CcEntry<KeyT, RangeRecord> *>(req.CcePtr());
-                    ReleaseCceLock(prev_cce->key_lock_ptr_,
-                                   prev_cce,
-                                   req.Txn(),
-                                   this->cc_ng_id_,
-                                   LockType::ReadLock);
-                    // Check if the new range is in the same bucket
-                    if (bucket_cce == prev_cce->payload_->range_owner_rec_)
-                    {
-                        req.SetCcePtr(nullptr);
-                        acquired_bucket_lock = true;
-                    }
-                    else
-                    {
-                        // Bucket lock is invalid too, reacquire bucket read
-                        // lock first.
-                        auto prev_bucket_cce = static_cast<
-                            CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                            prev_cce->payload_->range_owner_rec_);
-                        ReleaseCceLock(prev_bucket_cce->key_lock_ptr_,
-                                       prev_bucket_cce,
-                                       req.Txn(),
-                                       this->cc_ng_id_,
-                                       LockType::ReadLock);
-                        req.SetCcePtr(nullptr);
-                        acquired_bucket_lock = false;
-                    }
-                }
-            }
-        }
-
         // When we're acquiring bucket lock and range lock, always acquire
         // bucket lock before range lock to avoid internal dead lock.
-        if (!acquired_bucket_lock)
-        {
-            auto bucket_cce =
-                static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
-                    floor_cce->payload_->range_owner_rec_);
-            assert(bucket_cce != nullptr);
+        auto bucket_cce =
+            static_cast<CcEntry<RangeBucketKey, RangeBucketRecord> *>(
+                floor_cce->payload_->range_owner_rec_);
 
-            // Acquire bucket read lock
-            std::tie(acquired_lock, err_code) =
-                AcquireCceKeyLock(bucket_cce,
-                                  bucket_cce->payload_status_,
-                                  &req,
-                                  req.NodeGroupId(),
-                                  ng_term,
-                                  req.TxTerm(),
-                                  CcOperation::Read,
-                                  IsolationLevel::RepeatableRead,
-                                  CcProtocol::Locking,
-                                  req.ReadTimestamp(),
-                                  false);
-            if (err_code != CcErrorCode::NO_ERROR)
-            {
-                assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
-                // If blocked when locking bucket record, set bucket cce as
-                // cce ptr.
-                req.SetCcePtr(bucket_cce);
-                return false;
-            }
+        assert(bucket_cce != nullptr);
+
+        // Acquire bucket read lock
+        std::tie(acquired_lock, err_code) =
+            AcquireCceKeyLock(bucket_cce,
+                              bucket_cce->payload_status_,
+                              &req,
+                              req.NodeGroupId(),
+                              ng_term,
+                              req.TxTerm(),
+                              CcOperation::Read,
+                              IsolationLevel::RepeatableRead,
+                              CcProtocol::Locking,
+                              req.ReadTimestamp(),
+                              false);
+        if (err_code != CcErrorCode::NO_ERROR)
+        {
+            assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
+            bucket_cce->key_lock_ptr_->AbortQueueRequest(
+                req.Txn(),
+                CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
+            return false;
         }
 
         CcOperation cc_op =
@@ -411,7 +278,15 @@ public:
         else
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
-            req.SetCcePtr(floor_cce);
+            // Release the acquired bucket read lock before aborting.
+            ReleaseCceLock(bucket_cce->key_lock_ptr_,
+                           bucket_cce,
+                           req.Txn(),
+                           this->cc_ng_id_,
+                           LockType::ReadLock);
+            floor_cce->key_lock_ptr_->AbortQueueRequest(
+                req.Txn(),
+                CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
             return false;
         }
 
