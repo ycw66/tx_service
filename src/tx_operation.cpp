@@ -5065,7 +5065,7 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
     vct_key_ = vct_key;
     vct_cmd_ = vct_cmd;
     tx_req_ = tx_req;
-    auto &vct_refill = tx_req_->vct_refill_;
+    auto &vct_refill = tx_req_->vct_backfill_;
     size_t len = (vct_refill.size() == 0 ? vct_key->size() : vct_refill.size());
     size_t min_len = std::min(len, vct_hd_result_.size());
 

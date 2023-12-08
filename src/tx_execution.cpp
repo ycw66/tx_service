@@ -3310,13 +3310,8 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
         }
         else
         {
-#ifdef ON_KEY_OBJECT
             bool needs_write_log =
-                !txservice_skip_redo_log && rw_set_.ObjectCommandSize() > 0;
-#else
-            bool needs_write_log =
-                !txservice_skip_redo_log && rw_set_.WriteSetSize() > 0;
-#endif
+                !txservice_skip_redo_log && rw_set_.NeedsWriteLog();
             if (txlog_ != nullptr && needs_write_log)
             {
 #ifdef ON_KEY_OBJECT
@@ -3490,13 +3485,8 @@ void TransactionExecution::PostProcess(ValidateOperation &validate)
     }
     else
     {
-#ifdef ON_KEY_OBJECT
         bool needs_write_log =
-            !txservice_skip_redo_log && rw_set_.ObjectCommandSize() > 0;
-#else
-        bool needs_write_log =
-            !txservice_skip_redo_log && rw_set_.WriteSetSize() > 0;
-#endif
+            !txservice_skip_redo_log && rw_set_.NeedsWriteLog();
         if (txlog_ != nullptr && needs_write_log)
         {
 #ifdef ON_KEY_OBJECT
@@ -3740,6 +3730,11 @@ void TransactionExecution::FillCommandLogRequest(WriteToLogOp &write_log)
     {
         for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
         {
+            // skip those CmdSetEntry that have no successful commands
+            if (!obj_cmd_entry.HasSuccessfulCommand())
+            {
+                continue;
+            }
             uint32_t ng_id = cce_addr.NodeGroupId();
             auto shard_term_it = shard_terms->find(ng_id);
             if (shard_term_it == shard_terms->end())
@@ -5227,6 +5222,8 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
     {
         const ObjectCommandResult &cmd_result = hd_result.Value();
         RecordStatus obj_status = cmd_result.rec_status_;
+        LockType lock_acquired = cmd_result.lock_acquired_;
+        bool cmd_success = cmd_result.cmd_success_;
         const TxCommand *cmd = obj_cmd_op.command_;
 
         // The command is directly executed and committed on the object if
@@ -5240,17 +5237,18 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // sender will be notified after auto commit succeeds, i.e. after
         // PostProcess or WritLog.
 
-        LockType lock_acquired = cmd_result.lock_acquired_;
         if (lock_acquired == LockType::WriteLock)
         {
             LOG(INFO) << "txm acquired writelock";
             // The command modifies the object. Put it into the command set
-            // for writing log and post-processing.
-            rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
-                                     cmd_result.cce_addr_,
-                                     cmd_result.commit_ts_,
-                                     obj_cmd_op.key_,
-                                     obj_cmd_op.command_);
+            // for writing log and post-processing. If the command fails, only
+            // to release the write lock.
+            rw_set_.AddObjectCommand(
+                *obj_cmd_op.table_name_,
+                cmd_result.cce_addr_,
+                cmd_result.commit_ts_,
+                obj_cmd_op.key_,
+                cmd_success ? obj_cmd_op.command_ : nullptr);
         }
         else if (lock_acquired != LockType::NoLock)
         {
@@ -5314,13 +5312,13 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
     bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-    auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
+    auto &vct_backfill = obj_cmd_op.tx_req_->vct_backfill_;
 
-    if (vct_refill.size() > 0)
+    if (!vct_backfill.empty())
     {
-        for (size_t i = 0; i < vct_refill.size(); i++)
+        for (size_t i = 0; i < vct_backfill.size(); i++)
         {
-            RefillRec &refill_rec = vct_refill[i];
+            BackfillRec &refill_rec = vct_backfill[i];
             CcHandlerResult<ObjectCommandResult> &hd_res =
                 obj_cmd_op.vct_hd_result_[i];
 
@@ -5434,15 +5432,15 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
         bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
-        auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
-        bool need_refill = false;
+        auto &vct_backfill = obj_cmd_op.tx_req_->vct_backfill_;
+        bool need_backfill = false;
 
-        if (vct_refill.size() > 0)
+        if (!vct_backfill.empty())
         {
             vct_rec = obj_cmd_op.tx_req_->Result();
-            for (size_t i = 0; i < vct_refill.size(); i++)
+            for (size_t i = 0; i < vct_backfill.size(); i++)
             {
-                RefillRec &refill_rec = vct_refill[i];
+                BackfillRec &refill_rec = vct_backfill[i];
                 const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
                 vct_rec[refill_rec.pos_] = cmd_res.rec_status_;
             }
@@ -5450,14 +5448,15 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         else
         {
             vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
-            auto &vct_refill = obj_cmd_op.tx_req_->vct_refill_;
-            vct_refill.reserve(obj_cmd_op.vct_hd_result_.size());
+            vct_backfill.reserve(obj_cmd_op.vct_hd_result_.size());
 
             for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
             {
                 const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
                 RecordStatus obj_status = cmd_res.rec_status_;
                 vct_rec.push_back(obj_status);
+                LockType lock_acquired = cmd_res.lock_acquired_;
+                bool cmd_success = cmd_res.cmd_success_;
                 const TxKey *key = obj_cmd_op.vct_key_->at(i);
                 const TxCommand *cmd = obj_cmd_op.vct_cmd_->at(i);
 
@@ -5465,17 +5464,17 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                 // ObjectCommandTxRequest sender will be notified after auto
                 // commit succeeds, i.e. after PostProcess or WritLog.
 
-                LockType lock_acquired = cmd_res.lock_acquired_;
                 if (lock_acquired == LockType::WriteLock)
                 {
                     LOG(INFO) << "txm acquired writelock";
                     // The command modifies the object. Put it into the command
-                    // set for writing log and post-processing.
+                    // set for writing log and post-processing. If the command
+                    // fails, only to release the write lock.
                     rw_set_.AddObjectCommand(*obj_cmd_op.table_name_,
                                              cmd_res.cce_addr_,
                                              cmd_res.commit_ts_,
                                              key,
-                                             cmd);
+                                             cmd_success ? cmd : nullptr);
                 }
                 else if (lock_acquired != LockType::NoLock)
                 {
@@ -5490,13 +5489,13 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                 if (obj_status == RecordStatus::Unknown)
                 {
-                    vct_refill.emplace_back(i, cmd_res.cce_addr_);
-                    need_refill = true;
+                    vct_backfill.emplace_back(i, cmd_res.cce_addr_);
+                    need_backfill = true;
                 }
             }
         }
 
-        if (need_refill)
+        if (need_backfill)
         {
             // If this request has the objects that are not in memory, it will
             // finish soon, then it will be refill data read from cassandra and

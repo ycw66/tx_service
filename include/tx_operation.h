@@ -31,7 +31,7 @@ struct AnalyzeTableTxRequest;
 struct BatchReadTxRequest;
 struct DataMigrationStatus;
 struct ObjectCommandTxRequest;
-struct RefillRec;
+struct BackfillRec;
 struct MultiObjectCommandTxRequest;
 
 #define RETRY_NUM 3

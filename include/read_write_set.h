@@ -94,8 +94,8 @@ public:
     }
 
     const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
-        &ReadSet() const
+                             std::unordered_map<CcEntryAddr, ReadSetEntry>> &
+    ReadSet() const
     {
         return rset_;
     }
@@ -557,13 +557,16 @@ public:
         }
 
         CmdSetEntry &entry = cce_it->second;
-        entry.AddCommand(cmd);
+        if (cmd != nullptr)
+        {
+            entry.AddCommand(cmd);
+        }
 #endif
     }
 
     const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *ObjectCommandCce() const
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>> *
+    ObjectCommandCce() const
     {
 #ifdef ON_KEY_OBJECT
         return &cmd_set_;
@@ -578,6 +581,25 @@ public:
         return cce_cnt_;
 #else
         return 0;
+#endif
+    }
+
+    bool NeedsWriteLog() const
+    {
+#ifdef ON_KEY_OBJECT
+        for (const auto &[table_name, obj_cmd_set] : cmd_set_)
+        {
+            for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
+            {
+                if (obj_cmd_entry.HasSuccessfulCommand())
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+#else
+        return WriteSetSize() > 0;
 #endif
     }
 

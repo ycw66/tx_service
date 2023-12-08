@@ -112,6 +112,7 @@ struct CmdSetEntry
 
     void AddCommand(const TxCommand *cmd)
     {
+        assert(cmd != nullptr);
         if (cmd->IsDelete())
         {
             // clear all the commands since we don't need to write them into log
@@ -124,6 +125,12 @@ struct CmdSetEntry
             cmd->Serialize(cmd_str);
             cmd_str_list_.emplace_back(std::move(cmd_str));
         }
+    }
+
+    // No need to write to the log if there is no successful command.
+    bool HasSuccessfulCommand() const
+    {
+        return has_del_ || !cmd_str_list_.empty();
     }
 
     // commit_ts of the object cce when the commands apply to it, commands on

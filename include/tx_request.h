@@ -746,13 +746,13 @@ struct ObjectCommandTxRequest
     bool is_cmd_owner_{};
 };
 
-// If a command need to refill, it will create RefillRec with position and
-// CcEntryAddr, then save it to vct_refill. It will fill other parameters
+// If a command need to backfill, it will create BackfillRec with position and
+// CcEntryAddr, then save it to vct_backfill. It will fill other parameters
 // after read record from cassandra. And it will be used when rerun
 // MultiObjectCommandTxRequest.
-struct RefillRec
+struct BackfillRec
 {
-    RefillRec(size_t pos, const CcEntryAddr &ety_addr)
+    BackfillRec(size_t pos, const CcEntryAddr &ety_addr)
         : pos_(pos), ety_addr_(ety_addr)
     {
     }
@@ -836,7 +836,7 @@ struct MultiObjectCommandTxRequest
         std::unique_ptr<MultiObjectTxCommand> multi_obj_cmd_uptr_;
     };
     bool is_cmd_owner_{};
-    std::vector<RefillRec> vct_refill_;
+    std::vector<BackfillRec> vct_backfill_;
 };
 
 struct ClusterScaleTxRequest

@@ -79,6 +79,7 @@ public:
         CcHandlerResult<ObjectCommandResult> *hd_res = req.Result();
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
+        bool &cmd_success = obj_result.cmd_success_;
         CcEntry<KeyT, ValueT> *cce = nullptr;
         bool resume = false;
         const KeyT *look_key = nullptr;
@@ -370,6 +371,24 @@ public:
             // backfill
             assert(ng_id == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+
+            RecordStatus rec_status = cce->payload_status_;
+            assert(rec_status == RecordStatus::Unknown);
+
+            std::tie(acquired_lock, err_code) =
+                AcquireCceKeyLock(cce,
+                                  rec_status,
+                                  &req,
+                                  req.NodeGroupId(),
+                                  ng_term,
+                                  req.TxTerm(),
+                                  cc_op,
+                                  req.Isolation(),
+                                  req.Protocol(),
+                                  0,
+                                  false);
+
+            assert(err_code == CcErrorCode::NO_ERROR);
         }
 
         // check locking result
@@ -539,7 +558,6 @@ public:
             }
         }
 
-        bool cmd_success = false;
         if (cce->dirty_payload_status_ == RecordStatus::Normal)
         {
             assert(cce->dirty_payload_ != nullptr);
