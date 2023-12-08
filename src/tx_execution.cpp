@@ -1713,8 +1713,6 @@ void TransactionExecution::PostProcess(ReadLocalOperation &lock_local)
     {
         DLOG(ERROR) << "ReadLocalOperation failed for cc error:"
                     << lock_local.hd_result_->ErrorMsg();
-        rtp_resp_->FinishError(
-            ConvertCcError(lock_local.hd_result_->ErrorCode()));
     }
     else if (lock_local.hd_result_->Value().rec_status_ == RecordStatus::Normal)
     {
