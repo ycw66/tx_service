@@ -115,18 +115,11 @@ public:
             resume = true;
             cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr());
 
-            RecordStatus rec_status = cce->payload_status_;
-            if (cce->dirty_payload_status_ != RecordStatus::NonExistent)
-            {
-                // if dirty payload exists, use dirty_payload_status_
-                rec_status = cce->dirty_payload_status_ == RecordStatus::Deleted
-                                 ? RecordStatus::Deleted
-                                 : RecordStatus::Normal;
-            }
-
+            // For ON_KEY_OBJECT, we add lock regardless of whether the record
+            // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce,
-                                            rec_status,
+                                            RecordStatus::Normal,
                                             &req,
                                             req.NodeGroupId(),
                                             ng_term,
@@ -344,18 +337,11 @@ public:
             cce_addr.SetCce(
                 reinterpret_cast<uint64_t>(cce), ng_term, shard_->core_id_);
 
-            RecordStatus rec_status = cce->payload_status_;
-            if (cce->dirty_payload_status_ != RecordStatus::NonExistent)
-            {
-                // if dirty payload exists, use dirty_payload_status_
-                rec_status = cce->dirty_payload_status_ == RecordStatus::Deleted
-                                 ? RecordStatus::Deleted
-                                 : RecordStatus::Normal;
-            }
-
+            // For ON_KEY_OBJECT, we add lock regardless of whether the record
+            // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
-                                  rec_status,
+                                  RecordStatus::Normal,
                                   &req,
                                   req.NodeGroupId(),
                                   ng_term,
@@ -371,13 +357,13 @@ public:
             // backfill
             assert(ng_id == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
+            assert(cce->payload_status_ == RecordStatus::Unknown);
 
-            RecordStatus rec_status = cce->payload_status_;
-            assert(rec_status == RecordStatus::Unknown);
-
+            // For ON_KEY_OBJECT, we add lock regardless of whether the record
+            // is deleted, so just pass RecordStatus::Normal.
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
-                                  rec_status,
+                                  RecordStatus::Normal,
                                   &req,
                                   req.NodeGroupId(),
                                   ng_term,
@@ -420,9 +406,12 @@ public:
         }
         }
 
-        // Lock acquired
+        // Lock acquired, set the result.
         LOG(INFO) << "acquired lock: " << int(acquired_lock);
         obj_result.lock_acquired_ = acquired_lock;
+        obj_result.commit_ts_ = cce->commit_ts_;
+        obj_result.rec_status_ = cce->payload_status_;
+
         std::unique_ptr<TxCommand> cmd_uptr = nullptr;
         TxCommand *cmd = nullptr;
 
@@ -478,9 +467,6 @@ public:
             else
             {
                 assert(req.read_type_ == ReadType::Inside);
-                obj_result.lock_acquired_ = acquired_lock;
-                obj_result.rec_status_ = cce->payload_status_;
-                obj_result.commit_ts_ = cce->commit_ts_;
                 hd_res->SetFinished();
                 return true;
             }
@@ -640,8 +626,6 @@ public:
             obj_result.last_vali_ts_ =
                 std::max(cce->last_read_ts_, shard_->Now());
         }
-        obj_result.commit_ts_ = cce->commit_ts_;
-        obj_result.rec_status_ = RecordStatus::Normal;
 
         hd_res->SetFinished();
         return true;
