@@ -452,8 +452,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         assert(op_type_ == OperationType::AddIndex);
         LOG(INFO) << "Alter Table Index transaction upsert data store"
-                  << " info, txn: " << txm->TxNumber();
+                  << " info for base table: " << table_key_.Name().Trace()
+                  << ", txn: " << txm->TxNumber();
         op_ = &upsert_kv_table_op_;
+        upsert_kv_table_op_.retry_num_ = 100;
         // The post write request right after flushing the prepare log
         // installs the dirty schema in the tx service and returns a
         // local view (pointer) of the committed and dirty schema.
@@ -483,7 +485,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 {
                     LOG(ERROR) << "Upsert index for table: "
                                << table_key_.Name().String()
-                               << ", Failed to create tables in kv store";
+                               << ", Failed to create tables in kv store"
+                               << ". Txn: " << txm->TxNumber();
 
                     /*
                     After upsert kv fails, we need to flush a commit log to
