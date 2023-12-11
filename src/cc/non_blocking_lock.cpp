@@ -467,14 +467,16 @@ LockType NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
     else if (write_lk_type_ != WriteLockType::NoWritelock &&
              write_txn_ == tx_number)
     {
+        auto return_type = write_lk_type_ == WriteLockType::WriteLock
+                               ? LockType::WriteLock
+                               : LockType::WriteIntent;
+
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
 
         TryPopBlockingQueue(ccs);
 
-        return write_lk_type_ == WriteLockType::WriteLock
-                   ? LockType::WriteLock
-                   : LockType::WriteIntent;
+        return return_type;
     }
     else
     {
