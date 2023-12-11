@@ -1109,9 +1109,19 @@ void txservice::LocalCcHandler::ScanNextBatch(
             ScanCache *cache = scanner.Cache(core_id);
             const ScanTuple *last_tuple = cache->LastTuple();
 
-            req->SetPriorCceAddr(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CcePtr() : 0,
-                core_id);
+            // The entry address is available only after lock has been acquired.
+            // But Occ|ReadCommitted won't acquire any lock.
+            LockType lock_type = LockType::NoLock;
+            if (last_tuple != nullptr)
+            {
+                lock_type =
+                    scanner.DeduceScanTupleLockType(last_tuple->rec_status_);
+            }
+
+            req->SetPriorCceAddr(lock_type == LockType::NoLock
+                                     ? 0
+                                     : last_tuple->cce_addr_.CcePtr(),
+                                 core_id);
             req->SetCcePtr(nullptr, core_id);
 
             cache->Reset();

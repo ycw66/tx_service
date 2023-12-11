@@ -3706,15 +3706,6 @@ public:
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
                 req.PriorCceAddr(core_id));
             scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
-
-            // Releases the read intent on the last cc entry of the prior scan
-            // batch. If the prior scan put a lock other than read intent, the
-            // function has no effect.
-            ReleaseCceLock(cce->key_lock_ptr_,
-                           cce,
-                           req.Txn(),
-                           ng_id,
-                           LockType::ReadIntent);
         }
         else
         {
@@ -3970,25 +3961,6 @@ public:
                 cce = scan_ccm_it->second;
             }
 
-            // For Occ/ReadCommitted, acquire ReadIntent on the last scanned
-            // ccentry to prevent it being kicked out.
-            if (LockTypeUtil::DeduceLockType(
-                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
-                LockType::NoLock)
-            {
-                CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
-                if (last_cce != nullptr)
-                {
-                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
-                    shard_->UpsertLockHoldingTx(req.Txn(),
-                                                tx_term,
-                                                last_cce,
-                                                false,
-                                                ng_id,
-                                                table_name_.Type());
-                }
-            }
-
             // Only sets the result once at the first core.
             if (shard_->core_id_ == 0)
             {
@@ -4204,25 +4176,6 @@ public:
                 --scan_ccm_it;
                 cce_key = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
-            }
-
-            // For Occ/ReadCommitted, acquire ReadIntent on the last scanned
-            // ccentry to prevent it being kicked out.
-            if (LockTypeUtil::DeduceLockType(
-                    cc_op, iso_lvl, cc_proto, req.IsCoveringKeys()) ==
-                LockType::NoLock)
-            {
-                CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
-                if (last_cce != nullptr)
-                {
-                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
-                    shard_->UpsertLockHoldingTx(req.Txn(),
-                                                tx_term,
-                                                last_cce,
-                                                false,
-                                                ng_id,
-                                                table_name_.Type());
-                }
             }
 
             if (shard_->core_id_ == 0)
