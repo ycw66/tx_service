@@ -357,7 +357,6 @@ public:
             // backfill
             assert(ng_id == cce_addr.NodeGroupId());
             cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-            assert(cce->payload_status_ == RecordStatus::Unknown);
 
             // For ON_KEY_OBJECT, we add lock regardless of whether the record
             // is deleted, so just pass RecordStatus::Normal.
@@ -375,6 +374,18 @@ public:
                                   false);
 
             assert(err_code == CcErrorCode::NO_ERROR);
+
+            // This is the first backfill request or the payload has already
+            // been backfilled by another concurrent request. Either they are
+            // trying to backfill the same rec, or the rec has been backfilled
+            // and then changed by another txn. In the latter case, since the
+            // lock is acquired before backfilling, it's only possible that
+            // another txn acquired write lock and current txn acquired read
+            // intent.
+            assert(cce->payload_status_ == RecordStatus::Unknown ||
+                   cce->commit_ts_ == req.rec_commit_ts_ ||
+                   cce->commit_ts_ > req.rec_commit_ts_ &&
+                       acquired_lock == LockType::ReadIntent);
         }
 
         // check locking result
