@@ -20,6 +20,7 @@
 #include "cc_map.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"
+#include "error_messages.h"
 #include "fault/fault_inject.h"  // CODE_FAULT_INJECTOR
 #include "meter.h"
 #include "metrics.h"
@@ -135,6 +136,9 @@ public:
      * @param req The pointer to the cc request.
      */
     void Enqueue(CcRequestBase *req);
+
+    void AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
+                         CcErrorCode err_code);
 
     bool IsIdle()
     {

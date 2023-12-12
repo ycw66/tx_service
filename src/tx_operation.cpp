@@ -2991,6 +2991,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     install_new_range_op_.write_type_ = PostWriteType::PrepareCommit;
     install_new_range_op_.op_type_ = OperationType::Update;
     install_new_range_op_.key_ = old_start_key_;
+    install_new_range_op_.rec_ = range_record_.get();
 
     flush_op_.tab_name_ = &table_name_;
     flush_op_.data_sync_vec_ = &data_sync_vec_;
@@ -3012,6 +3013,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
     post_all_lock_op_.op_type_ = OperationType::Update;
     post_all_lock_op_.key_ = old_start_key_;
+    post_all_lock_op_.rec_ = range_record_.get();
 
     TX_TRACE_ASSOCIATE(
         this, &prepare_acquire_all_write_op_, "prepare_acquire_all_op_");
@@ -3145,6 +3147,7 @@ void SplitFlushRangeOp::Reset(
     install_new_range_op_.write_type_ = PostWriteType::PrepareCommit;
     install_new_range_op_.op_type_ = OperationType::Update;
     install_new_range_op_.key_ = old_start_key_;
+    install_new_range_op_.rec_ = range_record_.get();
 
     flush_op_.tab_name_ = &table_name_;
     flush_op_.data_sync_vec_ = &data_sync_vec_;
@@ -3166,6 +3169,7 @@ void SplitFlushRangeOp::Reset(
     post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
     post_all_lock_op_.op_type_ = OperationType::Update;
     post_all_lock_op_.key_ = old_start_key_;
+    post_all_lock_op_.rec_ = range_record_.get();
 
     kickout_data_it_ = {};
 

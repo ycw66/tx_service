@@ -1,8 +1,11 @@
 #include "cc/cc_req_misc.h"
 
+#include <unordered_map>
+
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
 #include "cc/local_cc_shards.h"
+#include "error_messages.h"
 #include "range_record.h"
 #include "range_slice.h"
 #include "statistics.h"
@@ -280,17 +283,37 @@ bool FetchRangeSlicesCc::Execute(CcShard &ccs)
         }
         else
         {
+            std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
+                waiting_reqs;
+
             for (auto [req, ccs] : requesters_)
             {
-                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+                waiting_reqs[ccs].push_back(req);
+            }
+
+            for (auto &[ccs, reqs] : waiting_reqs)
+            {
+                ccs->AbortCcRequests(std::move(reqs),
+                                     CcErrorCode::NG_TERM_CHANGED);
             }
         }
     }
     else
     {
+        // We need to make sure that the CcMap::Execute(CcRequest ) and
+        // CcRequest::ABortCcRequest(...) functions occur on the same thread.
+        // Otherwise, AbortCcRequest is not safe behavior.
+        std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
+            waiting_reqs;
+
         for (auto [req, ccs] : requesters_)
         {
-            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+            waiting_reqs[ccs].push_back(req);
+        }
+
+        for (auto &[ccs, reqs] : waiting_reqs)
+        {
+            ccs->AbortCcRequests(std::move(reqs), CcErrorCode::DATA_STORE_ERR);
         }
     }
 

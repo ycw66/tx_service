@@ -236,6 +236,7 @@ public:
         isolation_level_ = iso_level;
     }
 
+    // This method must be called on the same tx processor as the cc request.
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
@@ -3768,6 +3769,39 @@ public:
     // acquiring lock and writing log. If false, just execute the command to
     // get the result.
     bool apply_and_commit_{};
+};
+
+struct RequestAborterCc : public CcRequestBase
+{
+    explicit RequestAborterCc(std::vector<CcRequestBase *> &&reqs,
+                              CcErrorCode err_code)
+        : reqs_(std::move(reqs)), err_code_(err_code)
+    {
+    }
+
+    ~RequestAborterCc() = default;
+
+    bool Execute(CcShard &ccs) override
+    {
+        for (CcRequestBase *req : reqs_)
+        {
+            req->AbortCcRequest(err_code_);
+        }
+
+        // This object ownership is owned by itself. We need to return true to
+        // make sure Free() function will be called.
+        return true;
+    }
+
+    void Free() override
+    {
+        // This object ownership is owned by itself. We need to delete this
+        // object in CcShards::ProcessCcRequest(...)
+        delete this;
+    }
+
+    std::vector<CcRequestBase *> reqs_;
+    CcErrorCode err_code_;
 };
 
 }  // namespace txservice

@@ -69,9 +69,18 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
     assert(pins_ == 0);
     status_ = SliceStatus::PartiallyCached;
 
+    // We need to make sure that the CcMap::Execute(CcRequest ) and
+    // CcRequest::ABortCcRequest(...) functions occur on the same thread.
+    // Otherwise, AbortCcRequest is not safe behavior.
+    std::unordered_map<CcShard *, std::vector<CcRequestBase *>> waiting_reqs;
     for (auto &[cc_req, cc_shard] : cc_queue_)
     {
-        cc_req->AbortCcRequest(err_code);
+        waiting_reqs[cc_shard].push_back(cc_req);
+    }
+
+    for (auto &[cc_shard, reqs] : waiting_reqs)
+    {
+        cc_shard->AbortCcRequests(std::move(reqs), err_code);
     }
 
     if (cc_queue_.size() > 8)

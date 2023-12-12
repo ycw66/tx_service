@@ -9,6 +9,7 @@
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
 #include "checkpointer.h"
+#include "error_messages.h"
 #include "sharder.h"  // Sharder
 #include "tx_start_ts_collector.h"
 
@@ -290,6 +291,16 @@ void CcShard::Enqueue(CcRequestBase *req)
         tx_coordi_->sleep_cv_.notify_one();
     }
 #endif
+}
+
+void CcShard::AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
+                              CcErrorCode err_code)
+{
+    // Note: This object ownership is owned by itself. We will delete this
+    // object in RequestAborterCc::Free()
+    RequestAborterCc *request_aborter =
+        new RequestAborterCc(std::move(reqs), err_code);
+    Enqueue(request_aborter);
 }
 
 TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
