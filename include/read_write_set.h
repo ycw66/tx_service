@@ -94,8 +94,8 @@ public:
     }
 
     const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, ReadSetEntry>> &
-    ReadSet() const
+                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
+        &ReadSet() const
     {
         return rset_;
     }
@@ -565,8 +565,8 @@ public:
     }
 
     const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, CmdSetEntry>> *
-    ObjectCommandCce() const
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
+        *ObjectCommandCce() const
     {
 #ifdef ON_KEY_OBJECT
         return &cmd_set_;

@@ -213,7 +213,6 @@ public:
     bool rset_has_expired_{false};
 };
 
-#ifdef RANGE_PARTITION_ENABLED
 struct LockWriteRangesOp : public TransactionOperation
 {
 public:
@@ -249,7 +248,6 @@ public:
     bool init_;
     bool execute_immediately_{true};
 };
-#endif
 
 struct ReloadCacheOperation : TransactionOperation
 {
