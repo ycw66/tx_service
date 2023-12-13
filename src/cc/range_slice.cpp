@@ -55,22 +55,6 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
     cc_queue_.clear();
 
     fetch_slice_cc_ = nullptr;
-
-    if (to_alter_)
-    {
-        // Unlocks the slice before locking the range. This is because all
-        // locking operations follow the range-slice order to avoid deadlocks.
-        // Since there is a gap between releasing the slice lock and locking the
-        // range, someone else may jump in and lock the slice. However, the
-        // jumping-in tx won't be able to pin the slice, because the
-        // checkpionter has marked the slice to be altered.
-        slice_lk.unlock();
-
-        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        // Wake up all waiting threads since there could be multiple slices
-        // waiting on the same range wait_cv_.
-        range.wait_cv_.notify_all();
-    }
 }
 
 FillStoreSliceCc *StoreSlice::FillCcRequest()
@@ -80,7 +64,7 @@ FillStoreSliceCc *StoreSlice::FillCcRequest()
 
 void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
 {
-    std::unique_lock<std::mutex> slice_lk(slice_mux_);
+    std::lock_guard<std::mutex> lk(slice_mux_);
 
     assert(pins_ == 0);
     status_ = SliceStatus::PartiallyCached;
@@ -107,22 +91,6 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
     cc_queue_.clear();
 
     fetch_slice_cc_ = nullptr;
-
-    if (to_alter_)
-    {
-        // Unlocks the slice before locking the range. This is because all
-        // locking operations follow the range-slice order to avoid deadlocks.
-        // Since there is a gap between releasing the slice lock and locking the
-        // range, someone else may jump in and lock the slice. However, the
-        // jumping-in tx won't be able to pin the slice, because the
-        // checkpionter has marked the slice to be altered.
-        slice_lk.unlock();
-
-        std::unique_lock<std::shared_mutex> range_lk(range.mux_);
-        // Wake up all waiting threads since there could be multiple slices
-        // waiting on the same range wait_cv_.
-        range.wait_cv_.notify_all();
-    }
 }
 
 bool StoreSlice::IsRecentLoad() const
@@ -386,7 +354,7 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
 
     // The slice is unpinned. If the checkpointer has requested to alter the
     // slice, wakes up the checkpointer.
-    if (slice->pins_ == 0 && slice->to_alter_)
+    if (slice->pins_ == 1 && slice->to_alter_)
     {
         // Unlocks the slice before locking the range. This is because all
         // locking operations follow the range-slice order to avoid deadlocks.
@@ -498,6 +466,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         notify_cc.Reset();
     }
 
+    assert(slice->pins_ > 0 && slice->status_ == SliceStatus::FullyCached);
+
     size_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
     assert(core_cnt > 0);
 
@@ -590,8 +560,6 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
         post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut, is_last_one_vec);
     }
-
-    UnpinSlice(slice);
 
     auto key_greater =
         [](const SliceChangeInfo &lhs, const SliceChangeInfo &rhs)
@@ -693,6 +661,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         wait_cv_.wait(range_lk,
                       [slice_ptr = slice]
                       { return slice_ptr->ChangeAllowed(); });
+        assert(slice->pins_ == 1 && slice->status_ == SliceStatus::FullyCached);
 
         slice_lk.lock();
 
@@ -762,6 +731,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         }
         slice->to_alter_ = false;
     }
+
+    UnpinSlice(slice);
 
     return true;
 }

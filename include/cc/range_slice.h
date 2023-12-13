@@ -333,7 +333,7 @@ public:
     bool ChangeAllowed()
     {
         std::unique_lock<std::mutex> lk(slice_mux_);
-        return pins_ == 0 && status_ != SliceStatus::BeingLoaded;
+        return pins_ == 1;
     }
 
 private:
