@@ -2922,6 +2922,9 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     {
         DLOG(ERROR) << "LockWriteRangesOp failed for cc error:"
                     << lock_write_ranges.lock_range_result_->ErrorMsg();
+
+        state_stack_.pop_back();
+        assert(state_stack_.empty());
         Abort();
         return;
     }
