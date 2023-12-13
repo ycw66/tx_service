@@ -56,8 +56,7 @@ public:
     {
         uint32_t shard_code =
             ShardCode(table_or_index_name.GetBaseTableNameSV());
-        NodeGroupId ng_id = Sharder::Instance().ShardToCcNodeGroup(shard_code);
-        return ng_id;
+        return shard_code % Sharder::Instance().NodeGroupCount();
     }
 
 public:
