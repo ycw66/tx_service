@@ -455,13 +455,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                   << " info for base table: " << table_key_.Name().Trace()
                   << ", txn: " << txm->TxNumber();
         op_ = &upsert_kv_table_op_;
-        upsert_kv_table_op_.retry_num_ = 100;
         // The post write request right after flushing the prepare log
         // installs the dirty schema in the tx service and returns a
         // local view (pointer) of the committed and dirty schema.
         upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
         upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-        txm->PushOperation(&upsert_kv_table_op_);
+        txm->PushOperation(&upsert_kv_table_op_, 100);
         txm->Process(upsert_kv_table_op_);
     }
     else if (op_ == &upsert_kv_table_op_)
