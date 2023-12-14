@@ -206,6 +206,7 @@ public:
              it++)
         {
             debug_string.append(std::to_string(*it));
+            debug_string.append(",");
         }
 
         debug_string.append(" ,read_locks: ");

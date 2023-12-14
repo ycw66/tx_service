@@ -2186,6 +2186,7 @@ public:
                 ng_term,
                 read_ts,
                 is_read_snapshot,
+                keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta);
             break;
         default:
