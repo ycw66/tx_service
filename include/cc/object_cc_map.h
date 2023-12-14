@@ -420,8 +420,6 @@ public:
         // Lock acquired, set the result.
         LOG(INFO) << "acquired lock: " << int(acquired_lock);
         obj_result.lock_acquired_ = acquired_lock;
-        obj_result.commit_ts_ = cce->commit_ts_;
-        obj_result.rec_status_ = cce->payload_status_;
 
         std::unique_ptr<TxCommand> cmd_uptr = nullptr;
         TxCommand *cmd = nullptr;
@@ -445,10 +443,6 @@ public:
 
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
-            // cce->commit_ts_ = 1;
-            // TODO(zkl): load slice fom kv
-            // cce->payload_status_ = RecordStatus::Deleted;
-
             if (req.read_type_ == ReadType::OutsideNormal)
             {
                 // backfill
@@ -478,6 +472,8 @@ public:
             else
             {
                 assert(req.read_type_ == ReadType::Inside);
+                obj_result.commit_ts_ = cce->commit_ts_;
+                obj_result.rec_status_ = cce->payload_status_;
                 hd_res->SetFinished();
                 return true;
             }
@@ -525,6 +521,7 @@ public:
 
                 // Del command on a non-existent object also returns directly.
                 obj_result.rec_status_ = RecordStatus::Deleted;
+                obj_result.commit_ts_ = cce->commit_ts_;
                 hd_res->SetFinished();
                 return true;
             }
@@ -550,6 +547,8 @@ public:
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
+                obj_result.rec_status_ = RecordStatus::Normal;
+                obj_result.commit_ts_ = cce->commit_ts_;
                 hd_res->SetFinished();
                 return true;
             }
@@ -638,6 +637,8 @@ public:
                 std::max(cce->last_read_ts_, shard_->Now());
         }
 
+        obj_result.commit_ts_ = cce->commit_ts_;
+        obj_result.rec_status_ = cce->payload_status_;
         hd_res->SetFinished();
         return true;
     }

@@ -5225,6 +5225,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         LockType lock_acquired = cmd_result.lock_acquired_;
         bool cmd_success = cmd_result.cmd_success_;
         const TxCommand *cmd = obj_cmd_op.command_;
+        const TableName *table_name = obj_cmd_op.table_name_;
+        const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
+        uint64_t commit_ts = cmd_result.commit_ts_;
 
         // The command is directly executed and committed on the object if
         // autocommit and skip wal are both set. In such case, there is no need
@@ -5244,20 +5247,36 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
             rw_set_.AddObjectCommand(
-                *obj_cmd_op.table_name_,
-                cmd_result.cce_addr_,
-                cmd_result.commit_ts_,
+                *table_name,
+                cce_addr,
+                commit_ts,
                 obj_cmd_op.key_,
                 cmd_success ? obj_cmd_op.command_ : nullptr);
         }
         else if (lock_acquired != LockType::NoLock)
         {
-            LOG(INFO) << "txm acquired readlock";
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
-            rw_set_.AddRead(cmd_result.cce_addr_,
-                            cmd_result.commit_ts_,
-                            obj_cmd_op.table_name_);
+            LOG(INFO) << "txm acquired readlock/intent";
+            bool add_res;
+            if (obj_status == RecordStatus::Unknown)
+            {
+                // Only used to release lock.
+                add_res = rw_set_.AddRead(cce_addr, 0, table_name);
+            }
+            else
+            {
+                add_res = rw_set_.AddRead(cce_addr, commit_ts, table_name);
+            }
+            if (!add_res)
+            {
+                // Add read set fail, there is at least two unmatched read. This
+                // can't be autocommit request.
+                assert(!obj_cmd_op.auto_commit_);
+                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                rec_resp_ = nullptr;
+                return;
+            }
         }
 
         if (obj_status == RecordStatus::Unknown)
@@ -5271,6 +5290,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             return;
         }
 
+        // Whether we should notify the request sender.
         if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
         {
             // Not autocommit, or autocommit and skip wal, or autocommit and
@@ -5280,6 +5300,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             rec_resp_ = nullptr;
         }
 
+        // Whether we should auto commit the txn. For autocommit commands that
+        // need to write log, the request sender will be notified after WriteLog
+        // and PostProcess.
         if (obj_cmd_op.auto_commit_)
         {
             Commit();

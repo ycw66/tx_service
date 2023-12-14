@@ -45,6 +45,7 @@ public:
     // changes or deletes the object. Read only command need not commit.
     virtual TxObject *CommitOn(TxObject *obj_ptr)
     {
+        assert(false);
         return obj_ptr;
     }
 

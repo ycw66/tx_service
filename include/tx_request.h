@@ -634,6 +634,10 @@ struct AnalyzeTableTxRequest
 struct ObjectCommandTxRequest
     : public TemplateTxRequest<ObjectCommandTxRequest, RecordStatus>
 {
+    ObjectCommandTxRequest() : TemplateTxRequest(nullptr, nullptr, nullptr)
+    {
+    }
+
     ObjectCommandTxRequest(const TableName *table_name,
                            const TxKey *key,
                            TxCommand *command,
@@ -768,6 +772,10 @@ struct MultiObjectCommandTxRequest
     : public TemplateTxRequest<MultiObjectCommandTxRequest,
                                std::vector<RecordStatus>>
 {
+    MultiObjectCommandTxRequest() : TemplateTxRequest(nullptr, nullptr, nullptr)
+    {
+    }
+
     MultiObjectCommandTxRequest(const TableName *table_name,
                                 MultiObjectTxCommand *cmd,
                                 bool auto_commit = true)
@@ -792,7 +800,25 @@ struct MultiObjectCommandTxRequest
 
     MultiObjectCommandTxRequest(const MultiObjectCommandTxRequest &rhs) =
         delete;
-    MultiObjectCommandTxRequest(MultiObjectCommandTxRequest &&rhs) = delete;
+    MultiObjectCommandTxRequest(MultiObjectCommandTxRequest &&rhs)
+        : TemplateTxRequest(nullptr, nullptr, nullptr),
+          table_name_(rhs.table_name_),
+          auto_commit_(rhs.auto_commit_)
+    {
+        if (is_cmd_owner_)
+        {
+            multi_obj_cmd_uptr_ = nullptr;
+        }
+        if (rhs.is_cmd_owner_)
+        {
+            multi_obj_cmd_uptr_ = std::move(rhs.multi_obj_cmd_uptr_);
+        }
+        else
+        {
+            multi_obj_cmd_ = rhs.multi_obj_cmd_;
+        }
+        is_cmd_owner_ = rhs.is_cmd_owner_;
+    }
 
     ~MultiObjectCommandTxRequest() override
     {
