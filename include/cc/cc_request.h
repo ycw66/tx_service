@@ -639,8 +639,6 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
-        LOG(INFO) << "Reset, cce_addr:" << addr << " ,cce:" << std::hex
-                  << addr->CcePtr();
     }
 
     void Reset(const TxKey *key,
@@ -3172,6 +3170,7 @@ public:
     void ResetCcm()
     {
         ccm_ = nullptr;
+        offset_ = 0;
     }
 
     const TableSchema *GetTableSchema()
@@ -3195,12 +3194,24 @@ public:
         return first_core_;
     }
 
+    void SetOffset(size_t offset)
+    {
+        offset_ = offset;
+    }
+    size_t Offset() const
+    {
+        return offset_;
+    }
+
 private:
     TableName table_name_holder_{
         "",
         0,
         TableType::Primary};  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
+    // Temporarily store the currently parsed offset when fetch record from
+    // kvstore asynchronously.
+    size_t offset_{0};
     uint64_t commit_ts_;
     CcHandlerResult<Void> result_{nullptr};
     std::mutex *external_mux_;

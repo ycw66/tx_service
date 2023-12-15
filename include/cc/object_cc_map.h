@@ -462,12 +462,16 @@ public:
 
                 cce->payload_status_ = RecordStatus::Normal;
                 cce->commit_ts_ = req.rec_commit_ts_;
+                cce->ckpt_ts_.store(req.rec_commit_ts_,
+                                    std::memory_order_relaxed);
             }
             else if (req.read_type_ == ReadType::OutsideDeleted)
             {
                 // backfill
                 cce->payload_status_ = RecordStatus::Deleted;
                 cce->commit_ts_ = req.rec_commit_ts_;
+                cce->ckpt_ts_.store(req.rec_commit_ts_,
+                                    std::memory_order_relaxed);
             }
             else
             {
@@ -748,7 +752,7 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
-        LOG(INFO) << "==replay log cc";
+
         // If the log record's commit ts is smaller than that of the cc map,
         // this record is generated before the latest schema of the table
         // and hence should skip the replay process.
@@ -760,8 +764,10 @@ public:
         }
 
         KeyT key;
-        size_t offset = 0;
+        size_t offset = req.Offset();
         const std::string_view &log_blob = req.LogContentView();
+
+        size_t prev_offset = offset;
         while (offset < log_blob.size())
         {
             // the format of log_blob is: key_str, object_version, commands str
@@ -783,15 +789,12 @@ public:
                 continue;
             }
 
-            LOG(INFO) << "replay log key: " << key.ToString()
-                      << ", obj_ver: " << obj_version
-                      << ", commit ts: " << commit_ts
-                      << ", cmds len: " << cmds_len << ", cmds str: "
-                      << std::string_view(log_blob.data() + offset, cmds_len);
+            DLOG(INFO) << "replay log key: " << key.ToString()
+                       << ", obj_ver: " << obj_version
+                       << ", commit ts: " << commit_ts
+                       << ", cmds len: " << cmds_len << ", cmds str: "
+                       << std::string_view(log_blob.data() + offset, cmds_len);
 
-            // TODO(zkl): get object from kv asynchronously, concurrent with
-            //  replaying log? First read from kv then have the RedisMonoObject,
-            //  or create RedisMonoObject and fill the record later?
             auto it = FindEmplace(key);
             CcEntry<KeyT, ValueT> *cce = it->second;
 
@@ -803,8 +806,99 @@ public:
 
             bool has_del =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
-            offset += sizeof(has_del);
+            offset += sizeof(uint8_t);
             LOG(INFO) << "this txn log has_del? " << has_del;
+
+            // load payload from kvstore before committing pending commands
+            if (!has_del && cce->payload_status_ == RecordStatus::Unknown)
+            {
+                int64_t cc_ng_candid_term =
+                    Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+                int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+                int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
+                assert(ng_term > 0);
+                req.SetOffset(prev_offset);
+
+#ifdef RANGE_PARTITION_ENABLED
+                assert(Type() == TableType::Primary ||
+                       Type() == TableType::UniqueSecondary);
+
+                RangeSliceOpStatus pin_status;
+                RangeSliceId slice_id =
+                    shard_->PinRangeSlice(table_name_,
+                                          cc_ng_id_,
+                                          ng_term,
+                                          KeySchema(),
+                                          RecordSchema(),
+                                          schema_ts_,
+                                          table_schema_->GetKVCatalogInfo(),
+                                          key,
+                                          true,
+                                          &req,
+                                          pin_status,
+                                          false,
+                                          0);
+
+                if (pin_status == RangeSliceOpStatus::Successful)
+                {
+                    // The slice is unpinned immediately. This is
+                    // because the prior pin operation brings all
+                    // records in the slice into memory, including the
+                    // target record sharded to this core. Since cache
+                    // cleaning is done by the tx processor associated
+                    // with this core, the target record cannot be
+                    // kicked out before this read request finishes.
+                    slice_id.Unpin();
+
+                    if (cce->payload_status_ == RecordStatus::Unknown)
+                    {
+                        cce->payload_status_ = RecordStatus::Deleted;
+                        cce->commit_ts_ = 1U;
+                        cce->gap_commit_ts_ = 1U;
+                        cce->ckpt_ts_.store(1U, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        assert(cce->commit_ts_ > 1);
+                    }
+                }
+                else if (pin_status == RangeSliceOpStatus::BlockedOnLoad)
+                {
+                    return false;
+                }
+                else if (pin_status == RangeSliceOpStatus::Retry)
+                {
+                    shard_->Enqueue(shard_->LocalCoreId(), &req);
+                    return false;
+                }
+                else if (pin_status == RangeSliceOpStatus::Delay)
+                {
+                    if (slice_id.Range()->HasLock())
+                    {
+                        req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
+                    }
+                    else
+                    {
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
+                    }
+                }
+                else
+                {
+                    // If the pin operation returns an error, the data
+                    // store is inaccessible.
+                    req.Result()->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                    return true;
+                }
+
+#else
+
+                // load payload asynchronously
+                shard_->FetchRecord(table_name_, cce, cc_ng_id_, ng_term, &req);
+                return false;
+#endif
+            }
 
             // extract command list
             const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -832,6 +926,17 @@ public:
             cce->payload_status_ = cce->payload_ == nullptr
                                        ? RecordStatus::Deleted
                                        : RecordStatus::Normal;
+
+            // Must update dirty_commit_ts. Otherwise, this entry may be skipped
+            // by checkpointer.
+            if (cce->commit_ts_ > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = cce->commit_ts_;
+            }
+            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+            {
+                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+            }
 
             if (cce->key_lock_ptr_ != nullptr &&
                 cce->key_lock_ptr_->HasWriteLock())
@@ -929,6 +1034,26 @@ public:
 
         req.SetFinish();
         return false;
+    }
+
+    void BackFill(LruEntry *entry,
+                  uint64_t commit_ts,
+                  RecordStatus status,
+                  std::shared_ptr<TxRecord> &&rec_sptr) override
+    {
+        assert(status != RecordStatus::Unknown);
+        CcEntry<KeyT, ValueT> *cce =
+            dynamic_cast<CcEntry<KeyT, ValueT> *>(entry);
+        // It's possible that first ReplayLogCc triggers FetchRecord and the
+        // second ReplayLogCc has_del and overrides the cce.
+        if (cce->payload_status_ == RecordStatus::Unknown)
+        {
+            cce->ckpt_ts_ = commit_ts;
+            cce->commit_ts_ = commit_ts;
+            cce->payload_status_ = status;
+            cce->payload_ =
+                std::static_pointer_cast<ValueT>(std::move(rec_sptr));
+        }
     }
 
 private:

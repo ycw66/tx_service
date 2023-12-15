@@ -148,6 +148,14 @@ public:
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;
 
+    virtual void BackFill(LruEntry *cce,
+                          uint64_t commit_ts,
+                          RecordStatus status,
+                          std::shared_ptr<TxRecord> &&rec_sptr)
+    {
+        assert(false);
+    }
+
     /**
      * Used for debug to verify the map_link is complete.
      */

@@ -25,6 +25,7 @@ struct FetchTableRangesCc;
 struct SliceDataItem;
 class StoreSlice;
 struct LoadRangeSliceRequest;
+struct FetchRecordCc;
 
 namespace store
 {
@@ -121,6 +122,13 @@ public:
                       bool &found,
                       uint64_t &version_ts,
                       const txservice::TableSchema *table_schema) = 0;
+
+    // Fetch record from datastore asynchronously.
+    virtual void FetchRecord(const TableName &table_name,
+                             FetchRecordCc *fetch_cc)
+    {
+        assert(false);
+    }
 
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,

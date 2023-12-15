@@ -52,12 +52,14 @@ public:
     // serialize command for remote request and writing log
     virtual void Serialize(std::string &str) const
     {
+        assert(false);
     }
 
     // deserialize a command from binary blob for processing remote request and
     // replaying log
     virtual void Deserialize(std::string_view cmd_img)
     {
+        assert(false);
     }
 };
 
@@ -185,6 +187,7 @@ void TryCommitReplayCommands(std::shared_ptr<T> &payload,
             TxObject *new_obj_ptr = cmd->CommitOn(obj_ptr);
             if (new_obj_ptr != obj_ptr)
             {
+                // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
                 payload = std::shared_ptr<T>(static_cast<T *>(new_obj_ptr));
             }
         }

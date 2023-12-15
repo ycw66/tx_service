@@ -515,6 +515,13 @@ public:
 
     void RemoveFetchRequest(const TableName &table_name);
 
+    void FetchRecord(const TableName &table_name,
+                     LruEntry *cce,
+                     NodeGroupId cc_ng_id,
+                     int64_t cc_ng_term,
+                     CcRequestBase *requester);
+    void RemoveFetchRecordRequest(LruEntry *cce);
+
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
                                  const TableSchema *table_schema,
                                  NodeGroupId ng_id,
@@ -687,6 +694,9 @@ private:
         failover_ccms_;
 
     std::unordered_map<TableName, std::unique_ptr<FetchCc>> fetch_reqs_;
+
+    // For load record from kvstore asynchronously
+    std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;

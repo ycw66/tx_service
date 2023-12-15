@@ -557,6 +557,8 @@ public:
         }
 
         CmdSetEntry &entry = cce_it->second;
+        assert(cce_version >= entry.object_version_);
+        entry.object_version_ = cce_version;
         if (cmd != nullptr)
         {
             entry.AddCommand(cmd);

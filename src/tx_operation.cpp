@@ -5146,7 +5146,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             // keys belonging to this range.
             const RangeRecord *range_rec =
                 static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            const TxKey *range_end_key = range_rec->end_key_;
+            const TxKey *range_end_key = range_rec->GetRangeInfo()->EndKey();
             uint32_t key_shard = range_rec->GetRangeOwnerNg()->BucketOwner();
 
             auto cmp = [](const TxKey *start_key, const TxKey *end_key)

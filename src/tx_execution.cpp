@@ -5242,7 +5242,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
 
         if (lock_acquired == LockType::WriteLock)
         {
-            LOG(INFO) << "txm acquired writelock";
+            DLOG(INFO) << "txm acquired writelock";
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
@@ -5257,7 +5257,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             // Read lock is acquired under locking protocol. Add the cce to
             // read set for later PostRead.
-            LOG(INFO) << "txm acquired readlock/intent";
+            DLOG(INFO) << "txm acquired readlock/intent";
             bool add_res;
             if (obj_status == RecordStatus::Unknown)
             {

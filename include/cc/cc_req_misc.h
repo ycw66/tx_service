@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "catalog_factory.h"  //TableSchema
+#include "cc/cc_entry.h"      // LruEntry
 #include "cc_req_base.h"
 #include "error_messages.h"
 #include "tx_key.h"
@@ -614,4 +616,28 @@ private:
     std::mutex mux_;
     std::condition_variable cv_;
 };
+
+struct FetchRecordCc : public FetchCc
+{
+public:
+    FetchRecordCc() = delete;
+    FetchRecordCc(LruEntry *cce,
+                  CcShard &ccs,
+                  NodeGroupId cc_ng_id,
+                  int64_t cc_ng_term);
+    ~FetchRecordCc() = default;
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetFinish(int err);
+
+    const TableName *table_name_{nullptr};
+    const TableSchema *table_schema_{nullptr};
+    LruEntry *cce_{nullptr};
+    uint64_t rec_ts_{0};
+    RecordStatus rec_status_{RecordStatus::Unknown};
+    std::shared_ptr<TxRecord> rec_{nullptr};
+    int error_code_{0};
+};
+
 }  // namespace txservice

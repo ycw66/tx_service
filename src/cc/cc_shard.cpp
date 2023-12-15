@@ -1067,6 +1067,28 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
     fetch_reqs_.erase(table_name);
 }
 
+void CcShard::FetchRecord(const TableName &table_name,
+                          LruEntry *cce,
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term,
+                          CcRequestBase *requester)
+{
+    auto tab_it =
+        fetch_record_reqs_.try_emplace(cce, cce, *this, cc_ng_id, cc_ng_term);
+    FetchRecordCc *fetch_req = &(tab_it.first->second);
+
+    fetch_req->AddRequester(requester);
+    if (fetch_req->RequesterCount() == 1)
+    {
+        local_shards_.store_hd_->FetchRecord(table_name, fetch_req);
+    }
+}
+
+void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
+{
+    fetch_record_reqs_.erase(cce);
+}
+
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       NodeGroupId ng_id,

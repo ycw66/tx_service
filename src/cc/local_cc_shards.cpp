@@ -2211,6 +2211,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     uint64_t last_sync_ts = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
+    int32_t range_id = data_sync_task->range_id_;
     TableName range_tbl_name{table_name.StringView(),
                              TableType::RangePartition};
     TableRangeEntry *range_entry =

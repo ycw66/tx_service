@@ -584,4 +584,60 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
     assert(ccm != nullptr);
     return ccm->Execute(*this);
 }
+
+FetchRecordCc::FetchRecordCc(LruEntry *cce,
+                             CcShard &ccs,
+                             NodeGroupId cc_ng_id,
+                             int64_t cc_ng_term)
+    : FetchCc(ccs, cc_ng_id, cc_ng_term),
+      cce_(cce),
+      table_name_(&(cce->parent_map_->table_name_)),
+      table_schema_(cce->parent_map_->GetTableSchema())
+{
+}
+
+bool FetchRecordCc::Execute(CcShard &ccs)
+{
+    if (error_code_ == 0)
+    {
+        int64_t cc_ng_candid_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
+        {
+            cce_->parent_map_->BackFill(
+                cce_, rec_ts_, rec_status_, std::move(rec_));
+
+            for (CcRequestBase *req : requesters_)
+            {
+                ccs.Enqueue(ccs.core_id_, req);
+            }
+        }
+        else
+        {
+            for (CcRequestBase *req : requesters_)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
+        }
+    }
+    else
+    {
+        for (CcRequestBase *req : requesters_)
+        {
+            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        }
+    }
+
+    ccs.RemoveFetchRecordRequest(cce_);
+    return false;
+}
+
+void FetchRecordCc::SetFinish(int err)
+{
+    error_code_ = err;
+    ccs_.Enqueue(this);
+}
+
 }  // namespace txservice
