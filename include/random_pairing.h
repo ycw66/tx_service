@@ -43,7 +43,8 @@ public:
             if (static_cast<uint32_t>(sample_pool_.size()) < CapacityN)
             {
                 Insert(key);
-                std::is_sorted(sample_pool_.begin(), sample_pool_.end());
+                assert(
+                    std::is_sorted(sample_pool_.begin(), sample_pool_.end()));
             }
             else
             {
@@ -53,7 +54,8 @@ public:
                 if (random < CapacityN)
                 {
                     Replace(random, key);
-                    std::is_sorted(sample_pool_.begin(), sample_pool_.end());
+                    assert(std::is_sorted(sample_pool_.begin(),
+                                          sample_pool_.end()));
                 }
             }
         }
@@ -70,7 +72,8 @@ public:
                 c1_ -= 1;
 
                 Insert(key);
-                std::is_sorted(sample_pool_.begin(), sample_pool_.end());
+                assert(
+                    std::is_sorted(sample_pool_.begin(), sample_pool_.end()));
             }
             else
             {
@@ -90,14 +93,13 @@ public:
 
             while (iter != sample_pool_.end() - 1)
             {
-                CopyKey()(*iter, *(iter + 1));
+                *iter = std::move(*(iter + 1));
                 iter++;
             }
 
             sample_pool_.resize(sample_pool_.size() - 1);
 
-            std::is_sorted(sample_pool_.begin(), sample_pool_.end());
-
+            assert(std::is_sorted(sample_pool_.begin(), sample_pool_.end()));
             assert(sample_pool_.size() < CapacityN);
         }
         else
@@ -116,7 +118,7 @@ public:
         return sample_pool_.size();
     }
 
-    static uint32_t Capacity()
+    static constexpr uint32_t Capacity()
     {
         return CapacityN;
     }
@@ -150,7 +152,7 @@ private:
 
                 for (uint64_t j = sample_pool_.size() - 1; j > i; --j)
                 {
-                    CopyKey()(sample_pool_[j], sample_pool_[j - 1]);
+                    sample_pool_[j] = std::move(sample_pool_[j - 1]);
                 }
 
                 CopyKey()(sample_pool_[i], key);
