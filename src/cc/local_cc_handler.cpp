@@ -1382,6 +1382,14 @@ void txservice::LocalCcHandler::DataStoreUpsertTable(
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
 #endif
+
+    CODE_FAULT_INJECTOR("trigger_flush_kv_error", {
+        hres.SetError(CcErrorCode::DATA_STORE_ERR);
+        return;
+    });
+
+    ACTION_FAULT_INJECTOR("kv_upsert_table");
+
     cc_shards_.store_hd_->UpsertTable(
         schema, op_type, commit_ts, &hres, alter_table_info);
 }
