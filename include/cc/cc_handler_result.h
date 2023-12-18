@@ -230,7 +230,7 @@ private:
     // std::atomic<int8_t> error_code_{0};
     std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
     bool ref_cnted_{false};
-    std::atomic<uint32_t> ref_cnt_;
+    std::atomic<uint32_t> ref_cnt_{0};
     std::atomic<uint32_t> remote_ref_cnt_{0};
     // The parent tx state machine who sends a cc request and waits on this
     // handler result. The handler result is bound to a fixed tx machine. The tx

@@ -1666,6 +1666,33 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                     return;
                 }
             }
+
+            // Read lock early release logic:
+            // If it is skread and succeeds and need to trace back pk entry,
+            // add into drain_batch_
+            if (read_tx_req->tab_name_->Type() == TableType::UniqueSecondary &&
+                lock_type == LockType::ReadLock &&
+                !read.read_tx_req_->is_covering_keys_)
+            {
+                assert(TxStatus() != TxnStatus::Recovering);
+
+                uint16_t read_cnt = rw_set_.RemoveReadEntry(
+                    *read_tx_req->tab_name_, read_res.cce_addr_);
+                if (read_cnt == 0)
+                {
+                    drain_batch_.emplace_back(read_res.cce_addr_, read_res.ts_);
+                }
+            }
+            else if (read_tx_req->tab_name_->Type() == TableType::Primary &&
+                     !drain_batch_.empty())
+            {
+                assert(TxStatus() != TxnStatus::Recovering);
+                assert(drain_batch_.size() == 1);
+
+                abundant_lock_op_.Reset();
+                PushOperation(&abundant_lock_op_);
+                Process(abundant_lock_op_);
+            }
         }
 
         if (read_.read_type_ == ReadType::Inside &&

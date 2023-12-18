@@ -4736,7 +4736,8 @@ void ReleaseScanExtraLockOp::Reset()
 
 void ReleaseScanExtraLockOp::Forward(TransactionExecution *txm)
 {
-    if (hd_result_.IsFinished())
+    // do not wait on remote
+    if (hd_result_.IsFinished() || hd_result_.LocalRefCnt() == 0)
     {
         txm->PostProcess(*this);
     }
