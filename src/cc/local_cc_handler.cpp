@@ -1324,6 +1324,28 @@ void txservice::LocalCcHandler::UpdateTxnStatus(const TxId &txid,
     }
 }
 
+void txservice::LocalCcHandler::ReloadCache(NodeGroupId ng_id,
+                                            TxNumber tx_number,
+                                            int64_t tx_term,
+                                            uint16_t command_id,
+                                            CcHandlerResult<Void> &hres)
+{
+#ifdef EXT_TX_PROC_ENABLED
+    hres.SetToBlock();
+#endif
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
+    if (dest_node_id == cc_shards_.NodeId())
+    {
+        hres.SetFinished();  // Skip local node.
+    }
+    else
+    {
+        hres.IncrementRemoteRef();
+        remote_hd_.ReloadCache(
+            cc_shards_.node_id_, ng_id, tx_number, tx_term, command_id, hres);
+    }
+}
+
 void txservice::LocalCcHandler::FaultInject(const std::string &fault_name,
                                             const std::string &fault_paras,
                                             int64_t tx_term,

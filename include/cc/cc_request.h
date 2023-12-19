@@ -3038,6 +3038,60 @@ public:
     uint32_t visit_keys_{0};
 };
 
+struct ReloadCacheCc : public TemplatedCcRequest<ReloadCacheCc, Void>
+{
+    ReloadCacheCc() = default;
+    virtual ~ReloadCacheCc() = default;
+
+    ReloadCacheCc(const ReloadCacheCc &) = delete;
+    ReloadCacheCc(ReloadCacheCc &&) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!done_)
+        {
+            if (SystemHandler *sys_handler = ccs.GetSystemHandler();
+                sys_handler)
+            {
+                sys_handler->ReloadCache(
+                    [&ccs, this](bool ok)
+                    {
+                        done_ = true;
+                        ok_ = ok;
+                        ccs.Enqueue(this);
+                    });
+                return false;
+            }
+            else
+            {
+                done_ = true;
+                ok_ = true;
+            }
+        }
+
+        if (ok_)
+        {
+            res_->SetFinished();
+        }
+        else
+        {
+            res_->SetError(CcErrorCode::SYSTEM_HANDLER_ERR);
+        }
+        return true;
+    }
+
+    void Reset(CcHandlerResult<Void> *res)
+    {
+        res_ = res;
+        done_ = false;
+        ok_ = false;
+    }
+
+private:
+    bool done_{false};
+    bool ok_{false};
+};
+
 struct FaultInjectCC : public TemplatedCcRequest<FaultInjectCC, bool>
 {
 public:
@@ -3050,7 +3104,7 @@ public:
     FaultInjectCC(const FaultInjectCC &rhs) = delete;
     FaultInjectCC(FaultInjectCC &&rhs) = delete;
 
-    virtual bool Execute(CcShard &ccs) override
+    bool Execute(CcShard &ccs) override
     {
         FaultInject::Instance().InjectFault(*fault_name_, *fault_paras_);
         txlog::FaultInject::Instance().InjectFault(*fault_name_, *fault_paras_);

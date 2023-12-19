@@ -496,6 +496,38 @@ private:
     std::vector<RemoteScanSliceCache> scan_cache_vec_;
 };
 
+struct RemoteReloadCacheCc : public ReloadCacheCc
+{
+public:
+    RemoteReloadCacheCc();
+
+    RemoteReloadCacheCc(const RemoteReloadCacheCc &) = delete;
+    RemoteReloadCacheCc(RemoteReloadCacheCc &&) = delete;
+
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+private:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_;
+    CcStreamSender *hd_{nullptr};
+
+    CcHandlerResult<Void> cc_res_{nullptr};
+
+    friend class RemoteCcHandler;
+};
+
 struct RemoteFaultInjectCC : public FaultInjectCC
 {
 public:

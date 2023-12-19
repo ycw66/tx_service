@@ -187,6 +187,13 @@ public:
     {
     }
 
+    void ReloadCache(uint32_t src_node_id,
+                     NodeGroupId ng_id,
+                     TxNumber tx_number,
+                     int64_t tx_term,
+                     uint16_t command_id,
+                     CcHandlerResult<Void> &hres);
+
     void FaultInject(uint32_t src_node_id,
                      const std::string &fault_name,
                      const std::string &fault_paras,

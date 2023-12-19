@@ -72,6 +72,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       write_log_(this),
       sleep_op_(this),
       analyze_table_all_op_(this),
+      reload_cache_op_(this),
       fault_inject_op_(this),
       clean_entry_op_(this),
       abundant_lock_op_(this),
@@ -820,6 +821,28 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
                    req.auto_commit_);
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
+}
+
+void TransactionExecution::ProcessTxRequest(ReloadCacheTxRequest &req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &fi_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    void_resp_ = &req.tx_result_;
+
+    uint32_t hres_ref_cnt = Sharder::Instance().NodeGroupCount();
+    reload_cache_op_.Reset(hres_ref_cnt);
+
+    PushOperation(&reload_cache_op_);
+    Process(reload_cache_op_);
 }
 
 void TransactionExecution::ProcessTxRequest(FaultInjectTxRequest &fi_req)
@@ -4435,6 +4458,63 @@ void TransactionExecution::PostProcess(DsUpsertTableOp &ds_upsert_table_op)
         });
     state_stack_.pop_back();
     assert(!state_stack_.empty());
+}
+
+void TransactionExecution::Process(ReloadCacheOperation &reload_cache_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &reload_cache_op_,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    reload_cache_op_.is_running_ = true;
+
+    uint32_t ng_cnt = Sharder::Instance().NodeGroupCount();
+
+    for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+    {
+        cc_handler_->ReloadCache(ng_id,
+                                 TxNumber(),
+                                 TxTerm(),
+                                 CommandId(),
+                                 reload_cache_op.hd_result_);
+    }
+
+    StartTiming();
+}
+
+void TransactionExecution::PostProcess(ReloadCacheOperation &reload_cache_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &reload_cache_op_,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append("\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+    state_stack_.pop_back();
+    assert(state_stack_.empty());
+
+    if (reload_cache_op.hd_result_.IsError())
+    {
+        DLOG(INFO) << "ReloadCacheOperation FinishError for cc error: "
+                   << reload_cache_op.hd_result_.ErrorMsg();
+        void_resp_->FinishError(
+            ConvertCcError(reload_cache_op.hd_result_.ErrorCode()));
+    }
+    else
+    {
+        void_resp_->Finish(void_);
+    }
 }
 
 void TransactionExecution::Process(FaultInjectOp &fault_inject_op_)

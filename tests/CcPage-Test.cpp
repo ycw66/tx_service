@@ -56,13 +56,15 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
                                   10000,
                                   false,
                                   nullptr,
+                                  nullptr,
                                   &ng_configs,
                                   9001,
                                   2,
                                   nullptr,
                                   nullptr,
                                   true);
-    CcShard shard(0, 1, 10000, 10000, false, 0, local_cc_shards, nullptr);
+    CcShard shard(
+        0, 1, 10000, 10000, false, 0, local_cc_shards, nullptr, nullptr);
     std::string raft_path("");
     Sharder::Instance(0,
                       &ng_configs,

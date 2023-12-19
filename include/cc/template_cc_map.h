@@ -5087,6 +5087,24 @@ public:
         }
     }
 
+    bool Execute(ReloadCacheCc &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        return true;
+    }
+
     bool Execute(FaultInjectCC &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

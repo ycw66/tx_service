@@ -1163,6 +1163,50 @@ void txservice::remote::RemoteReadOutside::Finish()
     hd_->RecycleCcMsg(std::move(input_msg_));
 }
 
+txservice::remote::RemoteReloadCacheCc::RemoteReloadCacheCc() : cc_res_(nullptr)
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ReloadCacheResponse);
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+
+        ReloadCacheResponse *resp = output_msg_.mutable_reload_cache_resp();
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+        const ReloadCacheRequest &req = input_msg_->reload_cache_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteReloadCacheCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_reload_cache_req());
+
+    cc_res_.Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_reload_cache_resp();
+
+    ReloadCacheCc::Reset(&cc_res_);
+
+    input_msg_ = std::move(input_msg);
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
 txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
 {
     res_ = &cc_res_;

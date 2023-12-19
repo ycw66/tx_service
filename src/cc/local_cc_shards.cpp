@@ -21,6 +21,7 @@ LocalCcShards::LocalCcShards(
     uint32_t log_limit_mb,
     bool realtime_sampling,
     CatalogFactory *catalog_factory,
+    SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     int32_t range_bucket_seed,
     uint64_t cluster_config_version,
@@ -36,6 +37,7 @@ LocalCcShards::LocalCcShards(
       timer_terminate_(false),
       is_waiting_ckpt_(false),
       catalog_factory_(catalog_factory),
+      system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
@@ -67,7 +69,8 @@ LocalCcShards::LocalCcShards(
                                                           realtime_sampling,
                                                           node_id,
                                                           *this,
-                                                          catalog_factory_));
+                                                          catalog_factory_,
+                                                          system_handler));
     }
 
     // Starts flush worker threads firstly.

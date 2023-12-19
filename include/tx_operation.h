@@ -244,6 +244,15 @@ public:
 };
 #endif
 
+struct ReloadCacheOperation : TransactionOperation
+{
+    ReloadCacheOperation(TransactionExecution *txm);
+    void Reset(uint32_t hres_ref_cnt);
+    void Forward(TransactionExecution *txm) override;
+
+    CcHandlerResult<Void> hd_result_;
+};
+
 struct FaultInjectOp : TransactionOperation
 {
 public:

@@ -720,6 +720,17 @@ struct RangeSplitRecoveryTxRequest
     uint32_t node_group_id_;
 };
 
+struct ReloadCacheTxRequest
+    : public TemplateTxRequest<ReloadCacheTxRequest, Void>
+{
+    ReloadCacheTxRequest(const std::function<void()> *yield_fptr = nullptr,
+                         const std::function<void()> *resume_fptr = nullptr,
+                         TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm)
+    {
+    }
+};
+
 struct FaultInjectTxRequest
     : public TemplateTxRequest<FaultInjectTxRequest, bool>
 {

@@ -288,6 +288,12 @@ public:
                          TxnStatus status,
                          CcHandlerResult<Void> &hres) override;
 
+    void ReloadCache(NodeGroupId ng_id,
+                     TxNumber tx_number,
+                     int64_t tx_term,
+                     uint16_t command_id,
+                     CcHandlerResult<Void> &hres) override;
+
     void FaultInject(const std::string &fault_name,
                      const std::string &fault_paras,
                      int64_t tx_term,

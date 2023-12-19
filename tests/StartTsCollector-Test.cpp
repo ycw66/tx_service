@@ -69,6 +69,7 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     std::unique_ptr<TxService> tx_service_ = std::make_unique<TxService>(
         local_path,
         &mock_catalog_factory,
+        &MockSystemHandler::Instance(),
         tx_service_conf,
         node_id,
         &ng_configs,

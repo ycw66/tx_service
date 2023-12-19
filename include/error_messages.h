@@ -174,6 +174,9 @@ enum struct CcErrorCode
     PACK_SK_ERR,
     UPLOAD_RECORD_TO_CCMAP_ERR,
 
+    // Error when call system handler, like ReloadCacheCc.
+    SYSTEM_HANDLER_ERR,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 
@@ -231,6 +234,9 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::ACQUIRE_LEADER_TERM_ERR, "ACQUIRE_LEADER_TERM_ERROR"},
     {CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
      "ESTABLISH_NODE_CHANNEL_FAILED"},
+
+    // Error when call system handler, like ReloadCacheCc.
+    {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

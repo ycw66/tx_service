@@ -38,6 +38,7 @@ struct CommitTxRequest;
 struct AbortTxRequest;
 struct UpsertTableTxRequest;
 struct ObjectCommandTxRequest;
+struct ReloadCacheTxRequest;
 struct FaultInjectTxRequest;
 struct CleanCcEntryForTestTxRequest;
 struct CleanArchivesTxRequest;
@@ -122,6 +123,7 @@ public:
     void ProcessTxRequest(AbortTxRequest &abort_req);
     void ProcessTxRequest(UpsertTableTxRequest &req);
     void ProcessTxRequest(ObjectCommandTxRequest &req);
+    void ProcessTxRequest(ReloadCacheTxRequest &req);
     void ProcessTxRequest(FaultInjectTxRequest &fi_req);
     void ProcessTxRequest(CleanCcEntryForTestTxRequest &clean_req);
     void ProcessTxRequest(CleanArchivesTxRequest &clean_req);
@@ -306,6 +308,8 @@ private:
     void PostProcess(PostProcessOp &post_process);
     void Process(WriteToLogOp &write_log);
     void PostProcess(WriteToLogOp &write_log);
+    void Process(ReloadCacheOperation &reload_cache_op);
+    void PostProcess(ReloadCacheOperation &reload_cache_op);
     void Process(FaultInjectOp &fault_inject_op);
     void PostProcess(FaultInjectOp &fault_inject_op);
     void Process(CleanCcEntryForTestOp &clean_entry_op);
@@ -585,6 +589,9 @@ private:
     // analyze table
     AnalyzeTableAllOp analyze_table_all_op_;
 
+    // reload acl and cache
+    ReloadCacheOperation reload_cache_op_;
+
     // fault inject
     FaultInjectOp fault_inject_op_;
 
@@ -616,6 +623,7 @@ private:
     friend struct ScanOpenOperation;
     friend struct ScanNextOperation;
     friend struct ReleaseScanExtraLockOp;
+    friend struct ReloadCacheOperation;
     friend struct FaultInjectOp;
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;

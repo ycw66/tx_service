@@ -40,6 +40,7 @@ struct CkptTs;
 struct BroadcastStatisticsCc;
 struct AnalyzeTableAllCc;
 struct ReplayLogCc;
+struct ReloadCacheCc;
 struct FaultInjectCC;
 struct CleanCcEntryForTestCc;
 struct FillStoreSliceCc;
@@ -129,6 +130,7 @@ public:
     virtual bool Execute(BroadcastStatisticsCc &req) = 0;
     virtual bool Execute(AnalyzeTableAllCc &req) = 0;
     virtual bool Execute(ReplayLogCc &req) = 0;
+    virtual bool Execute(ReloadCacheCc &req) = 0;
     virtual bool Execute(FaultInjectCC &req) = 0;
     virtual bool Execute(CleanCcEntryForTestCc &req) = 0;
     virtual bool Execute(FillStoreSliceCc &req) = 0;

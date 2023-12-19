@@ -291,4 +291,18 @@ public:
     }
 };
 
+class MockSystemHandler : public txservice::SystemHandler
+{
+public:
+    static MockSystemHandler &Instance()
+    {
+        static MockSystemHandler instance_;
+        return instance_;
+    }
+
+private:
+    MockSystemHandler() = default;
+    virtual ~MockSystemHandler() = default;
+};
+
 }  // namespace txservice

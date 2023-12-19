@@ -29,6 +29,7 @@
 #include "range_record.h"
 #include "range_slice.h"
 #include "sharder.h"
+#include "system_handler.h"
 #include "tentry.h"
 #include "tx_service_common.h"
 
@@ -101,7 +102,8 @@ public:
             bool realtime_sampling,
             uint32_t node_id,
             LocalCcShards &local_shards,
-            CatalogFactory *catalog_factory);
+            CatalogFactory *catalog_factory,
+            SystemHandler *system_handler);
     /**
      * @brief Returns the cc map at this shard given the table name and the cc
      * node group.
@@ -645,6 +647,11 @@ public:
         return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
     }
 
+    SystemHandler *GetSystemHandler()
+    {
+        return system_handler_;
+    }
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -720,6 +727,8 @@ private:
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
     CatalogFactory *const catalog_factory_;
+
+    SystemHandler *const system_handler_;
 
     // The number of cc entries to free in one invocation of Clean().
     static constexpr uint64_t freeBatchSize = 100;

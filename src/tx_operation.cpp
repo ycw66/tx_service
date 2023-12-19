@@ -972,6 +972,51 @@ void PostProcessOp::Forward(TransactionExecution *txm)
     }
 }
 
+ReloadCacheOperation::ReloadCacheOperation(TransactionExecution *txm)
+    : hd_result_(txm)
+{
+    TX_TRACE_ASSOCIATE(this, &hd_result_);
+}
+
+void ReloadCacheOperation::Reset(uint32_t hres_ref_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(hres_ref_cnt);
+}
+
+void ReloadCacheOperation::Forward(TransactionExecution *txm)
+{
+    // start the state machine if not running.
+    if (!is_running_)
+    {
+        txm->Process(*this);
+    }
+
+    if (hd_result_.IsFinished())
+    {
+        txm->PostProcess(*this);
+    }
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            this,
+            "Forward.IsTimeOut",
+            txm,
+            [txm]() -> std::string
+            {
+                return std::string(",\"tx_number\":")
+                    .append(std::to_string(txm->TxNumber()))
+                    .append(",\"term\":")
+                    .append(std::to_string(txm->TxTerm()));
+            });
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
+        {
+            txm->PostProcess(*this);
+        }
+    }
+}
+
 FaultInjectOp::FaultInjectOp(TransactionExecution *txm) : hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);

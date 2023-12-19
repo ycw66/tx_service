@@ -650,6 +650,29 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }
 
+void txservice::remote::RemoteCcHandler::ReloadCache(
+    uint32_t src_node_id,
+    NodeGroupId ng_id,
+    TxNumber tx_number,
+    int64_t tx_term,
+    uint16_t command_id,
+    CcHandlerResult<Void> &hres)
+{
+    CcMessage send_msg;
+
+    send_msg.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ReloadCacheRequest);
+    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_tx_term(tx_term);
+    send_msg.set_command_id(command_id);
+    send_msg.set_tx_number(tx_number);
+
+    ReloadCacheRequest *reload_req = send_msg.mutable_reload_cache_req();
+    reload_req->set_src_node_id(src_node_id);
+
+    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
+}
+
 void txservice::remote::RemoteCcHandler::FaultInject(
     uint32_t src_node_id,
     const std::string &fault_name,

@@ -789,6 +789,7 @@ class TxService
 public:
     TxService(const std::string &local_path,
               CatalogFactory *catalog_factory,
+              SystemHandler *system_handler,
               const std::map<std::string, uint32_t> &conf,
               uint32_t node_id,  // = 0,
               std::unordered_map<uint32_t, std::vector<NodeConfig>>
@@ -809,6 +810,7 @@ public:
                            conf.find("node_log_limit_mb")->second,
                            conf.find("realtime_sampling")->second,
                            catalog_factory,
+                           system_handler,
                            ng_configs,
                            range_bucket_seed,
                            cluster_config_version,

@@ -485,6 +485,14 @@ message ScanSliceResponse {
 	bytes term = 15;
 }
 
+message ReloadCacheRequest {
+  uint32 src_node_id = 1;
+}
+
+message ReloadCacheResponse {
+  int32 error_code = 1;
+}
+
 message FaultInjectRequest {
   uint32 src_node_id = 1;
   string fault_name = 2;
@@ -695,8 +703,10 @@ message CcMessage {
 		ForwardPostCommitRequest = 43;
         AnalyzeTableAllRequest = 44;
         AnalyzeTableAllResponse = 45;
-		KickoutDataRequest = 46;
-		KickoutDataResponse = 47;
+        KickoutDataRequest = 46;
+        KickoutDataResponse = 47;
+        ReloadCacheRequest = 48;
+        ReloadCacheResponse = 49;
 	}
 
 	MessageType type = 1;
@@ -739,7 +749,9 @@ message CcMessage {
 		ForwardPostCommitRequest forward_post_commit_req = 51;
         AnalyzeTableAllRequest analyze_table_all_req = 52;
         AnalyzeTableAllResponse analyze_table_all_resp = 53;
-		KickoutDataRequest kickout_data_req = 54;
-		KickoutDataResponse kickout_data_resp = 55;
+        KickoutDataRequest kickout_data_req = 54;
+        KickoutDataResponse kickout_data_resp = 55;
+        ReloadCacheRequest reload_cache_req = 56;
+        ReloadCacheResponse reload_cache_resp = 57;
 	}
 }

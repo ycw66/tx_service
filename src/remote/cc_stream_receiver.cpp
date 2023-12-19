@@ -27,6 +27,7 @@ thread_local CcRequestPool<RemoteReadOutside> read_outside_pool_;
 thread_local CcRequestPool<RemoteScanOpen> scan_open_pool_;
 thread_local CcRequestPool<RemoteScanSlice> scan_slice_pool;
 thread_local CcRequestPool<RemoteScanNextBatch> scan_next_pool_;
+thread_local CcRequestPool<RemoteReloadCacheCc> reload_cache_pool_;
 thread_local CcRequestPool<RemoteFaultInjectCC> fault_inject_pool_;
 thread_local CcRequestPool<RemoteBroadcastStatisticsCc> broadcast_stat_pool_;
 thread_local CcRequestPool<RemoteAnalyzeTableAllCc> analyze_table_all_pool_;
@@ -1043,7 +1044,55 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         break;
     }
+    case CcMessage::MessageType::CcMessage_MessageType_ReloadCacheRequest:
+    {
+        RemoteReloadCacheCc *reload_req = reload_cache_pool_.NextRequest();
+        reload_req->Reset(std::move(msg));
+        TX_TRACE_ASSOCIATE(msg.get(), reload_req);
+        local_shards_.EnqueueCcRequest(0, reload_req);
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ReloadCacheResponse:
+    {
+        assert(msg->has_reload_cache_resp());
 
+        CcHandlerResult<Void> *hd_res = nullptr;
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        else
+        {
+            hd_res =
+                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+        }
+
+        const ReloadCacheResponse &reload_resp = msg->reload_cache_resp();
+        if (reload_resp.error_code() != 0)
+        {
+            hd_res->SetRemoteError(
+                ToLocalType::ConvertCcErrorCode(reload_resp.error_code()));
+        }
+        else
+        {
+            hd_res->SetRemoteFinished();
+        }
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
     case CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest:
     {
         RemoteFaultInjectCC *fault_inject_req =
@@ -1090,7 +1139,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         RemoteAnalyzeTableAllCc *analyze_req =
             analyze_table_all_pool_.NextRequest();
         analyze_req->Reset(std::move(msg));
-        TX_TRACE_ASSOCIATE(msg.get(), clean_req);
+        TX_TRACE_ASSOCIATE(msg.get(), analyze_req);
         uint32_t shard_code = txservice::Statistics::ShardCode(
             analyze_req->GetTableName()->GetBaseTableNameSV());
         local_shards_.EnqueueCcRequest(shard_code, analyze_req);
@@ -1100,22 +1149,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         assert(msg->has_analyze_table_all_resp());
 
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        CcHandlerResult<Void> *hd_res = nullptr;
 
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             msg_pool_.enqueue(std::move(msg));
             break;
         }
-        CcHandlerResult<Void> *hd_res =
-            reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+        else
+        {
+            hd_res =
+                reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+        }
 
         const AnalyzeTableAllResponse &analyze_resp =
             msg->analyze_table_all_resp();
         if (analyze_resp.error_code() != 0)
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(analyze_resp.error_code()));
         }
         else

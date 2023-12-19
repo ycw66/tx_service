@@ -21,6 +21,7 @@
 #include "metrics.h"
 #include "raft_log.pb.h"
 #include "store/data_store_handler.h"
+#include "system_handler.h"
 #include "tx_service_common.h"
 #include "type.h"
 
@@ -176,6 +177,7 @@ public:
                   uint32_t log_limit_mb,            // = 1000,
                   bool realtime_sampling,           // = false,
                   CatalogFactory *catalog_factory,  // = nullptr,
+                  SystemHandler *system_handler,    // = nullptr,
                   std::unordered_map<uint32_t, std::vector<NodeConfig>>
                       *ng_configs,                    // = nullptr,
                   int32_t range_bucket_seed,          // = -1,
@@ -650,6 +652,11 @@ public:
         return catalog_factory_;
     }
 
+    SystemHandler *GetSystemHandler()
+    {
+        return system_handler_;
+    }
+
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
@@ -842,6 +849,9 @@ private:
     std::atomic<uint64_t> ts_base_;
 
     CatalogFactory *const catalog_factory_;
+
+    SystemHandler *const system_handler_;
+
     std::unordered_map<TableName, std::unordered_map<NodeGroupId, CatalogEntry>>
         table_catalogs_;  // string owner
 

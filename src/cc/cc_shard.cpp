@@ -22,7 +22,8 @@ CcShard::CcShard(uint16_t core_id,
                  bool realtime_sampling,
                  uint32_t node_id,
                  LocalCcShards &local_shards,
-                 CatalogFactory *catalog_factory)
+                 CatalogFactory *catalog_factory,
+                 SystemHandler *system_handler)
     : node_id_(node_id),
       core_id_(core_id),
       core_cnt_(core_cnt),
@@ -44,6 +45,7 @@ CcShard::CcShard(uint16_t core_id,
       size_(0),
       ckpter_(nullptr),
       catalog_factory_(catalog_factory),
+      system_handler_(system_handler),
       active_si_txs_(),
       meter_(std::make_unique<metrics::Meter>(local_shards.metrics_registry_,
                                               local_shards_.common_labels_))
