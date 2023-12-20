@@ -381,11 +381,12 @@ public:
             // and then changed by another txn. In the latter case, since the
             // lock is acquired before backfilling, it's only possible that
             // another txn acquired write lock and current txn acquired read
-            // intent.
+            // intent or no lock (in read committed isolation level).
             assert(cce->payload_status_ == RecordStatus::Unknown ||
                    cce->commit_ts_ == req.rec_commit_ts_ ||
                    cce->commit_ts_ > req.rec_commit_ts_ &&
-                       acquired_lock == LockType::ReadIntent);
+                       (acquired_lock == LockType::ReadIntent ||
+                        acquired_lock == LockType::NoLock));
         }
 
         // check locking result
