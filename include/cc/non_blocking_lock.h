@@ -161,10 +161,15 @@ public:
         return {write_txn_, write_lk_type_};
     }
 
-    bool HasWrite(TxNumber txn)
+    bool HasWriteLockOrWriteIntent(TxNumber txn) const
     {
         return write_lk_type_ != WriteLockType::NoWritelock &&
                write_txn_ == txn;
+    }
+
+    bool HasWriteLock(TxNumber txn) const
+    {
+        return write_lk_type_ == WriteLockType::WriteLock && write_txn_ == txn;
     }
 
     LockType ClearTx(TxNumber tx_number, CcShard *ccs);

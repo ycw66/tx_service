@@ -1624,6 +1624,20 @@ uint64_t AcquireAllOp::MaxTs()
     return max_ts;
 }
 
+bool AcquireAllOp::IsDeadlock() const
+{
+    for (size_t idx = 0; idx < upload_cnt_; ++idx)
+    {
+        if (hd_results_[idx].IsError() &&
+            hd_results_[idx].ErrorCode() == CcErrorCode::DEAD_LOCK_ABORT)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm) : hd_result_(txm)
 {
 }
@@ -1651,7 +1665,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut(4))
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(4))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -2388,8 +2402,29 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // the recovery mode and the cc node is a leader candidate.
             if (txm->CheckLeaderTerm())
             {
-                txm->PushOperation(&acquire_all_lock_op_);
-                txm->Process(acquire_all_lock_op_);
+                LOG(ERROR) << "Upsert table schema transaction failed to "
+                              "acquire write lock, tx_number:"
+                           << txm->TxNumber();
+                // We downgrade catalog write lock to avoid blocking other
+                // transaction which acquiring catalog read lock. And then retry
+                // to acquire catalog write lock.
+                if (acquire_all_lock_op_.IsDeadlock())
+                {
+                    LOG(ERROR) << "Upsert table schema transaction deadlocks "
+                                  "with other transaction, downgrade write "
+                                  "lock, tx_number: "
+                               << txm->TxNumber();
+                    post_all_lock_op_.write_type_ =
+                        PostWriteType::DowngradeLock;
+                    op_ = &post_all_lock_op_;
+                    txm->PushOperation(&post_all_lock_op_);
+                    txm->Process(post_all_lock_op_);
+                }
+                else
+                {
+                    txm->PushOperation(&acquire_all_lock_op_);
+                    txm->Process(acquire_all_lock_op_);
+                }
             }
             else
             {
@@ -2447,6 +2482,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             else
             {
                 ACTION_FAULT_INJECTOR("upsert_table_post_all_lock");
+                assert(post_all_lock_op_.write_type_ ==
+                       PostWriteType::PostCommit);
                 op_ = &post_all_lock_op_;
                 txm->PushOperation(&post_all_lock_op_);
                 txm->Process(post_all_lock_op_);
@@ -2461,6 +2498,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // recovery), ForceToFinish.
             ForceToFinish(txm);
         }
+
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
@@ -2497,8 +2535,19 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // post_all_lock_op_ has finished without an error.
             assert(!post_all_lock_op_.IsFailed());
 
-            if (txm->commit_ts_ != tx_op_failed_ts_)
+            if (post_all_lock_op_.write_type_ == PostWriteType::DowngradeLock)
             {
+                // Reset write type to PostCommit
+                post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+                op_ = &acquire_all_lock_op_;
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+                return;
+            }
+            else if (txm->commit_ts_ != tx_op_failed_ts_)
+            {
+                assert(post_all_lock_op_.write_type_ !=
+                       PostWriteType::DowngradeLock);
                 // The tx's modification of the schema has succeeded. If the tx
                 // has previously read the same schema and keeps a pointer in
                 // the read set to the cc entry of the schema, removes it from
@@ -2512,6 +2561,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                assert(post_all_lock_op_.write_type_ !=
+                       PostWriteType::DowngradeLock);
                 // Flush kv failed, or it is recovering from a flush kv failure.
                 // This schema op has already been rolled back by now, only need
                 // to flush clean log here.
@@ -3980,6 +4031,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             {
                 ForceToFinish(txm);
             }
+
             return;
         }
 
@@ -4046,8 +4098,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 LOG(ERROR) << "Split Flush transaction failed to obtain write "
                               "lock, tx_number:"
                            << txm->TxNumber();
-
-                RetrySubOperation(txm, &commit_acquire_all_write_op_);
+                if (commit_acquire_all_write_op_.IsDeadlock())
+                {
+                    LOG(ERROR)
+                        << "Split Flush transaction deadlocks with other "
+                           "transactions, downgrade write lock, tx_number:"
+                        << txm->TxNumber();
+                    // We downgrade range write lock to write intent lock.
+                    post_all_lock_op_.write_type_ =
+                        PostWriteType::DowngradeLock;
+                    ForwardToSubOperation(txm, &post_all_lock_op_);
+                }
+                else
+                {
+                    RetrySubOperation(txm, &commit_acquire_all_write_op_);
+                }
             }
             else
             {
@@ -4361,6 +4426,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         if (kickout_data_it_ == new_range_info_.cend())
         {
+            LOG(INFO) << "Split Flush transaction post all lock, range id "
+                      << range_info_.PartitionId()
+                      << ", txn: " << txm->TxNumber();
+
             // All of the new ranges falls on the same node, proceed to post
             // write all. Now broadcast slice info to all nodes through
             // PostWriteAll. New ranges might land on other nodes.
@@ -4368,9 +4437,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             range_record_->range_slices_ = &slice_info_;
             range_record_->SetRangeInfo(&range_info_);
 
-            LOG(INFO) << "Split Flush transaction post all lock, range id "
-                      << range_info_.PartitionId()
-                      << ", txn: " << txm->TxNumber();
+            assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             ForwardToSubOperation(txm, &post_all_lock_op_);
         }
         else
@@ -4430,14 +4497,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         if (kickout_data_it_ == new_range_info_.cend())
         {
+            LOG(INFO) << "Split Flush transaction post all lock, range id "
+                      << range_info_.PartitionId()
+                      << ", txn: " << txm->TxNumber();
+
             // Now broadcast slice info to all nodes through PostWriteAll. New
             // ranges might land on other nodes.
             post_all_lock_op_.rec_ = range_record_.get();
             range_record_->range_slices_ = &slice_info_;
             range_record_->SetRangeInfo(&range_info_);
-            LOG(INFO) << "Split Flush transaction post all lock, range id "
-                      << range_info_.PartitionId()
-                      << ", txn: " << txm->TxNumber();
+
+            assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             ForwardToSubOperation(txm, &post_all_lock_op_);
         }
         else
@@ -4462,9 +4532,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << (int) (post_all_lock_op_.hd_result_.ErrorCode())
                            << ", msg "
                            << post_all_lock_op_.hd_result_.ErrorMsg();
-                post_all_lock_op_.rec_ = range_record_.get();
+
                 range_record_->range_slices_ = &slice_info_;
                 range_record_->SetRangeInfo(&range_info_);
+                post_all_lock_op_.rec_ = range_record_.get();
                 RetrySubOperation(txm, &post_all_lock_op_);
             }
             return;
@@ -4477,6 +4548,15 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
             return;
         }
+
+        if (post_all_lock_op_.write_type_ == PostWriteType::DowngradeLock)
+        {
+            post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+            // Retry to acquire range write lock on all node group.
+            ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
+            return;
+        }
+
         auto &rset = txm->rw_set_.ReadSet();
         auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
         assert(cluster_config_rset.size() == 1);
@@ -5152,6 +5232,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForceToFinish(txm);
             return;
         }
+
         if (acquire_cluster_config_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
@@ -5160,9 +5241,23 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                           ", tx_number:"
                        << txm->TxNumber();
 
-            // We need to roll forward after prepare log is written. Retry
-            // until succeed.
-            RetrySubOperation(txm, &acquire_cluster_config_write_op_);
+            if (acquire_cluster_config_write_op_.IsDeadlock())
+            {
+                LOG(ERROR) << "Cluster scale transaction deadlocks with other "
+                              "transactions, downgrade write lock, tx_number:"
+                           << txm->TxNumber();
+                // We downgrade write lock to resolve deadlock issue.
+                // And then retry to acquire write lock.
+                install_cluster_config_op_.write_type_ =
+                    PostWriteType::DowngradeLock;
+                ForwardToSubOperation(txm, &install_cluster_config_op_);
+            }
+            else
+            {
+                // We need to roll forward after prepare log is written. Retry
+                // until succeed.
+                RetrySubOperation(txm, &acquire_cluster_config_write_op_);
+            }
             return;
         }
 
@@ -5270,6 +5365,15 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         {
             // If tx failed, recycle the tx machine after releasing locks.
             ForceToFinish(txm);
+            return;
+        }
+
+        if (install_cluster_config_op_.write_type_ ==
+            PostWriteType::DowngradeLock)
+        {
+            // Retry to acquire write lock
+            install_cluster_config_op_.write_type_ = PostWriteType::Commit;
+            ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
             return;
         }
 
@@ -6132,7 +6236,20 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                        << status_->bucket_ids_[migrate_bucket_idx_]
                        << ", tx_number: " << txm->TxNumber()
                        << ", Keep retrying";
-            RetrySubOperation(txm, &prepare_bucket_lock_op_);
+
+            if (prepare_bucket_lock_op_.IsDeadlock())
+            {
+                LOG(ERROR) << "Data migration: deadlocks with other "
+                              "transactions, downgrade write lock, tx_number:"
+                           << txm->TxNumber();
+                post_all_bucket_lock_op_.write_type_ =
+                    PostWriteType::DowngradeLock;
+                ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            }
+            else
+            {
+                RetrySubOperation(txm, &prepare_bucket_lock_op_);
+            }
             return;
         }
 
@@ -6301,7 +6418,24 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                        << status_->bucket_ids_[migrate_bucket_idx_]
                        << ", tx_number:" << txm->TxNumber()
                        << ", Keep retrying";
-            RetrySubOperation(txm, &acquire_bucket_lock_op_);
+
+            assert(post_all_bucket_lock_op_.write_type_ ==
+                   PostWriteType::PostCommit);
+
+            if (acquire_bucket_lock_op_.IsDeadlock())
+            {
+                LOG(ERROR) << "Data migration: deadlocks with other "
+                              "transactions, downgrade write lock, tx_number:"
+                           << txm->TxNumber();
+                // Downgrade write lock to write intent
+                post_all_bucket_lock_op_.write_type_ =
+                    PostWriteType::DowngradeLock;
+                ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            }
+            else
+            {
+                RetrySubOperation(txm, &acquire_bucket_lock_op_);
+            }
             return;
         }
 
@@ -6485,6 +6619,23 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                        << ", tx number: " << txm->TxNumber();
             bucket_record_.SetBucketInfo(&bucket_info_);
             RetrySubOperation(txm, &post_all_bucket_lock_op_);
+            return;
+        }
+
+        if (post_all_bucket_lock_op_.write_type_ ==
+            PostWriteType::DowngradeLock)
+        {
+            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
+
+            if (prepare_log_op_.hd_result_.IsFinished())
+            {
+                ForwardToSubOperation(txm, &acquire_bucket_lock_op_);
+            }
+            else
+            {
+                ForwardToSubOperation(txm, &prepare_bucket_lock_op_);
+            }
+
             return;
         }
 

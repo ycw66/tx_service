@@ -358,12 +358,16 @@ public:
             return false;
         }
 
-        // When the commit ts is 0, the request commits nothing and only
-        // removes the write intents/locks acquired earlier.
-        if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
+        // When the commit ts is 0 or the commit type is DowngradeLock, the
+        // request commits nothing and only removes the write intents/locks
+        // acquired earlier.
+        if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_ ||
+            req.CommitType() == PostWriteType::DowngradeLock)
         {
             return TemplateCcMap<KeyT, RangeRecord>::Execute(req);
         }
+
+        assert(req.CommitType() != PostWriteType::DowngradeLock);
 
         // Prepare RangeRecord
         RangeRecord *upload_range_rec = nullptr;
@@ -413,7 +417,7 @@ public:
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
         if (target_cce == nullptr || target_cce->key_lock_ptr_ == nullptr ||
-            !target_cce->key_lock_ptr_->HasWrite(req.Txn()))
+            !target_cce->key_lock_ptr_->HasWriteLock(req.Txn()))
         {
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {

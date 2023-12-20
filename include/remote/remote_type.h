@@ -104,6 +104,8 @@ public:
             return CommitType::PostCommit;
         case PostWriteType::Commit:
             return CommitType::Commit;
+        case PostWriteType::DowngradeLock:
+            return CommitType::DowngradeLock;
         default:
             assert(false);
             return CommitType::PostCommit;
@@ -276,6 +278,8 @@ public:
             return PostWriteType::PostCommit;
         case CommitType::Commit:
             return PostWriteType::Commit;
+        case CommitType::DowngradeLock:
+            return PostWriteType::DowngradeLock;
         default:
             assert(false);
             return PostWriteType::PostCommit;

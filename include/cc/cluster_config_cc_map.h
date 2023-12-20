@@ -156,6 +156,7 @@ public:
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
+
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
         {
             // transaction failed before prepare log. Release lock and return.
@@ -166,6 +167,16 @@ public:
             req.Result()->SetFinished();
             return true;
         }
+        else if (req.CommitType() == PostWriteType::DowngradeLock)
+        {
+            // The request commits nothing. We downgrade write lock to
+            // resolve deadlock issue
+            DowngradeCceKeyWriteLock(&neg_inf_, req.Txn());
+            req.Result()->SetFinished();
+            return true;
+        }
+
+        assert(req.CommitType() == PostWriteType::Commit);
 
         ClusterConfigRecord *config_rec = nullptr;
         if (req.Key() != nullptr)

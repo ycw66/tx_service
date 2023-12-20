@@ -208,6 +208,7 @@ void txservice::LocalCcHandler::PostWriteAll(
     }
     else
     {
+        hres.IncrementRemoteRef();
         remote_hd_.PostWriteAll(cc_shards_.node_id_,
                                 table_name,
                                 key,

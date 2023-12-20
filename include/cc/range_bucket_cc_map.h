@@ -164,6 +164,8 @@ public:
         RangeBucketRecord *upload_bucket_rec = nullptr;
         const RangeBucketKey *target_key = nullptr;
 
+        assert(req.CommitTs() != 0);
+
         if (req.Key() != nullptr)
         {
             // Local request
@@ -200,7 +202,7 @@ public:
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
         if (cce->key_lock_ptr_ == nullptr ||
-            !cce->key_lock_ptr_->HasWrite(req.Txn()))
+            !cce->key_lock_ptr_->HasWriteLockOrWriteIntent(req.Txn()))
         {
             // Check if the tx still has lock on this cce. If this
             // is a duplicate post write all req or this ng has already
@@ -303,6 +305,12 @@ public:
                 }
                 upload_bucket_rec->SetBucketInfo(bucket_info);
             }
+        }
+        else
+        {
+            assert(req.CommitType() == PostWriteType::DowngradeLock);
+            // the request commits nothing and only downgrade the write
+            // locks to write intent.
         }
 
         return TemplateCcMap::Execute(req);

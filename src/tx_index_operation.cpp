@@ -896,8 +896,25 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // the recovery mode and the cc node is a leader candidate.
             if (txm->CheckLeaderTerm())
             {
-                txm->PushOperation(&acquire_all_lock_op_);
-                txm->Process(acquire_all_lock_op_);
+                // We downgrade catalog write lock to avoid blocking other
+                // transaction which acquiring catalog read lock. And then retry
+                // to acquire catalog write lock.
+                if (acquire_all_lock_op_.IsDeadlock())
+                {
+                    LOG(INFO) << "Alter Table Index transaction deadlocks with "
+                                 "other transaction, downgrade write lock"
+                              << ", txn: " << txm->TxNumber();
+                    post_all_lock_op_.write_type_ =
+                        PostWriteType::DowngradeLock;
+                    op_ = &post_all_lock_op_;
+                    txm->PushOperation(&post_all_lock_op_);
+                    txm->Process(post_all_lock_op_);
+                }
+                else
+                {
+                    txm->PushOperation(&acquire_all_lock_op_);
+                    txm->Process(acquire_all_lock_op_);
+                }
             }
             else
             {
@@ -959,6 +976,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
             LOG(INFO) << "Alter Table Index transaction commit dirty table"
                       << " schema, txn: " << txm->TxNumber();
+
+            assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             op_ = &post_all_lock_op_;
             txm->PushOperation(&post_all_lock_op_);
             txm->Process(post_all_lock_op_);
@@ -1004,8 +1023,18 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // post_all_lock_op_ has finished without an error.
             assert(!post_all_lock_op_.IsFailed());
 
-            if (txm->commit_ts_ != tx_op_failed_ts_)
+            if (post_all_lock_op_.write_type_ == PostWriteType::DowngradeLock)
             {
+                post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+                op_ = &acquire_all_lock_op_;
+                txm->PushOperation(&acquire_all_lock_op_);
+                txm->Process(acquire_all_lock_op_);
+                return;
+            }
+            else if (txm->commit_ts_ != tx_op_failed_ts_)
+            {
+                assert(post_all_lock_op_.write_type_ !=
+                       PostWriteType::DowngradeLock);
                 // The tx's modification of the schema has succeeded. If the tx
                 // has previously read the same schema and keeps a pointer in
                 // the read set to the cc entry of the schema, removes it from
@@ -1019,6 +1048,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             }
             else
             {
+                assert(post_all_lock_op_.write_type_ !=
+                       PostWriteType::DowngradeLock);
                 // Flush kv failed, or it is recovering from a flush kv failure.
                 // This schema op has already been rolled back by now, only need
                 // to flush clean log here.

@@ -459,7 +459,10 @@ enum class PostWriteType
     PrepareCommit,
     // PostCommit releases the write lock/intent and turns the dirty value to
     // the committed value.
-    PostCommit
+    PostCommit,
+    // DowngradeLock is used to downgrade write lock to write intent. We use
+    // this flag to resolve deadlock problem on DDL.
+    DowngradeLock,
 };
 
 inline static std::string_view empty_sv{"__empty"};

@@ -199,6 +199,7 @@ enum CommitType {
 	PrepareCommit = 0;
 	PostCommit = 1;
 	Commit = 2;
+	DowngradeLock = 3;
 }
 
 enum CcTableType {

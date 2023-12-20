@@ -513,6 +513,8 @@ struct AcquireAllOp : public TransactionOperation
      */
     uint64_t MaxTs();
 
+    bool IsDeadlock() const;
+
     std::vector<CcHandlerResult<AcquireAllResult>> hd_results_;
     uint32_t upload_cnt_{0};
     std::atomic<uint32_t> finish_cnt_{0};

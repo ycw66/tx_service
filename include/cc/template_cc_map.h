@@ -1081,10 +1081,9 @@ public:
         }
 
         const KeyT *target_key = nullptr;
-        const TxKey *req_key = req.Key();
-        if (req_key != nullptr)
+        if (req.Key() != nullptr)
         {
-            target_key = static_cast<const KeyT *>(req_key);
+            target_key = static_cast<const KeyT *>(req.Key());
         }
         else
         {
@@ -1111,14 +1110,14 @@ public:
         }
 
         const ValueT *payload = nullptr;
-        const TxRecord *rec = req.Payload();
-        if (rec != nullptr)
+        if (req.Payload() != nullptr)
         {
-            payload = static_cast<const ValueT *>(rec);
+            payload = static_cast<const ValueT *>(req.Payload());
         }
         // commit_ts = 0 means transaction failed (e.g. failed at prepare
         // phase), we have nothing to upload, only need to release write intent.
-        else if (req.CommitTs() > 0)
+        else if (req.CommitTs() > 0 &&
+                 req.CommitType() != PostWriteType::DowngradeLock)
         {
             if (req.DecodedPayload() == nullptr)
             {
@@ -1168,6 +1167,8 @@ public:
 
         if (req.OpType() == OperationType::Insert && *key_ptr != *target_key)
         {
+            assert(req.CommitType() != PostWriteType::DowngradeLock);
+
             auto insert_it = cce_ptr->insert_intention_set_.find(target_key);
             if (insert_it != cce_ptr->insert_intention_set_.end() &&
                 insert_it->second->txn_ == txn)
@@ -1274,7 +1275,8 @@ public:
 
             if (lk_type != LockType::NoLock)
             {
-                if (commit_ts > 0)
+                if (commit_ts > 0 &&
+                    req.CommitType() != PostWriteType::DowngradeLock)
                 {
                     shard_->DecrementMemory(cce_ptr->PayloadMemUsage());
                     cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
@@ -1296,8 +1298,22 @@ public:
                 // When commit_ts = 0, the request removes the write lock
                 // without installing a new value.
 
-                if (req.CommitType() != PostWriteType::PrepareCommit)
+                if (req.CommitType() == PostWriteType::PrepareCommit ||
+                    req.CommitType() == PostWriteType::DowngradeLock)
                 {
+                    // For PrepareCommit and DowngradeLock, the
+                    // post-write-all request keeps write intent or downgrades
+                    // the write lock to the write intent.
+                    if (lk_type == LockType::WriteLock)
+                    {
+                        DowngradeCceKeyWriteLock(cce_ptr, txn);
+                    }
+                }
+                else
+                {
+                    assert(req.CommitType() == PostWriteType::Commit ||
+                           req.CommitType() == PostWriteType::PostCommit);
+
                     // For PostCommit or Commit, the post-write-all request
                     // releases the write lock.
                     ReleaseCceLock(cce_ptr->key_lock_ptr_,
@@ -1305,15 +1321,6 @@ public:
                                    txn,
                                    req.NodeGroupId(),
                                    lk_type);
-                }
-                else if (req.CommitType() == PostWriteType::PrepareCommit)
-                {
-                    // For PrepareCommit, the post-write-all request keeps write
-                    // intent or downgrades the write lock to the write intent.
-                    if (lk_type == LockType::WriteLock)
-                    {
-                        DowngradeCceKeyWriteLock(cce_ptr, txn);
-                    }
                 }
             }
 

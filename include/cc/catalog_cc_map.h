@@ -145,7 +145,7 @@ public:
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before apply change.
         if (cce_ptr == nullptr || cce_ptr->key_lock_ptr_ == nullptr ||
-            !cce_ptr->key_lock_ptr_->HasWrite(req.Txn()))
+            !cce_ptr->key_lock_ptr_->HasWriteLockOrWriteIntent(req.Txn()))
         {
             // When the catalog entry is null in the post-write-all
             // phase, it means that (1) the cc req is a resend request and
@@ -494,9 +494,17 @@ public:
             break;
         }
         case PostWriteType::Commit:
+        {
             // Schema operations always employ multi-stage commits.
             assert(true);
             break;
+        }
+        case PostWriteType::DowngradeLock:
+        {
+            // the request commits nothing and only downgrade the write
+            // locks to write intent.
+            return TemplateCcMap::Execute(req);
+        }
         default:
             break;
         }
