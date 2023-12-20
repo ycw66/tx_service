@@ -173,7 +173,8 @@ public:
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
                    CcProtocol proto = CcProtocol::Locking,
                    bool is_for_write = false,
-                   bool is_recovering = false) override;
+                   bool is_recovering = false,
+                   bool execute_immediately = true) override;
 
     void ScanOpen(const TableName &table_name,
                   ScanIndexType index_type,

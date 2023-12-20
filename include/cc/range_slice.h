@@ -1,9 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
-#include <deque>
+#include <memory>
+#include <mutex>
 #include <shared_mutex>
-#include <unordered_set>
 #include <vector>
 
 #include "catalog_factory.h"
@@ -336,6 +337,11 @@ public:
         return pins_ == 1;
     }
 
+    size_t MemUsage() const
+    {
+        return sizeof(StoreSlice);
+    }
+
 private:
     bool IsRecentLoad() const;
 
@@ -507,6 +513,11 @@ public:
 
     size_t PostCkptSize();
 
+    uint32_t Pins()
+    {
+        return pins_.load(std::memory_order_acquire);
+    }
+
     /**
      * @brief Split the range with new_end. new_end will be the new
      * end key of this range, and every slice after new_end will be removed
@@ -527,11 +538,15 @@ public:
             return true;
         }
         auto boundary = boundary_keys_.begin() + remove_offset - 1;
-        auto slice = slices_.begin() + remove_offset;
-        while (slice != slices_.end())
+        for (auto slice = slices_.begin(); slice != slices_.end(); slice++)
         {
-            // first check if any of the slices that will be removed is pinned
-            // or being loaded
+            // first check if any of the slices in range is pinned. We should
+            // not update StoreRange if it is used by any cc req. Normally this
+            // should not happen since we've already acquired range write lock.
+            // But if a node acuired range read lock then failed over, we might
+            // have cc request accessing this range even if range split tx has
+            // acquired range write lock. In this case, we should wait for them
+            // to complete before continuing.
             std::unique_lock<std::mutex> slice_lk((*slice)->slice_mux_);
             if ((*slice)->pins_ > 0)
             {
@@ -550,12 +565,14 @@ public:
                               "split range";
                 return false;
             }
-            slice++;
         }
-        slice = slices_.begin() + remove_offset;
+        auto slice = slices_.begin() + remove_offset;
+        size_t mem_decreased = 0;
         while (boundary != boundary_keys_.end())
         {
             // Remove boundary keys >= new end key
+            mem_decreased += (*boundary)->MemUsage();
+            mem_decreased += (*slice)->MemUsage();
             removed_slices.emplace_back(
                 std::move(*boundary), (*slice)->Size(), (*slice)->status_);
             boundary++;
@@ -565,6 +582,10 @@ public:
         boundary_keys_.erase(boundary_keys_.begin() + remove_offset - 1,
                              boundary_keys_.end());
         range_end_key_ = std::get<0>(removed_slices.front()).get();
+        // Update size
+        assert(size_ > mem_decreased);
+        size_ -= mem_decreased;
+
         return true;
     }
 
@@ -587,6 +608,22 @@ public:
     {
         range_end_key_ = end_key;
         slices_.back()->end_key_ = end_key;
+    }
+
+    void UpdateLastAccessedTs(uint64_t ts)
+    {
+        last_accessed_ts_.store(ts, std::memory_order_relaxed);
+    }
+
+    uint64_t LastAccessedTs() const
+    {
+        return last_accessed_ts_.load(std::memory_order_relaxed);
+    }
+
+    size_t MemUsage()
+    {
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        return size_;
     }
 
 private:
@@ -660,6 +697,17 @@ private:
     LocalCcShards &local_cc_shards_;
 
     std::atomic<bool> has_write_lock_{false};
+
+    std::atomic_uint64_t last_accessed_ts_;
+    // pins_ will increase in these cases:
+    // 1. Child store slice is pinned
+    // 2. Child store slice is being loaded
+    // 3. TableRangeEntry.PinStoreRange() is called.
+    // This is the value we rely on to decide if a StoreRange can be
+    // safely evicted from memory.
+    std::atomic_uint32_t pins_{0};
+    // Memory usage of StoreRange.
+    size_t size_;
 
     friend class StoreSlice;
     friend struct TableRangeEntry;

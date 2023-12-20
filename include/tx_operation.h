@@ -107,6 +107,7 @@ public:
         key_ = key;
         rec_ = rec;
         hd_result_ = hd_res;
+        execute_immediately_ = true;
     }
 
     void Forward(TransactionExecution *txm) override;
@@ -115,6 +116,7 @@ public:
     const TxKey *key_{};
     TableName table_name_{empty_sv, TableType::RangePartition};
     TxRecord *rec_{};
+    bool execute_immediately_{true};
 
     // out-parameters, to pass result to caller operation
     CcHandlerResult<ReadKeyResult> *hd_result_{};
@@ -223,6 +225,7 @@ public:
     {
         init_ = false;
         is_running_ = false;
+        execute_immediately_ = true;
     }
 
     /**
@@ -241,6 +244,7 @@ public:
     TableWriteSet::iterator write_key_it_;
     TableWriteSet::iterator write_key_end_;
     bool init_;
+    bool execute_immediately_{true};
 };
 #endif
 
@@ -800,6 +804,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
         const TableSchema *table_schema,
         const TxKey *old_start_key,
         const TxKey *old_end_key,
+        StoreRange *store_range,
         const RangeInfo *old_range_info,
         std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
         uint64_t previous_scan_ts,
@@ -812,6 +817,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
                const TableSchema *table_schema,
                const TxKey *old_start_key,
                const TxKey *old_end_key,
+               StoreRange *store_range,
                const RangeInfo *old_range_info,
                std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
                uint64_t previous_scan_ts,
@@ -836,6 +842,7 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     // or raw pointers to inf key instances otherwise.
     const TxKey *old_start_key_;
     const TxKey *old_end_key_;
+    StoreRange *store_range_;
     // vector< new start key, new partition id >
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
     // Used during commit post write. We cannot rely on the range slice stored

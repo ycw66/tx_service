@@ -6,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include "local_cc_handler.h"
 #include "metrics.h"
 #include "raft_log.pb.h"
+#include "range_record.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tx_service_common.h"
@@ -515,6 +517,13 @@ public:
     void DropTableRanges(NodeGroupId ng_id);
 
     /**
+     * @brief Kickout least recently used range slices info from local cc
+     * shards. Note that this function should not be called on txprocessor since
+     * it will block for a while(up to milliseconds).
+     */
+    void KickoutRangeSlices();
+
+    /**
      * @brief Get the TableRangeEntry with given table name and key
      * from local cc shards. This result in a binary search with key in
      * table_ranges_.
@@ -561,14 +570,6 @@ public:
                                bool force_load,
                                uint8_t prefetch_size);
 
-    StoreRange *FindRange(const TableName &table_name,
-                          const NodeGroupId ng_id,
-                          const TxKey &key);
-
-    StoreRange *FindRange(const TableName &table_name,
-                          const NodeGroupId ng_id,
-                          int32_t range_id);
-
     uint64_t CountRanges(const TableName &table_name,
                          const NodeGroupId ng_id,
                          const NodeGroupId key_ng_id) const;
@@ -608,6 +609,27 @@ public:
     {
         std::unique_lock<std::mutex> lk(task_worker_mux_);
         return data_sync_task_queue_.empty();
+    }
+
+    size_t DecreaseRangeSliceMemUsage(size_t size)
+    {
+        size_t old_size =
+            range_slice_mem_usage_.fetch_sub(size, std::memory_order_relaxed);
+        if (old_size < size)
+        {
+            // The sub has caused overflow, in this case just reset usage to
+            // 0.
+            range_slice_mem_usage_.store(0, std::memory_order_release);
+            return 0;
+        }
+        return old_size - size;
+    }
+
+    size_t IncreaseRangeSliceMemUsage(size_t size)
+    {
+        return range_slice_mem_usage_.fetch_add(size,
+                                                std::memory_order_relaxed) +
+               size;
     }
 
     /**
@@ -660,7 +682,7 @@ public:
     std::shared_ptr<TableSchema> GetSharedTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
-    bool KickoutRangeSlice(const TableName &tbl_name,
+    bool KickoutKeyInSlice(const TableName &tbl_name,
                            const NodeGroupId ng_id,
                            const TxKey &key);
 
@@ -721,10 +743,10 @@ public:
                                        NodeGroupId owner_ng,
                                        uint64_t version);
 
-    void DropStoreRangesInBucket(NodeGroupId ng_id, uint16_t bucket_id);
+    bool DropStoreRangesInBucket(NodeGroupId ng_id, uint16_t bucket_id);
 
-    std::unordered_map<TableName, std::unordered_set<int>>
-    GetStoreRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id);
+    std::unordered_map<TableName, std::unordered_set<int>> GetRangesInBucket(
+        uint16_t bucket_id, NodeGroupId ng_id);
 
     const BucketInfo *CommitDirtyBucketInfo(NodeGroupId ng_id,
                                             uint16_t bucket_id);
@@ -742,7 +764,9 @@ public:
      */
     std::unordered_map<NodeGroupId, BucketMigrateInfo>
     GenerateBucketMigrationPlan(uint32_t new_ng_count, int32_t seed);
-
+    // Memory limit of heap memory allocated by range slices info.
+    // 5% of the total memory limit.
+    const uint64_t range_slice_memory_limit_;
     store::DataStoreHandler *const store_hd_;
     metrics::MetricsRegistry *const metrics_registry_;
     metrics::CommonLabels common_labels_;
@@ -803,6 +827,18 @@ private:
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
         *GetTableRangesForATableInternal(const TableName &range_table_name,
                                          const NodeGroupId ng_id);
+
+    // These 2 FindRange should only be used when we need to update range and
+    // slice spec during data sync of a range. StoreRange should not be accessed
+    // without protection. Any access must acquire shared lock on
+    // TableRangeEntry.
+    StoreRange *FindRange(const TableName &table_name,
+                          const NodeGroupId ng_id,
+                          const TxKey &key);
+
+    StoreRange *FindRange(const TableName &table_name,
+                          const NodeGroupId ng_id,
+                          int32_t range_id);
 
     BucketInfo *GetBucketInfoInternal(const uint16_t bucket_id,
                                       const NodeGroupId ng_id) const;
@@ -886,6 +922,9 @@ private:
 
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
+
+    // Memory used by range slices
+    std::atomic_size_t range_slice_mem_usage_{0};
 
     TxService *tx_service_;
 

@@ -117,7 +117,7 @@ public:
     {
     }
 
-    void FetchRangeSlices(FetchRangeSlicesCc *fetch_cc) override
+    void FetchRangeSlices(FetchRangeSlicesReq *fetch_cc) override
     {
     }
 

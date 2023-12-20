@@ -1,5 +1,6 @@
 #include "range_slice.h"
 
+#include <atomic>
 #include <cassert>
 #include <memory>
 #include <vector>
@@ -55,6 +56,7 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
     cc_queue_.clear();
 
     fetch_slice_cc_ = nullptr;
+    range.pins_.fetch_sub(1, std::memory_order_release);
 }
 
 FillStoreSliceCc *StoreSlice::FillCcRequest()
@@ -91,6 +93,7 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
     cc_queue_.clear();
 
     fetch_slice_cc_ = nullptr;
+    range.pins_.fetch_sub(1, std::memory_order_release);
 }
 
 bool StoreSlice::IsRecentLoad() const
@@ -108,11 +111,13 @@ StoreRange::StoreRange(const TxKey *start_key,
       range_end_key_(end_key),
       partition_id_(partition_id),
       cc_ng_id_(range_owner),
-      local_cc_shards_(cc_shards)
+      local_cc_shards_(cc_shards),
+      last_accessed_ts_(local_cc_shards_.ClockTs())
 {
     std::unique_ptr<StoreSlice> slice = std::make_unique<StoreSlice>();
     slice->start_key_ = start_key;
     slice->end_key_ = end_key;
+    size_ = sizeof(StoreRange) + slice->MemUsage();
     slices_.emplace_back(std::move(slice));
 }
 
@@ -160,6 +165,7 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         }
 
         ++slice->pins_;
+        pins_.fetch_add(1, std::memory_order_release);
         pin_status = RangeSliceOpStatus::Successful;
     }
     else
@@ -263,6 +269,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
         }
 
         ++slice->pins_;
+        pins_.fetch_add(1, std::memory_order_release);
         return RangeSliceOpStatus::Successful;
     }
     else
@@ -350,6 +357,7 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
     if (slice->pins_ > 0)
     {
         --slice->pins_;
+        pins_.fetch_sub(1, std::memory_order_release);
     }
 
     // The slice is unpinned. If the checkpointer has requested to alter the
@@ -683,12 +691,14 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         slice->end_key_ = next_slice_start_key.get();
         slice->size_ = split_keys[0].cur_size_;
         slice->post_ckpt_size_ = split_keys[0].post_update_size_;
+        size_t mem_size_change = 0;
 
         for (size_t idx = 1; idx < split_keys.size(); ++idx)
         {
             std::unique_ptr<StoreSlice> sub_slice =
                 std::make_unique<StoreSlice>();
             sub_slice->start_key_ = next_slice_start_key.get();
+            mem_size_change += next_slice_start_key->MemUsage();
 
             size_t boundary_keys_idx = slice_idx + idx - 1;
 
@@ -724,12 +734,21 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
             sub_slice->status_ = slice->status_;
             sub_slice->last_load_ts_ = slice->last_load_ts_;
+            mem_size_change += sub_slice->MemUsage();
 
             // Inserts the new sub-slices following the first sub-slice.
             slices_.emplace(slices_.begin() + slice_idx + idx,
                             std::move(sub_slice));
         }
         slice->to_alter_ = false;
+        size_ += mem_size_change;
+        if (local_cc_shards_.IncreaseRangeSliceMemUsage(mem_size_change) >
+            local_cc_shards_.range_slice_memory_limit_)
+        {
+            range_lk.unlock();
+            slice_lk.unlock();
+            local_cc_shards_.KickoutRangeSlices();
+        }
     }
 
     UnpinSlice(slice);
@@ -897,6 +916,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         {
             return LoadSliceStatus::Delay;
         }
+        pins_.fetch_add(1, std::memory_order_release);
 
         // Calls the data store's async API to load the slice
         // [slice_start, slice_end) into memory.
@@ -940,6 +960,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         else
         {
             slice.fetch_slice_cc_ = nullptr;
+            pins_.fetch_sub(1, std::memory_order_release);
             return LoadSliceStatus::Error;
         }
     }
@@ -1029,8 +1050,18 @@ void StoreRange::InitSlices(
         slices_.emplace_back(std::move(slice));
         boundary_keys_.emplace_back(std::move(slice_keys[idx].first));
     }
-
     assert(slices_.size() == boundary_keys_.size() + 1);
+    size_ = sizeof(StoreRange);
+    size_ += boundary_keys_.capacity() * sizeof(TxKey::Uptr);
+    for (auto &slice_key : boundary_keys_)
+    {
+        size_ += slice_key->MemUsage();
+    }
+    size_ += slices_.capacity() * sizeof(std::unique_ptr<StoreSlice>);
+    if (!slices_.empty())
+    {
+        size_ += slices_.front()->MemUsage() * slices_.size();
+    }
 }
 
 void StoreRange::InitSlices(
@@ -1062,5 +1093,16 @@ void StoreRange::InitSlices(
     }
 
     assert(slices_.size() == boundary_keys_.size() + 1);
+    size_ = sizeof(StoreRange);
+    size_ += boundary_keys_.capacity() * sizeof(TxKey::Uptr);
+    for (auto &slice_key : boundary_keys_)
+    {
+        size_ += slice_key->MemUsage();
+    }
+    size_ += slices_.capacity() * sizeof(std::unique_ptr<StoreSlice>);
+    if (!slices_.empty())
+    {
+        size_ += slices_.front()->MemUsage() * slices_.size();
+    }
 }
 }  // namespace txservice

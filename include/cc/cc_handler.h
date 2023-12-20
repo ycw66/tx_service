@@ -275,7 +275,8 @@ public:
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
         CcProtocol proto = CcProtocol::Locking,
         bool is_for_write = false,
-        bool is_recovring = false) = 0;
+        bool is_recovring = false,
+        bool execute_immediately = true) = 0;
 
     virtual void ScanOpen(
         const TableName &table_name,

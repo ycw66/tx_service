@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "catalog_key_record.h"
+#include "range_slice.h"
 #include "scan.h"
 #include "tx_command.h"
 #include "tx_execution.h"
@@ -570,6 +571,7 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
         const TableSchema *schema,
         const TxKey *old_start_key,
         const TxKey *old_end_key,
+        StoreRange *store_range,
         const RangeInfo *old_info,
         std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
         uint64_t previous_scan_ts,
@@ -581,6 +583,7 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
           schema_(schema),
           old_start_key_(old_start_key),
           old_end_key_(old_end_key),
+          store_range_(store_range),
           old_range_info_(old_info),
           new_range_info_(std::move(new_range_info)),
           previous_scan_ts_(previous_scan_ts),
@@ -593,6 +596,7 @@ struct SplitFlushTxRequest : public TemplateTxRequest<SplitFlushTxRequest, bool>
     const TableSchema *schema_{nullptr};
     const TxKey *old_start_key_{nullptr};
     const TxKey *old_end_key_{nullptr};
+    StoreRange *store_range_{nullptr};
     const RangeInfo *old_range_info_{nullptr};
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
     uint64_t previous_scan_ts_;
@@ -692,6 +696,7 @@ struct RangeSplitRecoveryTxRequest
         int32_t partition_id,
         const TxKey *start_key,
         const TxKey *end_key,
+        StoreRange *store_range,
         const RangeInfo *range_info,
         std::vector<std::unique_ptr<TxKey>> &&new_range_keys,
         std::vector<int32_t> &&new_partition_ids,
@@ -702,6 +707,7 @@ struct RangeSplitRecoveryTxRequest
           partition_id_(partition_id),
           start_key_(start_key),
           end_key_(end_key),
+          store_range_(store_range),
           range_info_(range_info),
           new_range_keys_(std::move(new_range_keys)),
           new_partition_ids_(std::move(new_partition_ids)),
@@ -714,6 +720,7 @@ struct RangeSplitRecoveryTxRequest
     int32_t partition_id_;
     const TxKey *start_key_;
     const TxKey *end_key_;
+    StoreRange *store_range_;
     const RangeInfo *range_info_;
     std::vector<std::unique_ptr<TxKey>> new_range_keys_;
     std::vector<int32_t> new_partition_ids_;

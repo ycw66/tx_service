@@ -1,6 +1,5 @@
 #include "tx_execution.h"
 
-#include <bitset>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -20,7 +19,6 @@
 #include "tx_trace.h"
 #include "tx_util.h"
 #include "type.h"
-#include "util.h"
 
 namespace txservice
 {
@@ -890,6 +888,7 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
             req.schema_,
             req.old_start_key_,
             req.old_end_key_,
+            req.store_range_,
             req.old_range_info_,
             std::move(req.new_range_info_),
             req.previous_scan_ts_,
@@ -908,6 +907,7 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
                                req.schema_,
                                req.old_start_key_,
                                req.old_end_key_,
+                               req.store_range_,
                                req.old_range_info_,
                                std::move(req.new_range_info_),
                                req.previous_scan_ts_,
@@ -1208,6 +1208,7 @@ void TransactionExecution::ProcessTxRequest(
             recover_req.table_schema_,
             recover_req.start_key_,
             recover_req.end_key_,
+            recover_req.store_range_,
             recover_req.range_info_,
             std::move(new_range_info),
             previous_scan_ts,
@@ -1226,6 +1227,7 @@ void TransactionExecution::ProcessTxRequest(
                               recover_req.table_schema_,
                               recover_req.start_key_,
                               recover_req.end_key_,
+                              recover_req.store_range_,
                               recover_req.range_info_,
                               std::move(new_range_info),
                               previous_scan_ts,
@@ -1247,10 +1249,7 @@ void TransactionExecution::ProcessTxRequest(
     }
     else
     {
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        const StoreRange *range = shards->FindRange(
-            table_name, recover_req.node_group_id_, *recover_req.start_key_);
-        const auto &slices = range->Slices();
+        const auto &slices = recover_req.store_range_->Slices();
         for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
              ++slice_it)
         {
@@ -1750,7 +1749,10 @@ void TransactionExecution::Process(ReadLocalOperation &lock_local)
                                start_ts_,
                                *lock_local.hd_result_,
                                IsolationLevel::RepeatableRead,
-                               CcProtocol::Locking);
+                               CcProtocol::Locking,
+                               false,
+                               false,
+                               lock_local.execute_immediately_);
     if (finished)
     {
         command_id_.fetch_add(1, std::memory_order_relaxed);
@@ -1762,7 +1764,8 @@ void TransactionExecution::PostProcess(ReadLocalOperation &lock_local)
     if (lock_local.hd_result_->IsError())
     {
         DLOG(ERROR) << "ReadLocalOperation failed for cc error:"
-                    << lock_local.hd_result_->ErrorMsg();
+                    << lock_local.hd_result_->ErrorMsg() << ", txn "
+                    << TxNumber();
     }
     else if (lock_local.hd_result_->Value().rec_status_ == RecordStatus::Normal)
     {
@@ -2958,7 +2961,10 @@ void TransactionExecution::Process(LockWriteRangesOp &lock_write_ranges)
                                start_ts_,
                                lock_range_result_,
                                IsolationLevel::RepeatableRead,
-                               CcProtocol::Locking);
+                               CcProtocol::Locking,
+                               false,
+                               false,
+                               lock_write_ranges.execute_immediately_);
 
     if (finished)
     {
@@ -2971,7 +2977,10 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
     if (lock_write_ranges.lock_range_result_->IsError())
     {
         DLOG(ERROR) << "LockWriteRangesOp failed for cc error:"
-                    << lock_write_ranges.lock_range_result_->ErrorMsg();
+                    << lock_write_ranges.lock_range_result_->ErrorMsg()
+                    << ", tx " << TxNumber();
+        state_stack_.pop_back();
+        assert(state_stack_.empty());
         Abort();
         return;
     }
@@ -3008,6 +3017,7 @@ void TransactionExecution::PostProcess(LockWriteRangesOp &lock_write_ranges)
         // acquiring a read lock on one range. This may result in stack overflow
         // when there are many ranges for write-set keys.
         lock_write_ranges.is_running_ = false;
+        lock_write_ranges.execute_immediately_ = true;
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
 }

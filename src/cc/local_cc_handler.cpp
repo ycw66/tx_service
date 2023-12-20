@@ -547,7 +547,8 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           IsolationLevel iso_level,
                                           CcProtocol proto,
                                           bool is_for_write,
-                                          bool is_recovering)
+                                          bool is_recovering,
+                                          bool execute_immediately)
 {
     ReadKeyResult &read_result = hres.Value();
     read_result.rec_ = &record;
@@ -614,7 +615,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
     bool finished = false;
 
-    if (ccm != nullptr && thd_id_ == ccs->core_id_)
+    if (ccm != nullptr && thd_id_ == ccs->core_id_ && execute_immediately)
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cc_req_base.h"
+#include "error_messages.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "type.h"
@@ -167,13 +168,13 @@ public:
     std::vector<InitRangeEntry> ranges_vec_;
 };
 
-struct FetchRangeSlicesCc : public CcRequestBase
+struct FetchRangeSlicesReq
 {
 public:
-    FetchRangeSlicesCc(const TableName &table_name,
-                       TableRangeEntry *range_entry,
-                       NodeGroupId ng_id,
-                       int64_t cc_ng_term)
+    FetchRangeSlicesReq(const TableName &table_name,
+                        TableRangeEntry *range_entry,
+                        NodeGroupId ng_id,
+                        int64_t cc_ng_term)
         : table_name_(table_name),
           cc_ng_id_(ng_id),
           cc_ng_term_(cc_ng_term),
@@ -181,8 +182,7 @@ public:
     {
     }
 
-    bool Execute(CcShard &ccs) override;
-    void SetFinish(int err);
+    void SetFinish(CcErrorCode err);
     void AddRequester(CcRequestBase *requester, CcShard *ccs)
     {
         requesters_.emplace_back(requester, ccs);
@@ -197,7 +197,6 @@ public:
     int64_t cc_ng_term_;
     TableRangeEntry *range_entry_;
     std::vector<std::pair<CcRequestBase *, CcShard *>> requesters_;
-    int error_code_{0};
     std::vector<std::pair<TxKey::Uptr, uint32_t>> slice_info_;
 };
 
@@ -504,7 +503,10 @@ public:
         return slice_items_[core_idx];
     }
 
-    RangeSliceId SliceId();
+    StoreSlice *Slice()
+    {
+        return slice_;
+    }
 
     uint64_t CkptTs() const
     {

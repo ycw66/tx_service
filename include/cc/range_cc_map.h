@@ -242,7 +242,7 @@ public:
             bucket_cce->key_lock_ptr_->AbortQueueRequest(
                 req.Txn(),
                 CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            return false;
+            return true;
         }
 
         CcOperation cc_op =
@@ -287,7 +287,7 @@ public:
             floor_cce->key_lock_ptr_->AbortQueueRequest(
                 req.Txn(),
                 CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            return false;
+            return true;
         }
 
         return true;
@@ -579,8 +579,15 @@ public:
                 }
                 else
                 {
+                    size_t orig_store_range_size =
+                        old_entry->RangeSlices()->MemUsage();
                     split_range_res = old_entry->RangeSlices()->SplitRange(
                         old_info->new_key_.front().get(), new_slice_keys);
+                    size_t new_store_range_size =
+                        old_entry->RangeSlices()->MemUsage();
+                    assert(orig_store_range_size >= new_store_range_size);
+                    shard_->local_shards_.DecreaseRangeSliceMemUsage(
+                        orig_store_range_size - new_store_range_size);
                 }
                 if (!split_range_res)
                 {
@@ -1016,8 +1023,20 @@ public:
                     // Restore range slice specs from log message. the range
                     // slice specs we read from data store is unreliable since
                     // it could've already been updated before the crash.
-                    old_table_range_entry->InitRangeSlices(
-                        std::move(range_slices), this->cc_ng_id_);
+
+                    int64_t size_change =
+                        old_table_range_entry->InitRangeSlices(
+                            std::move(range_slices), this->cc_ng_id_);
+                    if (size_change > 0)
+                    {
+                        shard_->local_shards_.IncreaseRangeSliceMemUsage(
+                            size_change);
+                    }
+                    else
+                    {
+                        shard_->local_shards_.DecreaseRangeSliceMemUsage(
+                            -size_change);
+                    }
                     old_table_range_entry->RangeSlices()->Lock();
                 }
             }

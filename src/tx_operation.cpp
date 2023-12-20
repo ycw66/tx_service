@@ -199,9 +199,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
                 // There is an error when getting the input key's range. The
                 // read operation is set to be errored.
                 hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
-
-                bool force_success = hd_result_.ForceError();
-                assert(force_success);
+                hd_result_.ForceError();
 
                 txm->PostProcess(*this);
                 return;
@@ -332,6 +330,7 @@ void ReadLocalOperation::Reset()
     table_name_ = TableName{empty_sv, TableType::RangePartition};
     rec_ = nullptr;
     hd_result_ = nullptr;
+    execute_immediately_ = true;
 }
 
 void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
@@ -363,7 +362,9 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
                     return;
                 }
             }
+            hd_result_->Value().Reset();
             hd_result_->Reset();
+            execute_immediately_ = false;
             txm->Process(*this);
             return;
         }
@@ -646,7 +647,10 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
                     return;
                 }
             }
+            lock_range_result_->Value().Reset();
             lock_range_result_->Reset();
+            is_running_ = false;
+            execute_immediately_ = false;
             txm->Process(*this);
             return;
         }
@@ -2979,6 +2983,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     const TableSchema *table_schema,
     const TxKey *old_start_key,
     const TxKey *old_end_key,
+    StoreRange *store_range,
     const RangeInfo *old_range_info,
     std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
     uint64_t previous_scan_ts,
@@ -2993,6 +2998,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       read_cluster_result_(txm),
       range_info_(*old_range_info),
       old_end_key_(old_end_key),
+      store_range_(store_range),
       new_range_info_(std::move(new_range_info)),
       previous_scan_ts_(previous_scan_ts),
       previous_data_sync_vec_(std::move(previous_data_sync_vec)),
@@ -3080,6 +3086,7 @@ void SplitFlushRangeOp::Reset(
     const TableSchema *table_schema,
     const TxKey *old_start_key,
     const TxKey *old_end_key,
+    StoreRange *store_range,
     const RangeInfo *old_range_info,
     std::vector<std::pair<TxKey::Uptr, int32_t>> &&new_range_info,
     uint64_t previous_scan_ts,
@@ -3105,6 +3112,7 @@ void SplitFlushRangeOp::Reset(
     assert(old_range_info->new_partition_id_.size() ==
            old_range_info->new_key_.size());
 
+    store_range_ = store_range;
     range_info_ = *old_range_info;
     range_info_.end_key_ = old_end_key;
     assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
@@ -3830,17 +3838,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         auto batch_it = data_sync_vec->begin();
                         size_t slice_start_idx = 0;
                         size_t slice_end_idx = 0;
-                        StoreRange *range = local_cc_shards.FindRange(
-                            table_name, node_group, *start_key);
 
                         while (batch_it != data_sync_vec->end())
                         {
                             const TxKey &slice_start_key = *batch_it->Key();
                             StoreSlice *curr_slice =
-                                range->FindSlice(slice_start_key);
+                                store_range_->FindSlice(slice_start_key);
 
                             auto slice_end_it =
-                                curr_slice->EndKey() == range->RangeEndKey()
+                                curr_slice->EndKey() ==
+                                        store_range_->RangeEndKey()
                                     ? data_sync_vec->end()
                                     : std::lower_bound(batch_it,
                                                        data_sync_vec->end(),
@@ -3915,15 +3922,16 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                             if (slice_size > StoreSlice::slice_upper_bound)
                             {
-                                if (!range->UpdateSliceSpec(curr_slice,
-                                                            table_name,
-                                                            table_schema,
-                                                            node_group,
-                                                            tx_term,
-                                                            ckpt_ts,
-                                                            *data_sync_vec,
-                                                            slice_start_idx,
-                                                            slice_end_idx))
+                                if (!store_range_->UpdateSliceSpec(
+                                        curr_slice,
+                                        table_name,
+                                        table_schema,
+                                        node_group,
+                                        tx_term,
+                                        ckpt_ts,
+                                        *data_sync_vec,
+                                        slice_start_idx,
+                                        slice_end_idx))
                                 {
                                     hd_res.SetError(
                                         CcErrorCode::NG_TERM_CHANGED);
@@ -4008,10 +4016,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
         // Now we can copy out the slice info since it's finalized after
         // flush data
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        const StoreRange *range =
-            shards->FindRange(table_name_, txm->TxCcNodeId(), *old_start_key_);
-        const auto &slices = range->Slices();
+        const auto &slices = store_range_->Slices();
         for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
              ++slice_it)
         {
@@ -4220,16 +4225,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
         // Split the range slices based on the range split keys.
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
         std::vector<
             std::tuple<const TxKey *, int32_t, std::vector<StoreSlice *>>>
             splitted_range_info;
-        StoreRange *old_range =
-            shards->FindRange(table_name_, txm->TxCcNodeId(), *old_start_key_);
-        auto &slices = old_range->Slices();
+        auto &slices = store_range_->Slices();
         auto slice_it = slices.begin();
-        const TxKey *start_key = old_range->RangeStartKey();
-        int32_t range_id = old_range->PartitionId();
+        const TxKey *start_key = store_range_->RangeStartKey();
+        int32_t range_id = store_range_->PartitionId();
         std::vector<StoreSlice *> subrange_slices;
         // First slice is always left in the old range. Put it into vector
         // first to avoid dealing with null start key.
@@ -4715,10 +4717,7 @@ void SplitFlushRangeOp::FillCommitLogRequest(TransactionExecution *txm)
     commit_split_msg->set_stage(::txlog::SplitRangeOpMessage_Stage_CommitSplit);
 
     // Fill the slice info
-    LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-    StoreRange *old_range =
-        shards->FindRange(table_name_, txm->TxCcNodeId(), *old_start_key_);
-    auto &slices = old_range->Slices();
+    auto &slices = store_range_->Slices();
     auto slice_it = slices.begin();
     commit_split_msg->add_slice_sizes((*slice_it)->Size());
     slice_it++;
@@ -6177,7 +6176,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         }
 
         auto local_shards = Sharder::Instance().GetLocalCcShards();
-        ranges_in_bucket_snapshot_ = local_shards->GetStoreRangesInBucket(
+        ranges_in_bucket_snapshot_ = local_shards->GetRangesInBucket(
             status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
 
         if (ranges_in_bucket_snapshot_.empty())
@@ -6350,7 +6349,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                          txm->CommitTs());
         bucket_record_.SetBucketInfo(&bucket_info_);
         ranges_in_bucket_snapshot_ =
-            Sharder::Instance().GetLocalCcShards()->GetStoreRangesInBucket(
+            Sharder::Instance().GetLocalCcShards()->GetRangesInBucket(
                 status_->bucket_ids_[migrate_bucket_idx_], txm->TxCcNodeId());
 
         if (ranges_in_bucket_snapshot_.size())

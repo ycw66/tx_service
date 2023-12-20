@@ -3450,7 +3450,7 @@ public:
         }
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0 ||
-            req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term)
+            (req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term))
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return req.SetFinish();
@@ -3733,11 +3733,11 @@ public:
             else
             {
                 within_boundary =
-                    req.Direction() == ScanDirection::Forward &&
-                        *scan_ccm_it->first < *req_end_key ||
-                    req.Direction() == ScanDirection::Backward &&
-                        *req_end_key < *scan_ccm_it->first ||
-                    req.EndInclusive() && *req_end_key == *scan_ccm_it->first;
+                    (req.Direction() == ScanDirection::Forward &&
+                     *scan_ccm_it->first < *req_end_key) ||
+                    (req.Direction() == ScanDirection::Backward &&
+                     *req_end_key < *scan_ccm_it->first) ||
+                    (req.EndInclusive() && *req_end_key == *scan_ccm_it->first);
             }
 
             if (scan_type != ScanType::ScanGap && within_boundary)
@@ -3846,7 +3846,7 @@ public:
                     // initializes the scan end to the request's end key. Or,
                     // the scan end is the slice's end;
                     if (*req_end_key < *slice_end ||
-                        *req_end_key == *slice_end && !req.EndInclusive())
+                        (*req_end_key == *slice_end && !req.EndInclusive()))
                     {
                         scan_end = req_end_key;
                         scan_end_inclusive = req.EndInclusive();
@@ -3894,7 +3894,7 @@ public:
             while (scan_ccm_it != pos_inf_it &&
                    (shard_->core_id_ > 0 || !is_cache_full()) &&
                    (*cce_key < *scan_end ||
-                    scan_end_inclusive && *cce_key == *scan_end))
+                    (scan_end_inclusive && *cce_key == *scan_end)))
             {
                 req.SetCcePtr(cce, core_id);
                 req.SetCceScanType(ScanType::ScanBoth, core_id);
@@ -3975,7 +3975,7 @@ public:
                 // scanned, scan_ccm_it would point to positive infinity.
                 if (scan_ccm_it != pos_inf_it &&
                     (*scan_ccm_it->first < *scan_end ||
-                     scan_end_inclusive && *scan_ccm_it->first == *scan_end))
+                     (scan_end_inclusive && *scan_ccm_it->first == *scan_end)))
                 {
                     // The slice is too large. The scan has not fully scanned
                     // the slice, before reaching the cache's size limit.
@@ -4111,7 +4111,7 @@ public:
             while (scan_ccm_it != neg_inf_it &&
                    (shard_->core_id_ > 0 || !is_cache_full()) &&
                    (*scan_end < *cce_key ||
-                    scan_end_inclusive && *scan_end == *cce_key))
+                    (scan_end_inclusive && *scan_end == *cce_key)))
             {
                 req.SetCcePtr(cce, core_id);
                 req.SetCceScanType(ScanType::ScanBoth, core_id);
@@ -4190,7 +4190,7 @@ public:
                 // tuple.
                 if (scan_ccm_it != neg_inf_it &&
                     (*scan_end < *scan_ccm_it->first ||
-                     scan_end_inclusive && *scan_ccm_it->first == *scan_end))
+                     (scan_end_inclusive && *scan_ccm_it->first == *scan_end)))
                 {
                     // The slice is too large. The scan has not fully scanned
                     // the slice, before reaching the cache's size limit.
@@ -4917,15 +4917,14 @@ public:
             first_enter = false;
         }
 
+        TableName range_table_name(table_name_.StringView(),
+                                   TableType::RangePartition);
         if (!req.built_slice_sample_pool_)
         {
-            TableName range_table_name(table_name_.StringView(),
-                                       TableType::RangePartition);
-
-            // All ranges has been added read lock. It is safe to access them.
-            // Also since all ranges are locked, the range map in local cc
-            // shards will not change so we can trust the map iterator after cc
-            // req resumes.
+            // All ranges has been added read lock. It is safe to access
+            // them. Also since all ranges are locked, the range map in
+            // local cc shards will not change so we can trust the map
+            // iterator after cc req resumes.
             std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
                 *range_map = shard_->GetTableRangesForATable(range_table_name,
                                                              cc_ng_id_);
@@ -4942,13 +4941,16 @@ public:
                             cc_ng_id_)
                         ->BucketOwner() == cc_ng_id_)
                 {
-                    const StoreRange *store_range = range_entry.RangeSlices();
-                    if (store_range == nullptr)
+                    // Pin store range so that it cannot be kicked out
+                    // during analyze.
+                    const StoreRange *store_range = range_entry.PinStoreRange();
+                    if (!store_range)
                     {
                         range_entry.FetchRangeSlices(
                             range_table_name, &req, cc_ng_id_, ng_term, shard_);
                         return false;
                     }
+                    assert(store_range != nullptr);
                     for (const std::unique_ptr<StoreSlice> &store_slice :
                          store_range->Slices())
                     {
@@ -5046,19 +5048,22 @@ public:
             }
             else if (pin_status == RangeSliceOpStatus::Delay)
             {
-                if (slice_id.Range()->HasLock())
-                {
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
-                }
-                else
-                {
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
+                assert(!slice_id.Range()->HasLock());
+                shard_->Enqueue(shard_->LocalCoreId(), &req);
+                return false;
             }
             else
             {
+                std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+                    *range_map = shard_->GetTableRangesForATable(
+                        range_table_name, cc_ng_id_);
+                for (auto range_it = range_map->begin();
+                     range_it != range_map->end();
+                     range_it++)
+                {
+                    auto &range_entry = range_it->second;
+                    range_entry.UnPinStoreRange();
+                }
                 hd_res->SetError(CcErrorCode::DATA_STORE_ERR);
                 return true;
             }
@@ -5082,6 +5087,16 @@ public:
             sample_pool_->Reset(std::move(key_sample_pool->random_pairing_),
                                 node_group_records,
                                 table_schema_);
+            std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>>
+                *range_map = shard_->GetTableRangesForATable(range_table_name,
+                                                             cc_ng_id_);
+            for (auto range_it = range_map->begin();
+                 range_it != range_map->end();
+                 range_it++)
+            {
+                auto &range_entry = range_it->second;
+                range_entry.UnPinStoreRange();
+            }
             hd_res->SetFinished();
             return true;
         }
@@ -5436,7 +5451,6 @@ public:
 
     bool Execute(GetPostCkptSlice &req) override
     {
-        RangeSliceId slice_id = req.SliceId();
         std::vector<SliceChangeInfo> &item_vec =
             req.SliceChangeInfoVec(shard_->core_id_);
 
@@ -5471,7 +5485,7 @@ public:
         else
         {
             const KeyT *start_key =
-                static_cast<const KeyT *>(slice_id.Slice()->StartKey());
+                static_cast<const KeyT *>(req.Slice()->StartKey());
 
             if (start_key == nullptr ||
                 start_key->Type() == KeyType::NegativeInf)
@@ -5490,8 +5504,7 @@ public:
             }
         }
 
-        const KeyT *end_key =
-            static_cast<const KeyT *>(slice_id.Slice()->EndKey());
+        const KeyT *end_key = static_cast<const KeyT *>(req.Slice()->EndKey());
         // nullptr end key means PositiveInfinity
         if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
         {
@@ -5690,7 +5703,7 @@ public:
             static_cast<CcEntry<KeyT, ValueT> *>(remove_entry);
 
 #ifdef RANGE_PARTITION_ENABLED
-        bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
+        bool kick_ret = shard_->local_shards_.KickoutKeyInSlice(
             table_name_, cc_ng_id_, *cc_entry->Key());
         if (!kick_ret)
         {
@@ -5852,7 +5865,7 @@ public:
                     page1_it, page2_it, page1_last_read_ts, page2_last_read_ts);
 
                 if (kickout_cc != nullptr &&
-                    (success && page == &page1_it->second || !success))
+                    ((success && page == &page1_it->second) || !success))
                 {
                     // If the caller care the clean status, reset the value of
                     // @@next_page depending on the clean result:
@@ -7175,7 +7188,7 @@ protected:
         {
 #ifdef RANGE_PARTITION_ENABLED
             if (cce->payload_status_ == RecordStatus::Normal ||
-                cce->payload_status_ == RecordStatus::Deleted && keep_deleted)
+                (cce->payload_status_ == RecordStatus::Deleted && keep_deleted))
             {
                 tuple = typed_cache->AddScanTuple();
             }
@@ -7261,8 +7274,8 @@ protected:
         else
         {
             if (!(cce->payload_status_ == RecordStatus::Normal ||
-                  cce->payload_status_ == RecordStatus::Deleted &&
-                      keep_deleted))
+                  (cce->payload_status_ == RecordStatus::Deleted &&
+                   keep_deleted)))
             {
                 return;
             }
@@ -7360,7 +7373,7 @@ protected:
         {
 #ifdef RANGE_PARTITION_ENABLED
             if (cce->payload_status_ == RecordStatus::Normal ||
-                cce->payload_status_ == RecordStatus::Deleted && keep_deleted)
+                (cce->payload_status_ == RecordStatus::Deleted && keep_deleted))
             {
                 tuple = remote_cache->cache_msg_->add_scan_tuple();
             }
@@ -7567,7 +7580,7 @@ protected:
             if (can_be_clean)
             {
 #ifdef RANGE_PARTITION_ENABLED
-                bool kick_ret = shard_->local_shards_.KickoutRangeSlice(
+                bool kick_ret = shard_->local_shards_.KickoutKeyInSlice(
                     table_name_, cc_ng_id_, *key_it);
                 if (!kick_ret)
                 {

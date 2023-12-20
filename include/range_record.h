@@ -1,8 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -10,6 +13,7 @@
 #include "cc_req_misc.h"
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_serialize.h"
@@ -17,7 +21,7 @@
 namespace txservice
 {
 struct DataSyncTask;
-struct FetchRangeSlicesCc;
+struct FetchRangeSlicesReq;
 // struct that stores range related info that we read from
 // KV storage during table range initialization.
 struct InitRangeEntry
@@ -329,13 +333,17 @@ public:
 
     ~TableRangeEntry();
 
-    void UpdateRangeEntry(uint64_t version_ts,
-                          const TxKey *end_key,
-                          std::unique_ptr<StoreRange> slices)
+    int64_t UpdateRangeEntry(uint64_t version_ts,
+                             const TxKey *end_key,
+                             std::unique_ptr<StoreRange> slices)
     {
         range_info_->version_ts_ = version_ts;
         range_info_->end_key_ = end_key;
+        std::lock_guard<std::shared_mutex> lk(mux_);
+        int64_t orig_size = range_slices_ ? range_slices_->MemUsage() : 0;
+        int64_t new_size = slices ? slices->MemUsage() : 0;
         range_slices_ = std::move(slices);
+        return new_size - orig_size;
     }
 
     /**
@@ -365,17 +373,37 @@ public:
         return range_info_->DirtyTs();
     }
 
-    StoreRange *RangeSlices()
+    StoreRange *PinStoreRange()
     {
-        return range_slices_.get();
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        if (range_slices_)
+        {
+            range_slices_->pins_.fetch_add(1, std::memory_order_release);
+            return range_slices_.get();
+        }
+        return nullptr;
     }
 
-    const StoreRange *RangeSlices() const
+    void UnPinStoreRange()
     {
-        return range_slices_.get();
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        if (range_slices_)
+        {
+            range_slices_->pins_.fetch_sub(1, std::memory_order_release);
+        }
     }
 
-    void DropStoreRangeAndSyncInfo();
+    bool KickoutKeyInSlice(const TxKey &key)
+    {
+        std::shared_lock<std::shared_mutex> lk(mux_);
+        if (range_slices_)
+        {
+            return range_slices_->KickoutSlice(key);
+        }
+        return true;
+    }
+
+    bool DropStoreRangeAndSyncInfo(size_t &mem_decreased);
 
     void SetRangeEndKey(const TxKey *end_key)
     {
@@ -391,23 +419,28 @@ public:
         range_info_->version_ts_ = version;
     }
 
-    void InitRangeSlices(std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
-                         NodeGroupId ng_id,
-                         bool fully_cached = false)
+    int64_t InitRangeSlices(
+        std::vector<std::pair<TxKey::Uptr, uint32_t>> &&slices,
+        NodeGroupId ng_id,
+        bool fully_cached = false);
+
+    size_t DropStoreRange()
     {
-        auto range_slices = std::make_unique<StoreRange>(
-            range_info_->StartKey(),
-            range_info_->EndKey(),
-            range_info_->PartitionId(),
-            ng_id,
-            *Sharder::Instance().GetLocalCcShards());
-        range_slices->InitSlices(std::move(slices), fully_cached);
-        range_slices_ = std::move(range_slices);
+        // We need to make sure that there's no one accesing StoreRange before
+        // dropping store range.
+        std::unique_lock<std::shared_mutex> lk(mux_);
+        size_t mem_decreased = 0;
+        if (range_slices_ && range_slices_->Pins() == 0)
+        {
+            mem_decreased += range_slices_->MemUsage();
+            range_slices_ = nullptr;
+        }
+        return mem_decreased;
     }
 
     uint64_t GetLastSyncTs()
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::shared_lock<std::shared_mutex> lk(mux_);
         if (sync_info_)
         {
             return sync_info_->last_sync_ts_;
@@ -422,7 +455,7 @@ public:
                         std::shared_ptr<DataSyncTask> task = nullptr,
                         uint64_t last_sync_ts = 0)
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock<std::shared_mutex> lk(mux_);
         if (!sync_info_)
         {
             // Only initialize sync_info_ when it is needed.
@@ -458,7 +491,7 @@ public:
 
     void PushPendingSyncTask(std::shared_ptr<DataSyncTask> task)
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::unique_lock<std::shared_mutex> lk(mux_);
         if (!sync_info_)
         {
             sync_info_ = std::make_unique<RangeSyncInfo>();
@@ -473,6 +506,15 @@ public:
                           CcShard *cc_shard);
 
 private:
+    StoreRange *RangeSlices()
+    {
+        return range_slices_.get();
+    }
+
+    const StoreRange *RangeSlices() const
+    {
+        return range_slices_.get();
+    }
     struct RangeSyncInfo
     {
         bool sync_ongoing_{false};
@@ -484,23 +526,24 @@ private:
     std::unique_ptr<RangeInfo> range_info_{nullptr};
 
     // Protects range_slices_, fetch_range_slices_cc_ and sync_info_
-    // Note that since we initialize range_slices_ atomically, and bucket write
-    // lock of range is held when dropping range_slices_, there's no need to
-    // acquire lock when reading range_slices_. The mutex is used to protect
-    // consistency between range_slices_ and fetch_range_slices_req_ and make
-    // sure range_slices_ is only initialized once when multiple cc requests
-    // want to load it from data store.
-    std::mutex mux_;
+    // Any update on these pointers requres unique lock on mux. But updating
+    // the object that these pointers point to only requires shared lock.
+    std::shared_mutex mux_;
+
     // range_slices_ stores the slice info in this range. This is only
     // initialized on the node group that owns this range, and it is initialized
-    // lazily when needed.
+    // lazily when needed. range_slices_ is only safe to accessed in the
+    // following cases:
+    // 1. StoreRange is pinned.
+    // 2. mutex lock is acquried on TableRangeEntry.mux_.
     std::unique_ptr<StoreRange> range_slices_{nullptr};
-    std::unique_ptr<FetchRangeSlicesCc> fetch_range_slices_req_{nullptr};
+    std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
     std::unique_ptr<RangeSyncInfo> sync_info_{nullptr};
 
     template <typename KeyT>
     friend class RangeCcMap;
-    friend struct FetchRangeSlicesCc;
+    friend class LocalCcShards;
+    friend struct FetchRangeSlicesReq;
 };
 struct RangeRecord : public TxRecord
 {

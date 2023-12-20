@@ -279,8 +279,26 @@ public:
                         // now migrated to other ng. Do this after dirty
                         // bucket info is committed to make sure all ranges
                         // are removed.
-                        shard_->local_shards_.DropStoreRangesInBucket(
-                            this->cc_ng_id_, target_key->bucket_id_);
+                        if (!shard_->local_shards_.DropStoreRangesInBucket(
+                                this->cc_ng_id_, target_key->bucket_id_))
+                        {
+                            // If drop store range is blocked, retry later.
+                            shard_->Enqueue(shard_->LocalCoreId(), &req);
+                            return false;
+                        }
+                    }
+                }
+                else if (bucket_info->Version() ==
+                             upload_bucket_rec->GetBucketInfo()->Version() &&
+                         bucket_info->BucketOwner() != this->cc_ng_id_)
+                {
+                    // This is a resumed request that was blocked by drop store
+                    // range. Retry.
+                    if (!shard_->local_shards_.DropStoreRangesInBucket(
+                            this->cc_ng_id_, target_key->bucket_id_))
+                    {
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
                     }
                 }
                 upload_bucket_rec->SetBucketInfo(bucket_info);

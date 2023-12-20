@@ -1,9 +1,15 @@
 #include "cc/local_cc_shards.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 
 #include "range_bucket_key_record.h"
+#include "range_record.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"
@@ -30,7 +36,8 @@ LocalCcShards::LocalCcShards(
     bool enable_mvcc,
     metrics::MetricsRegistry *metrics_registry,
     std::unordered_map<std::string, std::string> common_labels)
-    : store_hd_(store_hd),
+    : range_slice_memory_limit_((((uint64_t) memory_limit_mb) << 20) / 20),
+      store_hd_(store_hd),
       metrics_registry_(metrics_registry),
       common_labels_(common_labels),
       node_id_(node_id),
@@ -41,11 +48,23 @@ LocalCcShards::LocalCcShards(
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
+#ifdef EXT_TX_PROC_ENABLED
+      data_sync_worker_num_(core_cnt / 2),
+#else
       data_sync_worker_num_(core_cnt),
+#endif
       data_sync_worker_status_(WorkerStatus::Active),
+#ifdef EXT_TX_PROC_ENABLED
+      slice_worker_num_(core_cnt),
+#else
       slice_worker_num_(core_cnt * 2),
+#endif
       slice_thd_status_(WorkerStatus::Active),
-      flush_worker_num_(core_cnt),
+#ifdef EXT_TX_PROC_ENABLED
+      flush_worker_num_(std::min(core_cnt / 2, 10)),
+#else
+      flush_worker_num_(std::min(core_cnt, (uint16_t) 10)),
+#endif
       flush_worker_thd_status_(WorkerStatus::Active),
       statistics_thd_status_(WorkerStatus::Active)
 {
@@ -578,13 +597,54 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                 return;
             }
             replay_log_cc.SetFinish();
-
+            StoreRange *store_range = range_entry->PinStoreRange();
+            if (!store_range)
+            {
+                // Fetch range slices from data store if it's not cached.
+                RunOnTxProcessorCc cc([](CcShard &ccs) {});
+                range_entry->FetchRangeSlices(range_table_name,
+                                              &cc,
+                                              node_group_id,
+                                              tx_term,
+                                              cc_shards_[0].get());
+                cc.Wait();
+                while (cc.IsError())
+                {
+                    // Failed to fetch range slice. If error is caused by
+                    // data store unreachable, retry.
+                    if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
+                    {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(500));
+                        cc.Reset();
+                        range_entry->FetchRangeSlices(range_table_name,
+                                                      &cc,
+                                                      node_group_id,
+                                                      tx_term,
+                                                      cc_shards_[0].get());
+                        cc.Wait();
+                    }
+                    else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
+                    {
+                        // Term is invalid, we are no longer leader. Abort tx.
+                        txservice::AbortTx(txm);
+                        return;
+                    }
+                    else
+                    {
+                        assert(false);
+                    }
+                }
+                store_range = range_entry->PinStoreRange();
+                assert(store_range != nullptr);
+            }
             RangeSplitRecoveryTxRequest recover_req(
                 ds_split_range_op_msg,
                 table_schema,
                 partition_id,
                 start_key,
                 end_key,
+                store_range,
                 range_info,
                 std::move(new_range_keys),
                 std::move(new_partition_ids),
@@ -601,6 +661,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             else
             {
                 range_entry->TrySetDataSync(false, nullptr, 0);
+                range_entry->UnPinStoreRange();
                 range_entry->PopPendingSyncTask();
                 txservice::CommitTx(txm);
             }
@@ -689,7 +750,16 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         assert(init_ranges.size() == 1);
         std::vector<std::pair<TxKey::Uptr, uint32_t>> slices;
         slices.emplace_back(nullptr, 0);
-        res.first->second.InitRangeSlices(std::move(slices), ng_id, true);
+        int64_t mem_change =
+            res.first->second.InitRangeSlices(std::move(slices), ng_id, true);
+        if (mem_change > 0)
+        {
+            IncreaseRangeSliceMemUsage(mem_change);
+        }
+        else if (mem_change < 0)
+        {
+            DecreaseRangeSliceMemUsage(mem_change);
+        }
     }
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
 }
@@ -739,6 +809,17 @@ void LocalCcShards::CleanTableRange(const TableName &table_name,
     if (table_it != table_ranges_.end())
     {
         auto &ranges_of_all_ngs = table_it->second;
+        for (auto &ng_range : ranges_of_all_ngs)
+        {
+            for (auto &[key, range] : ng_range.second)
+            {
+                std::shared_lock<std::shared_mutex> lk(range.mux_);
+                if (range.RangeSlices())
+                {
+                    DecreaseRangeSliceMemUsage(range.RangeSlices()->MemUsage());
+                }
+            }
+        }
         ranges_of_all_ngs.erase(ng_id);
     }
     auto id_table_it = table_range_ids_.find(table_name);
@@ -753,11 +834,90 @@ void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     for (auto &table_range : table_ranges_)
     {
+        for (auto &ng_range : table_range.second)
+        {
+            for (auto &[key, range] : ng_range.second)
+            {
+                std::shared_lock<std::shared_mutex> lk(range.mux_);
+                if (range.RangeSlices())
+                {
+                    DecreaseRangeSliceMemUsage(range.RangeSlices()->MemUsage());
+                }
+            }
+        }
         table_range.second.erase(ng_id);
     }
     for (auto &range_id : table_range_ids_)
     {
         range_id.second.erase(ng_id);
+    }
+}
+
+void LocalCcShards::KickoutRangeSlices()
+{
+    size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
+    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    // Since we don't maintain a lru list of store range, we just
+    // kickout range slices that have not been accessed for at least
+    // 10 mins. If we still haven't cleaned up enough memory. We
+    // will sort the range slices by their last accessed time and
+    // kickout the least recent accessed range slices.
+    std::vector<std::pair<uint64_t, TableRangeEntry *>> scanned_ranges;
+    uint64_t current_ts = ClockTs();
+    for (auto &[table, table_ranges] : table_ranges_)
+    {
+        for (auto &[ng_id, ng_ranges] : table_ranges)
+        {
+            for (auto &[key, range_entry] : ng_ranges)
+            {
+                std::shared_lock<std::shared_mutex> lk(range_entry.mux_);
+                if (range_entry.RangeSlices())
+                {
+                    uint64_t last_accessed =
+                        range_entry.RangeSlices()->LastAccessedTs();
+                    if (current_ts > last_accessed &&
+                        current_ts - last_accessed > 600000000)
+                    {
+                        lk.unlock();
+                        size_t decreased = range_entry.DropStoreRange();
+                        if (decreased > 0 &&
+                            DecreaseRangeSliceMemUsage(decreased) <=
+                                target_memory_size)
+                        {
+                            // We've cleaned up enough memory space.
+                            return;
+                        }
+                    }
+                    else if (current_ts > last_accessed &&
+                             current_ts - last_accessed > 4000000)
+                    {
+                        // Put the store range into buffer for sort.
+                        // Only kickout range slices that are not
+                        // accessed for more than 4 seconds.
+                        scanned_ranges.emplace_back(last_accessed,
+                                                    &range_entry);
+                    }
+                }
+            }
+        }
+    }
+
+    // We should not need to reach here most of the time.
+    std::sort(scanned_ranges.begin(),
+              scanned_ranges.end(),
+              [](std::pair<uint64_t, TableRangeEntry *> a,
+                 std::pair<uint64_t, TableRangeEntry *> b) -> bool
+              { return a.first < b.first; });
+    for (auto &[time, entry] : scanned_ranges)
+    {
+        size_t decreased = entry->DropStoreRange();
+        if (decreased &&
+            DecreaseRangeSliceMemUsage(decreased) <= target_memory_size)
+        {
+            // We've cleaned up enough
+            // memory space.
+            return;
+        }
     }
 }
 
@@ -815,6 +975,9 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
 {
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     std::vector<TableRangeEntry *> new_entries;
+    bool range_slice_mem_full =
+        range_slice_mem_usage_.load(std::memory_order_relaxed) >
+        range_slice_memory_limit_;
 
     std::map<const TxKey *, TableRangeEntry, PtrLessThan<TxKey>> *ranges =
         GetTableRangesForATableInternal(table_name, ng_id);
@@ -827,11 +990,12 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     auto range_it = ranges->find(start_key.get());
     if (range_it == ranges->end())
     {
-        if (ng_id == range_ng)
+        if (ng_id == range_ng && !range_slice_mem_full)
         {
             range_slices = std::make_unique<StoreRange>(
                 start_key.get(), end_key, partition_id, range_ng, *this);
             range_slices->InitSlices(*slice_keys);
+            IncreaseRangeSliceMemUsage(range_slices->MemUsage());
         }
         auto new_range_entry_pair =
             ranges->try_emplace(start_key.get(),
@@ -868,8 +1032,19 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
                 *this);
             range_slices->InitSlices(*slice_keys);
         }
-        range_it->second.UpdateRangeEntry(
+        int64_t mem_change = range_it->second.UpdateRangeEntry(
             version, end_key, std::move(range_slices));
+        if (mem_change > 0)
+        {
+            // This would only happen rarely during recover when the old range
+            // slice version is read from data store. To avoid blocking tx
+            // processor, do not call KickoutRangeSlices.
+            IncreaseRangeSliceMemUsage(mem_change);
+        }
+        else if (mem_change < 0)
+        {
+            DecreaseRangeSliceMemUsage(mem_change);
+        }
     }
     return &range_it->second;
 }
@@ -904,6 +1079,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
+    std::shared_lock<std::shared_mutex> range_lk(entry->mux_);
     if (!entry->RangeSlices())
     {
         // Check if range is owned by cc_ng_id. If so, load range slices from
@@ -913,6 +1089,9 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                   cc_ng_id)
                 ->BucketOwner() == cc_ng_id)
         {
+            // release shared lock since FetchRangeSlices will acquire unique
+            // lock.
+            range_lk.unlock();
             entry->FetchRangeSlices(
                 range_table_name, cc_request, cc_ng_id, cc_ng_term, cc_shard);
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
@@ -924,6 +1103,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         return RangeSliceId(nullptr, nullptr);
     }
 
+    entry->RangeSlices()->UpdateLastAccessedTs(ClockTs());
     return entry->RangeSlices()->PinSlice(table_name,
                                           cc_ng_term,
                                           key,
@@ -972,6 +1152,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
         return RangeSliceId(nullptr, nullptr);
     }
+    std::shared_lock<std::shared_mutex> range_lk(entry->mux_);
     if (!entry->RangeSlices())
     {
         // Check if range is owned by cc_ng_id. If so, load range slices from
@@ -981,6 +1162,9 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
                                   cc_ng_id)
                 ->BucketOwner() == cc_ng_id)
         {
+            // release shared lock since FetchRangeSlices will acquire unique
+            // lock.
+            range_lk.unlock();
             entry->FetchRangeSlices(
                 range_table_name, cc_request, cc_ng_id, cc_ng_term, cc_shard);
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
@@ -991,13 +1175,13 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         }
         return RangeSliceId(nullptr, nullptr);
     }
-
     uint64_t snapshot_ts = 0;
     if (EnableMvcc())
     {
         snapshot_ts = TxStartTsCollector::Instance().GlobalMinSiTxStartTs();
     }
 
+    entry->RangeSlices()->UpdateLastAccessedTs(ClockTs());
     return entry->RangeSlices()->PinSlice(table_name,
                                           cc_ng_term,
                                           key,
@@ -1232,7 +1416,7 @@ std::shared_ptr<TableSchema> LocalCcShards::GetSharedTableSchema(
     return catalog_entry.schema_;
 }
 
-bool LocalCcShards::KickoutRangeSlice(const TableName &tbl_name,
+bool LocalCcShards::KickoutKeyInSlice(const TableName &tbl_name,
                                       const NodeGroupId ng_id,
                                       const TxKey &key)
 {
@@ -1241,13 +1425,13 @@ bool LocalCcShards::KickoutRangeSlice(const TableName &tbl_name,
     TableName range_tbl_name(tbl_name.StringView(), TableType::RangePartition);
     TableRangeEntry *entry =
         GetTableRangeEntryInternal(range_tbl_name, ng_id, &key);
-    if (entry == nullptr || entry->RangeSlices() == nullptr)
+    if (entry == nullptr)
     {
         return true;
     }
     else
     {
-        return entry->RangeSlices()->KickoutSlice(key);
+        return entry->KickoutKeyInSlice(key);
     }
 }
 
@@ -1541,7 +1725,7 @@ const BucketInfo *LocalCcShards::UploadBucketInfo(NodeGroupId ng_id,
     return bucket_info;
 }
 
-void LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
+bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                                             uint16_t bucket_id)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1555,15 +1739,24 @@ void LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                 if (Sharder::MapRangeIdToBucketId(
                         entry.GetRangeInfo()->PartitionId()) == bucket_id)
                 {
-                    entry.DropStoreRangeAndSyncInfo();
+                    size_t mem_decreased;
+                    if (!entry.DropStoreRangeAndSyncInfo(mem_decreased))
+                    {
+                        return false;
+                    }
+                    if (mem_decreased > 0)
+                    {
+                        DecreaseRangeSliceMemUsage(mem_decreased);
+                    }
                 }
             }
         }
     }
+    return true;
 }
 
 std::unordered_map<TableName, std::unordered_set<int>>
-LocalCcShards::GetStoreRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id)
+LocalCcShards::GetRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id)
 {
     std::unordered_map<TableName, std::unordered_set<int>> snapshot;
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1576,8 +1769,7 @@ LocalCcShards::GetStoreRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id)
             for (auto &[key, entry] : tbl_ranges->second)
             {
                 if (Sharder::MapRangeIdToBucketId(
-                        entry.GetRangeInfo()->PartitionId()) == bucket_id &&
-                    entry.RangeSlices() != nullptr)
+                        entry.GetRangeInfo()->PartitionId()) == bucket_id)
                 {
                     tbl_snapshot.insert(entry.GetRangeInfo()->PartitionId());
                 }
@@ -1692,7 +1884,6 @@ bool LocalCcShards::EnqueueDataSyncTask(const TableName &table_name,
                 task_worker_cv_.notify_one();
             },
             hres));
-
         return true;
     }
     else
@@ -2331,7 +2522,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
         // seperate thread.
 #ifdef RANGE_PARTITION_ENABLED
         // Fetch range slices info from data store if it's not loaded yet.
-        StoreRange *store_range = range_entry->RangeSlices();
+        // Pin the range so that it can't be kicked out during data sync.
+        StoreRange *store_range = range_entry->PinStoreRange();
         if (!store_range)
         {
             RunOnTxProcessorCc cc([](CcShard &ccs) {});
@@ -2342,7 +2534,38 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
             range_entry->FetchRangeSlices(
                 range_tbl_name, &cc, ng_id, ng_term, cc_shards_[0].get());
             cc.Wait();
-            store_range = range_entry->RangeSlices();
+            while (cc.IsError())
+            {
+                // Failed to fetch range slice. If error is caused by
+                // data store unreachable, retry.
+                if (cc.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    cc.Reset();
+                    range_entry->FetchRangeSlices(range_tbl_name,
+                                                  &cc,
+                                                  ng_id,
+                                                  ng_term,
+                                                  cc_shards_[0].get());
+                    cc.Wait();
+                }
+                else if (cc.ErrorCode() == CcErrorCode::NG_TERM_CHANGED)
+                {
+                    range_entry->TrySetDataSync(false);
+                    // Handle the pending tasks for the same range
+                    range_entry->PopPendingSyncTask();
+                    // Term is invalid, we are no longer leader. Abort data
+                    // sync.
+                    txservice::AbortTx(data_sync_txm);
+                    data_sync_task->SetError();
+                    return;
+                }
+                else
+                {
+                    assert(false);
+                }
+            }
+            store_range = range_entry->PinStoreRange();
             assert(store_range != nullptr);
         }
 
@@ -2366,6 +2589,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
 
             // Handle the pending tasks for the same range
             range_entry->PopPendingSyncTask();
+            range_entry->UnPinStoreRange();
             txservice::AbortTx(data_sync_txm);
             data_sync_task->SetError();
 
@@ -2572,6 +2796,7 @@ void LocalCcShards::SplitFlushRange(
                           "partition id.";
 
             range_entry->TrySetDataSync(false);
+            range_entry->UnPinStoreRange();
             range_entry->PopPendingSyncTask();
             txservice::AbortTx(split_txm);
             data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
@@ -2610,6 +2835,7 @@ void LocalCcShards::SplitFlushRange(
                                   table_schema,
                                   old_start_key,
                                   old_end_key,
+                                  range_entry->RangeSlices(),
                                   range_entry->GetRangeInfo(),
                                   std::move(new_range_ids),
                                   data_sync_task->data_sync_ts_,
@@ -2625,6 +2851,7 @@ void LocalCcShards::SplitFlushRange(
                    << range_entry->GetRangeInfo()->PartitionId() << " failed.";
 
         range_entry->TrySetDataSync(false);
+        range_entry->UnPinStoreRange();
         range_entry->PopPendingSyncTask();
         txservice::AbortTx(split_txm);
         data_sync_task->SetError();
@@ -2633,6 +2860,7 @@ void LocalCcShards::SplitFlushRange(
     }
 
     range_entry->TrySetDataSync(false, nullptr, data_sync_task->data_sync_ts_);
+    range_entry->UnPinStoreRange();
     range_entry->PopPendingSyncTask();
 
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
@@ -2832,6 +3060,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             {
                 range_entry->TrySetDataSync(false);
             }
+            range_entry->UnPinStoreRange();
             range_entry->PopPendingSyncTask();
         }
 
@@ -2990,9 +3219,9 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
             const TxKey &data_sync_key = *data_sync_vec[idx].Key();
 
             if (curr_range == nullptr ||
-                curr_range->RangeEndKey() != nullptr &&
-                    (*curr_range->RangeEndKey() < data_sync_key ||
-                     *curr_range->RangeEndKey() == data_sync_key))
+                (curr_range->RangeEndKey() != nullptr &&
+                 (*curr_range->RangeEndKey() < data_sync_key ||
+                  *curr_range->RangeEndKey() == data_sync_key)))
             {
                 if (curr_range != nullptr && flush_res && range_updated)
                 {
@@ -3005,6 +3234,8 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
                 // the range.
                 curr_range =
                     FindRange(table_name, node_group_id, data_sync_key);
+                // TODO: verify bucket info instead of relying on FindRange
+                // result
                 while (curr_range == nullptr)
                 {
                     // Items that does not belong to this are skipped
@@ -3026,8 +3257,8 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
         // Have iterated all flushed data items falling into the
         // current slice. Re-calculates the slice's size.
         if (idx == data_sync_vec.size() - 1 ||
-            curr_slice->EndKey() != nullptr &&
-                !(*data_sync_vec[idx + 1].Key() < *curr_slice->EndKey()))
+            (curr_slice->EndKey() != nullptr &&
+             !(*data_sync_vec[idx + 1].Key() < *curr_slice->EndKey())))
         {
             if (flush_res)
             {

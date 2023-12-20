@@ -33,6 +33,7 @@
 #include "proto/cc_request.pb.h"
 #include "random_pairing.h"
 #include "range_bucket_key_record.h"
+#include "range_slice.h"
 #include "read_write_set.h"
 #include "remote/cc_stream_receiver.h"
 #include "scan.h"
@@ -543,7 +544,6 @@ private:
     // of the cc entry.
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
-    KeyType key_type_{KeyType::Normal};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
@@ -1743,6 +1743,18 @@ public:
         prefetch_size_ = prefetch_size;
 
         range_slice_id_.Reset();
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        // If the request has pinned any slice, unpin it.
+        if (RangeSliceId().Slice() != nullptr)
+        {
+            RangeSliceId().Unpin();
+        }
+        assert(err_code != CcErrorCode::NO_ERROR);
+        res_->SetError(err_code);
+        Free();
     }
 
     bool IsLocal() const

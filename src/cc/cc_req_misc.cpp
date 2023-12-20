@@ -8,6 +8,7 @@
 #include "error_messages.h"
 #include "range_record.h"
 #include "range_slice.h"
+#include "sharder.h"
 #include "statistics.h"
 
 namespace txservice
@@ -261,41 +262,27 @@ void FetchTableRangesCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
-bool FetchRangeSlicesCc::Execute(CcShard &ccs)
+void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
 {
-    std::lock_guard<std::mutex> lk(range_entry_->mux_);
-    if (error_code_ == 0)
+    if (err == CcErrorCode::NO_ERROR)
     {
-        int64_t cc_ng_candid_term =
-            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-
-        if (std::max(cc_ng_candid_term, cc_ng_term) == cc_ng_term_)
-        {
-            // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
-            // time, the creating catalog will be cleaned by ClearCcNodeGroup,
-            // and the running cc_requests will check term invalid.
+        std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
+        assert(range_entry_->RangeSlices() == nullptr);
+        int64_t size_change =
             range_entry_->InitRangeSlices(std::move(slice_info_), cc_ng_id_);
-            for (auto [req, ccs] : requesters_)
-            {
-                ccs->Enqueue(req);
-            }
-        }
-        else
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        size_t mem_usage = shards->IncreaseRangeSliceMemUsage(size_change);
+
+        for (auto [req, ccs] : requesters_)
         {
-            std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
-                waiting_reqs;
-
-            for (auto [req, ccs] : requesters_)
-            {
-                waiting_reqs[ccs].push_back(req);
-            }
-
-            for (auto &[ccs, reqs] : waiting_reqs)
-            {
-                ccs->AbortCcRequests(std::move(reqs),
-                                     CcErrorCode::NG_TERM_CHANGED);
-            }
+            ccs->Enqueue(req);
+        }
+        if (mem_usage > shards->range_slice_memory_limit_)
+        {
+            range_entry_->fetch_range_slices_req_ = nullptr;
+            lk.unlock();
+            shards->KickoutRangeSlices();
+            return;
         }
     }
     else
@@ -313,18 +300,12 @@ bool FetchRangeSlicesCc::Execute(CcShard &ccs)
 
         for (auto &[ccs, reqs] : waiting_reqs)
         {
-            ccs->AbortCcRequests(std::move(reqs), CcErrorCode::DATA_STORE_ERR);
+            ccs->AbortCcRequests(std::move(reqs), err);
         }
     }
 
+    std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
     range_entry_->fetch_range_slices_req_ = nullptr;
-    return false;
-}
-
-void FetchRangeSlicesCc::SetFinish(int err)
-{
-    error_code_ = err;
-    Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(0, this);
 }
 
 bool ClearCcNodeGroup::Execute(CcShard &ccs)
@@ -606,10 +587,5 @@ bool GetPostCkptSlice::Execute(CcShard &ccs)
     CcMap *ccm = ccs.GetCcm(table_name_, cc_ng_id_);
     assert(ccm != nullptr);
     return ccm->Execute(*this);
-}
-
-RangeSliceId GetPostCkptSlice::SliceId()
-{
-    return RangeSliceId(range_, slice_);
 }
 }  // namespace txservice
