@@ -1157,6 +1157,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     flush_data_timeout_ = 600;
 
     read_cluster_result_.Reset();
+    read_cluster_result_.ResetTxm(txm);
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = NegativeInfinity<VoidKey>::Instance();
