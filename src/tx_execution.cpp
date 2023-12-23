@@ -2762,6 +2762,33 @@ void TransactionExecution::ScanClose(
         }
     }
 
+    if (scan_it->second.slice_position_ == SlicePosition::Middle)
+    {
+        // Append last tuple of each ScanCache which has acquired ReadIntent to
+        // the drain_batch_.
+        //
+        // 1) If last_tuple.lk_type is NoLock, then drain_batch_ doesn't include
+        // them and should append them into itself. 2) If last_tuple.lk_type is
+        // not NoLock, then drain_batch_ has include them, and should skip them.
+        // Non-repetition and non-omission.
+        std::vector<const ScanTuple *> last_tuples;
+        last_tuples.reserve(scanner->CacheCount());
+        scanner->ShardCacheLastTuples(&last_tuples);
+        for (const ScanTuple *last_tuple : last_tuples)
+        {
+            if (last_tuple)
+            {
+                LockType lk_type =
+                    scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
+                if (lk_type == LockType::NoLock)
+                {
+                    drain_batch_.emplace_back(last_tuple->cce_addr_,
+                                              last_tuple->key_ts_);
+                }
+            }
+        }
+    }
+
 #ifndef RANGE_PARTITION_ENABLED
     if (scanner != nullptr)
     {

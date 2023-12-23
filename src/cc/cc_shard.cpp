@@ -10,6 +10,7 @@
 #include "cc/range_bucket_cc_map.h"
 #include "checkpointer.h"
 #include "error_messages.h"
+#include "range_slice.h"
 #include "sharder.h"  // Sharder
 #include "tx_start_ts_collector.h"
 
@@ -1534,36 +1535,46 @@ RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
                                        prefetch_size);
 }
 
-RangeSliceId CcShard::PinRangeSlice(const TableName &table_name,
-                                    NodeGroupId cc_ng_id,
-                                    int64_t cc_ng_term,
-                                    const Schema *key_schema,
-                                    const Schema *rec_schema,
-                                    uint64_t schema_ts,
-                                    const KVCatalogInfo *kv_info,
-                                    uint32_t range_id,
-                                    const TxKey &key,
-                                    bool inclusive,
-                                    CcRequestBase *cc_request,
-                                    RangeSliceOpStatus &pin_status,
-                                    bool force_load,
-                                    uint8_t prefetch_size)
+RangeSliceId CcShard::PinRangeSlices(const TableName &table_name,
+                                     NodeGroupId cc_ng_id,
+                                     int64_t cc_ng_term,
+                                     const Schema *key_schema,
+                                     const Schema *rec_schema,
+                                     uint64_t schema_ts,
+                                     const KVCatalogInfo *kv_info,
+                                     uint32_t range_id,
+                                     const TxKey &start_key,
+                                     bool start_inclusive,
+                                     const TxKey *end_key,
+                                     bool end_inclusive,
+                                     CcRequestBase *cc_request,
+                                     bool force_load,
+                                     uint8_t prefetch_size,
+                                     uint8_t max_pin_cnt,
+                                     bool forward_pin,
+                                     RangeSliceOpStatus &pin_status,
+                                     const StoreSlice *&last_pinned_slice)
 {
-    return local_shards_.PinRangeSlice(table_name,
-                                       cc_ng_id,
-                                       cc_ng_term,
-                                       key_schema,
-                                       rec_schema,
-                                       schema_ts,
-                                       kv_info,
-                                       range_id,
-                                       key,
-                                       inclusive,
-                                       cc_request,
-                                       this,
-                                       pin_status,
-                                       force_load,
-                                       prefetch_size);
+    return local_shards_.PinRangeSlices(table_name,
+                                        cc_ng_id,
+                                        cc_ng_term,
+                                        key_schema,
+                                        rec_schema,
+                                        schema_ts,
+                                        kv_info,
+                                        range_id,
+                                        start_key,
+                                        start_inclusive,
+                                        end_key,
+                                        end_inclusive,
+                                        cc_request,
+                                        this,
+                                        force_load,
+                                        prefetch_size,
+                                        max_pin_cnt,
+                                        forward_pin,
+                                        pin_status,
+                                        last_pinned_slice);
 }
 
 void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)

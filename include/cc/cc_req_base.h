@@ -66,10 +66,6 @@ public:
         assert(false && "Unimplemented virtual method");
     }
 
-    // The previous time to run it. The interval time is const variable array.
-    // It will be 16 times of previous interval.
-    uint64_t prev_exec_ts_;
-
 protected:
     CcRequestBase() = default;
 

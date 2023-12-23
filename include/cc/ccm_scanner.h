@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
 #include <queue>
@@ -121,6 +122,12 @@ public:
 
     virtual const ScanTuple *LastTuple() const = 0;
 
+    void RemoveLast()
+    {
+        assert(size_ > 0);
+        --size_;
+    }
+
 protected:
     size_t idx_;
     size_t size_;
@@ -155,8 +162,7 @@ public:
 
     bool IsFull() const
     {
-        return mem_size_ >=
-               (1024 * 20 / Sharder::Instance().GetLocalCcShardsCount());
+        return mem_size_ >= 1024 * 16;
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
@@ -244,6 +250,12 @@ public:
     const ScanTuple *LastTuple() const override
     {
         return Last();
+    }
+
+    const TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx) const
+    {
+        assert(idx < cache_.size());
+        return &cache_[idx];
     }
 
 private:
@@ -360,6 +372,9 @@ public:
     }
 
     virtual void Reset(const Schema *key_schema) = 0;
+    virtual void CommitAtCore(uint16_t core_id)
+    {
+    }
 
 protected:
     ScanDirection direct_;
@@ -642,6 +657,11 @@ public:
         {
             scans_[idx].Reset();
         }
+
+        std::unique_lock<std::mutex> lk(mux_);
+        head_index_ = Inf();
+        index_chain_.resize(shard_cnt);
+        head_occupied_ = false;
     }
 
     uint32_t BlockedShard() const override
@@ -675,56 +695,27 @@ public:
 
     const ScanTuple *Current() override
     {
-        if (status_ != ScannerStatus::Open)
-        {
-            return nullptr;
-        }
-
-        if (heap_.empty())
-        {
-            for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
-            {
-                if (scans_[core_id].Status() == ScannerStatus::Open)
-                {
-                    const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-                        scans_[core_id].Current();
-                    assert(scan_tuple != nullptr);
-                    heap_.emplace(scan_tuple, core_id);
-                }
-            }
-        }
-
-        if (heap_.empty())
+        if (head_index_ == Inf())
         {
             status_ = ScannerStatus::Blocked;
             return nullptr;
         }
-
-        const std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t> &top =
-            heap_.top();
-        return top.first;
+        else
+        {
+            assert(status_ == ScannerStatus::Open);
+            return At(head_index_);
+        }
     }
 
     void MoveNext() override
     {
-        if (heap_.empty())
+        if (head_index_ == Inf())
         {
             return;
         }
 
-        size_t core_id = heap_.top().second;
-        heap_.pop();
-        scans_[core_id].MoveNext();
-
-        if (scans_[core_id].Status() == ScannerStatus::Open)
-        {
-            const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-                scans_[core_id].Current();
-            assert(scan_tuple != nullptr);
-            heap_.emplace(scan_tuple, core_id);
-        }
-
-        if (heap_.empty())
+        head_index_ = AdvanceMergeIndex(head_index_);
+        if (head_index_ == Inf())
         {
             status_ = ScannerStatus::Blocked;
         }
@@ -780,47 +771,251 @@ public:
             cache_it->Reset();
         }
 
-        while (!heap_.empty())
+        std::unique_lock<std::mutex> lk(mux_);
+        head_index_ = Inf();
+        head_occupied_ = false;
+    }
+
+    /**
+     * @brief Commits the scan at the specified core.
+     *
+     * @param core_id
+     */
+    void CommitAtCore(uint16_t core_id) override
+    {
+        std::vector<CompoundIndex> &next_chain = index_chain_[core_id];
+        next_chain.clear();
+        next_chain.reserve(scans_[core_id].Size());
+
+        CompoundIndex head_index;
+        if (scans_[core_id].Size() == 0)
         {
-            heap_.pop();
+            head_index = Inf();
         }
+        else
+        {
+            for (uint32_t idx = 0; idx < scans_[core_id].Size() - 1; ++idx)
+            {
+                next_chain.emplace_back(core_id, idx + 1);
+            }
+            // The next index of the last tuple is infinity.
+            next_chain.emplace_back(Inf());
+            assert(next_chain.size() == scans_[core_id].Size());
+
+            head_index = {core_id, 0};
+        }
+
+        Merge(head_index);
     }
 
 private:
-    struct ForwardCompare
+    struct CompoundIndex
     {
-        bool operator()(const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
-                                        size_t> &lhs,
-                        const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
-                                        size_t> &rhs)
+    public:
+        CompoundIndex() : index_(UINT32_MAX)
         {
-            return !(*lhs.first < *rhs.first);
         }
+
+        CompoundIndex(uint16_t core_id, uint32_t offset)
+        {
+            index_ = (offset << 10) | core_id;
+        }
+
+        friend bool operator==(const CompoundIndex &lhs,
+                               const CompoundIndex &rhs)
+        {
+            return lhs.index_ == rhs.index_;
+        }
+
+        friend bool operator!=(const CompoundIndex &lhs,
+                               const CompoundIndex &rhs)
+        {
+            return !(lhs == rhs);
+        }
+
+        uint16_t CoreId() const
+        {
+            return index_ & 0x3FF;
+        }
+
+        uint32_t Offset() const
+        {
+            return index_ >> 10;
+        }
+
+    private:
+        /**
+         * @brief The lower 10 bits represent the core ID. The remaining higher
+         * bits represent the offset in the scan result vector.
+         *
+         */
+        uint32_t index_;
     };
 
-    struct BackwardCompare
+    const CompoundIndex &Inf() const
     {
-        bool operator()(const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
-                                        size_t> &lhs,
-                        const std::pair<const TemplateScanTuple<KeyT, ValueT> *,
-                                        size_t> &rhs)
+        static CompoundIndex inf;
+        return inf;
+    }
+
+    void Merge(CompoundIndex head)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        if (!head_occupied_)
         {
-            return *lhs.first < *rhs.first;
+            // The head is empty. There is nothing to merge. Sets the head to
+            // the input scan list's head.
+            head_index_ = head;
+            head_occupied_ = true;
         }
-    };
+        else if (head != Inf())
+        {
+            // Merges the input scan list with the list pointed by the head.
+            if (head_index_ == Inf())
+            {
+                head_index_ = head;
+                return;
+            }
+            CompoundIndex curr_head = head_index_;
+            head_occupied_ = false;
 
-    using CompareFunc =
-        std::conditional_t<IsForward, ForwardCompare, BackwardCompare>;
+            lk.unlock();
+            Merge(head, curr_head);
+        }
+    }
 
-    std::priority_queue<
-        std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t>,
-        std::vector<std::pair<const TemplateScanTuple<KeyT, ValueT> *, size_t>>,
-        CompareFunc>
-        heap_;
+    void Merge(CompoundIndex left, CompoundIndex right)
+    {
+        CompoundIndex merge_head;
+        CompoundIndex prev_index;
+
+        if (left == Inf())
+        {
+            // The left is empty.
+            return Merge(right);
+        }
+        else if (right == Inf())
+        {
+            // The right is empty.
+            return Merge(left);
+        }
+
+        const TemplateScanTuple<KeyT, ValueT> *left_tuple = At(left);
+        const TemplateScanTuple<KeyT, ValueT> *right_tuple = At(right);
+
+        if (IsForward)
+        {
+            if (left_tuple->KeyObj() < right_tuple->KeyObj())
+            {
+                merge_head = left;
+                prev_index = left;
+                left = AdvanceMergeIndex(left);
+            }
+            else
+            {
+                merge_head = right;
+                prev_index = right;
+                right = AdvanceMergeIndex(right);
+            }
+
+            while (left != Inf() && right != Inf())
+            {
+                left_tuple = At(left);
+                right_tuple = At(right);
+
+                if (left_tuple->KeyObj() < right_tuple->KeyObj())
+                {
+                    UpdateNextIndex(prev_index, left);
+                    prev_index = left;
+                    left = AdvanceMergeIndex(left);
+                }
+                else
+                {
+                    UpdateNextIndex(prev_index, right);
+                    prev_index = right;
+                    right = AdvanceMergeIndex(right);
+                }
+            }
+        }
+        else
+        {
+            if (left_tuple->KeyObj() < right_tuple->KeyObj())
+            {
+                merge_head = right;
+                prev_index = right;
+                right = AdvanceMergeIndex(right);
+            }
+            else
+            {
+                merge_head = left;
+                prev_index = left;
+                left = AdvanceMergeIndex(left);
+            }
+
+            while (left != Inf() && right != Inf())
+            {
+                left_tuple = At(left);
+                right_tuple = At(right);
+
+                if (left_tuple->KeyObj() < right_tuple->KeyObj())
+                {
+                    UpdateNextIndex(prev_index, right);
+                    prev_index = right;
+                    right = AdvanceMergeIndex(right);
+                }
+                else
+                {
+                    UpdateNextIndex(prev_index, left);
+                    prev_index = left;
+                    left = AdvanceMergeIndex(left);
+                }
+            }
+        }
+
+        if (left != Inf())
+        {
+            UpdateNextIndex(prev_index, left);
+        }
+
+        if (right != Inf())
+        {
+            UpdateNextIndex(prev_index, right);
+        }
+
+        Merge(merge_head);
+    }
+
+    CompoundIndex AdvanceMergeIndex(CompoundIndex index)
+    {
+        assert(index.CoreId() < index_chain_.size());
+        assert(index.Offset() < index_chain_[index.CoreId()].size());
+
+        return index_chain_[index.CoreId()][index.Offset()];
+    }
+
+    const TemplateScanTuple<KeyT, ValueT> *At(CompoundIndex index) const
+    {
+        assert(index.CoreId() < scans_.size());
+        assert(index.Offset() < scans_[index.CoreId()].Size());
+
+        return scans_[index.CoreId()].At(index.Offset());
+    }
+
+    void UpdateNextIndex(CompoundIndex prev_index, CompoundIndex index)
+    {
+        assert(prev_index.CoreId() < index_chain_.size());
+        assert(prev_index.Offset() < index_chain_[prev_index.CoreId()].size());
+
+        index_chain_[prev_index.CoreId()][prev_index.Offset()] = index;
+    }
 
     // Scan caches of the target node group. Its size is core count of the
     // target node.
     std::vector<TemplateScanCache<KeyT, ValueT>> scans_;
+    std::vector<std::vector<CompoundIndex>> index_chain_;
+    std::mutex mux_;
+    bool head_occupied_{false};
+    CompoundIndex head_index_{Inf()};
 
     const Schema *key_schema_;
     /**

@@ -413,7 +413,7 @@ bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
         (write_lk_type_ != WriteLockType::NoWritelock &&
          write_txn_ == tx_number))
     {
-        return true;
+        return false;
     }
 
     read_intentions_.emplace(tx_number);

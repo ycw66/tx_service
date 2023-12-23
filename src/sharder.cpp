@@ -157,7 +157,12 @@ int Sharder::Init(
         log_agent_->Init(txlog_ips_, txlog_ports_, 0);
     }
 
+#ifdef EXT_TX_PROC_ENABLED
+    tx_worker_pool_ = std::make_unique<TxWorkerPool>(
+        local_shards_->Count() >= 2 ? local_shards_->Count() / 2 : 1);
+#else
     tx_worker_pool_ = std::make_unique<TxWorkerPool>(local_shards_->Count());
+#endif
     sharder_worker_ = std::make_unique<TxWorkerPool>(1);
     // there shouldn't be any concurrent visit before Init retruns so we
     // can directly modify ng_configs_ without doing copy on write.

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <memory>
+#include <shared_mutex>
 #include <vector>
 
 #include "cc_req_misc.h"
@@ -121,21 +122,26 @@ StoreRange::StoreRange(const TxKey *start_key,
     slices_.emplace_back(std::move(slice));
 }
 
-RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
-                                  int64_t ng_term,
-                                  const TxKey &search_key,
-                                  bool inclusive,
-                                  const Schema *key_schema,
-                                  const Schema *rec_schema,
-                                  uint64_t schema_ts,
-                                  uint64_t snapshot_ts,
-                                  const KVCatalogInfo *kv_info,
-                                  CcRequestBase *cc_request,
-                                  CcShard *cc_shard,
-                                  store::DataStoreHandler *store_hd,
-                                  RangeSliceOpStatus &pin_status,
-                                  bool force_load,
-                                  uint8_t prefetch_size)
+RangeSliceId StoreRange::PinSlices(const TableName &tbl_name,
+                                   int64_t ng_term,
+                                   const TxKey &search_key,
+                                   bool inclusive,
+                                   const TxKey *end_key,
+                                   bool end_inclusive,
+                                   const Schema *key_schema,
+                                   const Schema *rec_schema,
+                                   uint64_t schema_ts,
+                                   uint64_t snapshot_ts,
+                                   const KVCatalogInfo *kv_info,
+                                   CcRequestBase *cc_request,
+                                   CcShard *cc_shard,
+                                   store::DataStoreHandler *store_hd,
+                                   bool force_load,
+                                   uint8_t prefetch_size,
+                                   uint8_t max_pin_cnt,
+                                   bool forward_pin,
+                                   RangeSliceOpStatus &pin_status,
+                                   const StoreSlice *&last_pinned_slice)
 {
     // A shared lock on the range to prevent concurrent splitting or merging of
     // slices.
@@ -165,11 +171,85 @@ RangeSliceId StoreRange::PinSlice(const TableName &tbl_name,
         }
 
         ++slice->pins_;
-        pins_.fetch_add(1, std::memory_order_release);
         pin_status = RangeSliceOpStatus::Successful;
+        last_pinned_slice = slice;
+
+        slice_lk.unlock();
+
+        size_t pin_slice_cnt = 1;
+
+        if (forward_pin)
+        {
+            for (size_t s_idx = slice_idx + 1;
+                 s_idx < slices_.size() && pin_slice_cnt < max_pin_cnt;
+                 ++s_idx)
+            {
+                StoreSlice *prepin_slice = slices_[s_idx].get();
+
+                if (end_key != nullptr)
+                {
+                    // If the request (e.g., a scan) specifies the end key, does
+                    // not pin slices beyond the end key.
+                    const TxKey *slice_start = prepin_slice->StartKey();
+                    if (!(*slice_start < *end_key ||
+                          (end_inclusive && *slice_start == *end_key)))
+                    {
+                        break;
+                    }
+                }
+
+                std::unique_lock<std::mutex> s_lk(prepin_slice->slice_mux_);
+                if (!prepin_slice->to_alter_ &&
+                    prepin_slice->status_ == SliceStatus::FullyCached)
+                {
+                    last_pinned_slice = prepin_slice;
+                    ++prepin_slice->pins_;
+                    ++pin_slice_cnt;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+        else if (slice_idx > 0)
+        {
+            for (int32_t s_idx = slice_idx - 1;
+                 s_idx >= 0 && pin_slice_cnt < max_pin_cnt;
+                 --s_idx)
+            {
+                StoreSlice *prepin_slice = slices_[s_idx].get();
+
+                if (end_key != nullptr)
+                {
+                    // If the request (e.g., a scan) specifies the end key, does
+                    // not pin slices beyond the end key.
+                    const TxKey *slice_end = prepin_slice->EndKey();
+                    if (!(*end_key < *slice_end))
+                    {
+                        break;
+                    }
+                }
+
+                std::unique_lock<std::mutex> s_lk(prepin_slice->slice_mux_);
+                if (!prepin_slice->to_alter_ &&
+                    prepin_slice->status_ == SliceStatus::FullyCached)
+                {
+                    last_pinned_slice = prepin_slice;
+                    ++prepin_slice->pins_;
+                    ++pin_slice_cnt;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+        pins_.fetch_add(pin_slice_cnt, std::memory_order_release);
     }
     else
     {
+        last_pinned_slice = nullptr;
         // collect metrics: slice cache miss
         if (metrics::enable_cache_hit_rate)
         {
@@ -376,6 +456,39 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
         // waiting on the same range wait_cv_.
         wait_cv_.notify_all();
     }
+}
+
+void StoreRange::BatchUnpinSlices(StoreSlice *start_slice,
+                                  const StoreSlice *end_slice,
+                                  bool forward_dir)
+{
+    std::shared_lock<std::shared_mutex> s_lk(mux_);
+    size_t slice_idx;
+    if (start_slice->StartKey() == nullptr)
+    {
+        slice_idx = 0;
+    }
+    else
+    {
+        slice_idx = SearchSlice(*start_slice->StartKey(), true);
+    }
+    assert(slices_[slice_idx].get() == start_slice);
+    StoreSlice *slice = start_slice;
+    while (slice != end_slice)
+    {
+        UnpinSlice(slice);
+        if (forward_dir)
+        {
+            slice_idx++;
+        }
+        else
+        {
+            slice_idx--;
+        }
+        assert(slice_idx < slices_.size() && slice_idx >= 0);
+        slice = slices_[slice_idx].get();
+    }
+    UnpinSlice(slice);
 }
 
 bool StoreRange::UpdateSliceSpec(StoreSlice *slice,

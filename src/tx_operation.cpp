@@ -1155,6 +1155,7 @@ void ScanNextOperation::Reset()
 void ScanNextOperation::ResetResult()
 {
 #ifdef RANGE_PARTITION_ENABLED
+    slice_hd_result_.Value().Reset();
     slice_hd_result_.Reset();
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
@@ -1312,8 +1313,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 }
             }
 
-            scan_state_->SetSliceLastKey(
-                std::move(scan_slice_result.last_key_));
+            scan_state_->SetSliceLastKey(scan_slice_result.LastKey());
             scan_state_->inclusive_ =
                 Direction() == ScanDirection::Forward ? false : true;
             scan_state_->slice_position_ = scan_slice_result.slice_position_;

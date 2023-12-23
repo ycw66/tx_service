@@ -19,10 +19,6 @@ namespace txservice
 template <typename KeyT, typename ValueT>
 struct CcEntry;
 
-/**
- * @brief Copied from TableLock.h
- *
- */
 class NonBlockingLock
 {
 public:
@@ -136,9 +132,12 @@ public:
      * @brief Acquires a read intent. Tx's under OCC/MVCC acquire read intents
      * for read operations. Read intents do not block writes. Their goal is to
      * prevent the cache replacement algorithm from kicking out the cc entry
-     * from the cc map.
+     * from the cc map. Hence, acquiring read intent always succeeds.
      *
      * @param tx_number The tx who acquires the read intention
+     * @return true, if the tx adds a read intent to the lock.
+     * @return false, if the tx already holds a lock/intent higher than read
+     * intent and no read intent is added.
      */
     bool AcquireReadIntent(TxNumber tx_number);
 

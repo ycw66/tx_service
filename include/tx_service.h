@@ -449,8 +449,8 @@ public:
                 do
                 {
                     local_round_cnt = round_cnt;
-                    // LOG(INFO) << "native thd yield sleeps, round cnt: "
-                    //           << local_round_cnt;
+                    // LOG(INFO) << "native thd yield sleeps, core #" << thd_id_
+                    //           << ", round cnt: " << local_round_cnt;
                     bool no_ext_proc = coordi_->sleep_cv_.wait_for(
                         lk,
                         2s,
@@ -462,9 +462,10 @@ public:
                         });
 
                     round_cnt = one_round_cnt_.load(std::memory_order_relaxed);
-                    // LOG(INFO)
-                    //     << "native thd yield wakes up, no ext proc: "
-                    //     << (int) no_ext_proc << ", round cnt: " << round_cnt;
+                    // LOG(INFO) << "native thd yield wakes up, core #" <<
+                    // thd_id_
+                    //           << ", no ext proc: " << (int) no_ext_proc
+                    //           << ", round cnt: " << round_cnt;
 
                     // If the round counter is not incremented since last sleep,
                     // it means that there is no external processor, or the
@@ -511,14 +512,18 @@ public:
                     tx_proc_status_.store(TxProcessorStatus::Sleep,
                                           std::memory_order_relaxed);
 
+                    // LOG(INFO) << "native thd long sleeps, core #" << thd_id_
+                    //           << ", round cnt: " << local_round_cnt;
+
                     std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
                     coordi_->sleep_cv_.wait(lk, [this]() { return !IsIdle(); });
 
 #ifdef EXT_TX_PROC_ENABLED
                     local_round_cnt =
                         one_round_cnt_.load(std::memory_order_relaxed);
-                    // LOG(INFO) << "native thd long wakes up, round cnt: "
-                    //           << local_round_cnt;
+                    // LOG(INFO) << "native thd long wakes up, core #" <<
+                    // thd_id_
+                    //           << ", round cnt: " << local_round_cnt;
 #endif
                     tx_proc_status_.store(TxProcessorStatus::Busy,
                                           std::memory_order_relaxed);

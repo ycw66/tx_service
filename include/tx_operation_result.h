@@ -185,7 +185,7 @@ struct RemoteScanSliceCache
 
     bool IsFull() const
     {
-        return cache_mem_size_ >= 1024 * 20 / shard_cnt_;
+        return cache_mem_size_ >= 1024 * 20;
     }
 
     void Reset(uint16_t shard_cnt)
@@ -217,27 +217,29 @@ struct RangeScanSliceResult
     RangeScanSliceResult()
         : last_key_(nullptr),
           slice_position_(SlicePosition::FirstSlice),
+          cc_ng_id_(0),
           ccm_scanner_(nullptr),
           is_local_(true),
-          cc_ng_id_(0)
+          last_key_set_(false)
     {
     }
 
     RangeScanSliceResult(TxKey::Uptr last_key, SlicePosition status)
         : last_key_(std::move(last_key)),
           slice_position_(status),
+          cc_ng_id_(0),
           ccm_scanner_(nullptr),
           is_local_(true),
-          cc_ng_id_(0)
-
+          last_key_set_(true)
     {
     }
 
     RangeScanSliceResult(RangeScanSliceResult &&rhs)
         : last_key_(std::move(rhs.last_key_)),
           slice_position_(rhs.slice_position_),
+          cc_ng_id_(rhs.cc_ng_id_),
           is_local_(rhs.is_local_),
-          cc_ng_id_(rhs.cc_ng_id_)
+          last_key_set_(rhs.last_key_set_)
     {
         if (rhs.is_local_)
         {
@@ -249,13 +251,7 @@ struct RangeScanSliceResult
         }
     }
 
-    ~RangeScanSliceResult()
-    {
-        if (!is_local_)
-        {
-            last_key_ = nullptr;
-        }
-    }
+    ~RangeScanSliceResult() = default;
 
     RangeScanSliceResult &operator=(RangeScanSliceResult &&rhs)
     {
@@ -268,6 +264,7 @@ struct RangeScanSliceResult
         slice_position_ = rhs.slice_position_;
         is_local_ = rhs.is_local_;
         cc_ng_id_ = rhs.cc_ng_id_;
+        last_key_set_ = rhs.last_key_set_;
 
         if (rhs.is_local_)
         {
@@ -281,16 +278,72 @@ struct RangeScanSliceResult
         return *this;
     }
 
+    void Reset()
+    {
+        std::unique_lock<std::mutex> lk(last_key_mux_);
+        last_key_ = nullptr;
+        last_key_set_ = false;
+    }
+
+    const TxKey *SetLastKey(std::unique_ptr<TxKey> key)
+    {
+        std::unique_lock<std::mutex> lk(last_key_mux_);
+        if (!last_key_set_)
+        {
+            last_key_ = std::move(key);
+            last_key_set_ = true;
+        }
+
+        return last_key_.get();
+    }
+
+    std::pair<TxKey *, bool> UpdateLastKey(const TxKey *key,
+                                           SlicePosition slice_pos)
+    {
+        bool success = false;
+        std::unique_lock<std::mutex> lk(last_key_mux_);
+        if (!last_key_set_)
+        {
+            last_key_ = key != nullptr ? key->Clone() : nullptr;
+            last_key_set_ = true;
+            slice_position_ = slice_pos;
+            success = true;
+        }
+
+        return {last_key_.get(), success};
+    }
+
+    std::pair<const TxKey *, bool> PeekLastKey() const
+    {
+        std::unique_lock<std::mutex> lk(last_key_mux_);
+        if (last_key_set_)
+        {
+            return {last_key_.get(), true};
+        }
+        else
+        {
+            return {nullptr, false};
+        }
+    }
+
+    std::unique_ptr<TxKey> LastKey()
+    {
+        std::unique_lock<std::mutex> lk(last_key_mux_);
+        last_key_set_ = false;
+        return std::move(last_key_);
+    }
+
     /**
      * @brief The last key of the current scan batch. For forward scans, the
      * last key is the exclusive end of the current slice, which is the
-     * inclusive start key of the next scan batch. For backward scans, the last
-     * key is the inclusive start of the current slice, which is the exclusive
-     * start key of the next scan batch.
+     * inclusive start key of the next scan batch. For backward scans, the
+     * last key is the inclusive start of the current slice, which is the
+     * exclusive start key of the next scan batch.
      *
      */
     TxKey::Uptr last_key_;
     SlicePosition slice_position_;
+    NodeGroupId cc_ng_id_{0};
 
     union
     {
@@ -299,7 +352,8 @@ struct RangeScanSliceResult
     };
     bool is_local_{true};
 
-    NodeGroupId cc_ng_id_{0};
+    bool last_key_set_{false};
+    mutable std::mutex last_key_mux_;
 };
 
 struct ScanNextResult

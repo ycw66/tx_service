@@ -1,8 +1,10 @@
 #pragma once
 
 #include <algorithm>  // std::min
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -252,15 +254,17 @@ protected:
     // lock and need to be re-execute. b. ccreq records the ccentry address, and
     // need to use ccentry to find the corresponding ccmap and ccshard.
     CcMap *ccm_{nullptr};
-    uint32_t node_group_id_{0};
-    // whether request is running on multi threads in parallel. e.g.
-    // RemoteScanOpen.
-    bool parallel_req_{false};
+
     // The term of the cc node group on which the request is first processed.
     // The term is matched, when the request is blocked and resumed on the same
     // cc node group. The request is terminated if the cc node group has failed
     // since first execution and the term changes.
     int64_t ng_term_{-1};
+
+    uint32_t node_group_id_{0};
+    // whether request is running on multi threads in parallel. e.g.
+    // RemoteScanOpen.
+    bool parallel_req_{false};
 };
 
 struct AcquireCc
@@ -1621,8 +1625,8 @@ struct ScanSliceCc
 public:
     ScanSliceCc()
         : start_key_(nullptr),
-          start_key_type_(RangeKeyType::RawPtr),
           end_key_(nullptr),
+          start_key_type_(RangeKeyType::RawPtr),
           end_key_type_(RangeKeyType::RawPtr)
     {
         parallel_req_ = true;
@@ -1688,8 +1692,11 @@ public:
         read_for_write_ = read_for_write;
         is_covering_keys_ = is_covering_keys;
 
+        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
+        last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
+        err_ = CcErrorCode::NO_ERROR;
     }
 
     void Set(const TableName &tbl_name,
@@ -1742,19 +1749,24 @@ public:
         is_covering_keys_ = is_covering_keys;
         prefetch_size_ = prefetch_size;
 
+        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
+        last_pinned_slice_ = nullptr;
+        err_ = CcErrorCode::NO_ERROR;
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        // If the request has pinned any slice, unpin it.
-        if (RangeSliceId().Slice() != nullptr)
+        if (SetError(err_code))
         {
-            RangeSliceId().Unpin();
+            // Last core finished. If the request has pinned any slice, unpin
+            // it.
+            if (range_slice_id_.Range() != nullptr)
+            {
+                UnpinSlices();
+            }
+            Free();
         }
-        assert(err_code != CcErrorCode::NO_ERROR);
-        res_->SetError(err_code);
-        Free();
     }
 
     bool IsLocal() const
@@ -1842,7 +1854,7 @@ public:
         else
         {
             start_key_type_ = RangeKeyType::UniquePtr;
-            start_key_uptr_.release();
+            (void) start_key_uptr_.release();
             start_key_uptr_ = std::move(start_key);
         }
     }
@@ -1856,7 +1868,7 @@ public:
         else
         {
             end_key_type_ = RangeKeyType::UniquePtr;
-            end_key_uptr_.release();
+            (void) end_key_uptr_.release();
             end_key_uptr_ = std::move(end_key);
         }
     }
@@ -1904,48 +1916,60 @@ public:
         return &slice_result.remote_scan_caches_->at(shard_id);
     }
 
-    uint64_t PriorCceAddr(uint16_t shard_id)
+    CcScanner *GetLocalScanner()
     {
-        assert(shard_id < cce_addr_vec_.size());
-        return cce_addr_vec_[shard_id];
+        return IsLocal() ? res_->Value().ccm_scanner_ : nullptr;
+    }
+
+    enum struct ScanBlockingType
+    {
+        NoBlocking = 0,
+        BlockOnLock,
+        BlockOnFuture
+    };
+
+    uint64_t CceAddr(uint16_t core_id)
+    {
+        assert(core_id < blocking_vec_.size());
+        return blocking_vec_[core_id].cce_addr_;
+    }
+
+    std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
+    {
+        assert(core_id < blocking_vec_.size());
+        return {blocking_vec_[core_id].type_,
+                blocking_vec_[core_id].scan_type_};
+    }
+
+    void SetBlockingInfo(uint16_t core_id,
+                         uint64_t cce_addr,
+                         ScanType scan_type,
+                         ScanBlockingType blocking_type)
+    {
+        assert(core_id < blocking_vec_.size());
+        blocking_vec_[core_id] = {cce_addr, scan_type, blocking_type};
     }
 
     void SetShardCount(uint16_t shard_cnt)
     {
-        cce_addr_vec_.resize(shard_cnt);
-        cce_ptr_vec_.resize(shard_cnt);
-        blocked_scan_types_.resize(shard_cnt);
-        is_wait_for_post_write_.resize(shard_cnt, false);
-        unfinished_core_cnt_.store(shard_cnt, std::memory_order_release);
+        blocking_vec_.resize(shard_cnt);
     }
 
     uint64_t GetShardCount() const
     {
-        return cce_ptr_vec_.size();
+        return blocking_vec_.size();
+    }
+
+    void SetUnfinishedCoreCnt(uint16_t core_cnt)
+    {
+        unfinished_core_cnt_.store(core_cnt, std::memory_order_release);
     }
 
     void SetPriorCceAddr(uint64_t addr, uint16_t shard_id)
     {
-        assert(shard_id < cce_addr_vec_.size());
-        cce_addr_vec_[shard_id] = addr;
-        cce_ptr_vec_[shard_id] = nullptr;
-    }
-
-    uint64_t PriorCceAddr(uint16_t shard_id) const
-    {
-        assert(shard_id < cce_addr_vec_.size());
-        return cce_addr_vec_[shard_id];
-    }
-
-    LruEntry *CcePtr(uint16_t shard_id)
-    {
-        assert(shard_id < cce_ptr_vec_.size());
-        return cce_ptr_vec_[shard_id];
-    }
-
-    void SetCcePtr(LruEntry *block_on_cce, uint16_t shard_id)
-    {
-        cce_ptr_vec_[shard_id] = block_on_cce;
+        assert(shard_id < blocking_vec_.size());
+        blocking_vec_[shard_id] = {
+            addr, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
     }
 
     /**
@@ -1966,8 +1990,29 @@ public:
             // result will be updated by dedicated core.
             if (res_->Value().is_local_)
             {
-                res_->SetFinished();
+                if (err_ == CcErrorCode::NO_ERROR)
+                {
+                    res_->SetFinished();
+                }
+                else
+                {
+                    res_->SetError(err_);
+                }
             }
+        }
+
+        return remaining_cnt == 1;
+    }
+
+    bool SetError(CcErrorCode err)
+    {
+        err_ = err;
+        uint16_t remaining_cnt =
+            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
+
+        if (remaining_cnt == 1)
+        {
+            res_->SetError(err_);
         }
 
         return remaining_cnt == 1;
@@ -1987,7 +2032,14 @@ public:
     {
         if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
         {
-            res_->SetFinished();
+            if (err_ == CcErrorCode::NO_ERROR)
+            {
+                res_->SetFinished();
+            }
+            else
+            {
+                res_->SetError(err_);
+            }
             return true;
         }
         return false;
@@ -1995,7 +2047,7 @@ public:
 
     bool IsResponseSender(uint16_t core_id) const
     {
-        return (tx_number_ & 0x3FF) % cce_addr_vec_.size() == core_id;
+        return ((tx_number_ & 0x3FF) % blocking_vec_.size()) == core_id;
     }
 
     bool IsForWrite() const
@@ -2006,31 +2058,6 @@ public:
     const RangeSliceId &SliceId() const
     {
         return range_slice_id_;
-    }
-
-    void SetSliceId(const RangeSliceId &slice)
-    {
-        range_slice_id_ = slice;
-    }
-
-    void SetCceScanType(ScanType blocked_scan_type, uint16_t core_id)
-    {
-        blocked_scan_types_[core_id] = blocked_scan_type;
-    }
-
-    ScanType BlockedCceScanType(uint16_t core_id) const
-    {
-        return blocked_scan_types_[core_id];
-    }
-
-    void SetIsWaitForPostWrite(bool is_wait, uint16_t core_id)
-    {
-        is_wait_for_post_write_[core_id] = is_wait;
-    }
-
-    bool IsWaitForPostWrite(uint16_t core_id) const
-    {
-        return is_wait_for_post_write_[core_id];
     }
 
     bool IsCoveringKeys() const
@@ -2049,9 +2076,26 @@ public:
         return prefetch_size_;
     }
 
-private:
-    uint32_t range_id_{0};
+    void PinSlices(const RangeSliceId &slice, const StoreSlice *last_slice)
+    {
+        range_slice_id_ = slice;
+        last_pinned_slice_ = last_slice;
+    }
 
+    const StoreSlice *LastPinnedSlice() const
+    {
+        return last_pinned_slice_;
+    }
+
+    void UnpinSlices()
+    {
+        range_slice_id_.Range()->BatchUnpinSlices(
+            range_slice_id_.Slice(),
+            last_pinned_slice_,
+            direction_ == ScanDirection::Forward);
+    }
+
+private:
     enum struct RangeKeyType
     {
         RawPtr,
@@ -2065,8 +2109,6 @@ private:
         const std::string *start_key_str_;
         std::unique_ptr<TxKey> start_key_uptr_;
     };
-    RangeKeyType start_key_type_;
-    bool start_inclusive_{false};
 
     union
     {
@@ -2074,28 +2116,42 @@ private:
         const std::string *end_key_str_;
         std::unique_ptr<TxKey> end_key_uptr_;
     };
+
+    RangeKeyType start_key_type_;
     RangeKeyType end_key_type_;
+
+    uint32_t range_id_{0};
+    ScanDirection direction_{ScanDirection::Forward};
+
+    uint64_t ts_{0};
+    int64_t tx_term_{-1};
+
+    bool start_inclusive_{false};
     bool end_inclusive_{false};
 
-    ScanDirection direction_{ScanDirection::Forward};
     /**
      * @brief Number of slices to prefetch when a cache-miss slice is loaded.
      *
      */
     uint8_t prefetch_size_{0};
-    uint64_t ts_{0};
-    int64_t tx_term_{-1};
     bool read_for_write_{false};
-    std::vector<bool> is_wait_for_post_write_;
+
+    std::atomic<uint16_t> unfinished_core_cnt_{1};
+    const StoreSlice *last_pinned_slice_{nullptr};
     bool is_covering_keys_{false};
+
     int64_t cc_ng_term_{-1};
 
-    std::vector<ScanType> blocked_scan_types_;
+    struct ScanBlockingInfo
+    {
+        uint64_t cce_addr_;
+        ScanType scan_type_;
+        ScanBlockingType type_;
+    };
+    std::vector<ScanBlockingInfo> blocking_vec_;
 
-    std::vector<uint64_t> cce_addr_vec_;
-    std::vector<LruEntry *> cce_ptr_vec_;
-    std::atomic<uint16_t> unfinished_core_cnt_{0};
     RangeSliceId range_slice_id_;
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
 };
 
 struct CkptTsCc : public CcRequestBase

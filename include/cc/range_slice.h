@@ -414,21 +414,26 @@ public:
 
     ~StoreRange() = default;
 
-    RangeSliceId PinSlice(const TableName &tbl_name,
-                          int64_t ng_term,
-                          const TxKey &search_key,
-                          bool inclusive,
-                          const Schema *key_schema,
-                          const Schema *rec_schema,
-                          uint64_t schema_ts,
-                          uint64_t snapshot_ts,
-                          const KVCatalogInfo *kv_info,
-                          CcRequestBase *cc_request,
-                          CcShard *cc_shard,
-                          store::DataStoreHandler *store_hd,
-                          RangeSliceOpStatus &pin_status,
-                          bool force_load,
-                          uint8_t prefetch_size);
+    RangeSliceId PinSlices(const TableName &tbl_name,
+                           int64_t ng_term,
+                           const TxKey &search_key,
+                           bool inclusive,
+                           const TxKey *end_key,
+                           bool end_inclusive,
+                           const Schema *key_schema,
+                           const Schema *rec_schema,
+                           uint64_t schema_ts,
+                           uint64_t snapshot_ts,
+                           const KVCatalogInfo *kv_info,
+                           CcRequestBase *cc_request,
+                           CcShard *cc_shard,
+                           store::DataStoreHandler *store_hd,
+                           bool force_load,
+                           uint8_t prefetch_size,
+                           uint8_t max_pin_cnt,
+                           bool forward_pin,
+                           RangeSliceOpStatus &pin_status,
+                           const StoreSlice *&last_pinned_slice);
 
     RangeSliceOpStatus PinSlice(const TableName &tbl_name,
                                 int64_t ng_term,
@@ -445,6 +450,10 @@ public:
                                 uint8_t prefetch_size = 0);
 
     void UnpinSlice(StoreSlice *slice);
+
+    void BatchUnpinSlices(StoreSlice *start_slice,
+                          const StoreSlice *end_slice,
+                          bool forward_dir);
 
     bool UpdateRangeSlicesInStore(const TableName &table_name,
                                   uint64_t schema_ts,
@@ -711,6 +720,7 @@ private:
 
     friend class StoreSlice;
     friend struct TableRangeEntry;
+    friend struct RangeSliceId;
 };
 
 /**
@@ -726,12 +736,17 @@ public:
     {
     }
 
-    RangeSliceId(StoreRange *range, StoreSlice *slice_ptr)
-        : range_ptr_(range), slice_ptr_(slice_ptr)
+    explicit RangeSliceId(StoreRange *range, StoreSlice *slice)
+        : range_ptr_(range), slice_ptr_(slice)
     {
     }
 
     RangeSliceId(const RangeSliceId &rhs)
+        : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
+    {
+    }
+
+    RangeSliceId(RangeSliceId &&rhs)
         : range_ptr_(rhs.range_ptr_), slice_ptr_(rhs.slice_ptr_)
     {
     }

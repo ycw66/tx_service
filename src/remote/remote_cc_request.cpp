@@ -1002,9 +1002,11 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
 
         const RangeScanSliceResult &slice_result = cc_res_.Value();
         output_msg_.clear_last_key();
-        if (slice_result.last_key_ != nullptr)
+        auto [last_key, key_set] = slice_result.PeekLastKey();
+        assert(key_set || cc_res_.IsError());
+        if (last_key != nullptr)
         {
-            slice_result.last_key_->Serialize(*output_msg_.mutable_last_key());
+            last_key->Serialize(*output_msg_.mutable_last_key());
         }
         output_msg_.set_slice_position(
             ToRemoteType::ConvertSlicePosition(slice_result.slice_position_));
@@ -1066,6 +1068,7 @@ void txservice::remote::RemoteScanSlice::Reset(
 {
     assert(input_msg->has_scan_slice_req());
 
+    cc_res_.Value().Reset();
     cc_res_.Reset();
     output_msg_.Clear();
 
@@ -1108,7 +1111,6 @@ void txservice::remote::RemoteScanSlice::Reset(
         uint64_t cce_addr =
             core_id < vec_size ? scan_slice_req.prior_cce_vec(core_id) : 0;
         SetPriorCceAddr(cce_addr, core_id);
-        SetCcePtr(nullptr, core_id);
     }
 
     RangeScanSliceResult &slice_result = cc_res_.Value();

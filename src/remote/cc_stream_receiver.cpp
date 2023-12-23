@@ -223,19 +223,19 @@ void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
     }
 
     RangeScanSliceResult &scan_slice_result = hd_res->Value();
-
-    scan_slice_result.slice_position_ =
-        ToLocalType::ConvertSlicePosition(msg->slice_position());
-
     CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
+    const TxKey *scan_end = nullptr;
     if (!msg->last_key().empty())
     {
-        scan_slice_result.last_key_ = range_scanner.DecodeKey(msg->last_key());
+        scan_end = scan_slice_result.SetLastKey(
+            range_scanner.DecodeKey(msg->last_key()));
     }
     else
     {
-        scan_slice_result.last_key_ = nullptr;
+        scan_slice_result.SetLastKey(nullptr);
     }
+    scan_slice_result.slice_position_ =
+        ToLocalType::ConvertSlicePosition(msg->slice_position());
 
     const char *tuple_cnt_info = msg->tuple_cnt().data();
     uint16_t remote_core_cnt = *((const uint16_t *) tuple_cnt_info);
@@ -276,6 +276,41 @@ void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
                                       core_id,
                                       scan_slice_result.cc_ng_id_);
         }
+
+        // For remote scans, the scan result is a string representation of
+        // scanned key-value pairs. It may include keys beyond the scan's last
+        // key, due to parallel scans across multi cores at the remote node.
+        // Removes the keys from the scan cache beyond the scan's end.
+        if (range_scanner.Direction() == ScanDirection::Forward)
+        {
+            assert(scan_end == nullptr ||
+                   scan_slice_result.slice_position_ ==
+                       txservice::SlicePosition::Middle ||
+                   scan_slice_result.slice_position_ ==
+                       txservice::SlicePosition::LastSliceInRange);
+
+            while (scan_end != nullptr && shard_cache->Size() > 0 &&
+                   *scan_end <= *shard_cache->LastTuple()->Key())
+            {
+                shard_cache->RemoveLast();
+            }
+        }
+        else
+        {
+            assert(scan_end == nullptr ||
+                   scan_slice_result.slice_position_ ==
+                       txservice::SlicePosition::Middle ||
+                   scan_slice_result.slice_position_ ==
+                       txservice::SlicePosition::FirstSliceInRange);
+
+            while (scan_end != nullptr && shard_cache->Size() > 0 &&
+                   *shard_cache->LastTuple()->Key() < *scan_end)
+            {
+                shard_cache->RemoveLast();
+            }
+        }
+        range_scanner.CommitAtCore(core_id);
+
         key_ts_ptr += tuple_cnt;
         gap_ts_ptr += tuple_cnt;
         term_ptr += tuple_cnt;

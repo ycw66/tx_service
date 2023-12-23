@@ -582,20 +582,25 @@ public:
                                bool force_load,
                                uint8_t prefetch_size);
 
-    RangeSliceId PinRangeSlice(const TableName &table_name,
-                               NodeGroupId cc_ng_id,
-                               int64_t cc_ng_term,
-                               const Schema *key_schema,
-                               const Schema *rec_schema,
-                               uint64_t schema_ts,
-                               const KVCatalogInfo *kv_info,
-                               uint32_t range_id,
-                               const TxKey &key,
-                               bool inclusive,
-                               CcRequestBase *cc_request,
-                               RangeSliceOpStatus &pin_status,
-                               bool force_load,
-                               uint8_t prefetch_size);
+    RangeSliceId PinRangeSlices(const TableName &table_name,
+                                NodeGroupId cc_ng_id,
+                                int64_t cc_ng_term,
+                                const Schema *key_schema,
+                                const Schema *rec_schema,
+                                uint64_t schema_ts,
+                                const KVCatalogInfo *kv_info,
+                                uint32_t range_id,
+                                const TxKey &start_key,
+                                bool start_inclusive,
+                                const TxKey *end_key,
+                                bool end_inclusive,
+                                CcRequestBase *cc_request,
+                                bool force_load,
+                                uint8_t prefetch_size,
+                                uint8_t max_pin_cnt,
+                                bool forward_pin,
+                                RangeSliceOpStatus &pin_status,
+                                const StoreSlice *&last_pinned_slice);
 
     /**
      * Used for unit test to verify the lru link is complete.

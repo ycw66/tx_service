@@ -4,11 +4,11 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <tuple>
-#include <unordered_set>
 #include <vector>
 
 #include "cc_entry.h"
@@ -3451,34 +3451,28 @@ public:
     {
         if (req.SendResponseIfFinished())
         {
-            RangeSliceId slice_id = req.SliceId();
-            slice_id.Unpin();
+            req.UnpinSlices();
             return true;
         }
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0 ||
             (req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term))
         {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return req.SetFinish();
+            return req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
-        IsolationLevel iso_lvl = req.Isolation();
-        CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
-        bool is_read_snapshot;
+        bool is_read_snapshot =
+            req.Isolation() == IsolationLevel::Snapshot && !req.IsForWrite();
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
             cc_op = CcOperation::ReadSkIndex;
-            is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
         }
         else
         {
             cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                      : CcOperation::Read;
-            is_read_snapshot =
-                (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
 
         CcHandlerResult<RangeScanSliceResult> *hd_res = req.Result();
@@ -3540,11 +3534,6 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache]() -> bool {
-            return req.IsLocal() ? scan_cache->IsFull()
-                                 : remote_scan_cache->IsFull();
-        };
-
         auto last_cce_of_cache =
             [&req, scan_cache, remote_scan_cache]() -> CcEntry<KeyT, ValueT> *
         {
@@ -3574,30 +3563,51 @@ public:
             }
         };
 
-        RangeSliceId slice_id;
-        if (shard_->core_id_ == 0 && req.SliceId().Slice() == nullptr)
+        if (req.SliceId().Slice() == nullptr)
         {
-            // The scan slice request is first dispatched to the 1st core, which
-            // pins the slice in memory. Processing at the 1st core also sets
-            // the scan batch's boundary, in case the slice in memory is too
-            // large to fit into a single batch. The same request is dispatched
-            // to other cores to scan in parallel. The slice is unpinned by the
-            // last core finishing the scan batch.
+            // The scan slice request is first dispatched to one core, which
+            // pins the slice in memory. After the slice is pinned, the request
+            // is dispatched to other cores to scan in parallel. The slice is
+            // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status;
-            slice_id = shard_->PinRangeSlice(table_name_,
-                                             req.NodeGroupId(),
-                                             ng_term,
-                                             KeySchema(),
-                                             RecordSchema(),
-                                             schema_ts_,
-                                             table_schema_->GetKVCatalogInfo(),
-                                             req.RangeId(),
-                                             *req_start_key,
-                                             req.StartInclusive(),
-                                             &req,
-                                             pin_status,
-                                             false,
-                                             req.PrefetchSize());
+            const StoreSlice *last_pinned_slice;
+            uint8_t max_pin_cnt = 1;
+            if (req_end_key == nullptr &&
+                req.PrefetchSize() < shard_->core_cnt_)
+            {
+                if (req.PrefetchSize() < UINT8_MAX)
+                {
+                    max_pin_cnt += req.PrefetchSize();
+                }
+                else
+                {
+                    max_pin_cnt = req.PrefetchSize();
+                }
+            }
+            else
+            {
+                max_pin_cnt = shard_->core_cnt_;
+            }
+            RangeSliceId slice_id = shard_->PinRangeSlices(
+                table_name_,
+                req.NodeGroupId(),
+                ng_term,
+                KeySchema(),
+                RecordSchema(),
+                schema_ts_,
+                table_schema_->GetKVCatalogInfo(),
+                req.RangeId(),
+                *req_start_key,
+                req.StartInclusive(),
+                req_end_key,
+                req.EndInclusive(),
+                &req,
+                false,
+                req.PrefetchSize(),
+                max_pin_cnt,
+                req.Direction() == ScanDirection::Forward,
+                pin_status,
+                last_pinned_slice);
 
             if (pin_status == RangeSliceOpStatus::Retry)
             {
@@ -3630,12 +3640,23 @@ public:
                 return true;
             }
 
-            req.SetSliceId(slice_id);
-        }
-        else
-        {
-            slice_id = req.SliceId();
-            assert(slice_id.Slice() != nullptr);
+            req.PinSlices(slice_id, last_pinned_slice);
+            // Update unfinished cnt before dispatching to remaining cores.
+            req.SetUnfinishedCoreCnt(req.GetShardCount());
+
+            // Dispatches to remaining cores to scan pinned slice(s) in
+            // parallel.
+            for (uint16_t core_id = 0; core_id < shard_->local_shards_.Count();
+                 ++core_id)
+            {
+                if (core_id == shard_->core_id_)
+                {
+                    continue;
+                }
+
+                shard_->local_shards_.EnqueueCcRequest(
+                    shard_->core_id_, core_id, &req);
+            }
         }
 
         Iterator scan_ccm_it;
@@ -3644,49 +3665,62 @@ public:
         uint32_t ng_id = req.NodeGroupId();
         int64_t tx_term = req.TxTerm();
 
-        if (req.CcePtr(core_id) != nullptr)
+        enum struct ScanReturnType
         {
-            cce = static_cast<CcEntry<KeyT, ValueT> *>(req.CcePtr(core_id));
-            ScanType scan_type = req.BlockedCceScanType(core_id);
-            scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
-            cce_key = scan_ccm_it->first;
+            Success,
+            Blocked,
+            Yield,
+            Error,
+        };
 
-            req.SetCcePtr(nullptr, core_id);
-            req.SetCceScanType(ScanType::ScanUnknow, core_id);
-
-            bool is_locked = false;
-            if (req.IsWaitForPostWrite(shard_->core_id_))
+        auto scan_tuple_func = [&, this](const KeyT *cce_key,
+                                         CcEntry<KeyT, ValueT> *cce,
+                                         ScanType scan_type) -> ScanReturnType
+        {
+            auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->payload_status_,
+                                               &req,
+                                               ng_id,
+                                               ng_term,
+                                               tx_term,
+                                               cc_op,
+                                               req.Isolation(),
+                                               req.Protocol(),
+                                               req.ReadTimestamp(),
+                                               req.IsCoveringKeys());
+            switch (lock_pair.second)
             {
-                req.SetIsWaitForPostWrite(false, shard_->core_id_);
-                cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
-            }
-            else
+            case CcErrorCode::NO_ERROR:
+                break;
+            case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
             {
-                // Lock has been acquired, UpsertLockHoldingTx
-                auto lock_pair =
-                    LockHandleForResumedRequest(cce,
-                                                cce->payload_status_,
-                                                &req,
-                                                ng_id,
-                                                ng_term,
-                                                tx_term,
-                                                cc_op,
-                                                iso_lvl,
-                                                req.Protocol(),
-                                                req.ReadTimestamp(),
-                                                req.IsCoveringKeys());
-
-                if (lock_pair.second != CcErrorCode::NO_ERROR)
-                {
-                    assert(lock_pair.second ==
-                           CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
-                }
-
-                is_locked = true;
+                req.SetBlockingInfo(
+                    shard_->core_id_,
+                    reinterpret_cast<uint64_t>(cce),
+                    scan_type,
+                    ScanSliceCc::ScanBlockingType::BlockOnFuture);
+                return ScanReturnType::Blocked;
             }
+            case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+            {
+                req.SetBlockingInfo(shard_->core_id_,
+                                    reinterpret_cast<uint64_t>(cce),
+                                    scan_type,
+                                    ScanSliceCc::ScanBlockingType::BlockOnLock);
+                req.SetRangeCcNgTerm(ng_term);
+                // Lock fail should stop the execution of current
+                // CC request since it's already in blocking queue.
+                return ScanReturnType::Blocked;
+            }
+            default:
+            {
+                // lock confilct: back off and retry.
+                req.Result()->SetError(lock_pair.second);
+                return ScanReturnType::Error;
+            }
+            }  //-- end: switch
 
+            bool is_locked = lock_pair.first != LockType::NoLock;
             if (req.IsLocal())
             {
                 AddScanTuple(cce_key,
@@ -3710,12 +3744,106 @@ public:
                                 is_read_snapshot,
                                 is_locked);
             }
-        }
-        else if (req.PriorCceAddr(core_id) != 0)
+
+            return ScanReturnType::Success;
+        };
+
+        uint64_t addr = req.CceAddr(core_id);
+        if (addr != 0)
         {
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                req.PriorCceAddr(core_id));
+            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(addr);
+        }
+
+        if (cce != nullptr)
+        {
+            auto [blocking_type, scan_type] = req.BlockingPair(core_id);
             scan_ccm_it = Iterator(cce, &neg_inf_, &pos_inf_);
+            cce_key = scan_ccm_it->first;
+
+            if (blocking_type == ScanSliceCc::ScanBlockingType::NoBlocking)
+            {
+                // This is a resumed scan slice cc. If the scan itself won't
+                // lock the cce, we will put a read intent on the last cce so
+                // that it can't be kicked from memory and this cce addr is
+                // valid. This lock should be released when the scan slicecc
+                // resumes.
+                if (LockTypeUtil::DeduceLockType(cc_op,
+                                                 req.Isolation(),
+                                                 req.Protocol(),
+                                                 req.IsCoveringKeys()) ==
+                    LockType::NoLock)
+                {
+                    ReleaseCceLock(cce->key_lock_ptr_,
+                                   cce,
+                                   req.Txn(),
+                                   ng_id,
+                                   LockType::ReadIntent);
+                }
+            }
+            else
+            {
+                bool is_locked = false;
+
+                if (blocking_type ==
+                    ScanSliceCc::ScanBlockingType::BlockOnFuture)
+                {
+                    // The scan was blocked because it intends to scan a key's
+                    // version that has not been committed.
+                    cce->key_lock_ptr_->ReleaseReadLock(req.Txn(), shard_);
+                }
+                else
+                {
+                    // The scan was blocked because of read-write conflicts. The
+                    // read lock/write intent has been acquired, updates the
+                    // lock holding tx collection in this shard.
+                    auto lock_pair =
+                        LockHandleForResumedRequest(cce,
+                                                    cce->payload_status_,
+                                                    &req,
+                                                    ng_id,
+                                                    ng_term,
+                                                    tx_term,
+                                                    cc_op,
+                                                    req.Isolation(),
+                                                    req.Protocol(),
+                                                    req.ReadTimestamp(),
+                                                    req.IsCoveringKeys());
+
+                    if (lock_pair.second != CcErrorCode::NO_ERROR)
+                    {
+                        assert(lock_pair.second ==
+                               CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+
+                    is_locked = true;
+                }
+
+                if (req.IsLocal())
+                {
+                    AddScanTuple(cce_key,
+                                 cce,
+                                 scan_cache,
+                                 scan_type,
+                                 ng_id,
+                                 ng_term,
+                                 req.ReadTimestamp(),
+                                 is_read_snapshot,
+                                 is_locked);
+                }
+                else
+                {
+                    AddScanTupleMsg(cce_key,
+                                    cce,
+                                    remote_scan_cache,
+                                    scan_type,
+                                    ng_term,
+                                    req.ReadTimestamp(),
+                                    is_read_snapshot,
+                                    is_locked);
+                }
+            }
         }
         else
         {
@@ -3749,75 +3877,26 @@ public:
 
             if (scan_type != ScanType::ScanGap && within_boundary)
             {
-                req.SetCcePtr(cce, core_id);
-                req.SetCceScanType(scan_type, core_id);
+                ScanReturnType ret_type =
+                    scan_tuple_func(cce_key, cce, scan_type);
 
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   cce->payload_status_,
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
+                switch (ret_type)
                 {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
+                case ScanReturnType::Blocked:
                     return false;
-                }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
-                {
-                    req.SetRangeCcNgTerm(ng_term);
-                    // Lock fail should stop the execution of current
-                    // CC request since it's already in blocking queue.
-                    return false;
-                }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
+                case ScanReturnType::Error:
                     return true;
-                }
-                }  //-- end: switch
-
-                bool is_locked = lock_pair.first != LockType::NoLock;
-                if (req.IsLocal())
-                {
-                    AddScanTuple(cce_key,
-                                 cce,
-                                 scan_cache,
-                                 scan_type,
-                                 ng_id,
-                                 ng_term,
-                                 req.ReadTimestamp(),
-                                 is_read_snapshot,
-                                 is_locked);
-                }
-                else
-                {
-                    AddScanTupleMsg(cce_key,
-                                    cce,
-                                    remote_scan_cache,
-                                    scan_type,
-                                    ng_term,
-                                    req.ReadTimestamp(),
-                                    is_read_snapshot,
-                                    is_locked);
+                default:
+                    break;
                 }
             }
         }
 
+        RangeScanSliceResult &slice_result = hd_res->Value();
         if (req.Direction() == ScanDirection::Forward)
         {
             ++scan_ccm_it;
-            const StoreSlice *slice = slice_id.Slice();
+            const StoreSlice *last_slice = req.LastPinnedSlice();
 
             // The scan at core 0 sets the scan's end key. By default, the
             // scan's end is the exclusive end of the slice or the request's
@@ -3829,167 +3908,171 @@ public:
             // batch. So, scans at other cores may slightly exceed the scan
             // cache's capacity.
 
-            const KeyT *scan_end = nullptr;
-            bool scan_end_inclusive = false;
-            if (shard_->core_id_ == 0)
+            const KeyT *initial_end = nullptr;
+            bool init_end_inclusive = false;
+
+            // Given the scan batch's final end key, deduces the local scan's
+            // end and inclusiveness.
+            auto deduce_scan_end =
+                [](const KeyT *batch_end_key,
+                   const KeyT *req_end_key,
+                   bool req_inclusive) -> std::pair<const KeyT *, bool>
             {
+                const KeyT *end = nullptr;
+                bool inclusive = false;
+
+                // The scan batch's end key has been finalized. If the final
+                // end key is null, it means that either the request specifies
+                // the end key, which falls into the slice, or the scanned slice
+                // is the last ending with positive infinity.
+                if (batch_end_key == nullptr)
+                {
+                    if (req_end_key != nullptr)
+                    {
+                        end = req_end_key;
+                        inclusive = req_inclusive;
+                    }
+                    else
+                    {
+                        end = PositiveInfinity<KeyT>::Instance();
+                        inclusive = false;
+                    }
+                }
+                else
+                {
+                    end = batch_end_key;
+                    inclusive = false;
+                }
+
+                return {end, inclusive};
+            };
+
+            auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
+            if (!end_finalized)
+            {
+                // This scan batch's end key has not been set. Takes the smaller
+                // of the slice's last key and the request's end key as the
+                // local scan's initial end. The initial end may be modified, if
+                // another core finishes earlier and finalizes the batch's end
+                // before this core. The final end may be smaller or greater
+                // than the initial end.
                 const KeyT *slice_end =
-                    static_cast<const KeyT *>(slice->EndKey());
+                    static_cast<const KeyT *>(last_slice->EndKey());
                 if (slice_end == nullptr)
                 {
                     slice_end = PositiveInfinity<KeyT>::Instance();
                 }
 
-                if (req_end_key == nullptr)
+                // If the request specifies the end key and it falls into the
+                // slice, initializes the local scan's end to the request's end
+                // key. Or, the scan end is the slice's end.
+                if (req_end_key != nullptr &&
+                    (*req_end_key < *slice_end ||
+                     (*req_end_key == *slice_end && !req.EndInclusive())))
                 {
-                    // The request does not specify the end key. This scan
-                    // batch's end is initialized to the slice's end.
-                    scan_end = slice_end;
-                    scan_end_inclusive = false;
+                    initial_end = req_end_key;
+                    init_end_inclusive = req.EndInclusive();
                 }
                 else
                 {
-                    // If the request's specified end key falls into the slice,
-                    // initializes the scan end to the request's end key. Or,
-                    // the scan end is the slice's end;
-                    if (*req_end_key < *slice_end ||
-                        (*req_end_key == *slice_end && !req.EndInclusive()))
-                    {
-                        scan_end = req_end_key;
-                        scan_end_inclusive = req.EndInclusive();
-                    }
-                    else
-                    {
-                        scan_end = slice_end;
-                        scan_end_inclusive = false;
-                    }
+                    initial_end = slice_end;
+                    init_end_inclusive = false;
                 }
             }
             else
             {
-                // When the scan's end key is not set in the result after
-                // scanning the first core, it means that either the request
-                // specifies the scan's end, which falls into the slice, or the
-                // scanned slice is the last ending with positive infinity.
-                if (hd_res->Value().last_key_ == nullptr)
-                {
-                    if (req_end_key != nullptr)
-                    {
-                        scan_end = req_end_key;
-                        scan_end_inclusive = req.EndInclusive();
-                    }
-                    else
-                    {
-                        scan_end = PositiveInfinity<KeyT>::Instance();
-                        scan_end_inclusive = false;
-                    }
-                }
-                else
-                {
-                    scan_end = static_cast<const KeyT *>(
-                        hd_res->Value().last_key_.get());
-                    scan_end_inclusive = false;
-                }
+                // This scan batch's end key has been finalized by one of the
+                // cores. Deduces the local scan's end and inclusiveness.
+                std::tie(initial_end, init_end_inclusive) =
+                    deduce_scan_end(static_cast<const KeyT *>(final_end_key),
+                                    req_end_key,
+                                    req.EndInclusive());
             }
 
-            Iterator pos_inf_it = End();
-            cce_key = scan_ccm_it->first;
-            cce = scan_ccm_it->second;
+            // Iterator pos_inf_it = End();
+            // cce_key = scan_ccm_it->first;
+            // cce = scan_ccm_it->second;
 
-            assert(scan_end != nullptr);
-
-            while (scan_ccm_it != pos_inf_it &&
-                   (shard_->core_id_ > 0 || !is_cache_full()) &&
-                   (*cce_key < *scan_end ||
-                    (scan_end_inclusive && *cce_key == *scan_end)))
+            auto scan_loop_func = [&, this](
+                                      const KeyT *end_key,
+                                      bool inclusive,
+                                      bool end_finalized) -> ScanReturnType
             {
-                req.SetCcePtr(cce, core_id);
-                req.SetCceScanType(ScanType::ScanBoth, core_id);
+                Iterator pos_inf_it = End();
+                const KeyT *cce_key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
 
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   cce->payload_status_,
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
-                {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
-                    return false;
-                }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
-                {
-                    req.SetRangeCcNgTerm(ng_term);
-                    // Lock fail should stop the execution of current
-                    // CC request since it's already in blocking queue.
-                    return false;
-                }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
-                }
-                }  //-- end: switch
+                auto is_cache_full =
+                    [&req, scan_cache, remote_scan_cache]() -> bool {
+                    return req.IsLocal() ? scan_cache->IsFull()
+                                         : remote_scan_cache->IsFull();
+                };
 
-                bool is_locked = lock_pair.first != LockType::NoLock;
-                if (req.IsLocal())
+                while (scan_ccm_it != pos_inf_it &&
+                       (end_finalized || !is_cache_full()) &&
+                       (*cce_key < *end_key ||
+                        (inclusive && *cce_key == *end_key)))
                 {
-                    AddScanTuple(cce_key,
-                                 cce,
-                                 scan_cache,
-                                 ScanType::ScanBoth,
-                                 ng_id,
-                                 ng_term,
-                                 req.ReadTimestamp(),
-                                 is_read_snapshot,
-                                 is_locked);
-                }
-                else
-                {
-                    AddScanTupleMsg(cce_key,
-                                    cce,
-                                    remote_scan_cache,
-                                    ScanType::ScanBoth,
-                                    ng_term,
-                                    req.ReadTimestamp(),
-                                    is_read_snapshot,
-                                    is_locked);
+                    ScanReturnType scan_ret =
+                        scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
+
+                    if (scan_ret != ScanReturnType::Success)
+                    {
+                        return scan_ret;
+                    }
+
+                    ++scan_ccm_it;
+                    cce_key = scan_ccm_it->first;
+                    cce = scan_ccm_it->second;
                 }
 
-                ++scan_ccm_it;
-                cce_key = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
+                return ScanReturnType::Success;
+            };
+
+            ScanReturnType scan_ret =
+                scan_loop_func(initial_end, init_end_inclusive, end_finalized);
+            switch (scan_ret)
+            {
+            case ScanReturnType::Blocked:
+                return false;
+            case ScanReturnType::Error:
+                return true;
+            case ScanReturnType::Yield:
+                shard_->Enqueue(shard_->core_id_, &req);
+                return false;
+            default:
+                break;
             }
 
-            // Only sets the result once at the first core.
-            if (shard_->core_id_ == 0)
+            // If the end of this scan batch is not finalized when the local
+            // scan at this core started, tries to set the batch's end using the
+            // local end. If another core has finalized the batch's end, the
+            // scan at this core may need to be adjusted: if the batch's final
+            // end is less than the end at this core, keys after the final end
+            // needs to be removed from the local scan cache; if the batch's
+            // final end is greater than the end of this core, keys smaller than
+            // the batch's final end but greater than the local end need to be
+            // included in the local scan cache.
+            if (!end_finalized)
             {
-                const KeyT *scan_end_key = nullptr;
+                const KeyT *local_end = nullptr;
                 SlicePosition slice_position;
 
                 // scan_ccm_it points to the entry after the last scanned tuple.
                 // If the slice ends with positive infinity and has been fully
                 // scanned, scan_ccm_it would point to positive infinity.
+                auto pos_inf_it = End();
                 if (scan_ccm_it != pos_inf_it &&
-                    (*scan_ccm_it->first < *scan_end ||
-                     (scan_end_inclusive && *scan_ccm_it->first == *scan_end)))
+                    (*scan_ccm_it->first < *initial_end ||
+                     (init_end_inclusive &&
+                      *scan_ccm_it->first == *initial_end)))
                 {
                     // The slice is too large. The scan has not fully scanned
                     // the slice, before reaching the cache's size limit.
                     // Pretends the slice's exclusive end to be the key after
                     // the last scanned tuple, from which the next scan batch
                     // resume.
-                    scan_end_key = scan_ccm_it->first;
+                    local_end = scan_ccm_it->first;
                     slice_position = SlicePosition::Middle;
                 }
                 else
@@ -4000,19 +4083,19 @@ public:
                     // batches are needed. So, we pretend that the scan has
                     // reached the last slice ending with positive infinity.
                     // The calling tx will terminate the scan.
-                    if (scan_end == PositiveInfinity<KeyT>::Instance() ||
-                        req_end_key == scan_end)
+                    if (initial_end == PositiveInfinity<KeyT>::Instance() ||
+                        req_end_key == initial_end)
                     {
                         slice_position = SlicePosition::LastSlice;
                     }
                     else
                     {
-                        // scan_end must be the end of the slice.
-                        scan_end_key = scan_end;
+                        // The local scan end must be the end of the slice.
+                        local_end = initial_end;
 
-                        const KeyT *range_end =
-                            static_cast<const KeyT *>(slice_id.RangeEndKey());
-                        if (range_end != nullptr && *scan_end == *range_end)
+                        const KeyT *range_end = static_cast<const KeyT *>(
+                            req.SliceId().RangeEndKey());
+                        if (range_end != nullptr && *initial_end == *range_end)
                         {
                             slice_position = SlicePosition::LastSliceInRange;
                         }
@@ -4023,188 +4106,233 @@ public:
                     }
                 }
 
-                RangeScanSliceResult &slice_result = hd_res->Value();
-                slice_result.last_key_ =
-                    scan_end_key != nullptr ? scan_end_key->Clone() : nullptr;
-                slice_result.slice_position_ = slice_position;
-                req.SetRangeCcNgTerm(ng_term);
+                auto [batch_end, set_success] =
+                    slice_result.UpdateLastKey(local_end, slice_position);
 
-                // Dispatches to remaining cores to scan the slice in parallel.
-                for (uint16_t core_id = 1;
-                     core_id < shard_->local_shards_.Count();
-                     ++core_id)
+                if (set_success)
                 {
-                    shard_->local_shards_.EnqueueCcRequest(
-                        shard_->core_id_, core_id, &req);
+                    req.SetRangeCcNgTerm(ng_term);
+                }
+                else
+                {
+                    // The local scan tries to set the scan batch's end, but the
+                    // scan at another core have set the batch's end. The scan
+                    // results need to be adjusted, if the results include the
+                    // keys greater than the batch's end, or the results miss
+                    // some keys smaller than the batch's end.
+                    auto [end_key, end_inclusive] =
+                        deduce_scan_end(static_cast<const KeyT *>(batch_end),
+                                        req_end_key,
+                                        req.EndInclusive());
+                    size_t trailing_cnt = 0;
+
+                    if (req.IsLocal())
+                    {
+                        // Excludes keys from the scan cache greater than the
+                        // batch's end. Exclusion is only done when the scan
+                        // request comes from the local node. For remote
+                        // requests, since scan results are serialized into the
+                        // scan cache, exclusion is done at the request sending
+                        // node when the scan results are de-serialized.
+                        while (scan_cache->Size() > 0)
+                        {
+                            const KeyT &last_key = scan_cache->Last()->KeyObj();
+                            if (*end_key < last_key ||
+                                (*end_key == last_key && !end_inclusive))
+                            {
+                                ++trailing_cnt;
+                                scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+                    }
+
+                    // If no key is removed from the scan cache, it's possible
+                    // that the local scan may miss keys smaller than the
+                    // batch's end. Re-scans the cc map using the batch's end.
+                    if (trailing_cnt == 0)
+                    {
+                        scan_ret = scan_loop_func(end_key, end_inclusive, true);
+                        switch (scan_ret)
+                        {
+                        case ScanReturnType::Blocked:
+                            return false;
+                        case ScanReturnType::Error:
+                            return true;
+                        case ScanReturnType::Yield:
+                            shard_->Enqueue(shard_->core_id_, &req);
+                            return false;
+                        default:
+                            break;
+                        }
+                    }
                 }
             }
         }
         else
         {
             --scan_ccm_it;
-            const StoreSlice *slice = slice_id.Slice();
+            const StoreSlice *last_slice = req.LastPinnedSlice();
 
-            const KeyT *scan_end = nullptr;
-            bool scan_end_inclusive = false;
-            if (shard_->core_id_ == 0)
+            const KeyT *initial_end = nullptr;
+            bool init_end_inclusive = false;
+
+            auto deduce_scan_end =
+                [](const KeyT *batch_end_key,
+                   const KeyT *req_end_key,
+                   bool req_inclusive) -> std::pair<const KeyT *, bool>
+            {
+                const KeyT *end = nullptr;
+                bool inclusive = false;
+
+                // The scan batch's end key has been finalized. If the final
+                // end key is null, it means that either the request specifies
+                // the end key, which falls into the slice, or the scanned slice
+                // is the first starting from negative infinity.
+                if (batch_end_key == nullptr)
+                {
+                    if (req_end_key != nullptr)
+                    {
+                        end = req_end_key;
+                        inclusive = req_inclusive;
+                    }
+                    else
+                    {
+                        end = NegativeInfinity<KeyT>::Instance();
+                        inclusive = true;
+                    }
+                }
+                else
+                {
+                    end = batch_end_key;
+                    inclusive = true;
+                }
+
+                return {end, inclusive};
+            };
+
+            auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
+            if (!end_finalized)
             {
                 const KeyT *slice_begin =
-                    static_cast<const KeyT *>(slice->StartKey());
+                    static_cast<const KeyT *>(last_slice->StartKey());
                 if (slice_begin == nullptr)
                 {
                     slice_begin = NegativeInfinity<KeyT>::Instance();
                 }
 
-                if (req_end_key == nullptr)
+                if (req_end_key != nullptr && (*slice_begin < *req_end_key ||
+                                               *slice_begin == *req_end_key))
                 {
-                    // The request does not specify the end key. This scan
-                    // batch's end is initialized to the slice's start (backward
-                    // scans).
-                    scan_end = slice_begin;
-                    scan_end_inclusive = true;
+                    initial_end = req_end_key;
+                    init_end_inclusive = req.EndInclusive();
                 }
                 else
                 {
-                    // If the request's specified end key falls into the slice,
-                    // initializes the scan end to the request's end key. Or,
-                    // the scan end is the slice's begin.
-                    if (*slice_begin < *req_end_key ||
-                        *slice_begin == *req_end_key)
-                    {
-                        scan_end = req_end_key;
-                        scan_end_inclusive = req.EndInclusive();
-                    }
-                    else
-                    {
-                        scan_end = slice_begin;
-                        scan_end_inclusive = true;
-                    }
+                    initial_end = slice_begin;
+                    init_end_inclusive = true;
                 }
             }
             else
             {
-                // When the scan's end key is not set in the result after
-                // scanning the first core, it means that either the request
-                // specifies the scan's end key, which falls into the slice, or
-                // the scanned slice is the first beginning from negative
-                // infinity.
-                if (hd_res->Value().last_key_ == nullptr)
-                {
-                    if (req_end_key != nullptr)
-                    {
-                        scan_end = req_end_key;
-                        scan_end_inclusive = req.EndInclusive();
-                    }
-                    else
-                    {
-                        scan_end = NegativeInfinity<KeyT>::Instance();
-                        scan_end_inclusive = true;
-                    }
-                }
-                else
-                {
-                    scan_end = static_cast<const KeyT *>(
-                        hd_res->Value().last_key_.get());
-                    scan_end_inclusive = true;
-                }
+                // This scan batch's end key has been finalized by one of the
+                // cores. Deduces the local scan's end and inclusiveness.
+                std::tie(initial_end, init_end_inclusive) =
+                    deduce_scan_end(static_cast<const KeyT *>(final_end_key),
+                                    req_end_key,
+                                    req.EndInclusive());
             }
 
-            Iterator neg_inf_it = Begin();
-            cce_key = scan_ccm_it->first;
-            cce = scan_ccm_it->second;
+            // Iterator neg_inf_it = Begin();
+            // cce_key = scan_ccm_it->first;
+            // cce = scan_ccm_it->second;
 
-            assert(scan_end != nullptr);
-
-            while (scan_ccm_it != neg_inf_it &&
-                   (shard_->core_id_ > 0 || !is_cache_full()) &&
-                   (*scan_end < *cce_key ||
-                    (scan_end_inclusive && *scan_end == *cce_key)))
+            auto scan_loop_func = [&, this](
+                                      const KeyT *end_key,
+                                      bool inclusive,
+                                      bool end_finalized) -> ScanReturnType
             {
-                req.SetCcePtr(cce, core_id);
-                req.SetCceScanType(ScanType::ScanBoth, core_id);
+                Iterator neg_inf_it = Begin();
+                const KeyT *cce_key = scan_ccm_it->first;
+                CcEntry<KeyT, ValueT> *cce = scan_ccm_it->second;
 
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   cce->payload_status_,
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
-                {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetIsWaitForPostWrite(true, shard_->core_id_);
-                    return false;
-                }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
-                {
-                    req.SetRangeCcNgTerm(ng_term);
-                    // Lock fail should stop the execution of current
-                    // CC request since it's already in blocking queue.
-                    return false;
-                }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
-                }
-                }  //-- end: switch
+                auto is_cache_full =
+                    [&req, scan_cache, remote_scan_cache]() -> bool {
+                    return req.IsLocal() ? scan_cache->IsFull()
+                                         : remote_scan_cache->IsFull();
+                };
 
-                bool is_locked = lock_pair.first != LockType::NoLock;
-                if (req.IsLocal())
+                while (scan_ccm_it != neg_inf_it &&
+                       (end_finalized || !is_cache_full()) &&
+                       (*end_key < *cce_key ||
+                        (inclusive && *end_key == *cce_key)))
                 {
-                    AddScanTuple(cce_key,
-                                 cce,
-                                 scan_cache,
-                                 ScanType::ScanBoth,
-                                 ng_id,
-                                 ng_term,
-                                 req.ReadTimestamp(),
-                                 is_read_snapshot,
-                                 is_locked);
-                }
-                else
-                {
-                    AddScanTupleMsg(cce_key,
-                                    cce,
-                                    remote_scan_cache,
-                                    ScanType::ScanBoth,
-                                    ng_term,
-                                    req.ReadTimestamp(),
-                                    is_read_snapshot,
-                                    is_locked);
+                    // req.SetCcePtr(cce, core_id);
+                    // req.SetCceScanType(ScanType::ScanBoth, core_id);
+
+                    ScanReturnType scan_ret =
+                        scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
+
+                    if (scan_ret != ScanReturnType::Success)
+                    {
+                        return scan_ret;
+                    }
+
+                    --scan_ccm_it;
+                    cce_key = scan_ccm_it->first;
+                    cce = scan_ccm_it->second;
                 }
 
-                --scan_ccm_it;
-                cce_key = scan_ccm_it->first;
-                cce = scan_ccm_it->second;
+                return ScanReturnType::Success;
+            };
+
+            ScanReturnType scan_ret =
+                scan_loop_func(initial_end, init_end_inclusive, end_finalized);
+            switch (scan_ret)
+            {
+            case ScanReturnType::Blocked:
+                return false;
+            case ScanReturnType::Error:
+                return true;
+            case ScanReturnType::Yield:
+                shard_->Enqueue(shard_->core_id_, &req);
+                return false;
+            default:
+                break;
             }
 
-            if (shard_->core_id_ == 0)
+            // If the end of this scan batch is not finalized when the local
+            // scan at this core started, tries to set the batch's end using the
+            // local end. If another core has finalized the batch's end, the
+            // scan at this core may need to be adjusted: if the batch's final
+            // end is less than the end at this core, keys before the final end
+            // needs to be removed from the local scan cache; if the batch's
+            // final end is smaller than the end of this core, keys greater than
+            // the batch's final end but less than the local end need to be
+            // included in the local scan cache.
+
+            if (!end_finalized)
             {
-                const KeyT *scan_start_key = nullptr;
+                const KeyT *local_end = nullptr;
                 SlicePosition slice_position;
 
                 // scan_ccm_it points to the entry before the last scanned
                 // tuple.
+                auto neg_inf_it = Begin();
                 if (scan_ccm_it != neg_inf_it &&
-                    (*scan_end < *scan_ccm_it->first ||
-                     (scan_end_inclusive && *scan_ccm_it->first == *scan_end)))
+                    (*initial_end < *scan_ccm_it->first ||
+                     (init_end_inclusive &&
+                      *scan_ccm_it->first == *initial_end)))
                 {
                     // The slice is too large. The scan has not fully scanned
                     // the slice, before reaching the cache's size limit.
                     // Pretends the slice's inclusive start to be the last
                     // scanned key, from which the next scan batch resumes.
                     ++scan_ccm_it;
-                    scan_start_key = scan_ccm_it->first;
+                    local_end = scan_ccm_it->first;
                     slice_position = SlicePosition::Middle;
                 }
                 else
@@ -4215,19 +4343,20 @@ public:
                     // batches are needed. So, we pretend that the scan has
                     // reached the first slice (starting with negative
                     // infinity). The calling tx will terminate the scan.
-                    if (scan_end == NegativeInfinity<KeyT>::Instance() ||
-                        req_end_key == scan_end)
+                    if (initial_end == NegativeInfinity<KeyT>::Instance() ||
+                        req_end_key == initial_end)
                     {
                         slice_position = SlicePosition::FirstSlice;
                     }
                     else
                     {
-                        // scan_end must be the start of the slice.
-                        scan_start_key = scan_end;
+                        // The local scan end must be the start of the slice.
+                        local_end = initial_end;
 
-                        const KeyT *range_start =
-                            static_cast<const KeyT *>(slice_id.RangeStartKey());
-                        if (range_start != nullptr && *scan_end == *range_start)
+                        const KeyT *range_start = static_cast<const KeyT *>(
+                            req.SliceId().RangeStartKey());
+                        if (range_start != nullptr &&
+                            *initial_end == *range_start)
                         {
                             slice_position = SlicePosition::FirstSliceInRange;
                         }
@@ -4238,39 +4367,111 @@ public:
                     }
                 }
 
-                RangeScanSliceResult &slice_result = hd_res->Value();
-                slice_result.last_key_ = scan_start_key != nullptr
-                                             ? scan_start_key->Clone()
-                                             : nullptr;
-                slice_result.slice_position_ = slice_position;
-                req.SetRangeCcNgTerm(ng_term);
+                auto [batch_end, set_success] =
+                    slice_result.UpdateLastKey(local_end, slice_position);
 
-                // Dispatches to remaining cores to scan in parallel.
-                for (uint16_t core_id = 1;
-                     core_id < shard_->local_shards_.Count();
-                     ++core_id)
+                if (set_success)
                 {
-                    shard_->local_shards_.EnqueueCcRequest(
-                        shard_->core_id_, core_id, &req);
+                    req.SetRangeCcNgTerm(ng_term);
+                }
+                else
+                {
+                    // The local scan tries to set the scan batch's end, but the
+                    // scan at another core have set the batch's end. The scan
+                    // results need to be adjusted, if the results include the
+                    // keys smaller than the batch's end, or the results miss
+                    // some keys greater than the batch's end.
+                    auto [end_key, end_inclusive] =
+                        deduce_scan_end(static_cast<const KeyT *>(batch_end),
+                                        req_end_key,
+                                        req.EndInclusive());
+                    size_t trailing_cnt = 0;
+
+                    if (req.IsLocal())
+                    {
+                        // Excludes keys from the scan cache smaller than the
+                        // batch's end. Exclusion is only done when the scan
+                        // request comes from the local node. For remote
+                        // requests, since scan results are serialized into the
+                        // scan cache, exclusion is done at the request sending
+                        // node when the scan results are de-serialized.
+                        while (scan_cache->Size() > 0)
+                        {
+                            const KeyT &last_key = scan_cache->Last()->KeyObj();
+                            if (last_key < *end_key ||
+                                (last_key == *end_key && !end_inclusive))
+                            {
+                                ++trailing_cnt;
+                                scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+                    }
+
+                    // If no key is removed from the scan cache, it's possible
+                    // that the local scan may miss keys greater than the
+                    // batch's end. Re-scans the cc map using the batch's end.
+                    if (trailing_cnt == 0)
+                    {
+                        scan_ret = scan_loop_func(end_key, end_inclusive, true);
+                        switch (scan_ret)
+                        {
+                        case ScanReturnType::Blocked:
+                            return false;
+                        case ScanReturnType::Error:
+                            return true;
+                        case ScanReturnType::Yield:
+                            shard_->Enqueue(shard_->core_id_, &req);
+                            return false;
+                        default:
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        bool finish = req.SetFinish();
-        if (finish)
+        if (slice_result.slice_position_ == SlicePosition::Middle)
         {
-            // We only update result if req is local on SetFinish(). For
-            // remote request we assign a dedicated response sender for each
-            // req
+            // When the scan batch stops in the middle of the range,
+            // acquires the read intent on the last scanned key to prevent
+            // if from kicking out. The next scan batch will resume from the
+            // last key without searching the cc map.
+            CcEntry<KeyT, ValueT> *last_cce = last_cce_of_cache();
+            if (last_cce != nullptr)
+            {
+                bool add_intent =
+                    last_cce->GetKeyLock().AcquireReadIntent(req.Txn());
+                if (add_intent)
+                {
+                    shard_->UpsertLockHoldingTx(req.Txn(),
+                                                tx_term,
+                                                last_cce,
+                                                false,
+                                                ng_id,
+                                                table_name_.Type());
+                }
+            }
+        }
+
+        if (req.IsLocal())
+        {
+            req.GetLocalScanner()->CommitAtCore(core_id);
+        }
+        if (req.SetFinish())
+        {
             if (req.Result()->Value().is_local_)
             {
-                slice_id.Unpin();
+                req.UnpinSlices();
                 return true;
             }
             else if (req.IsResponseSender(shard_->core_id_))
             {
                 req.SendResponseIfFinished();
-                slice_id.Unpin();
+                req.UnpinSlices();
                 return true;
             }
             else
@@ -5005,21 +5206,28 @@ public:
                 key_schema = table_schema_->IndexKeySchema(table_name_);
             }
 
+            const StoreSlice *last_pinned_slice;
             RangeSliceId slice_id =
-                shard_->PinRangeSlice(table_name_,
-                                      cc_ng_id_,
-                                      ng_term,
-                                      key_schema,
-                                      table_schema_->RecordSchema(),
-                                      table_schema_->Version(),
-                                      table_schema_->GetKVCatalogInfo(),
-                                      range_id,
-                                      *slice_start_key,
-                                      true,
-                                      &req,
-                                      pin_status,
-                                      false,
-                                      UINT8_MAX);
+                shard_->PinRangeSlices(table_name_,
+                                       cc_ng_id_,
+                                       ng_term,
+                                       key_schema,
+                                       table_schema_->RecordSchema(),
+                                       table_schema_->Version(),
+                                       table_schema_->GetKVCatalogInfo(),
+                                       range_id,
+                                       *slice_start_key,
+                                       true,
+                                       nullptr,
+                                       false,
+                                       &req,
+                                       false,
+                                       UINT8_MAX,
+                                       1,
+                                       true,
+                                       pin_status,
+                                       last_pinned_slice);
+
             if (pin_status == RangeSliceOpStatus::Successful)
             {
                 slice_id.Unpin();

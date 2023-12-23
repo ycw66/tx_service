@@ -49,7 +49,7 @@ LocalCcShards::LocalCcShards(
       enable_mvcc_(enable_mvcc),
       realtime_sampling_(realtime_sampling),
 #ifdef EXT_TX_PROC_ENABLED
-      data_sync_worker_num_(core_cnt / 2),
+      data_sync_worker_num_(core_cnt >= 2 ? (core_cnt / 2) : 1),
 #else
       data_sync_worker_num_(core_cnt),
 #endif
@@ -61,9 +61,9 @@ LocalCcShards::LocalCcShards(
 #endif
       slice_thd_status_(WorkerStatus::Active),
 #ifdef EXT_TX_PROC_ENABLED
-      flush_worker_num_(std::min(core_cnt / 2, 10)),
+      flush_worker_num_(core_cnt >= 2 ? std::min(core_cnt / 2, 10) : 1),
 #else
-      flush_worker_num_(std::min(core_cnt, (uint16_t) 10)),
+      flush_worker_num_(std::min((int) core_cnt, 10)),
 #endif
       flush_worker_thd_status_(WorkerStatus::Active),
       statistics_thd_status_(WorkerStatus::Active)
@@ -1077,7 +1077,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         cc_shard->FetchTableRanges(
             range_table_name, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
-        return RangeSliceId(nullptr, nullptr);
+        return RangeSliceId();
     }
     std::shared_lock<std::shared_mutex> range_lk(entry->mux_);
     if (!entry->RangeSlices())
@@ -1100,42 +1100,53 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         {
             pin_status = RangeSliceOpStatus::NotOwner;
         }
-        return RangeSliceId(nullptr, nullptr);
+        return RangeSliceId();
     }
 
     entry->RangeSlices()->UpdateLastAccessedTs(ClockTs());
-    return entry->RangeSlices()->PinSlice(table_name,
-                                          cc_ng_term,
-                                          key,
-                                          inclusive,
-                                          key_schema,
-                                          rec_schema,
-                                          schema_ts,
-                                          INT64_MAX,
-                                          kv_info,
-                                          cc_request,
-                                          cc_shard,
-                                          store_hd_,
-                                          pin_status,
-                                          force_load,
-                                          prefetch_size);
+    const StoreSlice *last_pinned_slice;
+    return entry->RangeSlices()->PinSlices(table_name,
+                                           cc_ng_term,
+                                           key,
+                                           inclusive,
+                                           nullptr,
+                                           false,
+                                           key_schema,
+                                           rec_schema,
+                                           schema_ts,
+                                           INT64_MAX,
+                                           kv_info,
+                                           cc_request,
+                                           cc_shard,
+                                           store_hd_,
+                                           force_load,
+                                           prefetch_size,
+                                           1,
+                                           true,
+                                           pin_status,
+                                           last_pinned_slice);
 }
 
-RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
-                                          NodeGroupId cc_ng_id,
-                                          int64_t cc_ng_term,
-                                          const Schema *key_schema,
-                                          const Schema *rec_schema,
-                                          uint64_t schema_ts,
-                                          const KVCatalogInfo *kv_info,
-                                          uint32_t range_id,
-                                          const TxKey &key,
-                                          bool inclusive,
-                                          CcRequestBase *cc_request,
-                                          CcShard *cc_shard,
-                                          RangeSliceOpStatus &pin_status,
-                                          bool force_load,
-                                          uint8_t prefetch_size)
+RangeSliceId LocalCcShards::PinRangeSlices(const TableName &table_name,
+                                           NodeGroupId cc_ng_id,
+                                           int64_t cc_ng_term,
+                                           const Schema *key_schema,
+                                           const Schema *rec_schema,
+                                           uint64_t schema_ts,
+                                           const KVCatalogInfo *kv_info,
+                                           uint32_t range_id,
+                                           const TxKey &start_key,
+                                           bool start_inclusive,
+                                           const TxKey *end_key,
+                                           bool end_inclusive,
+                                           CcRequestBase *cc_request,
+                                           CcShard *cc_shard,
+                                           bool force_load,
+                                           uint8_t prefetch_size,
+                                           uint8_t max_pin_cnt,
+                                           bool forward_pin,
+                                           RangeSliceOpStatus &pin_status,
+                                           const StoreSlice *&last_pinned_slice)
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -1150,7 +1161,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         cc_shard->FetchTableRanges(
             range_table_name, cc_request, cc_ng_id, cc_ng_term);
         pin_status = RangeSliceOpStatus::BlockedOnLoad;
-        return RangeSliceId(nullptr, nullptr);
+        return RangeSliceId();
     }
     std::shared_lock<std::shared_mutex> range_lk(entry->mux_);
     if (!entry->RangeSlices())
@@ -1173,7 +1184,7 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
         {
             pin_status = RangeSliceOpStatus::NotOwner;
         }
-        return RangeSliceId(nullptr, nullptr);
+        return RangeSliceId();
     }
     uint64_t snapshot_ts = 0;
     if (EnableMvcc())
@@ -1182,21 +1193,26 @@ RangeSliceId LocalCcShards::PinRangeSlice(const TableName &table_name,
     }
 
     entry->RangeSlices()->UpdateLastAccessedTs(ClockTs());
-    return entry->RangeSlices()->PinSlice(table_name,
-                                          cc_ng_term,
-                                          key,
-                                          inclusive,
-                                          key_schema,
-                                          rec_schema,
-                                          schema_ts,
-                                          snapshot_ts,
-                                          kv_info,
-                                          cc_request,
-                                          cc_shard,
-                                          store_hd_,
-                                          pin_status,
-                                          force_load,
-                                          prefetch_size);
+    return entry->RangeSlices()->PinSlices(table_name,
+                                           cc_ng_term,
+                                           start_key,
+                                           start_inclusive,
+                                           end_key,
+                                           end_inclusive,
+                                           key_schema,
+                                           rec_schema,
+                                           schema_ts,
+                                           snapshot_ts,
+                                           kv_info,
+                                           cc_request,
+                                           cc_shard,
+                                           store_hd_,
+                                           force_load,
+                                           prefetch_size,
+                                           max_pin_cnt,
+                                           forward_pin,
+                                           pin_status,
+                                           last_pinned_slice);
 }
 
 StoreRange *LocalCcShards::FindRange(const TableName &table_name,
