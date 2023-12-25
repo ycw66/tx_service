@@ -66,20 +66,10 @@ public:
         std::filesystem::remove_all(std::filesystem::path(storage_path_));
     }
 
-    int64_t Term() const
-    {
-        return leader_term_.load(std::memory_order_acquire);
-    }
-
     void FinishLogGroupReplay(uint32_t log_group_id,
                               int64_t ng_term,
                               uint32_t latest_committed_txn_no,
                               uint64_t last_ckpt_ts);
-
-    int64_t CandidateTerm() const
-    {
-        return candidate_leader_term_.load(std::memory_order_acquire);
-    }
 
     /**
      * Pin data of this node group if this ccnode is group leader.
@@ -178,8 +168,6 @@ private:
     const std::string storage_path_;
 
     braft::Node *volatile node_;
-    std::atomic<int64_t> leader_term_;
-    std::atomic<int64_t> candidate_leader_term_;
 
     std::atomic<uint64_t> last_ckpt_ts_;
 

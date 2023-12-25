@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <shared_mutex>
 #include <string>
@@ -218,6 +219,17 @@ public:
      * @return false, otherwise.
      */
     bool CheckLeaderTerm(uint32_t ng_id, int64_t term) const;
+
+    void SetLeaderTerm(NodeGroupId ng_id, int64_t term)
+    {
+        leader_term_cache_[ng_id].store(term, std::memory_order_release);
+    }
+
+    void SetCandidateTerm(NodeGroupId ng_id, int64_t term)
+    {
+        candidate_leader_term_cache_[ng_id].store(term,
+                                                  std::memory_order_release);
+    }
 
     /**
      * @brief The term of the leader of the input cc node group.
@@ -488,6 +500,8 @@ private:
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
+    std::atomic<int32_t> leader_term_cache_[1000];
+    std::atomic<int32_t> candidate_leader_term_cache_[1000];
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
 

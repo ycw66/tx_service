@@ -23,8 +23,6 @@ CcNode::CcNode(const uint32_t ng_id,
       ng_ips_(ng_ips),
       ng_ports_(ng_ports),
       storage_path_(storage_path),
-      leader_term_(-1),
-      candidate_leader_term_(-1),
       last_ckpt_ts_(0),
       pinning_threads_(0),
       local_cc_shards_(local_shards),
@@ -128,6 +126,11 @@ int CcNode::Start()
 CcNode::~CcNode()
 {
     delete node_;
+
+    // leader term should've been reset to -1 when the node is joined,
+    // but let's do it again just to be safe.
+    Sharder::Instance().SetLeaderTerm(ng_id_, -1);
+    Sharder::Instance().SetCandidateTerm(ng_id_, -1);
 }
 
 // Shut this node down.
@@ -205,8 +208,7 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
 
     // ignore the FinishReplayMsg whose ng_term is smaller than the current
     // candidate_leader_term_ or if this cc node is not recovering.
-    int64_t candidate_term =
-        candidate_leader_term_.load(std::memory_order_acquire);
+    int64_t candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
     if (candidate_term < 0 || candidate_term > ng_term)
     {
         return;
@@ -236,13 +238,12 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
         // work for the current term.
         recovered_log_groups_.clear();
 
-        leader_term_.store(
-            candidate_leader_term_.load(std::memory_order_acquire),
-            std::memory_order_release);
+        candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
+        Sharder::Instance().SetLeaderTerm(ng_id_, candidate_term);
         LOG(INFO) << "The leader of cc node group ng#" << ng_id_
-                  << " with the term " << candidate_leader_term_
+                  << " with the term " << candidate_term
                   << " has been recovered.";
-        candidate_leader_term_.store(-1, std::memory_order_release);
+        Sharder::Instance().SetCandidateTerm(ng_id_, -1);
 
         Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
     }
@@ -251,14 +252,14 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
 int64_t CcNode::PinData()
 {
     std::unique_lock lk(pinning_threads_mux_);
-    int64_t leader_term = leader_term_.load(std::memory_order_acquire);
+    int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id_);
     if (leader_term > 0)
     {
         pinning_threads_++;
     }
     else
     {
-        leader_term = candidate_leader_term_.load(std::memory_order_acquire);
+        leader_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
         if (leader_term > 0)
         {
             pinning_threads_++;
@@ -452,8 +453,7 @@ void CcNode::on_leader_start(int64_t term)
         // replay thread and leader election thread may update
         // candidate_leader_term_ and recovered_log_groups_ concurrently.
         std::lock_guard<std::mutex> lk(recovery_mux_);
-
-        candidate_leader_term_.store(term, std::memory_order_release);
+        Sharder::Instance().SetCandidateTerm(ng_id_, term);
 
         // new leader will send ReplayLog request to logservice to replay logs.
         // It should reset the recovered_log_groups_ ahead.
@@ -499,8 +499,8 @@ void CcNode::on_leader_stop(const butil::Status &status)
     LOG(INFO) << "CC node " << ip_ << ":" << port_
               << " steps down as the leader of ng#" << ng_id_ << ".";
 
-    leader_term_.store(-1, std::memory_order_release);
-    candidate_leader_term_.store(-1, std::memory_order_release);
+    Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+    Sharder::Instance().SetLeaderTerm(ng_id_, -1);
 
     // Wait for data unpin then clear all node_group data
     {

@@ -1,5 +1,7 @@
 #include "sharder.h"
 
+#include <atomic>
+
 #include "cc_req_base.h"
 #include "cc_shard.h"
 #include "fault/cc_node.h"
@@ -125,6 +127,8 @@ int Sharder::Init(
     for (uint32_t nid = 0; nid < 1000; nid++)
     {
         ng_leader_cache_[nid].store(nid);
+        leader_term_cache_[nid].store(-1);
+        candidate_leader_term_cache_[nid].store(-1);
     }
     if (ng_configs != nullptr)
     {
@@ -318,17 +322,7 @@ int64_t Sharder::LeaderTerm(uint32_t ng_id) const
     {
         return -1;
     }
-
-    auto cluster_config = cluster_config_;
-
-    auto find_it = cluster_config->cc_nodes_.find(ng_id);
-    if (find_it == cluster_config->cc_nodes_.end())
-    {
-        return -1;
-    }
-
-    const fault::CcNode &cc_node = *find_it->second;
-    return cc_node.Term();
+    return leader_term_cache_[ng_id].load(std::memory_order_acquire);
 }
 
 int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
@@ -338,16 +332,7 @@ int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
         return -1;
     }
 
-    auto cluster_config = cluster_config_;
-
-    auto find_it = cluster_config->cc_nodes_.find(ng_id);
-    if (find_it == cluster_config->cc_nodes_.end())
-    {
-        return -1;
-    }
-
-    const fault::CcNode &cc_node = *find_it->second;
-    return cc_node.CandidateTerm();
+    return candidate_leader_term_cache_[ng_id].load(std::memory_order_acquire);
 }
 
 void Sharder::UpdateLeaders()
