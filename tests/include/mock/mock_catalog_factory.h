@@ -39,6 +39,11 @@ public:
     {
         return UINT16_MAX;
     }
+
+    uint64_t SchemaTs() const override
+    {
+        return 1;
+    }
 };
 
 class MockRecordSchema : public txservice::Schema
@@ -200,11 +205,11 @@ public:
 
     CcMap::uptr CreatePkCcMap(const TableName &table_name,
                               const TableSchema *table_schema,
-                              uint64_t schema_ts,
                               bool ccm_has_full_entries,
                               CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {
+        uint64_t schema_ts = table_schema->KeySchema()->SchemaTs();
         return std::make_unique<
             txservice::TemplateCcMap<CompositeKey<int>, CompositeRecord<int>>>(
             shard,
@@ -217,7 +222,6 @@ public:
 
     CcMap::uptr CreateSkCcMap(const txservice::TableName &index_name,
                               const txservice::TableSchema *table_schema,
-                              uint64_t schema_ts,
                               txservice::CcShard *shard,
                               txservice::NodeGroupId cc_ng_id) override
     {

@@ -40,6 +40,7 @@ struct KeySchema : public Schema
                              size_t *const column_index) const = 0;
 
     virtual uint16_t ExtendKeyParts() const = 0;
+    virtual uint64_t SchemaTs() const = 0;
 };
 
 struct SecondaryKeySchema : public KeySchema
@@ -80,6 +81,11 @@ public:
     uint16_t ExtendKeyParts() const override
     {
         return sk_schema_->ExtendKeyParts();
+    }
+
+    uint64_t SchemaTs() const override
+    {
+        return sk_schema_->SchemaTs();
     }
 
     std::unique_ptr<const KeySchema> sk_schema_;

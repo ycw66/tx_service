@@ -507,8 +507,9 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         local_cc_shards_.EnableMvcc()
             ? TxStartTsCollector::Instance().GlobalMinSiTxStartTs()
             : 0;
-    const Schema *key_schema;
-    if (table_name.Type() == TableType::Secondary)
+    const KeySchema *key_schema;
+    if (table_name.Type() == TableType::Secondary ||
+        table_name.Type() == TableType::UniqueSecondary)
     {
         key_schema = schema->IndexKeySchema(table_name);
     }
@@ -530,7 +531,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                                              slice,
                                              key_schema,
                                              schema->RecordSchema(),
-                                             schema->Version(),
+                                             key_schema->SchemaTs(),
                                              snapshot_ts,
                                              schema->GetKVCatalogInfo(),
                                              &notify_cc,

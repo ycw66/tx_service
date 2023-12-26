@@ -566,7 +566,6 @@ public:
                 shard_->CreateOrUpdatePkCcMap(table_key->Name(),
                                               new_schema,
                                               req.NodeGroupId(),
-                                              catalog_entry->DirtyVersion(),
                                               true,
                                               true);
 
@@ -574,10 +573,7 @@ public:
                 for (const TableName &index_name : index_names)
                 {
                     shard_->CreateOrUpdateSkCcMap(
-                        index_name,
-                        new_schema,
-                        req.NodeGroupId(),
-                        catalog_entry->DirtyVersion());
+                        index_name, new_schema, req.NodeGroupId());
                 }
             }
             // Alter Table
@@ -585,11 +581,8 @@ public:
             {
                 assert(old_schema != nullptr && new_schema != nullptr);
                 // Update pk cc map using new schema.
-                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
-                                              new_schema,
-                                              req.NodeGroupId(),
-                                              catalog_entry->DirtyVersion(),
-                                              false);
+                shard_->CreateOrUpdatePkCcMap(
+                    table_key->Name(), new_schema, req.NodeGroupId(), false);
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Update pk range table if exist.
@@ -623,12 +616,10 @@ public:
                                       old_index_name) != new_index_names.end())
                         {
                             // Update current sk cc map using new schema.
-                            shard_->CreateOrUpdateSkCcMap(
-                                old_index_name,
-                                new_schema,
-                                req.NodeGroupId(),
-                                catalog_entry->DirtyVersion(),
-                                false);
+                            shard_->CreateOrUpdateSkCcMap(old_index_name,
+                                                          new_schema,
+                                                          req.NodeGroupId(),
+                                                          false);
 #ifdef RANGE_PARTITION_ENABLED
                             // Update current sk range table if exist.
                             TableName index_range_table_name{
@@ -697,10 +688,7 @@ public:
                         // In this step, just create cc map for new sk.
                         // We will update current sk ccmap in PostCommit.
                         shard_->CreateOrUpdateSkCcMap(
-                            new_index_name,
-                            new_schema,
-                            req.NodeGroupId(),
-                            catalog_entry->DirtyVersion());
+                            new_index_name, new_schema, req.NodeGroupId());
 
                         // New sk range cc map should use the dirty schema
                         const TableName new_index_range_name{
@@ -1076,20 +1064,16 @@ public:
             {
                 // Alter table index operation.
                 // Pk table ccmap using old schema.
-                shard_->CreateOrUpdatePkCcMap(table_name,
-                                              old_schema,
-                                              req.NodeGroupId(),
-                                              catalog_entry->Version());
+                shard_->CreateOrUpdatePkCcMap(
+                    table_name, old_schema, req.NodeGroupId());
 
                 // Old sk table ccmap using old schema.
                 std::vector<TableName> old_index_names =
                     old_schema->IndexNames();
                 for (const auto &old_index_name : old_index_names)
                 {
-                    shard_->CreateOrUpdateSkCcMap(old_index_name,
-                                                  old_schema,
-                                                  req.NodeGroupId(),
-                                                  catalog_entry->Version());
+                    shard_->CreateOrUpdateSkCcMap(
+                        old_index_name, old_schema, req.NodeGroupId());
                 }
 
                 // New sk table ccmap using new schema
@@ -1102,10 +1086,7 @@ public:
                                   new_index_name) == old_index_names.cend())
                     {
                         shard_->CreateOrUpdateSkCcMap(
-                            new_index_name,
-                            new_schema,
-                            req.NodeGroupId(),
-                            catalog_entry->DirtyVersion());
+                            new_index_name, new_schema, req.NodeGroupId());
 
                         // New sk range cc maps should use the dirty schema
                         const TableName new_index_range_name{

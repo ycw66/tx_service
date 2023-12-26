@@ -269,6 +269,10 @@ protected:
                         uint32_t ng_id,
                         LockType lk_type = LockType::NoLock);
 
+    /**
+     * @brief The version of this ccmap. It is the version of the corresponding
+     * KeySchema. This value is different from version of the TableSchema.
+     */
     uint64_t schema_ts_{1};
     const TableSchema *table_schema_;
 };

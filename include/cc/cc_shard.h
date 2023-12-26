@@ -519,14 +519,12 @@ public:
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
                                  const TableSchema *table_schema,
                                  NodeGroupId ng_id,
-                                 uint64_t schema_ts,
                                  bool is_create = true,
                                  bool ccm_has_full_entries = false);
 
     CcMap *CreateOrUpdateSkCcMap(const TableName &index_name,
                                  const TableSchema *table_schema,
                                  NodeGroupId ng_id,
-                                 uint64_t schema_ts,
                                  bool is_create = true);
 
     /**

@@ -38,7 +38,7 @@ struct KVCatalogInfo
 
     std::string kv_table_name_;
     // map of <mysql_index_table_name, kv_index_table_name>
-    std::unordered_map<txservice::TableName, std::string> kv_index_names_;
+    std::unordered_map<TableName, std::string> kv_index_names_;
 };
 
 class Statistics;
@@ -121,14 +121,12 @@ public:
 
     virtual CcMap::uptr CreatePkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
-                                      uint64_t schema_ts,
                                       bool ccm_has_full_entries,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 
     virtual CcMap::uptr CreateSkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
-                                      uint64_t schema_ts,
                                       CcShard *shard,
                                       NodeGroupId cc_ng_id) = 0;
 

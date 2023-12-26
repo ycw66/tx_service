@@ -1071,7 +1071,6 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
                                       const TableSchema *table_schema,
                                       NodeGroupId ng_id,
-                                      uint64_t schema_ts,
                                       bool is_create,
                                       bool ccm_has_full_entries)
 {
@@ -1079,18 +1078,13 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
     {
         auto ccm_it = native_ccms_.try_emplace(
             table_name,
-            catalog_factory_->CreatePkCcMap(table_name,
-                                            table_schema,
-                                            schema_ts,
-                                            ccm_has_full_entries,
-                                            this,
-                                            ng_id));
+            catalog_factory_->CreatePkCcMap(
+                table_name, table_schema, ccm_has_full_entries, this, ng_id));
         // update table schema for alter table command.
         if (!is_create && !ccm_it.second)
         {
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
-            ccm->SetSchemaTs(schema_ts);
         }
         assert(ccm_it.first->first.IsStringOwner());
         return ccm_it.first->second.get();
@@ -1102,18 +1096,13 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
             fail_ccm_it->second;
         auto ccm_it = ccms.try_emplace(
             ng_id,
-            catalog_factory_->CreatePkCcMap(table_name,
-                                            table_schema,
-                                            schema_ts,
-                                            ccm_has_full_entries,
-                                            this,
-                                            ng_id));
+            catalog_factory_->CreatePkCcMap(
+                table_name, table_schema, ccm_has_full_entries, this, ng_id));
         // update table schema for alter table command.
         if (!is_create && !ccm_it.second)
         {
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
-            ccm->SetSchemaTs(schema_ts);
         }
         return ccm_it.first->second.get();
     }
@@ -1122,7 +1111,6 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
 CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
                                       const TableSchema *table_schema,
                                       NodeGroupId ng_id,
-                                      uint64_t schema_ts,
                                       bool is_create)
 {
     if (ng_id == node_id_)
@@ -1130,13 +1118,12 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
             catalog_factory_->CreateSkCcMap(
-                index_name, table_schema, schema_ts, this, ng_id));
+                index_name, table_schema, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create && !ccm_it.second)
         {
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
-            ccm->SetSchemaTs(schema_ts);
         }
         return ccm_it.first->second.get();
     }
@@ -1145,16 +1132,15 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        auto ccm_it = ccms.try_emplace(
-            ng_id,
-            catalog_factory_->CreateSkCcMap(
-                index_name, table_schema, schema_ts, this, ng_id));
+        auto ccm_it =
+            ccms.try_emplace(ng_id,
+                             catalog_factory_->CreateSkCcMap(
+                                 index_name, table_schema, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create && !ccm_it.second)
         {
             CcMap *ccm = ccm_it.first->second.get();
             ccm->SetTableSchema(table_schema);
-            ccm->SetSchemaTs(schema_ts);
         }
         return ccm_it.first->second.get();
     }
@@ -1191,13 +1177,11 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
 #endif
 
         std::vector<TableName> index_names = curr_schema->IndexNames();
-        CreateOrUpdatePkCcMap(
-            base_table_name, curr_schema, cc_ng_id, catalog_entry->Version());
+        CreateOrUpdatePkCcMap(base_table_name, curr_schema, cc_ng_id);
 
         for (const TableName &index_name : index_names)
         {
-            CreateOrUpdateSkCcMap(
-                index_name, curr_schema, cc_ng_id, catalog_entry->Version());
+            CreateOrUpdateSkCcMap(index_name, curr_schema, cc_ng_id);
         }
     }
 
