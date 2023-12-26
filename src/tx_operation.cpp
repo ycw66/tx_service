@@ -4866,26 +4866,6 @@ void ReleaseScanExtraLockOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeout",
-            txm,
-            [txm]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
-
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
-        }
-    }
 }
 
 AnalyzeTableAllOp::AnalyzeTableAllOp(TransactionExecution *txm)
