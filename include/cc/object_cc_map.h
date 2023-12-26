@@ -1136,5 +1136,70 @@ private:
             }
         }
     }
+
+    void ScanKey(const KeyT *key,
+                 CcEntry<KeyT, ValueT> *cce,
+                 RemoteScanCache *remote_cache,
+                 bool include_gap,
+                 int64_t ng_term,
+                 uint64_t read_ts,
+                 bool is_read_snapshot,
+                 bool keep_deleted,
+                 bool is_ckpt_delta = false) const override
+    {
+        remote::ScanTuple_msg *tuple = nullptr;
+        uint32_t tuple_size = 0;
+
+#ifdef RANGE_PARTITION_ENABLED
+        if (cce->payload_status_ == RecordStatus::Normal ||
+            cce->payload_status_ == RecordStatus::Deleted && keep_deleted)
+        {
+            tuple = remote_cache->cache_msg_->add_scan_tuple();
+        }
+        else
+        {
+            return;
+        }
+#else
+        tuple = remote_cache->cache_msg_->add_scan_tuple();
+#endif
+        key->Serialize(*tuple->mutable_key());
+        tuple_size += key->Size();
+
+        tuple->clear_record();
+        if (cce->payload_ != nullptr)
+        {
+            cce->payload_->ValueT::Serialize(*tuple->mutable_record());
+            tuple_size += sizeof(int8_t);
+        }
+        else
+        {
+            int8_t obj_type = -1;
+            tuple->mutable_record()->append(
+                reinterpret_cast<const char *>(&obj_type), sizeof(int8_t));
+            tuple_size += sizeof(int8_t);
+        }
+
+        tuple->set_rec_status(
+            remote::ToRemoteType::ConvertRecordStatus(cce->payload_status_));
+        tuple->set_key_ts(cce->commit_ts_);
+
+        if (include_gap)
+        {
+            tuple->set_gap_ts(cce->gap_commit_ts_);
+        }
+        else
+        {
+            tuple->set_gap_ts(0);
+        }
+
+        remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
+        cce_addr->set_cce_ptr(reinterpret_cast<uint64_t>(cce));
+        cce_addr->set_term(ng_term);
+        // For remote scans, the returned cc entries' node group ID is set
+        // on the sender side when the sender receives the response.
+
+        remote_cache->cache_mem_size_ += tuple_size;
+    }
 };
 }  // namespace txservice

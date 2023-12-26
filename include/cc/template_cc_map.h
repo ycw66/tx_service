@@ -7617,15 +7617,15 @@ protected:
         remote_cache->cache_mem_size_ += tuple_size;
     }
 
-    void ScanKey(const KeyT *key,
-                 CcEntry<KeyT, ValueT> *cce,
-                 RemoteScanCache *remote_cache,
-                 bool include_gap,
-                 int64_t ng_term,
-                 uint64_t read_ts,
-                 bool is_read_snapshot,
-                 bool keep_deleted,
-                 bool is_ckpt_delta = false) const
+    virtual void ScanKey(const KeyT *key,
+                         CcEntry<KeyT, ValueT> *cce,
+                         RemoteScanCache *remote_cache,
+                         bool include_gap,
+                         int64_t ng_term,
+                         uint64_t read_ts,
+                         bool is_read_snapshot,
+                         bool keep_deleted,
+                         bool is_ckpt_delta = false) const
     {
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
