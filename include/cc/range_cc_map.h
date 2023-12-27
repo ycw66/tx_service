@@ -406,8 +406,7 @@ public:
             assert(req.PayloadStr() != nullptr);
             std::unique_ptr<RangeRecord> decoded_rec =
                 std::make_unique<RangeRecord>();
-            DeserializeRangeRecord(
-                *req.PayloadStr(), decoded_rec.get(), range_slices);
+            DeserializeRangeRecord(*req.PayloadStr(), decoded_rec.get());
             upload_range_rec = decoded_rec.get();
             req.SetDecodedPayload(std::move(decoded_rec));
         }
@@ -558,31 +557,28 @@ public:
                         ->BucketOwner();
                 if (range_owner != this->cc_ng_id_)
                 {
-                    if (range_slices.empty())
+                    // For remote node groups, we won't bother initializing
+                    // range slices for new ranges. They will be loaded from
+                    // data store on read.
+                    for (size_t i = 0; i < old_info->new_key_.size(); i++)
                     {
-                        // This could happen if a participant ng failover to the
-                        // coordinator node. In this case, the participant will
-                        // receive a local cc req.
-                        for (auto &slice : *upload_range_rec->range_slices_)
-                        {
-                            range_slices.emplace_back(
-                                slice.first ? slice.first->Clone() : nullptr,
-                                slice.second);
-                        }
+                        const TableRangeEntry *new_range =
+                            shard_->CreateTableRange(
+                                this->table_name_,
+                                this->cc_ng_id_,
+                                old_info->new_partition_id_.at(i),
+                                old_info->new_key_.at(i)->Clone(),
+                                old_info->dirty_ts_,
+                                nullptr);
+                        new_range_infos.push_back(new_range->GetRangeInfo());
                     }
-                    std::unique_ptr<StoreRange> store_range =
-                        std::make_unique<StoreRange>(
-                            old_info->start_key_.get(),
-                            old_end_key,
-                            old_info->partition_id_,
-                            range_owner,
-                            *Sharder::Instance().GetLocalCcShards());
-                    store_range->InitSlices(std::move(range_slices));
-                    split_range_res = store_range->SplitRange(
-                        old_info->new_key_.front().get(), new_slice_keys);
                 }
                 else
                 {
+                    // For local node group, fill the range slice info for new
+                    // ranges. These new slice specs is currently stored in the
+                    // splitting range, so just copy them to the new ranges to
+                    // avoid further data store read.
                     size_t orig_store_range_size =
                         old_entry->RangeSlices()->MemUsage();
                     split_range_res = old_entry->RangeSlices()->SplitRange(
@@ -592,81 +588,82 @@ public:
                     assert(orig_store_range_size >= new_store_range_size);
                     shard_->local_shards_.DecreaseRangeSliceMemUsage(
                         orig_store_range_size - new_store_range_size);
-                }
-                if (!split_range_res)
-                {
-                    // If split fails due to slice is pinned or is loading
-                    // retry later.
-                    shard_->Enqueue(shard_->LocalCoreId(), &req);
-                    return false;
-                }
-                if (new_slice_keys.empty())
-                {
-                    // If all current slices should stay in old range, assign
-                    // empty slice for new range
-                    for (auto &new_key : old_info->new_key_)
+                    if (!split_range_res)
                     {
-                        new_slice_keys.emplace_back(
-                            new_key->Clone(), 0, SliceStatus::FullyCached);
+                        // If split fails due to slice is pinned or is loading
+                        // retry later.
+                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        return false;
                     }
-                }
-
-                // Create new range entries in local cc shard
-                size_t cur_slice_idx = 0;
-                for (uint new_range_idx = 0;
-                     new_range_idx < old_info->new_partition_id_.size();
-                     new_range_idx++)
-                {
-                    std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
-                        cur_range_slices;
-                    // First slice start key will reuse the new range start
-                    // key, so we can just pass in nullptr.
-                    TxKey::Uptr range_start_key =
-                        std::move(std::get<0>(new_slice_keys[cur_slice_idx]));
-                    std::get<0>(new_slice_keys[cur_slice_idx]) = nullptr;
-                    cur_range_slices.push_back(
-                        std::move(new_slice_keys.at(cur_slice_idx)));
-                    cur_slice_idx++;
-                    // Move the range slices that falls into the new range.
-                    while (cur_slice_idx != new_slice_keys.size() &&
-                           (new_range_idx + 1 == old_info->new_key_.size() ||
-                            *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
-                                *old_info->new_key_.at(new_range_idx + 1)))
+                    if (new_slice_keys.empty())
                     {
-                        cur_range_slices.push_back(
-                            std::move(new_slice_keys.at(cur_slice_idx++)));
-                    }
-
-                    if (new_range_idx <
-                            old_info->new_partition_id_.size() - 1 &&
-                        cur_slice_idx == new_slice_keys.size())
-                    {
-                        // If we run out of slice before we reach last new
-                        // range, insert an empty slice for the next new
-                        // range
-                        for (size_t idx = new_range_idx + 1;
-                             idx < old_info->new_key_.size();
-                             ++idx)
+                        // If all current slices should stay in old range,
+                        // assign empty slice for new range
+                        for (auto &new_key : old_info->new_key_)
                         {
                             new_slice_keys.emplace_back(
-                                old_info->new_key_.at(idx)->Clone(),
-                                0,
-                                SliceStatus::FullyCached);
+                                new_key->Clone(), 0, SliceStatus::FullyCached);
                         }
                     }
 
-                    const TableRangeEntry *new_range = shard_->CreateTableRange(
-                        this->table_name_,
-                        this->cc_ng_id_,
-                        old_info->new_partition_id_.at(new_range_idx),
-                        std::move(range_start_key),
-                        cur_slice_idx == new_slice_keys.size()
-                            ? old_end_key
-                            : std::get<0>(new_slice_keys.at(cur_slice_idx))
-                                  .get(),
-                        old_info->dirty_ts_,
-                        &cur_range_slices);
-                    new_range_infos.push_back(new_range->GetRangeInfo());
+                    // Create new range entries in local cc shard
+                    size_t cur_slice_idx = 0;
+                    for (uint new_range_idx = 0;
+                         new_range_idx < old_info->new_partition_id_.size();
+                         new_range_idx++)
+                    {
+                        std::vector<
+                            std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
+                            cur_range_slices;
+                        // First slice start key will reuse the new range start
+                        // key, so we can just pass in nullptr.
+                        TxKey::Uptr range_start_key = std::move(
+                            std::get<0>(new_slice_keys[cur_slice_idx]));
+                        std::get<0>(new_slice_keys[cur_slice_idx]) = nullptr;
+                        cur_range_slices.push_back(
+                            std::move(new_slice_keys.at(cur_slice_idx)));
+                        cur_slice_idx++;
+                        // Move the range slices that falls into the new range.
+                        while (
+                            cur_slice_idx != new_slice_keys.size() &&
+                            (new_range_idx + 1 == old_info->new_key_.size() ||
+                             *std::get<0>(new_slice_keys.at(cur_slice_idx)) <
+                                 *old_info->new_key_.at(new_range_idx + 1)))
+                        {
+                            cur_range_slices.push_back(
+                                std::move(new_slice_keys.at(cur_slice_idx++)));
+                        }
+
+                        if (new_range_idx <
+                                old_info->new_partition_id_.size() - 1 &&
+                            cur_slice_idx == new_slice_keys.size())
+                        {
+                            // If we run out of slice before we reach last new
+                            // range, insert an empty slice for the next new
+                            // range
+                            for (size_t idx = new_range_idx + 1;
+                                 idx < old_info->new_key_.size();
+                                 ++idx)
+                            {
+                                new_slice_keys.emplace_back(
+                                    old_info->new_key_.at(idx)->Clone(),
+                                    0,
+                                    SliceStatus::FullyCached);
+                            }
+                        }
+                        assert(*range_start_key ==
+                               *(old_info->new_key_.at(new_range_idx)));
+
+                        const TableRangeEntry *new_range =
+                            shard_->CreateTableRange(
+                                this->table_name_,
+                                this->cc_ng_id_,
+                                old_info->new_partition_id_.at(new_range_idx),
+                                std::move(range_start_key),
+                                old_info->dirty_ts_,
+                                &cur_range_slices);
+                        new_range_infos.push_back(new_range->GetRangeInfo());
+                    }
                 }
 
                 // Mark the range as commited, which makes the new keys
@@ -995,6 +992,8 @@ public:
                                     SliceStatus::FullyCached);
                             }
                         }
+                        assert(*range_start_key ==
+                               *(new_range_keys.at(new_range_idx)));
 
                         const TableRangeEntry *new_range =
                             shard_->CreateTableRange(
@@ -1002,11 +1001,6 @@ public:
                                 this->cc_ng_id_,
                                 new_range_ids.at(new_range_idx),
                                 std::move(range_start_key),
-                                cur_slice_idx == new_slice_keys.size()
-                                    ? old_end_key
-                                    : std::get<0>(
-                                          new_slice_keys.at(cur_slice_idx))
-                                          .get(),
                                 old_info->dirty_ts_,
                                 &cur_range_slices);
                         new_range_infos.push_back(new_range->GetRangeInfo());
@@ -1200,10 +1194,8 @@ public:
     }
 
 private:
-    void DeserializeRangeRecord(
-        const std::string &payload,
-        RangeRecord *range_record,
-        std::vector<std::pair<TxKey::Uptr, uint32_t>> &range_slices)
+    void DeserializeRangeRecord(const std::string &payload,
+                                RangeRecord *range_record)
     {
         const char *buf = payload.data();
         size_t offset = 0;
@@ -1257,26 +1249,6 @@ private:
             range_info->end_key_ = PositiveInfinity<KeyT>::Instance();
         }
         range_record->SetRangeInfo(std::move(range_info));
-
-        uint16_t slice_cnt;
-        DesrializeFrom(buf, offset, &slice_cnt);
-        if (slice_cnt > 0)
-        {
-            uint32_t slice_size;
-            DesrializeFrom(buf, offset, &slice_size);
-            range_slices.emplace_back(nullptr, slice_size);
-            for (size_t idx = 1; idx < slice_cnt; idx++)
-            {
-                DesrializeFrom(buf, offset, &slice_size);
-                range_slices.emplace_back(nullptr, slice_size);
-            }
-            for (size_t idx = 1; idx < slice_cnt; idx++)
-            {
-                TxKey::Uptr slice_key = std::make_unique<KeyT>();
-                slice_key->Deserialize(buf, offset, nullptr);
-                range_slices.at(idx).first = std::move(slice_key);
-            }
-        }
     }
 
     void SplitSamplePool(const RangeInfo *old_info)

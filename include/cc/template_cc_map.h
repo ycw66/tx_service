@@ -3449,16 +3449,16 @@ public:
 
     bool Execute(ScanSliceCc &req) override
     {
-        if (req.SendResponseIfFinished())
-        {
-            req.UnpinSlices();
-            return true;
-        }
         int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
         if (ng_term < 0 ||
             (req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term))
         {
             return req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+        if (req.SendResponseIfFinished())
+        {
+            req.UnpinSlices();
+            return true;
         }
 
         CcOperation cc_op;

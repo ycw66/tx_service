@@ -551,7 +551,6 @@ public:
     RangeRecord()
         : range_info_{nullptr},
           is_info_owner_(false),
-          range_slices_(nullptr),
           range_owner_rec_(nullptr),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
@@ -561,7 +560,6 @@ public:
     RangeRecord(const RangeRecord &rhs)
         : range_info_(nullptr),
           is_info_owner_(rhs.is_info_owner_),
-          range_slices_(rhs.range_slices_),
           is_read_result_(rhs.is_read_result_)
     {
         if (rhs.is_info_owner_)
@@ -610,24 +608,18 @@ public:
         }
     }
 
-    RangeRecord(const RangeInfo *info,
-                const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                LruEntry *range_owner)
+    RangeRecord(const RangeInfo *info, LruEntry *range_owner)
         : range_info_(info),
           is_info_owner_(false),
-          range_slices_(slices),
           range_owner_rec_(range_owner),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
     {
     }
 
-    RangeRecord(std::unique_ptr<RangeInfo> info,
-                const std::vector<std::pair<TxKey::Uptr, size_t>> *slices,
-                LruEntry *range_owner)
+    RangeRecord(std::unique_ptr<RangeInfo> info, LruEntry *range_owner)
         : range_info_uptr_(std::move(info)),
           is_info_owner_(true),
-          range_slices_(slices),
           range_owner_rec_(range_owner),
           new_range_owner_rec_(nullptr),
           is_read_result_(false)
@@ -689,31 +681,6 @@ public:
         {
             range_info_->end_key_->Serialize(str);
         }
-        uint16_t slice_cnt;
-        if (range_slices_ == nullptr)
-        {
-            slice_cnt = 0;
-            SerializeToStr(&slice_cnt, str);
-        }
-        else
-        {
-            slice_cnt = range_slices_->size();
-            SerializeToStr(&slice_cnt, str);
-            for (auto slice_it = range_slices_->cbegin();
-                 slice_it != range_slices_->cend();
-                 slice_it++)
-            {
-                uint32_t slice_size = slice_it->second;
-                SerializeToStr(&slice_size, str);
-            }
-            // skip first slice key since it will reuse range start key
-            for (auto slice_it = range_slices_->cbegin() + 1;
-                 slice_it != range_slices_->cend();
-                 slice_it++)
-            {
-                slice_it->first->Serialize(str);
-            }
-        }
     }
 
     void Deserialize(const char *buf, size_t &offset) override
@@ -741,16 +708,6 @@ public:
             size += new_key->SerializedLength();
         }
         size += (sizeof(int32_t) * range_info_->new_partition_id_.size());
-        if (range_slices_)
-        {
-            size += (sizeof(uint32_t) * range_slices_->size());
-            for (auto slice_it = range_slices_->cbegin() + 1;
-                 slice_it != range_slices_->cend();
-                 slice_it++)
-            {
-                size += slice_it->first->SerializedLength();
-            }
-        }
         return size;
     }
 
@@ -800,8 +757,6 @@ public:
         }
 
         is_info_owner_ = rhs.is_info_owner_;
-
-        range_slices_ = rhs.range_slices_;
 
         // Free own unique ptr.
         if (!is_read_result_ && new_range_owner_rec_)
@@ -888,8 +843,6 @@ public:
         assert(!other.is_info_owner_);
         range_info_ = other.range_info_;
         is_info_owner_ = other.is_info_owner_;
-
-        range_slices_ = other.range_slices_;
 
         // Free own unique ptr.
         if (is_read_result_ && new_range_owner_bucket_)
@@ -981,9 +934,6 @@ public:
         std::unique_ptr<RangeInfo> range_info_uptr_;
     };
     bool is_info_owner_{false};
-    // Only used in range split tx to broadcast slice
-    // info to all nodes.
-    const std::vector<std::pair<TxKey::Uptr, size_t>> *range_slices_{nullptr};
 
     /**
      * @brief The bucket record that owns this range.

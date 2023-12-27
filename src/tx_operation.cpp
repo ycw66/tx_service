@@ -3073,8 +3073,7 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       clean_log_op_(txm)
 {
     range_info_.end_key_ = old_end_key;
-    range_record_ =
-        std::make_unique<RangeRecord>(&range_info_, nullptr, nullptr);
+    range_record_ = std::make_unique<RangeRecord>(&range_info_, nullptr);
     old_start_key_ = range_info_.StartKey() != nullptr ? range_info_.StartKey()
                                                        : old_start_key;
 
@@ -3168,12 +3167,10 @@ void SplitFlushRangeOp::Reset(
     range_info_.end_key_ = old_end_key;
     assert(range_info_.new_partition_id_.size() == range_info_.new_key_.size());
 
-    range_record_ =
-        std::make_unique<RangeRecord>(&range_info_, nullptr, nullptr);
+    range_record_ = std::make_unique<RangeRecord>(&range_info_, nullptr);
 
     old_end_key_ = old_end_key;
 
-    assert(slice_info_.empty());
     assert(data_sync_vec_.empty());
     assert(archive_vec_.empty());
     assert(mv_base_vec_.empty());
@@ -3317,10 +3314,8 @@ void SplitFlushRangeOp::ClearInfos()
     // release TxKey ownership to reduce memory usage
     range_info_.Clear();
     new_range_info_.clear();
-    slice_info_.clear();
 
     new_range_info_.shrink_to_fit();
-    slice_info_.shrink_to_fit();
 
     range_record_ = nullptr;
 }
@@ -4067,23 +4062,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         });
 
-        // Now we can copy out the slice info since it's finalized after
-        // flush data
-        const auto &slices = store_range_->Slices();
-        for (auto slice_it = slices.cbegin(); slice_it != slices.cend();
-             ++slice_it)
-        {
-            if (slice_it == slices.cbegin())
-            {
-                slice_info_.emplace_back(nullptr, (*slice_it)->Size());
-            }
-            else
-            {
-                slice_info_.emplace_back((*slice_it)->StartKey()->Clone(),
-                                         (*slice_it)->Size());
-            }
-        }
-
         LOG(INFO) << "Split Flush transaction lock cluster config, range id"
                   << range_info_.PartitionId() << ", txn: " << txm->TxNumber();
         // Upgrade to write lock again for commit phase.
@@ -4435,7 +4413,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // write all. Now broadcast slice info to all nodes through
             // PostWriteAll. New ranges might land on other nodes.
             post_all_lock_op_.rec_ = range_record_.get();
-            range_record_->range_slices_ = &slice_info_;
             range_record_->SetRangeInfo(&range_info_);
 
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
@@ -4505,7 +4482,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             // Now broadcast slice info to all nodes through PostWriteAll. New
             // ranges might land on other nodes.
             post_all_lock_op_.rec_ = range_record_.get();
-            range_record_->range_slices_ = &slice_info_;
             range_record_->SetRangeInfo(&range_info_);
 
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
@@ -4534,7 +4510,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << ", msg "
                            << post_all_lock_op_.hd_result_.ErrorMsg();
 
-                range_record_->range_slices_ = &slice_info_;
                 range_record_->SetRangeInfo(&range_info_);
                 post_all_lock_op_.rec_ = range_record_.get();
                 RetrySubOperation(txm, &post_all_lock_op_);

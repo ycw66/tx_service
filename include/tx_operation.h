@@ -847,9 +847,6 @@ struct SplitFlushRangeOp : public CompositeTransactionOperation
     StoreRange *store_range_;
     // vector< new start key, new partition id >
     std::vector<std::pair<TxKey::Uptr, int32_t>> new_range_info_;
-    // Used during commit post write. We cannot rely on the range slice stored
-    // in TableRangeEntry since that might become invalid during retry.
-    std::vector<std::pair<TxKey::Uptr, size_t>> slice_info_;
 
     // vector buffer used during checkpoint scan
     std::vector<FlushRecord> data_sync_vec_;

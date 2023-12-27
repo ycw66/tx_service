@@ -418,7 +418,6 @@ public:
         const NodeGroupId ng_id,
         int32_t partition_id,
         TxKey::Uptr start_key,
-        const TxKey *end_key,
         uint64_t version,
         std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>>
             *slice_keys = nullptr);

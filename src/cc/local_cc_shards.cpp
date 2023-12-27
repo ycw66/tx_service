@@ -81,15 +81,16 @@ LocalCcShards::LocalCcShards(
 
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
-        cc_shards_.emplace_back(std::make_unique<CcShard>(thd_idx,
-                                                          core_cnt,
-                                                          memory_limit_mb,
-                                                          log_limit_mb,
-                                                          realtime_sampling,
-                                                          node_id,
-                                                          *this,
-                                                          catalog_factory_,
-                                                          system_handler));
+        cc_shards_.emplace_back(
+            std::make_unique<CcShard>(thd_idx,
+                                      core_cnt,
+                                      memory_limit_mb * 0.95,
+                                      log_limit_mb,
+                                      realtime_sampling,
+                                      node_id,
+                                      *this,
+                                      catalog_factory_,
+                                      system_handler));
     }
 
     // Starts flush worker threads firstly.
@@ -758,7 +759,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         }
         else if (mem_change < 0)
         {
-            DecreaseRangeSliceMemUsage(mem_change);
+            DecreaseRangeSliceMemUsage(-mem_change);
         }
     }
     ids.try_emplace(last_range_entry.partition_id_, &res.first->second);
@@ -969,7 +970,6 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     const NodeGroupId ng_id,
     int32_t partition_id,
     TxKey::Uptr start_key,
-    const TxKey *end_key,
     uint64_t version,
     std::vector<std::tuple<TxKey::Uptr, uint32_t, SliceStatus>> *slice_keys)
 {
@@ -990,7 +990,11 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     auto range_it = ranges->find(start_key.get());
     if (range_it == ranges->end())
     {
-        if (ng_id == range_ng && !range_slice_mem_full)
+        const TxKey *end_key =
+            GetTableRangeEntryInternal(table_name, ng_id, start_key.get())
+                ->GetRangeInfo()
+                ->EndKey();
+        if (ng_id == range_ng && slice_keys && !range_slice_mem_full)
         {
             range_slices = std::make_unique<StoreRange>(
                 start_key.get(), end_key, partition_id, range_ng, *this);
@@ -1022,18 +1026,20 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
     {
         // Update existing range entry's version range slice info if the passed
         // in version is newer.
-        if (ng_id == range_ng)
+        if (ng_id == range_ng && slice_keys)
         {
             range_slices = std::make_unique<StoreRange>(
                 range_it->second.GetRangeInfo()->StartKey(),
-                end_key,
+                range_it->second.GetRangeInfo()->EndKey(),
                 partition_id,
                 range_ng,
                 *this);
             range_slices->InitSlices(*slice_keys);
         }
         int64_t mem_change = range_it->second.UpdateRangeEntry(
-            version, end_key, std::move(range_slices));
+            version,
+            range_it->second.GetRangeInfo()->EndKey(),
+            std::move(range_slices));
         if (mem_change > 0)
         {
             // This would only happen rarely during recover when the old range
@@ -1043,7 +1049,7 @@ const TableRangeEntry *LocalCcShards::CreateTableRange(
         }
         else if (mem_change < 0)
         {
-            DecreaseRangeSliceMemUsage(mem_change);
+            DecreaseRangeSliceMemUsage(-mem_change);
         }
     }
     return &range_it->second;
