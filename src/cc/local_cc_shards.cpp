@@ -8,6 +8,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "error_messages.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "store/data_store_handler.h"
@@ -65,8 +66,7 @@ LocalCcShards::LocalCcShards(
 #else
       flush_worker_num_(std::min((int) core_cnt, 10)),
 #endif
-      flush_worker_thd_status_(WorkerStatus::Active),
-      statistics_thd_status_(WorkerStatus::Active)
+      flush_worker_thd_status_(WorkerStatus::Active)
 {
     using namespace std::chrono_literals;
     uint64_t ts_base = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -111,11 +111,6 @@ LocalCcShards::LocalCcShards(
     {
         data_sync_worker_thds_.push_back(
             std::thread([this] { DataSyncWorker(); }));
-    }
-
-    if (realtime_sampling)
-    {
-        statistics_thd_ = std::thread([this] { SyncTableStatisticsWorker(); });
     }
 }
 
@@ -1973,6 +1968,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         assert(hres != nullptr);
         status = std::make_shared<DataSyncStatus>();
     }
+    std::lock_guard<std::mutex> lk(status->mux_);
     for (auto &range : *ranges)
     {
         if (EnqueueDataSyncTask(table_name,
@@ -2012,6 +2008,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     std::lock_guard<std::mutex> task_worker_lk(task_worker_mux_);
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>();
+    std::lock_guard<std::mutex> lk(status->mux_);
     for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
     {
         TableType type;
@@ -2093,17 +2090,6 @@ void LocalCcShards::Terminate()
     for (int id = 0; id < slice_worker_num_; id++)
     {
         update_slice_spec_thds_.at(id).join();
-    }
-
-    if (realtime_sampling_)
-    {
-        {
-            std::unique_lock<std::mutex> lk(statistics_mux_);
-            statistics_thd_status_ = WorkerStatus::Terminated;
-            statistics_cv_.notify_one();
-        }
-
-        statistics_thd_.join();
     }
 }
 
@@ -2536,9 +2522,39 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk)
     MergeSortedVectors(
         std::move(archive_vecs), *archive_vec, rec_greater, false);
 
+    // Sync table stats with other node groups if this is the first processed
+    // range of the table.
+    bool table_is_updated = data_sync_vec->size() != 0 ||
+                            archive_vec->size() != 0 ||
+                            mv_base_vec->size() != 0;
+    if (realtime_sampling_ && data_sync_task->SetSyncStats())
+    {
+        while (!table_schema->StatisticsObject()->SyncTableStatistics(
+            store_hd_,
+            table_name,
+            table_schema,
+            ng_id,
+            target_data_sync_ts,
+            table_is_updated))
+        {
+            LOG(ERROR) << "Failed to update statistics of table "
+                       << table_name.Trace() << ", retrying.";
+            std::this_thread::sleep_for(1s);
+            // Check leader term in infinite while loop.
+            if (!Sharder::Instance().CheckLeaderTerm(ng_id, ng_term))
+            {
+                LOG(ERROR) << "Leader term changed during table "
+                              "statistics update";
+                range_entry->TrySetDataSync(false);
+                txservice::AbortTx(data_sync_txm);
+                data_sync_task->SetError(CcErrorCode::NG_TERM_CHANGED);
+                return;
+            }
+        }
+    }
+
     // 4. Process the data sync vec
-    if (data_sync_vec->size() != 0 || archive_vec->size() != 0 ||
-        mv_base_vec->size() != 0)
+    if (table_is_updated)
     {
         // 4.1 For range partition, execute range split if necessary using
         // seperate thread.
@@ -3303,192 +3319,5 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
         success = success && ret;
     }
     return success;
-}
-
-void LocalCcShards::SyncTableStatisticsWorker()
-{
-    std::unique_lock<std::mutex> worker_lk(statistics_mux_);
-    std::unordered_map<NodeGroupId, uint64_t> ng_sync_ts;
-    while (statistics_thd_status_ == WorkerStatus::Active)
-    {
-        // Wake up every 10s to sync table statistics with other nodes.
-        statistics_cv_.wait_for(
-            worker_lk,
-            10s,
-            [this]
-            { return statistics_thd_status_ == WorkerStatus::Terminated; });
-
-        if (statistics_thd_status_ == WorkerStatus::Terminated)
-        {
-            break;
-        }
-        CODE_FAULT_INJECTOR("skip_sync_table_statistics", { continue; });
-
-        worker_lk.unlock();
-
-        std::vector<uint32_t> node_groups =
-            Sharder::Instance().LocalNodeGroups();
-        for (uint32_t node_group : node_groups)
-        {
-            // check whether this node is group leader, pin its data if it
-            // is
-            int64_t leader_term =
-                Sharder::Instance().TryPinNodeGroupData(node_group);
-            if (leader_term < 0)
-            {
-                continue;
-            }
-            CkptTsCc ckpt_req(cc_shards_.size(), node_group);
-
-            // Use ckpt ts as sync ts. It will be used next round to decide
-            // if table has any updates since last sync.
-            for (auto &ccs : cc_shards_)
-            {
-                ccs->Enqueue(&ckpt_req);
-            }
-            ckpt_req.Wait();
-
-            uint64_t sync_ts = ckpt_req.GetCkptTs();
-            auto sync_ts_pair = ng_sync_ts.try_emplace(node_group, 0);
-            uint64_t &last_sync_ts = sync_ts_pair.first->second;
-            bool succ = true;
-
-            // Get table names in this node group, stats sync worker should
-            // be TableName string owner.
-            std::unordered_map<TableName, bool> tables =
-                GetCatalogTableNameSnapshot(node_group, sync_ts);
-
-            // Loop over all tables and sync stats.
-            for (auto it = tables.begin(); it != tables.end(); ++it)
-            {
-                if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
-                {
-                    // Skip the node groups that are no longer on this node.
-                    break;
-                }
-
-                const TableName &table_name = it->first;
-                bool is_dirty = it->second;
-                if (!table_name.IsMeta())
-                {
-                    bool updated = true;
-                    if (!is_dirty)
-                    {
-                        // Check if the table has updated since last sync
-                        // time.
-                        GetTableLastCommitTsCc get_commit_ts_cc(
-                            table_name, node_group, cc_shards_.size());
-                        for (auto &ccs : cc_shards_)
-                        {
-                            ccs->Enqueue(&get_commit_ts_cc);
-                        }
-                        get_commit_ts_cc.Wait();
-
-                        if (get_commit_ts_cc.LastCommitTs() < last_sync_ts)
-                        {
-                            updated = false;
-                        }
-                    }
-
-                    // Set isolation level to RepeatableRead to ensure the
-                    // readlock will be set during the execution of the
-                    // following ReadTxRequest.
-                    TransactionExecution *txm =
-                        NewTxInit(tx_service_,
-                                  IsolationLevel::RepeatableRead,
-                                  CcProtocol::Locking,
-                                  node_group);
-                    if (txm == nullptr)
-                    {
-                        succ = false;
-                        continue;
-                    }
-                    const TableName base_table_name{
-                        table_name.GetBaseTableNameSV(), TableType::Primary};
-
-                    CatalogKey table_key(base_table_name);
-                    CatalogRecord catalog_rec;
-
-                    ReadTxRequest read_req;
-                    read_req.Set(&catalog_ccm_name,
-                                 &table_key,
-                                 &catalog_rec,
-                                 false,
-                                 false,
-                                 true);
-                    txm->Execute(&read_req);
-                    read_req.Wait();
-
-                    RecordStatus rec_status = read_req.Result().first;
-                    if (read_req.IsError() ||
-                        rec_status != RecordStatus::Normal)
-                    {
-                        // Use AbortTxRequest to release read lock.
-                        txservice::AbortTx(txm);
-
-                        if (read_req.IsError())
-                        {
-                            succ = false;
-                        }
-                        continue;
-                    }
-
-                    const TableSchema *table_schema = catalog_rec.Schema();
-                    if (is_dirty && catalog_rec.DirtySchema() &&
-                        !table_schema->IndexKeySchema(table_name))
-                    {
-                        assert(table_name.Type() == TableType::Secondary ||
-                               table_name.Type() == TableType::UniqueSecondary);
-                        table_schema = catalog_rec.DirtySchema();
-                    }
-
-                    assert(table_schema != nullptr);
-
-                    // For index table, if this table has been dropped, skip it.
-                    if ((table_name.Type() == TableType::Secondary ||
-                         table_name.Type() == TableType::UniqueSecondary) &&
-                        table_schema->IndexKeySchema(table_name) == nullptr)
-                    {
-                        txservice::AbortTx(txm);
-                        continue;
-                    }
-
-                    while (
-                        !table_schema->StatisticsObject()->SyncTableStatistics(
-                            store_hd_,
-                            table_name,
-                            table_schema,
-                            node_group,
-                            sync_ts,
-                            updated))
-                    {
-                        LOG(ERROR) << "Failed to update statistics of table "
-                                   << table_name.Trace() << ", retrying.";
-                        std::this_thread::sleep_for(1s);
-                        // Check leader term in infinite while loop.
-                        if (!Sharder::Instance().CheckLeaderTerm(node_group,
-                                                                 leader_term))
-                        {
-                            LOG(ERROR) << "Leader term changed during table "
-                                          "statistics update";
-                            succ = false;
-                            break;
-                        }
-                    }
-
-                    txservice::CommitTx(txm);
-                }
-            }
-            if (succ)
-            {
-                last_sync_ts = sync_ts;
-            }
-
-            // finish table stats sync on this node group, unpin its data
-            // and clear its ccmaps and catalogs if it is no longer leader
-            Sharder::Instance().UnpinNodeGroupData(node_group);
-        }
-        worker_lk.lock();
-    }
 }
 }  // namespace txservice
