@@ -3444,34 +3444,38 @@ void LocalCcShards::SyncTableStatisticsWorker()
 
                     assert(table_schema != nullptr);
 
+                    // For index table, if this table has been dropped, skip it.
                     if ((table_name.Type() == TableType::Secondary ||
                          table_name.Type() == TableType::UniqueSecondary) &&
-                        table_schema->IndexKeySchema(table_name) != nullptr)
+                        table_schema->IndexKeySchema(table_name) == nullptr)
                     {
-                        while (!table_schema->StatisticsObject()
-                                    ->SyncTableStatistics(store_hd_,
-                                                          table_name,
-                                                          table_schema,
-                                                          node_group,
-                                                          sync_ts,
-                                                          updated))
+                        txservice::AbortTx(txm);
+                        continue;
+                    }
+
+                    while (
+                        !table_schema->StatisticsObject()->SyncTableStatistics(
+                            store_hd_,
+                            table_name,
+                            table_schema,
+                            node_group,
+                            sync_ts,
+                            updated))
+                    {
+                        LOG(ERROR) << "Failed to update statistics of table "
+                                   << table_name.Trace() << ", retrying.";
+                        std::this_thread::sleep_for(1s);
+                        // Check leader term in infinite while loop.
+                        if (!Sharder::Instance().CheckLeaderTerm(node_group,
+                                                                 leader_term))
                         {
-                            LOG(ERROR)
-                                << "Failed to update statistics of table "
-                                << table_name.Trace() << ", retrying.";
-                            std::this_thread::sleep_for(1s);
-                            // Check leader term in infinite while loop.
-                            if (!Sharder::Instance().CheckLeaderTerm(
-                                    node_group, leader_term))
-                            {
-                                LOG(ERROR)
-                                    << "Leader term changed during table "
-                                       "statistics update";
-                                succ = false;
-                                break;
-                            }
+                            LOG(ERROR) << "Leader term changed during table "
+                                          "statistics update";
+                            succ = false;
+                            break;
                         }
                     }
+
                     txservice::CommitTx(txm);
                 }
             }
