@@ -80,8 +80,7 @@ public:
                                      const TableName &table_or_index_name,
                                      const TableSchema *table_schema,
                                      NodeGroupId ng_id,
-                                     uint64_t version,
-                                     bool updated) const = 0;
+                                     uint64_t version) const = 0;
 };
 
 struct StatisticsEntry

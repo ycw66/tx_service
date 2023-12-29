@@ -102,6 +102,7 @@ public:
 
         units_ += 1;
         insert_delete_counter_ += 1;
+        updated_since_sync_ = true;
 
         // units_ may be less than sample_pool_.Size(), because we don't deal
         // with sample_pool_ when core count changes, but we re-calculate
@@ -126,6 +127,7 @@ public:
         {
             units_ -= 1;
             insert_delete_counter_ += 1;
+            updated_since_sync_ = true;
             sample_pool_.Delete(key);
 
             units_ =
@@ -214,6 +216,16 @@ public:
         }
     }
 
+    void ResetUpdatedSinceSync()
+    {
+        updated_since_sync_ = false;
+    }
+
+    bool UpdatedSinceSync() const
+    {
+        return updated_since_sync_;
+    }
+
 private:
     static bool IsLocal(NodeGroupId ng_id)
     {
@@ -244,7 +256,6 @@ private:
         return (records + Unit() - 1) / Unit();
     }
 
-private:
     // Points to key of index_sample_pool_map_.
     const TableName *table_or_index_name_;
 
@@ -267,6 +278,8 @@ private:
     CcShard *cc_shard_{nullptr};
 
     OnMassChange on_mass_change_;
+
+    bool updated_since_sync_{false};
 };
 
 template <typename KeyT>
@@ -560,56 +573,55 @@ public:
                              const TableName &table_or_index_name,
                              const TableSchema *table_schema,
                              NodeGroupId ng_id,
-                             uint64_t version,
-                             bool updated) const override
+                             uint64_t version) const override
     {
         bool ok = true;
-
+        bool updated = false;
         int32_t need_save_counter =
             need_save_counter_.load(std::memory_order_acquire);
-        if (updated || need_save_counter > 0)
+
+        std::unordered_map<TableName,
+                           std::pair<uint64_t, std::vector<TxKey::Uptr>>>
+            sample_pool_map;
+        Task task = [this,
+                     &table_or_index_name,
+                     ng_id,
+                     table_schema,
+                     &updated,
+                     &sample_pool_map](CcShard &ccs)
         {
-            std::unordered_map<TableName,
-                               std::pair<uint64_t, std::vector<TxKey::Uptr>>>
-                sample_pool_map;
-            Task task = [this,
-                         &table_or_index_name,
-                         ng_id,
-                         table_schema,
-                         updated,
-                         &sample_pool_map](CcShard &ccs)
-            {
-                To(sample_pool_map);
+            To(sample_pool_map);
 
-                if (updated)
+            auto iter = index_sample_pool_map_.find(table_or_index_name);
+            if (iter != index_sample_pool_map_.end())
+            {
+                const std::unordered_map<NodeGroupId,
+                                         TemplateCcMapSamplePool<KeyT>>
+                    &ng_sample_pool_map = iter->second;
+                auto it = ng_sample_pool_map.find(ng_id);
+                if (it != ng_sample_pool_map.end() &&
+                    it->second.UpdatedSinceSync())
                 {
-                    const auto iter =
-                        index_sample_pool_map_.find(table_or_index_name);
-                    if (iter != index_sample_pool_map_.end())
-                    {
-                        const std::unordered_map<NodeGroupId,
-                                                 TemplateCcMapSamplePool<KeyT>>
-                            &ng_sample_pool_map = iter->second;
-                        const auto it = ng_sample_pool_map.find(ng_id);
-                        if (it != ng_sample_pool_map.end())
-                        {
-                            const TemplateCcMapSamplePool<KeyT>
-                                &ccmap_sample_pool = it->second;
-                            Broadcast(table_schema, ccmap_sample_pool);
-                        }
-                    }
+                    updated = true;
+                    TemplateCcMapSamplePool<KeyT> &ccmap_sample_pool =
+                        const_cast<TemplateCcMapSamplePool<KeyT> &>(it->second);
+                    Broadcast(table_schema, ccmap_sample_pool);
+                    ccmap_sample_pool.ResetUpdatedSinceSync();
                 }
-            };
-            RunOnBindingCcShard(std::move(task));
-
-            if (DoStore(ng_id))
-            {
-                ok = Store(store_hd, sample_pool_map, version);
             }
+        };
+        RunOnBindingCcShard(std::move(task));
 
-            need_save_counter_.fetch_sub(need_save_counter,
-                                         std::memory_order_release);
+        if (DoStore(ng_id) && (updated || need_save_counter > 0))
+        {
+            ok = Store(store_hd, sample_pool_map, version);
+            if (ok)
+            {
+                need_save_counter_.fetch_sub(need_save_counter,
+                                             std::memory_order_release);
+            }
         }
+
         return ok;
     }
 

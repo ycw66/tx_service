@@ -43,7 +43,6 @@ struct DataSyncStatus
     uint32_t unfinished_tasks_{0};
     bool all_task_started_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
-    std::unordered_set<TableName> synced_stats_;
     std::mutex mux_;
     std::condition_variable cv_;
 };
@@ -126,14 +125,6 @@ public:
     {
         std::unique_lock<std::mutex> lk(status_->mux_);
         status_->err_code_ = err_code;
-    }
-
-    // Add tablename to synced table stats table set in status_.
-    // Return if table is put into the set for the first time.
-    bool SetSyncStats()
-    {
-        std::unique_lock<std::mutex> lk(status_->mux_);
-        return status_->synced_stats_.insert(table_name_).second;
     }
 
     const TableName table_name_;
@@ -1164,6 +1155,12 @@ private:
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+
+    WorkerStatus statistics_thd_status_;
+    std::mutex statistics_mux_;
+    std::condition_variable statistics_cv_;
+    std::thread statistics_thd_;
+    void SyncTableStatisticsWorker();
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
