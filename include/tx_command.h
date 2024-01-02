@@ -61,6 +61,8 @@ public:
     {
         assert(false);
     }
+
+    virtual TxCommandResult *GetResult() = 0;
 };
 
 /**

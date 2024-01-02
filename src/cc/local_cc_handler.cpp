@@ -1453,6 +1453,7 @@ void txservice::LocalCcHandler::ObjectCommand(
     txservice::TxCommand &obj_cmd,
     txservice::TxNumber txn,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t tx_ts,
     txservice::CcHandlerResult<txservice::ObjectCommandResult> &hres,
     IsolationLevel iso_level,
@@ -1485,7 +1486,24 @@ void txservice::LocalCcHandler::ObjectCommand(
     }
     else
     {
-        // TODO(zkl): support remote requests.
+        // set "cmd_result_" for deserializing the command result returned from
+        // remote node.
+        hres.Value().cmd_result_ = obj_cmd.GetResult();
+        hres.Value().is_local_ = false;
+        remote_hd_.ObjectCommand(cc_shards_.node_id_,
+                                 dest_node_id,
+                                 table_name,
+                                 key,
+                                 key_shard_code,
+                                 obj_cmd,
+                                 txn,
+                                 tx_term,
+                                 command_id,
+                                 tx_ts,
+                                 hres,
+                                 iso_level,
+                                 proto,
+                                 commit);
     }
 }
 
@@ -1494,6 +1512,7 @@ void txservice::LocalCcHandler::ObjectCommandOutside(
     TxCommand &obj_cmd,
     TxNumber txn,
     int64_t tx_term,
+    uint16_t command_id,
     uint64_t tx_ts,
     CcHandlerResult<ObjectCommandResult> &hres,
     IsolationLevel iso_level,
@@ -1533,8 +1552,23 @@ void txservice::LocalCcHandler::ObjectCommandOutside(
     }
     else
     {
-        // TODO(zkl): support remote requests.
-        assert(false);
+        // set "cmd_ptr_" for deserializing the command result returned from
+        // remote node.
+        hres.Value().cmd_result_ = obj_cmd.GetResult();
+        hres.Value().is_local_ = false;
+        remote_hd_.ObjectCommandOutside(cce_addr,
+                                        obj_cmd,
+                                        txn,
+                                        tx_term,
+                                        command_id,
+                                        tx_ts,
+                                        hres,
+                                        iso_level,
+                                        proto,
+                                        commit,
+                                        rec,
+                                        rec_ts,
+                                        read_type);
     }
 }
 

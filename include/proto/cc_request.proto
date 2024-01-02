@@ -4,8 +4,8 @@ package txservice.remote;
 option cc_generic_services = true;
 
 enum StreamType {
-	RegularCcStream = 0;
-	LongMsgCcStream = 1;
+    RegularCcStream = 0;
+    LongMsgCcStream = 1;
 }
 
 message ConnectRequest {
@@ -28,19 +28,19 @@ message TransferResponse {
 }
 
 message CheckTxStatusRequest {
-	uint64 tx_number = 1;
-	int64 tx_term = 2;
+    uint64 tx_number = 1;
+    int64 tx_term = 2;
 }
 
 message CheckTxStatusResponse {
     enum TxStatus {
-		NOT_FOUND = 0;
-		ONGOING = 1;
-		COMMITTED = 2;
-		ABORTED = 3;
-		RESULT_UNKNOWN = 4;
-	}
-	TxStatus tx_status = 1;
+        NOT_FOUND = 0;
+        ONGOING = 1;
+        COMMITTED = 2;
+        ABORTED = 3;
+        RESULT_UNKNOWN = 4;
+    }
+    TxStatus tx_status = 1;
 }
 
 // New leader notify its node_id to other nodes.
@@ -54,77 +54,77 @@ message NotifyNewLeaderStartResponse {
 }
 
 message GetMinTxStartTsRequest {
-	uint32 ng_id = 1;
+    uint32 ng_id = 1;
 }
 
 message GetMinTxStartTsResponse {
-	int64 term = 1;
-	uint64 ts = 2;
-	bool error = 3;
+    int64 term = 1;
+    uint64 ts = 2;
+    bool error = 3;
 }
 
 message ClusterAddNodeRequest {
-	repeated string host_list = 1;
-	repeated int32 port_list = 2;
+    repeated string host_list = 1;
+    repeated int32 port_list = 2;
 }
 
 message ClusterRemoveNodeRequest
 {
-	int32 remove_node_count = 1;
+    int32 remove_node_count = 1;
 }
 
 enum ClusterScaleWriteLogResult
 {
-	SUCCESS = 0;
-	FAIL = 1;
-	UNKOWN = 2;
+    SUCCESS = 0;
+    FAIL = 1;
+    UNKOWN = 2;
 }
 
 message ClusterAddNodeResponse{
-	uint64 tx_number = 1;
-	ClusterScaleWriteLogResult result = 2;
+    uint64 tx_number = 1;
+    ClusterScaleWriteLogResult result = 2;
 }
 
 message ClusterRemoveNodeResponse{
-	uint64 tx_number = 1;
-	ClusterScaleWriteLogResult result = 2;
+    uint64 tx_number = 1;
+    ClusterScaleWriteLogResult result = 2;
 }
 
 enum ClusterScaleStatus
 {
-	IN_PROGRESS = 0;
-	CLUSTER_CONFIG_UPDATE = 1;
-	FINISHED = 2;
-	INVALID_TXN = 3;
-	UNKNOWN = 4;
+    IN_PROGRESS = 0;
+    CLUSTER_CONFIG_UPDATE = 1;
+    FINISHED = 2;
+    INVALID_TXN = 3;
+    UNKNOWN = 4;
 }
 
 message ClusterScaleStatusRequest
 {
-	uint64 tx_number = 1;
+    uint64 tx_number = 1;
 }
 
 message ClusterScaleStatusResponse
 {
-	ClusterScaleStatus status = 1;
+    ClusterScaleStatus status = 1;
 }
 
 message GetClusterNodesRequest{
 }
 
 message GetClusterNodesResponse{
-	repeated string host_list = 1;
-	repeated int32 port_list = 2;
-	bool error = 3;
+    repeated string host_list = 1;
+    repeated int32 port_list = 2;
+    bool error = 3;
 }
 
 message AcquireNodeGroupTermRequest{
-	uint32 node_group_id = 1;
+    uint32 node_group_id = 1;
 }
 
 message AcquireNodeGroupTermResponse{
-	uint32 node_group_id = 1;
-	int64 node_group_term = 2;
+    uint32 node_group_id = 1;
+    int64 node_group_term = 2;
 }
 
 service CcStreamService {
@@ -132,75 +132,75 @@ service CcStreamService {
 };
 
 service CcRpcService {
-	rpc Transfer(TransferRequest) returns (TransferResponse);
-	rpc CheckTxStatus(CheckTxStatusRequest) returns (CheckTxStatusResponse);
-	rpc NotifyNewLeaderStart(NotifyNewLeaderStartRequest) returns (NotifyNewLeaderStartResponse);
-	rpc GetMinTxStartTs(GetMinTxStartTsRequest) returns (GetMinTxStartTsResponse);
-	rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
-	rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
-	rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
-	rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
-	rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
-	rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
-	rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
+    rpc Transfer(TransferRequest) returns (TransferResponse);
+    rpc CheckTxStatus(CheckTxStatusRequest) returns (CheckTxStatusResponse);
+    rpc NotifyNewLeaderStart(NotifyNewLeaderStartRequest) returns (NotifyNewLeaderStartResponse);
+    rpc GetMinTxStartTs(GetMinTxStartTsRequest) returns (GetMinTxStartTsResponse);
+    rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
+    rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
+    rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
+    rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
+    rpc AcquireNodeGroupLeaderTerm(AcquireNodeGroupTermRequest) returns (AcquireNodeGroupTermResponse);
+    rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
+    rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
 }
 
 message TxId_msg {
-	uint32 core_id = 1;
-	uint32 ident = 2;
-	uint64 vec_idx = 3;
+    uint32 core_id = 1;
+    uint32 ident = 2;
+    uint64 vec_idx = 3;
 }
 
 message CceAddr_msg {
-	oneof entry_ptr {
-		uint64 cce_ptr = 1;
-		uint64 insert_ptr = 2;
-	}
-	int64 term = 3;
-	uint32 core_id = 4;
+    oneof entry_ptr {
+        uint64 cce_ptr = 1;
+        uint64 insert_ptr = 2;
+    }
+    int64 term = 3;
+    uint32 core_id = 4;
 }
 
 enum IsolationType {
-	ReadCommitted = 0;
-	SnapshotIsolation = 1;
-	RepeatableRead = 2;
-	Serializable = 3;
+    ReadCommitted = 0;
+    SnapshotIsolation = 1;
+    RepeatableRead = 2;
+    Serializable = 3;
 }
 
 enum CcProtocolType {
-	Occ = 0;
-	OccRead = 1;
-	Locking = 2;
+    Occ = 0;
+    OccRead = 1;
+    Locking = 2;
 }
 
 enum CcLockType {
-	NoLock = 0;
-	ReadIntent = 1;
-	WriteIntent = 2;
-	ReadLock = 3;
-	WriteLock = 4;
+    NoLock = 0;
+    ReadIntent = 1;
+    WriteIntent = 2;
+    ReadLock = 3;
+    WriteLock = 4;
 }
 
 enum CcOperationType {
-   	Read = 0;
+       Read = 0;
     ReadForWrite = 1;
     Write = 2;
     ReadSkIndex = 3;
 }
 
 enum RecordStatusType {
-	NORMAL = 0;
-	UNDEFINED = 1;
-	DELETED = 2;
-	VERSIONUNDEFIND=3;
-	BaseVersionMiss=4;
-	ArchiveVersionMiss=5;
+    NORMAL = 0;
+    UNDEFINED = 1;
+    DELETED = 2;
+    VERSIONUNDEFIND=3;
+    BaseVersionMiss=4;
+    ArchiveVersionMiss=5;
 }
 
 enum CommitType {
-	PrepareCommit = 0;
-	PostCommit = 1;
-	Commit = 2;
+    PrepareCommit = 0;
+    PostCommit = 1;
+    Commit = 2;
 	DowngradeLock = 3;
 }
 
@@ -209,285 +209,285 @@ enum CcTableType {
     Secondary = 1;
     Catalog = 2;
     RangePartition = 3;
-	UniqueSecondary = 4;
-	RangeBucket = 5;
-	ClusterConfig = 6;
+    UniqueSecondary = 4;
+    RangeBucket = 5;
+    ClusterConfig = 6;
 }
 
 enum RemoteKeyType {
-	Normal = 0;
-	NegativeInf = 1;
-	PositiveInf = 2;
+    Normal = 0;
+    NegativeInf = 1;
+    PositiveInf = 2;
 }
 
 enum SlicePosition {
-	Middle = 0;
-	FirstSliceInRange = 1;
-	LastSliceInRange = 2;
-	FirstSlice = 3;
-	LastSlice = 4;
+    Middle = 0;
+    FirstSliceInRange = 1;
+    LastSliceInRange = 2;
+    FirstSlice = 3;
+    LastSlice = 4;
 }
 
 enum CleanType {
-	CleanForFree = 0;
-	CleanForSplitRange = 1;
-	CleanForAlterTabel = 2;
+    CleanForFree = 0;
+    CleanForSplitRange = 1;
+    CleanForAlterTabel = 2;
 }
 
 message AcquireRequest {
-	uint32 src_node_id = 1;
-	string table_name_str = 2;
-	CcTableType table_type = 3;
-	bytes key = 4;
-	uint32 key_shard_code = 5;
-	uint32 vec_idx = 6;
-	uint64 ts = 7;
-	bool insert = 8;
-	CcProtocolType protocol = 9;
-	IsolationType iso_level = 10;
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
+    bytes key = 4;
+    uint32 key_shard_code = 5;
+    uint32 vec_idx = 6;
+    uint64 ts = 7;
+    bool insert = 8;
+    CcProtocolType protocol = 9;
+    IsolationType iso_level = 10;
 }
 
 message AcquireResponse {
-	int32 error_code = 1;
-	uint64 vali_ts = 2;
-	uint64 commit_ts = 3;
-	CceAddr_msg cce_addr = 4;
-	// The response is an acknowledgement or the result
-	bool is_ack = 5;
-	uint32 vec_idx = 6;
+    int32 error_code = 1;
+    uint64 vali_ts = 2;
+    uint64 commit_ts = 3;
+    CceAddr_msg cce_addr = 4;
+    // The response is an acknowledgement or the result
+    bool is_ack = 5;
+    uint32 vec_idx = 6;
 }
 
 message AcquireAllRequest {
-	uint32 src_node_id = 1;
-	string table_name_str = 2;
-	CcTableType table_type = 3;
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
   oneof acq_all_key
   {
-	  bytes key = 4;
+      bytes key = 4;
     bool neg_inf = 5;
     bool pos_inf = 6;
   }
-	uint32 node_group_id = 7;
-	bool insert = 8;
-	CcProtocolType protocol = 9;
-	CcOperationType cc_op = 10;
+    uint32 node_group_id = 7;
+    bool insert = 8;
+    CcProtocolType protocol = 9;
+    CcOperationType cc_op = 10;
 }
 
 message AcquireAllResponse {
-	int32 error_code = 1;
-	uint64 vali_ts = 2;
-	uint64 commit_ts = 3;
-	int64 node_term = 4;
-	// The response is an acknowledgement or the result
-	bool is_ack = 5;
+    int32 error_code = 1;
+    uint64 vali_ts = 2;
+    uint64 commit_ts = 3;
+    int64 node_term = 4;
+    // The response is an acknowledgement or the result
+    bool is_ack = 5;
 }
 
 message ValidateRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg cce_addr = 3;
-	uint64 start_ts = 4;
-	uint64 commit_ts = 5;
-	uint64 key_ts = 6;
-	uint64 gap_ts = 7;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    CceAddr_msg cce_addr = 3;
+    uint64 start_ts = 4;
+    uint64 commit_ts = 5;
+    uint64 key_ts = 6;
+    uint64 gap_ts = 7;
 }
 
 message ValidateResponse {
-	int32 error_code = 1;
-	repeated uint64 txs = 2;
+    int32 error_code = 1;
+    repeated uint64 txs = 2;
 }
 
 message PostprocessResponse {
-	int32 error_code = 1;
+    int32 error_code = 1;
 }
 
 message VersionTxRecord_msg {
-	bytes record = 1;
-	RecordStatusType rec_status = 2;
-	uint64 version_ts = 3;
+    bytes record = 1;
+    RecordStatusType rec_status = 2;
+    uint64 version_ts = 3;
 }
 
 message ReadRequest {
-	uint32 src_node_id = 1;
-	string table_name_str = 2;
-	CcTableType table_type = 3;
-	bytes key = 4;
-	uint32 key_shard_code = 5;
-	bytes record = 6;
-	enum ReadType {
-		INSIDE = 0;
-		OUTSIDE_NORMAL = 1;
-		OUTSIDE_DELETED = 2;
-	}
-	ReadType read_type = 7;
-	uint64 ts = 8;
-	IsolationType iso_level = 9;
-	CcProtocolType protocol = 10;
-	bool is_for_write = 11;
-	bool is_covering_keys = 12;
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
+    bytes key = 4;
+    uint32 key_shard_code = 5;
+    bytes record = 6;
+    enum ReadType {
+        INSIDE = 0;
+        OUTSIDE_NORMAL = 1;
+        OUTSIDE_DELETED = 2;
+    }
+    ReadType read_type = 7;
+    uint64 ts = 8;
+    IsolationType iso_level = 9;
+    CcProtocolType protocol = 10;
+    bool is_for_write = 11;
+    bool is_covering_keys = 12;
 }
 
 message ReadResponse {
-	int32 error_code = 1;
-	bytes record = 2;
-	RecordStatusType rec_status = 3;
-	uint64 ts = 4;
-	CceAddr_msg cce_addr = 5;
-	CcLockType lock_type = 6;
-	// The response is an acknowledgement or the result
-	bool is_ack = 7;
+    int32 error_code = 1;
+    bytes record = 2;
+    RecordStatusType rec_status = 3;
+    uint64 ts = 4;
+    CceAddr_msg cce_addr = 5;
+    CcLockType lock_type = 6;
+    // The response is an acknowledgement or the result
+    bool is_ack = 7;
 }
 
 message ReadOutsideRequest {
     uint32 node_group_id = 1;
-	bytes record = 2;
-	RecordStatusType rec_status = 3;
-	uint64 commit_ts = 4;
-	CceAddr_msg cce_addr = 5;
-	repeated VersionTxRecord_msg archives = 6;
+    bytes record = 2;
+    RecordStatusType rec_status = 3;
+    uint64 commit_ts = 4;
+    CceAddr_msg cce_addr = 5;
+    repeated VersionTxRecord_msg archives = 6;
 }
 
 message PostCommitRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg cce_addr = 3;
-	uint64 commit_ts = 4;
-	bytes record = 5;
-	uint32 operation_type = 6;
-	uint32 key_shard_code = 7;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    CceAddr_msg cce_addr = 3;
+    uint64 commit_ts = 4;
+    bytes record = 5;
+    uint32 operation_type = 6;
+    uint32 key_shard_code = 7;
 }
 
 message ForwardPostCommitRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	int64 node_group_term = 3;
-	bytes key = 4;
-	string table_name_str = 5;
-	CcTableType table_type = 6;
-	uint64 commit_ts = 7;
-	bytes record = 8;
-	uint32 operation_type = 9;
-	uint32 key_shard_code = 10;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    int64 node_group_term = 3;
+    bytes key = 4;
+    string table_name_str = 5;
+    CcTableType table_type = 6;
+    uint64 commit_ts = 7;
+    bytes record = 8;
+    uint32 operation_type = 9;
+    uint32 key_shard_code = 10;
 }
 
 message PostWriteAllRequest {
-	uint32 src_node_id = 1;
-	string table_name_str = 2;
-	CcTableType table_type = 3;
-	uint32 node_group_id = 4;
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
+    uint32 node_group_id = 4;
   oneof post_write_key
   {
-	  bytes key = 5;
+      bytes key = 5;
     bool neg_inf = 6;
     bool pos_inf = 7;
   }
-	uint64 commit_ts = 8;
-	bytes record = 9;
-	uint32 operation_type = 10;
-	CommitType commit_type = 11;
+    uint64 commit_ts = 8;
+    bytes record = 9;
+    uint32 operation_type = 10;
+    CommitType commit_type = 11;
 }
 
 message ScanTuple_msg {
-	bytes key = 1;
-	bytes record = 2;
-	RecordStatusType rec_status = 3;
-	uint64 key_ts = 4;
-	uint64 gap_ts = 5;
-	CceAddr_msg cce_addr = 6;
+    bytes key = 1;
+    bytes record = 2;
+    RecordStatusType rec_status = 3;
+    uint64 key_ts = 4;
+    uint64 gap_ts = 5;
+    CceAddr_msg cce_addr = 6;
 }
 
 message ScanOpenRequest {
-	uint32 src_node_id = 1;
-	uint32 shard_id = 2;
-	string table_name_str = 3;
-	CcTableType table_type = 4;
-	oneof start_key {
-		bytes key = 5;
-		bool neg_inf = 6;
-		bool pos_inf = 7;
-	}
-	bool inclusive = 8;
-	bool direction = 9;
-	uint64 ts = 10;
-	bool ckpt = 11;
-	IsolationType iso_level = 12;
-	CcProtocolType protocol = 13;
-	bool is_for_write = 14;
-	bool is_covering_keys = 15;
+    uint32 src_node_id = 1;
+    uint32 shard_id = 2;
+    string table_name_str = 3;
+    CcTableType table_type = 4;
+    oneof start_key {
+        bytes key = 5;
+        bool neg_inf = 6;
+        bool pos_inf = 7;
+    }
+    bool inclusive = 8;
+    bool direction = 9;
+    uint64 ts = 10;
+    bool ckpt = 11;
+    IsolationType iso_level = 12;
+    CcProtocolType protocol = 13;
+    bool is_for_write = 14;
+    bool is_covering_keys = 15;
 }
 
 message ScanCache_msg {
-	repeated ScanTuple_msg scan_tuple = 1;	
+    repeated ScanTuple_msg scan_tuple = 1;
 }
 
 message ScanOpenResponse {
-	int32 error_code = 1;
-	uint32 node_group_id = 2;
-	repeated ScanCache_msg scan_cache = 3;
+    int32 error_code = 1;
+    uint32 node_group_id = 2;
+    repeated ScanCache_msg scan_cache = 3;
 }
 
 message ScanNextRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg prior_cce_ptr = 3;
-	bool direction = 4;
-	uint64 ts = 5;
-	uint64 scan_cache_ptr = 6;
-	bool ckpt = 7;
-	IsolationType iso_level = 8;
-	CcProtocolType protocol = 9;
-	bool is_for_write = 10;
-	bool is_covering_keys = 11;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    CceAddr_msg prior_cce_ptr = 3;
+    bool direction = 4;
+    uint64 ts = 5;
+    uint64 scan_cache_ptr = 6;
+    bool ckpt = 7;
+    IsolationType iso_level = 8;
+    CcProtocolType protocol = 9;
+    bool is_for_write = 10;
+    bool is_covering_keys = 11;
 }
 
 message ScanNextResponse {
-	int32 error_code = 1;
-	ScanCache_msg scan_cache = 2;
-	uint64 scan_cache_ptr = 3;
+    int32 error_code = 1;
+    ScanCache_msg scan_cache = 2;
+    uint64 scan_cache_ptr = 3;
 }
 
 message ScanSliceRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	// The term of the node group the scan targets.
-	// -1, if the to-scan slice is the first in the remote node
-	// (and therefore its term is unknown).
-	int64 cc_ng_term = 3;
-	string table_name_str = 4;
-	CcTableType table_type = 5;
-	uint32 range_id = 6;
-	bytes start_key = 7;
-	bool start_inclusive = 9;
-	bytes end_key = 10;
-	bool end_inclusive = 11;
-	bool is_forward = 12;
-	uint64 ts = 13;
-	repeated uint64 prior_cce_vec = 14;
-	IsolationType iso_level = 15;
-	CcProtocolType protocol = 16;
-	bool is_for_write = 17;
-	bool is_covering_keys = 18;
-	uint32 prefetch_size = 19;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    // The term of the node group the scan targets.
+    // -1, if the to-scan slice is the first in the remote node
+    // (and therefore its term is unknown).
+    int64 cc_ng_term = 3;
+    string table_name_str = 4;
+    CcTableType table_type = 5;
+    uint32 range_id = 6;
+    bytes start_key = 7;
+    bool start_inclusive = 9;
+    bytes end_key = 10;
+    bool end_inclusive = 11;
+    bool is_forward = 12;
+    uint64 ts = 13;
+    repeated uint64 prior_cce_vec = 14;
+    IsolationType iso_level = 15;
+    CcProtocolType protocol = 16;
+    bool is_for_write = 17;
+    bool is_covering_keys = 18;
+    uint32 prefetch_size = 19;
 }
 
 message ScanSliceResponse {
-	uint64 tx_number = 1;
-	uint64 handler_addr = 2;
-	int64 tx_term = 3;
-	uint32 command_id=4;
-	int32 error_code = 5;
-	bytes tuple_cnt = 6;
-	bytes last_key = 7;
-	SlicePosition slice_position = 8;
-	bytes keys = 9;
-	bytes records = 10;
-	bytes rec_status = 11;
-	bytes key_ts = 12;
-	bytes gap_ts = 13;
-	bytes cce_ptr = 14;
-	bytes term = 15;
-	bytes key_start_offsets = 16;
-	bytes record_start_offsets = 17;
+    uint64 tx_number = 1;
+    uint64 handler_addr = 2;
+    int64 tx_term = 3;
+    uint32 command_id=4;
+    int32 error_code = 5;
+    bytes tuple_cnt = 6;
+    bytes last_key = 7;
+    SlicePosition slice_position = 8;
+    bytes keys = 9;
+    bytes records = 10;
+    bytes rec_status = 11;
+    bytes key_ts = 12;
+    bytes gap_ts = 13;
+    bytes cce_ptr = 14;
+    bytes term = 15;
+    bytes key_start_offsets = 16;
+    bytes record_start_offsets = 17;
 }
 
 message ReloadCacheRequest {
@@ -617,146 +617,191 @@ message AbortTransactionResponse {
 }
 
 message BlockedCcReqCheckRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	CceAddr_msg cce_addr = 3;
-	// CcHandlerResult template type
-	uint32 result_temp_type = 4;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    CceAddr_msg cce_addr = 3;
+    // CcHandlerResult template type
+    uint32 result_temp_type = 4;
 }
 
 message BlockedCcReqCheckResponse {
-	// To return the status of cc_request varified.
+    // To return the status of cc_request varified.
     // Value from AckStatus
-	int32 req_status = 1;
-	// CcHandlerResult template type
-	uint32 result_temp_type = 2;
+    int32 req_status = 1;
+    // CcHandlerResult template type
+    uint32 result_temp_type = 2;
 }
 
 message FlushDataAllRequest {
-	string table_name_str = 4;
-	CcTableType table_type = 5;
-	uint32 node_group_id = 6;
-	int64 node_group_term = 7;
-	uint64 data_sync_ts = 9;
-	bool is_dirty = 10;
+    string table_name_str = 4;
+    CcTableType table_type = 5;
+    uint32 node_group_id = 6;
+    int64 node_group_term = 7;
+    uint64 data_sync_ts = 9;
+    bool is_dirty = 10;
 }
 
 message FlushDataAllResponse {
-	int32 error_code = 1;
+    int32 error_code = 1;
 }
 
 message InitMigrationRequest {
-	message MigrateInfo {
-		uint32 bucket_id = 1;
-		uint32 new_owner = 2;
-	}
+    message MigrateInfo {
+        uint32 bucket_id = 1;
+        uint32 new_owner = 2;
+    }
 
-	uint64 tx_number = 1;
-	uint32 orig_owner = 2;
-	repeated MigrateInfo migrate_infos = 3;
+    uint64 tx_number = 1;
+    uint32 orig_owner = 2;
+    repeated MigrateInfo migrate_infos = 3;
 }
 
 message InitMigrationResponse {
-	bool success = 1;
+    bool success = 1;
 }
 
 message KickoutDataRequest {
-	uint32 src_node_id = 1;
-	uint32 node_group_id = 2;
-	string table_name_str = 3;
-	CcTableType table_type = 4;
-	uint64 ckpt_ts = 5;
-	CleanType clean_type = 6;
+    uint32 src_node_id = 1;
+    uint32 node_group_id = 2;
+    string table_name_str = 3;
+    CcTableType table_type = 4;
+    uint64 ckpt_ts = 5;
+    CleanType clean_type = 6;
 }
 
 message KickoutDataResponse {
-	int32 error_code = 1;
+    int32 error_code = 1;
+}
+
+message ApplyRequest {
+    uint32 src_node_id = 1;
+    string table_name_str = 2;
+    CcTableType table_type = 3;
+    bytes key = 4;
+    uint32 key_shard_code = 5;
+    bytes cmd = 6;
+    uint64 tx_ts = 7;
+    IsolationType iso_level = 8;
+    CcProtocolType protocol = 9;
+    bool apply_and_commit = 10;
+}
+
+message ApplyResponse {
+    int32 error_code = 1;
+    bytes cmd_result = 2;
+    RecordStatusType rec_status = 3;
+    uint64 commit_ts = 4;
+    uint64 last_vali_ts = 5;
+    CceAddr_msg cce_addr = 6;
+    CcLockType lock_type = 7;
+    bool cmd_success = 8;
+    // The response is an acknowledgement or the result
+    bool is_ack = 9;
+}
+
+message ApplyOutsideRequest {
+    uint32 node_group_id = 1;
+    bytes record = 2;
+    RecordStatusType rec_status = 3;
+    uint64 rec_ts = 4;
+    CceAddr_msg cce_addr = 5;
+    bytes cmd = 6;
+    uint64 tx_ts =7;
+    IsolationType iso_level = 8;
+    CcProtocolType protocol = 9;
+    bool apply_and_commit = 10;
 }
 
 message CcMessage {
-	enum MessageType {
-		AcquireRequest = 0;
-		AcquireResponse = 3;
-		ReadRequest = 4;
-		ReadResponse = 5;
-		ValidateRequest = 6;
-		ValidateResponse = 7;
-		PostprocessResponse = 8;
-		PostCommitRequest = 10;
-		ScanOpenRequest = 12;
-		ScanOpenResponse = 13;
-		ScanNextRequest = 14;
-		ScanNextResponse = 15;
-		ReadOutsideRequest = 17;
-		ScanSliceRequest = 18;
-		FaultInjectRequest = 26;
-		FaultInjectResponse = 27;
-		AcquireAllRequest = 28;
-		AcquireAllResponse = 29;
-		PostWriteAllRequest = 30;
-		CleanCcEntryForTestRequest = 32;
-		CleanCcEntryForTestResponse = 33;
-		RecoverStateCheckRequest = 34;
-		RecoverStateCheckResponse = 35;
-		BroadcastStatisticsRequest = 36;
-		DeadLockRequest = 37;
-		DeadLockResponse = 38;
-		AbortTransactionRequest = 39;
-		AbortTransactionResponse = 40;
-		BlockedCcReqCheckRequest = 41;
-    	BlockedCcReqCheckResponse = 42;
-		ForwardPostCommitRequest = 43;
+    enum MessageType {
+        AcquireRequest = 0;
+        AcquireResponse = 3;
+        ReadRequest = 4;
+        ReadResponse = 5;
+        ValidateRequest = 6;
+        ValidateResponse = 7;
+        PostprocessResponse = 8;
+        PostCommitRequest = 10;
+        ScanOpenRequest = 12;
+        ScanOpenResponse = 13;
+        ScanNextRequest = 14;
+        ScanNextResponse = 15;
+        ReadOutsideRequest = 17;
+        ScanSliceRequest = 18;
+        FaultInjectRequest = 26;
+        FaultInjectResponse = 27;
+        AcquireAllRequest = 28;
+        AcquireAllResponse = 29;
+        PostWriteAllRequest = 30;
+        CleanCcEntryForTestRequest = 32;
+        CleanCcEntryForTestResponse = 33;
+        RecoverStateCheckRequest = 34;
+        RecoverStateCheckResponse = 35;
+        BroadcastStatisticsRequest = 36;
+        DeadLockRequest = 37;
+        DeadLockResponse = 38;
+        AbortTransactionRequest = 39;
+        AbortTransactionResponse = 40;
+        BlockedCcReqCheckRequest = 41;
+        BlockedCcReqCheckResponse = 42;
+        ForwardPostCommitRequest = 43;
         AnalyzeTableAllRequest = 44;
         AnalyzeTableAllResponse = 45;
         KickoutDataRequest = 46;
         KickoutDataResponse = 47;
         ReloadCacheRequest = 48;
         ReloadCacheResponse = 49;
-	}
+        ApplyRequest = 50;
+        ApplyResponse = 51;
+        ApplyOutsideRequest = 52;
+    }
 
-	MessageType type = 1;
-	uint64 tx_number = 2;
-	uint64 handler_addr = 3;
-	int64 tx_term = 4;
-	uint32 command_id=5;
+    MessageType type = 1;
+    uint64 tx_number = 2;
+    uint64 handler_addr = 3;
+    int64 tx_term = 4;
+    uint32 command_id=5;
 
-	oneof content {
-		AcquireRequest acquire_req = 10;
-		AcquireResponse acquire_resp = 11;
-		ReadRequest read_req = 12;
-		ReadResponse read_resp = 13;
-		ValidateRequest validate_req = 14;
-		ValidateResponse validate_resp = 15;
-		PostprocessResponse post_resp = 16;
-		PostCommitRequest postcommit_req = 18;
-		ScanOpenRequest scan_open_req = 20;
-		ScanOpenResponse scan_open_resp = 21;
-		ScanNextRequest scan_next_req = 22;
-		ScanNextResponse scan_next_resp = 23;
-		ReadOutsideRequest read_outside_req = 25;
-		ScanSliceRequest scan_slice_req = 26;
-		FaultInjectRequest fault_inject_req = 34;
-		FaultInjectResponse fault_inject_resp= 35;
-		AcquireAllRequest acquire_all_req = 36;
-		AcquireAllResponse acquire_all_resp = 37;
-		PostWriteAllRequest post_write_all_req = 38;
-		CleanCcEntryForTestRequest clean_cc_entry_req = 40;
-		CleanCcEntryForTestResponse clean_cc_entry_resp= 41;
-		RecoverStateCheckRequest recover_state_check_req = 42;
-		RecoverStateCheckResponse recover_state_check_resp = 43;
-		BroadcastStatisticsRequest broadcast_statistics_req = 44;
-		DeadLockRequest dead_lock_request = 45;
-		DeadLockResponse dead_lock_response = 46;
-		AbortTransactionRequest abort_tran_req = 47;
-		AbortTransactionResponse abort_tran_resp = 48;
-		BlockedCcReqCheckRequest blocked_check_req = 49;
-		BlockedCcReqCheckResponse blocked_check_resp = 50;
-		ForwardPostCommitRequest forward_post_commit_req = 51;
+    oneof content {
+        AcquireRequest acquire_req = 10;
+        AcquireResponse acquire_resp = 11;
+        ReadRequest read_req = 12;
+        ReadResponse read_resp = 13;
+        ValidateRequest validate_req = 14;
+        ValidateResponse validate_resp = 15;
+        PostprocessResponse post_resp = 16;
+        PostCommitRequest postcommit_req = 18;
+        ScanOpenRequest scan_open_req = 20;
+        ScanOpenResponse scan_open_resp = 21;
+        ScanNextRequest scan_next_req = 22;
+        ScanNextResponse scan_next_resp = 23;
+        ReadOutsideRequest read_outside_req = 25;
+        ScanSliceRequest scan_slice_req = 26;
+        FaultInjectRequest fault_inject_req = 34;
+        FaultInjectResponse fault_inject_resp= 35;
+        AcquireAllRequest acquire_all_req = 36;
+        AcquireAllResponse acquire_all_resp = 37;
+        PostWriteAllRequest post_write_all_req = 38;
+        CleanCcEntryForTestRequest clean_cc_entry_req = 40;
+        CleanCcEntryForTestResponse clean_cc_entry_resp= 41;
+        RecoverStateCheckRequest recover_state_check_req = 42;
+        RecoverStateCheckResponse recover_state_check_resp = 43;
+        BroadcastStatisticsRequest broadcast_statistics_req = 44;
+        DeadLockRequest dead_lock_request = 45;
+        DeadLockResponse dead_lock_response = 46;
+        AbortTransactionRequest abort_tran_req = 47;
+        AbortTransactionResponse abort_tran_resp = 48;
+        BlockedCcReqCheckRequest blocked_check_req = 49;
+        BlockedCcReqCheckResponse blocked_check_resp = 50;
+        ForwardPostCommitRequest forward_post_commit_req = 51;
         AnalyzeTableAllRequest analyze_table_all_req = 52;
         AnalyzeTableAllResponse analyze_table_all_resp = 53;
         KickoutDataRequest kickout_data_req = 54;
         KickoutDataResponse kickout_data_resp = 55;
         ReloadCacheRequest reload_cache_req = 56;
         ReloadCacheResponse reload_cache_resp = 57;
-	}
+        ApplyRequest apply_cc_req = 58;
+        ApplyResponse apply_cc_resp = 59;
+        ApplyOutsideRequest apply_outside_req = 60;
+    }
 }

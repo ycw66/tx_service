@@ -435,6 +435,8 @@ public:
      * @param obj_cmd
      * @param txn
      * @param tx_term
+     * @param command_id the value of "TxExection::command_id_", it has nothing
+     * to do with "TxCommand".
      * @param tx_ts
      * @param hres
      * @param proto
@@ -447,6 +449,7 @@ public:
                                TxCommand &obj_cmd,
                                TxNumber txn,
                                int64_t tx_term,
+                               uint16_t command_id,
                                uint64_t tx_ts,
                                CcHandlerResult<ObjectCommandResult> &hres,
                                IsolationLevel iso_level,
@@ -476,6 +479,7 @@ public:
         TxCommand &obj_cmd,
         TxNumber txn,
         int64_t tx_term,
+        uint16_t command_id,
         uint64_t tx_ts,
         CcHandlerResult<ObjectCommandResult> &hres,
         IsolationLevel iso_level,

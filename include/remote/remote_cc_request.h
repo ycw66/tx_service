@@ -719,5 +719,56 @@ private:
     CcStreamSender *hd_{nullptr};
     CcHandlerResult<Void> cc_res_{nullptr};
 };
+
+struct RemoteApplyCc : public ApplyCc
+{
+public:
+    RemoteApplyCc();
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    void Acknowledge();
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+protected:
+    CcMessage output_msg_;
+    std::unique_ptr<CcMessage> input_msg_{nullptr};
+    CcStreamSender *hd_{nullptr};
+    TableName remote_table_name_{empty_sv, TableType::Primary};
+    CcHandlerResult<ObjectCommandResult> cc_res_{nullptr};
+};
+
+struct RemoteApplyOutside : public RemoteApplyCc
+{
+public:
+    // RemoteApplyOutside();
+    void Reset(std::unique_ptr<CcMessage> input_msg);
+    // void Acknowledge();
+    uint64_t handler_addr()
+    {
+        if (input_msg_)
+        {
+            return input_msg_->handler_addr();
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    const CcEntryAddr &CceAddr() const
+    {
+        return cc_res_.Value().cce_addr_;
+    }
+};
+
 }  // namespace remote
 }  // namespace txservice

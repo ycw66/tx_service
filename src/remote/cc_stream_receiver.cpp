@@ -38,6 +38,8 @@ thread_local CcRequestPool<RemoteBlockReqCheckCc> blocked_req_check_pool_;
 thread_local CcRequestPool<RemoteKickoutCcEntry> kickout_cc_entry_pool_;
 thread_local CcRequestPool<ProcessRemoteScanRespCc>
     process_remote_scan_resp_pool_;
+thread_local CcRequestPool<RemoteApplyCc> apply_pool_;
+thread_local CcRequestPool<RemoteApplyOutside> apply_outside_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -1574,6 +1576,104 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         // Recycle the cc message
+        msg_pool_.enqueue(std::move(msg));
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ApplyRequest:
+    {
+        RemoteApplyCc *apply = apply_pool_.NextRequest();
+        TX_TRACE_ASSOCIATE(msg.get(), apply);
+        apply->Reset(std::move(msg));
+        local_shards_.EnqueueCcRequest(apply->key_shard_code_, apply);
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ApplyOutsideRequest:
+    {
+        RemoteApplyOutside *apply_outside = apply_outside_pool_.NextRequest();
+
+        TX_TRACE_ASSOCIATE(msg.get(), apply_outside);
+        apply_outside->Reset(std::move(msg));
+
+        const CcEntryAddr &cce_addr = apply_outside->CceAddr();
+        local_shards_.EnqueueCcRequest(cce_addr.CoreId(), apply_outside);
+
+        break;
+    }
+    case CcMessage::MessageType::CcMessage_MessageType_ApplyResponse:
+    {
+        assert(msg->has_apply_cc_resp());
+
+        CcHandlerResult<ObjectCommandResult> *hd_res = nullptr;
+
+        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
+        int64_t tx_term = msg->tx_term();
+        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
+        {
+            // The tx node has failed. Pointer stability does not hold anymore.
+            msg_pool_.enqueue(std::move(msg));
+            break;
+        }
+        else
+        {
+            hd_res = reinterpret_cast<CcHandlerResult<ObjectCommandResult> *>(
+                msg->handler_addr());
+
+            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
+                hd_res->Txm()->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                break;
+            }
+        }
+
+        const ApplyResponse &apply_res = msg->apply_cc_resp();
+
+        if (apply_res.error_code() != 0)
+        {
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(apply_res.error_code()));
+        }
+        else
+        {
+            ObjectCommandResult &obj_cmd_result = hd_res->Value();
+
+            if (obj_cmd_result.cce_addr_.Term() < 0)
+            {
+                const CceAddr_msg &cce_addr_msg = apply_res.cce_addr();
+                obj_cmd_result.cce_addr_.SetCce(cce_addr_msg.cce_ptr(),
+                                                cce_addr_msg.term(),
+                                                cce_addr_msg.core_id());
+                // CC entry's shard Id has been set when the request was
+                // sent.
+            }
+
+            if (!apply_res.is_ack())
+            {
+                obj_cmd_result.rec_status_ =
+                    ToLocalType::ConvertRecordStatusType(
+                        apply_res.rec_status());
+
+                if (obj_cmd_result.cmd_result_ != nullptr &&
+                    apply_res.cmd_result().size() > 0)
+                {
+                    size_t offset = 0;
+                    obj_cmd_result.cmd_result_->Deserialize(
+                        apply_res.cmd_result().data(), offset);
+                    assert(offset == apply_res.cmd_result().size());
+                }
+
+                obj_cmd_result.commit_ts_ = apply_res.commit_ts();
+                obj_cmd_result.last_vali_ts_ = apply_res.last_vali_ts();
+                obj_cmd_result.lock_acquired_ =
+                    ToLocalType::ConvertLockType(apply_res.lock_type());
+                obj_cmd_result.cmd_success_ = apply_res.cmd_success();
+
+                hd_res->SetFinished();
+            }
+        }
         msg_pool_.enqueue(std::move(msg));
         break;
     }

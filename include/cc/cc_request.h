@@ -3935,7 +3935,6 @@ private:
     {
         const TxKey *key_{};
         TxCommand *cmd_{};
-        TxCommandResult *cmd_result_{};
     };
 
     struct RemoteTuple
@@ -3943,7 +3942,6 @@ private:
         const std::string *key_str_{};
         const std::string *cmd_str_{};
         std::unique_ptr<TxCommand> cmd_uptr_;
-        std::unique_ptr<TxCommandResult> cmd_result_uptr_;
     };
 
 public:
@@ -3951,16 +3949,25 @@ public:
     {
         local_input_.key_ = nullptr;
         local_input_.cmd_ = nullptr;
-        local_input_.cmd_result_ = nullptr;
     }
 
     ~ApplyCc() override
     {
         if (!is_local_)
         {
-            remote_input_.cmd_result_uptr_ = nullptr;
+            remote_input_.cmd_uptr_ = nullptr;
         }
     };
+
+    void Free() override
+    {
+        in_use_.store(false, std::memory_order_release);
+        if (!is_local_)
+        {
+            //  release uptrs on ApplyCc finish, instead of reuse
+            remote_input_.cmd_uptr_ = nullptr;
+        }
+    }
 
     bool ValidTermCheck() override
     {
@@ -4021,17 +4028,14 @@ public:
             proto,
             iso_level);
 
-        // TODO(zkl): release uptrs on ApplyCc finish, instead of reuse
         if (!is_local_)
         {
             remote_input_.cmd_uptr_ = nullptr;
-            remote_input_.cmd_result_uptr_ = nullptr;
         }
 
         is_local_ = true;
         local_input_.key_ = key;
         local_input_.cmd_ = cmd;
-        local_input_.cmd_result_ = cmd_result;
 
         key_shard_code_ = key_shard_code;
         tx_term_ = tx_term;
@@ -4064,7 +4068,9 @@ public:
                uint64_t tx_ts,
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
-               std::string *rec_str = nullptr,
+               IsolationLevel iso_level,
+               bool commit,
+               const std::string *rec_str = nullptr,
                uint64_t rec_ts = 0,
                ReadType read_type = ReadType::Inside)
     {
@@ -4075,17 +4081,14 @@ public:
             txn,
             proto);
 
-        // TODO(zkl): release uptrs on ApplyCc finish, instead of reuse
         if (!is_local_)
         {
             remote_input_.cmd_uptr_ = nullptr;
-            remote_input_.cmd_result_uptr_ = nullptr;
         }
 
         is_local_ = false;
         remote_input_.key_str_ = key_str;
         remote_input_.cmd_str_ = cmd_str;
-        remote_input_.cmd_result_uptr_ = nullptr;
 
         key_shard_code_ = key_shard_code;
         tx_term_ = tx_term;
@@ -4148,11 +4151,6 @@ public:
         return is_local_ ? nullptr : remote_input_.cmd_str_;
     }
 
-    TxCommandResult *CommandResultPtr() const
-    {
-        return is_local_ ? local_input_.cmd_result_ : nullptr;
-    }
-
     bool OwnCommand() const
     {
         return !is_local_ && remote_input_.cmd_uptr_ != nullptr;
@@ -4168,12 +4166,6 @@ public:
     {
         assert(!is_local_);
         return std::move(remote_input_.cmd_uptr_);
-    }
-
-    void SetCommandResult(std::unique_ptr<TxCommandResult> cmd_result)
-    {
-        assert(!is_local_);
-        remote_input_.cmd_result_uptr_ = std::move(cmd_result);
     }
 
     LruEntry *CcePtr() const
@@ -4221,7 +4213,7 @@ public:
 
     // for backfill
     std::shared_ptr<TxRecord> *rec_{nullptr};
-    std::string *rec_str_{nullptr};
+    const std::string *rec_str_{nullptr};
     uint64_t rec_commit_ts_{0};
     ReadType read_type_{ReadType::Inside};
 };

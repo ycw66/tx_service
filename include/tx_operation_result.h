@@ -470,7 +470,8 @@ struct ObjectCommandResult
         rec_status_ = RecordStatus::Unknown;
         lock_acquired_ = LockType::NoLock;
         cmd_success_ = false;
-        cmd_uptr_ = nullptr;
+        is_local_ = true;
+        cmd_result_ = nullptr;
     }
 
     // cce commit_ts, for validation?
@@ -486,8 +487,10 @@ struct ObjectCommandResult
     // be added into write set and written into log.
     bool cmd_success_{};
 
-    // for read-modify-write commands, complete command copies (including the
-    // command arguments) to be stored in write set and referenced by objects
-    std::unique_ptr<TxCommand> cmd_uptr_{};
+    // Whether the command operation executting on local node.
+    bool is_local_{true};
+
+    // Only used for remote request deserializes the received command result.
+    TxCommandResult *cmd_result_{nullptr};
 };
 }  // namespace txservice

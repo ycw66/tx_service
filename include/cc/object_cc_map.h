@@ -106,6 +106,27 @@ public:
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
 
+        // Should create command before calling req.IsReadOnly().
+        TxCommand *cmd = nullptr;
+        if (req.IsLocal())
+        {
+            cmd = req.CommandPtr();
+        }
+        else
+        {
+            if (req.OwnCommand())
+            {
+                cmd = req.remote_input_.cmd_uptr_.get();
+            }
+            else
+            {
+                std::unique_ptr<TxCommand> cmd_uptr =
+                    CreateTxCommand(*req.CommandImage());
+                cmd = cmd_uptr.get();
+                req.SetCommand(std::move(cmd_uptr));
+            }
+        }
+
         CcOperation cc_op =
             req.IsReadOnly() ? CcOperation::Read : CcOperation::Write;
 
@@ -223,26 +244,6 @@ public:
 
                             if (cce == nullptr)
                             {
-                                std::unique_ptr<TxCommand> cmd_uptr = nullptr;
-                                TxCommand *cmd = nullptr;
-                                if (req.IsLocal())
-                                {
-                                    cmd = req.CommandPtr();
-                                }
-                                else
-                                {
-                                    if (req.OwnCommand())
-                                    {
-                                        cmd_uptr = req.ReleaseCommand();
-                                    }
-                                    else
-                                    {
-                                        cmd_uptr = CreateTxCommand(
-                                            *req.CommandImage());
-                                    }
-                                    cmd = cmd_uptr.get();
-                                }
-
                                 bool proceed =
                                     cmd->ProceedOnNonExistentObject();
                                 if (!proceed)
@@ -421,26 +422,6 @@ public:
         // Lock acquired, set the result.
         LOG(INFO) << "acquired lock: " << int(acquired_lock);
         obj_result.lock_acquired_ = acquired_lock;
-
-        std::unique_ptr<TxCommand> cmd_uptr = nullptr;
-        TxCommand *cmd = nullptr;
-
-        if (req.IsLocal())
-        {
-            cmd = req.CommandPtr();
-        }
-        else
-        {
-            if (req.OwnCommand())
-            {
-                cmd_uptr = req.ReleaseCommand();
-            }
-            else
-            {
-                cmd_uptr = CreateTxCommand(*req.CommandImage());
-            }
-            cmd = cmd_uptr.get();
-        }
 
         if (cce->payload_status_ == RecordStatus::Unknown)
         {

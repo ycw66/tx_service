@@ -5160,18 +5160,20 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         assert(obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideDeleted ||
                obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideNormal);
         // backfill
-        cc_handler_->ObjectCommandOutside(cache_miss_read_cce_addr_,
-                                          *obj_cmd_op.command_,
-                                          TxNumber(),
-                                          tx_term_,
-                                          current_ts,
-                                          hd_res,
-                                          iso_level_,
-                                          protocol_,
-                                          commit,
-                                          obj_cmd_op.cmd_tx_req_->rec_,
-                                          obj_cmd_op.cmd_tx_req_->version_,
-                                          obj_cmd_op.cmd_tx_req_->read_type_);
+        cc_handler_->ObjectCommandOutside(
+            cache_miss_read_cce_addr_,
+            *obj_cmd_op.command_,
+            TxNumber(),
+            tx_term_,
+            command_id_.load(std::memory_order_relaxed),
+            current_ts,
+            hd_res,
+            iso_level_,
+            protocol_,
+            commit,
+            obj_cmd_op.cmd_tx_req_->rec_,
+            obj_cmd_op.cmd_tx_req_->version_,
+            obj_cmd_op.cmd_tx_req_->read_type_);
     }
     else
     {
@@ -5183,6 +5185,7 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                    *obj_cmd_op.command_,
                                    TxNumber(),
                                    tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
                                    current_ts,
                                    hd_res,
                                    iso_level_,
@@ -5363,6 +5366,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                 *obj_cmd_op.vct_cmd_->at(refill_rec.pos_),
                 TxNumber(),
                 tx_term_,
+                command_id_.load(std::memory_order_relaxed),
                 current_ts,
                 hd_res,
                 iso_level_,
@@ -5390,17 +5394,19 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 #endif
 
             hd_res.Reset();
-            cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
-                                       key,
-                                       key_shard_code,
-                                       *obj_cmd_op.vct_cmd_->at(i),
-                                       TxNumber(),
-                                       tx_term_,
-                                       current_ts,
-                                       hd_res,
-                                       iso_level_,
-                                       protocol_,
-                                       commit);
+            cc_handler_->ObjectCommand(
+                *obj_cmd_op.table_name_,
+                key,
+                key_shard_code,
+                *obj_cmd_op.vct_cmd_->at(i),
+                TxNumber(),
+                tx_term_,
+                command_id_.load(std::memory_order_relaxed),
+                current_ts,
+                hd_res,
+                iso_level_,
+                protocol_,
+                commit);
         }
     }
 

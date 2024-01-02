@@ -1687,3 +1687,186 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
 }
+
+txservice::remote::RemoteApplyCc::RemoteApplyCc()
+{
+    res_ = &cc_res_;
+
+    output_msg_.set_type(
+        CcMessage::MessageType::CcMessage_MessageType_ApplyResponse);
+
+    cc_res_.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
+    {
+        output_msg_.set_tx_number(input_msg_->tx_number());
+        output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_tx_term(input_msg_->tx_term());
+        output_msg_.set_command_id(input_msg_->command_id());
+
+        const ObjectCommandResult &apply_result = res->Value();
+        ApplyResponse *resp = output_msg_.mutable_apply_cc_resp();
+        resp->set_is_ack(false);
+        resp->set_error_code(
+            ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+
+        if (!res->IsError())
+        {
+            resp->set_commit_ts(apply_result.commit_ts_);
+            resp->set_last_vali_ts(apply_result.last_vali_ts_);
+
+            CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
+            cce_addr_msg->set_cce_ptr(apply_result.cce_addr_.CcePtr());
+            cce_addr_msg->set_term(apply_result.cce_addr_.Term());
+            cce_addr_msg->set_core_id(apply_result.cce_addr_.CoreId());
+
+            resp->set_rec_status(
+                ToRemoteType::ConvertRecordStatus(apply_result.rec_status_));
+            resp->set_lock_type(
+                ToRemoteType::ConvertLockType(apply_result.lock_acquired_));
+            resp->set_cmd_success(apply_result.cmd_success_);
+
+            assert(!is_local_);
+            std::string *cmd_res_str = resp->mutable_cmd_result();
+            assert(remote_input_.cmd_uptr_ != nullptr);
+            if (remote_input_.cmd_uptr_->GetResult() != nullptr)
+            {
+                remote_input_.cmd_uptr_->GetResult()->Serialize(*cmd_res_str);
+            }
+        }
+
+        const ApplyRequest &req = input_msg_->apply_cc_req();
+        hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+        hd_->RecycleCcMsg(std::move(input_msg_));
+    };
+}
+
+void txservice::remote::RemoteApplyCc::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_apply_cc_req());
+
+    cc_res_.Reset();
+    cc_res_.Value().Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_apply_cc_resp();
+
+    const ApplyRequest &req = input_msg->apply_cc_req();
+    std::string_view table_name_sv{req.table_name_str()};
+    remote_table_name_ = TableName(
+        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+
+    cc_res_.Value().cce_addr_.SetCce(0, -1, req.key_shard_code() >> 10, 0);
+
+    ApplyResponse *resp = output_msg_.mutable_apply_cc_resp();
+    resp->clear_cmd_result();
+    ApplyCc::Reset(&remote_table_name_,
+                   &req.key(),
+                   req.key_shard_code(),
+                   &req.cmd(),
+                   input_msg->tx_number(),
+                   input_msg->tx_term(),
+                   req.tx_ts(),
+                   &cc_res_,
+                   ToLocalType::ConvertProtocol(req.protocol()),
+                   ToLocalType::ConvertIsolation(req.iso_level()),
+                   req.apply_and_commit());
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}
+
+void txservice::remote::RemoteApplyCc::Acknowledge()
+{
+    output_msg_.set_tx_number(input_msg_->tx_number());
+    output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_tx_term(input_msg_->tx_term());
+    output_msg_.set_command_id(input_msg_->command_id());
+
+    ApplyResponse *apply_resp = output_msg_.mutable_apply_cc_resp();
+    apply_resp->set_is_ack(true);
+    apply_resp->set_error_code(
+        ToRemoteType::ConvertCcErrorCode(CcErrorCode::NO_ERROR));
+
+    CceAddr_msg *resp_addr = apply_resp->mutable_cce_addr();
+    const CcEntryAddr &addr = cc_res_.Value().cce_addr_;
+    assert(addr.CcePtr() != 0 || addr.InsertPtr() != 0);
+    if (addr.CcePtr() != 0)
+    {
+        resp_addr->set_cce_ptr(addr.CcePtr());
+    }
+    else
+    {
+        resp_addr->set_insert_ptr(addr.InsertPtr());
+    }
+    resp_addr->set_term(addr.Term());
+    resp_addr->set_core_id(addr.CoreId());
+
+    const ApplyRequest &req = input_msg_->apply_cc_req();
+    hd_->SendMessageToNode(req.src_node_id(), output_msg_);
+}
+
+void txservice::remote::RemoteApplyOutside::Reset(
+    std::unique_ptr<CcMessage> input_msg)
+{
+    assert(input_msg->has_apply_outside_req());
+
+    cc_res_.Reset();
+    cc_res_.Value().Reset();
+
+    output_msg_.clear_tx_number();
+    output_msg_.clear_handler_addr();
+    output_msg_.clear_apply_cc_resp();
+
+    const ApplyOutsideRequest &req = input_msg->apply_outside_req();
+
+    assert(req.cce_addr().cce_ptr() != 0);
+    cc_res_.Value().cce_addr_.SetCce(req.cce_addr().cce_ptr(),
+                                     req.cce_addr().term(),
+                                     req.node_group_id(),
+                                     req.cce_addr().core_id());
+
+    auto rec_status = ToLocalType::ConvertRecordStatusType(req.rec_status());
+    ReadType read_type;
+    if (rec_status == RecordStatus::Normal)
+    {
+        read_type = ReadType::OutsideNormal;
+    }
+    else if (rec_status == RecordStatus::Deleted)
+    {
+        read_type = ReadType::OutsideDeleted;
+    }
+    else
+    {
+        assert(false);
+    }
+
+    ApplyResponse *resp = output_msg_.mutable_apply_cc_resp();
+    resp->clear_cmd_result();
+
+    ApplyCc::Reset(nullptr,
+                   nullptr,
+                   req.node_group_id() << 10,
+                   &req.cmd(),
+                   input_msg->tx_number(),
+                   input_msg->tx_term(),
+                   req.tx_ts(),
+                   &cc_res_,
+                   ToLocalType::ConvertProtocol(req.protocol()),
+                   ToLocalType::ConvertIsolation(req.iso_level()),
+                   req.apply_and_commit(),
+                   &req.record(),
+                   req.rec_ts(),
+                   read_type);
+
+    input_msg_ = std::move(input_msg);
+
+    if (hd_ == nullptr)
+    {
+        hd_ = Sharder::Instance().GetCcStreamSender();
+    }
+}

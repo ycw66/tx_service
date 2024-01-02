@@ -5042,6 +5042,47 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
+    else if (txm->IsTimeOut() && !hd_result_.Value().is_local_)
+    {
+        if (cce_addr.Term() < 0)
+        {
+            TX_TRACE_ACTION_WITH_CONTEXT(
+                this,
+                "Forward.Term<0.IsTimeout",
+                txm,
+                (
+                    [txm]() -> std::string
+                    {
+                        return std::string(",\"tx_number\":")
+                            .append(std::to_string(txm->TxNumber()))
+                            .append(",\"term\":")
+                            .append(std::to_string(txm->TxTerm()));
+                    }));
+            // For non-blocking concurrency control protocols, the object
+            // command is expected to return instantly. For 2PL, if the request
+            // is blocked, the cc node will send an acknowledgement to update
+            // the key's term. In either case, if the object's term is not set,
+            // the tx has not received any response or acknowledgement from the
+            // key's cc node group. The request is forced to be errored upon
+            // timeout.
+
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
+        }
+        else if (cce_addr.Term() > 0)
+        {
+            txm->cc_handler_->BlockCcReqCheck(
+                txm->TxNumber(),
+                txm->TxTerm(),
+                txm->CommandId(),
+                cce_addr,
+                &hd_result_,
+                ResultTemplateType::ReadKeyResult);
+        }
+    }
 }
 
 MultiObjectCommandOp::MultiObjectCommandOp(
