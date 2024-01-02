@@ -6722,7 +6722,9 @@ protected:
 
         bool is_emplace = false;
         std::vector<KeyT> new_keys;
+        std::vector<size_t> new_key_item_idxs;
         new_keys.reserve(CcPage<KeyT, ValueT>::split_threshold_);
+        new_key_item_idxs.reserve(CcPage<KeyT, ValueT>::split_threshold_);
         std::vector<size_t> entry_indexs;
 
         for (size_t item_idx = first_index; item_idx < end_idx;)
@@ -6738,7 +6740,6 @@ protected:
                 assert(idx_in_page < target_page->Size());
 
                 is_emplace = false;
-
                 update_cc_entry(slice_items[item_idx],
                                 target_page->Entry(idx_in_page));
             }
@@ -6754,11 +6755,11 @@ protected:
                             new_keys, shard_->mem_usage_, entry_indexs);
 
                         assert(new_keys.size() == entry_indexs.size());
+                        assert(new_key_item_idxs.size() == entry_indexs.size());
 
                         for (size_t i = 0; i < entry_indexs.size(); ++i)
                         {
-                            size_t slice_item_index =
-                                item_idx - new_keys.size() + i;
+                            size_t slice_item_index = new_key_item_idxs[i];
                             update_cc_entry(
                                 slice_items[slice_item_index],
                                 target_page->Entry(entry_indexs[i]));
@@ -6767,6 +6768,7 @@ protected:
                         TryUpdatePageKey(target_iter);
 
                         new_keys.clear();
+                        new_key_item_idxs.clear();
                     }
 
                     // Move to next page
@@ -6797,11 +6799,11 @@ protected:
                             new_keys, shard_->mem_usage_, entry_indexs);
 
                         assert(new_keys.size() == entry_indexs.size());
+                        assert(new_key_item_idxs.size() == entry_indexs.size());
 
                         for (size_t i = 0; i < entry_indexs.size(); ++i)
                         {
-                            size_t slice_item_index =
-                                item_idx - new_keys.size() + i;
+                            size_t slice_item_index = new_key_item_idxs[i];
                             update_cc_entry(
                                 slice_items[slice_item_index],
                                 target_page->Entry(entry_indexs[i]));
@@ -6810,6 +6812,7 @@ protected:
                         TryUpdatePageKey(target_iter);
 
                         new_keys.clear();
+                        new_key_item_idxs.clear();
 
                         assert(target_page->Full());
                     }
@@ -6818,6 +6821,7 @@ protected:
                 if (target_page->Full() && target_page->LastKey() < *target_key)
                 {
                     assert(new_keys.empty());
+                    assert(new_key_item_idxs.empty());
 
                     // target page is full, choose the next page if `key` can be
                     // inserted into next page
@@ -6839,6 +6843,7 @@ protected:
                 if (target_page->Full())
                 {
                     assert(new_keys.empty());
+                    assert(new_key_item_idxs.empty());
 
                     // split this page
                     std::vector<KeyT> new_page_keys;
@@ -6882,6 +6887,7 @@ protected:
                 // We will insert these keys into the page later. This is to
                 // avoid frequent moving of data during insertion
                 new_keys.emplace_back(*target_key);
+                new_key_item_idxs.emplace_back(item_idx);
 
                 is_emplace = true;
             }
@@ -6896,10 +6902,11 @@ protected:
                 new_keys, shard_->mem_usage_, entry_indexs);
 
             assert(new_keys.size() == entry_indexs.size());
+            assert(new_key_item_idxs.size() == entry_indexs.size());
 
             for (size_t i = 0; i < entry_indexs.size(); ++i)
             {
-                size_t slice_item_index = end_idx - new_keys.size() + i;
+                size_t slice_item_index = new_key_item_idxs[i];
                 update_cc_entry(slice_items[slice_item_index],
                                 target_page->Entry(entry_indexs[i]));
             }
@@ -6907,6 +6914,7 @@ protected:
             TryUpdatePageKey(target_iter);
 
             new_keys.clear();
+            new_key_item_idxs.clear();
         }
 
         size_ += (end_idx - first_index);
