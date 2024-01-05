@@ -212,7 +212,7 @@ private:
     std::mutex mux_;
 };
 
-#if !defined(DBUG_OFF) && !defined(_lint)
+#ifdef WITH_FAULT_INJECT
 #define ACTION_FAULT_INJECTOR(FaultName) \
     FaultInject::Instance().TriggerAction(FaultName)
 #define CODE_FAULT_INJECTOR(FaultName, code)               \
