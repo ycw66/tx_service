@@ -391,7 +391,8 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
-    if (rw_set_.WriteSetSize() == 0 && rw_set_.ReadSetSize() == 0)
+    if (rw_set_.WriteSetSize() == 0 && rw_set_.ObjectCommandSize() == 0 &&
+        rw_set_.ReadSetSize() == 0)
     {
         commit_tx_req_->Reset();
         commit_tx_req_->to_commit_ = commit_req.to_commit_;
@@ -403,7 +404,13 @@ bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
     }
     else
     {
-        Execute(&commit_req);
+        int err = Execute(&commit_req);
+        if (err != 0)
+        {
+            commit_req.SetError(
+                TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX);
+            return false;
+        }
         commit_req.Wait();
         bool success = commit_req.Result();
         return success;

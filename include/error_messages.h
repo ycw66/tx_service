@@ -56,7 +56,10 @@ enum struct TxErrorCode
     ACQUIRE_LEADER_TERM_FAIL,
 
     //-- NotifyStartMigrationOp
-    DUPLICATE_MIGRATION_TX_ERROR
+    DUPLICATE_MIGRATION_TX_ERROR,
+
+    // Execute TxRequest on a committed/aborted txn
+    TX_REQUEST_TO_COMMITTED_ABORTED_TX
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -97,7 +100,9 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL,
      "The checkpoint error due to pin range slice failed."},
     {TxErrorCode::GET_RANGE_ID_ERROR, "Acquire range read lock failed."},
-    {TxErrorCode::ACQUIRE_LEADER_TERM_FAIL, "Acquire leader term failed."}};
+    {TxErrorCode::ACQUIRE_LEADER_TERM_FAIL, "Acquire leader term failed."},
+    {TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX,
+     "Execute TxRequest failed, transaction has committed/aborted"}};
 
 enum struct CcErrorCode
 {
