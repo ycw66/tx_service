@@ -290,7 +290,7 @@ void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
                        txservice::SlicePosition::LastSliceInRange);
 
             while (scan_end != nullptr && shard_cache->Size() > 0 &&
-                   *scan_end <= *shard_cache->LastTuple()->Key())
+                   *scan_end < *shard_cache->LastTuple()->Key())
             {
                 shard_cache->RemoveLast();
             }

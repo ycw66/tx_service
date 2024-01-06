@@ -174,13 +174,8 @@ struct RemoteScanCache
 struct RemoteScanSliceCache
 {
     RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0), shard_cnt_(shard_cnt)
+        : cache_mem_size_(0), shard_cnt_(shard_cnt), trailing_cnt_(0)
     {
-    }
-
-    size_t Size() const
-    {
-        return rec_status_.size();
     }
 
     bool IsFull() const
@@ -198,7 +193,23 @@ struct RemoteScanSliceCache
         keys_.clear();
         records_.clear();
         cache_mem_size_ = 0;
+        trailing_cnt_ = 0;
         shard_cnt_ = shard_cnt;
+    }
+
+    void RemoveLast()
+    {
+        trailing_cnt_++;
+    }
+
+    uint64_t LastCce()
+    {
+        return cce_ptr_.at(cce_ptr_.size() - 1 - trailing_cnt_);
+    }
+
+    size_t Size() const
+    {
+        return cce_ptr_.size() - trailing_cnt_;
     }
 
     std::vector<uint64_t> key_ts_;
@@ -210,6 +221,7 @@ struct RemoteScanSliceCache
     std::string records_;
     uint32_t cache_mem_size_;
     uint16_t shard_cnt_;
+    size_t trailing_cnt_;
 };
 
 struct RangeScanSliceResult

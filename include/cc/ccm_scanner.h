@@ -85,6 +85,7 @@ public:
         idx_ = 0;
         size_ = 0;
         mem_size_ = 0;
+        trailing_cnt_ = 0;
     }
 
     void Rewind()
@@ -126,13 +127,17 @@ public:
     {
         assert(size_ > 0);
         --size_;
+        trailing_cnt_++;
     }
+
+    virtual void TrailingTuples(std::vector<const ScanTuple *> &tuple_buf) = 0;
 
 protected:
     size_t idx_;
     size_t size_;
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
+    size_t trailing_cnt_{0};
 };
 
 template <typename KeyT, typename ValueT>
@@ -256,6 +261,14 @@ public:
     {
         assert(idx < cache_.size());
         return &cache_[idx];
+    }
+
+    void TrailingTuples(std::vector<const ScanTuple *> &tuple_buf) override
+    {
+        for (size_t idx = size_; idx < size_ + trailing_cnt_; idx++)
+        {
+            tuple_buf.push_back(At(idx));
+        }
     }
 
 private:

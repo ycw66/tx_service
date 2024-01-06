@@ -440,18 +440,10 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
         pins_.fetch_sub(1, std::memory_order_release);
     }
 
-    // The slice is unpinned. If the checkpointer has requested to alter the
-    // slice, wakes up the checkpointer.
+    // The slice is unpinned. If the update slice spec worker has requested to
+    // alter the slice, wakes up the worker thread.
     if (slice->pins_ == 1 && slice->to_alter_)
     {
-        // Unlocks the slice before locking the range. This is because all
-        // locking operations follow the range-slice order to avoid deadlocks.
-        // Since there is a gap between releasing the slice lock and locking the
-        // range, someone else may jump in and lock the slice. However, the
-        // jumping-in tx won't be able to pin the slice, because the
-        // checkpionter has marked the slice to be altered.
-        slice_lk.unlock();
-        std::unique_lock<std::shared_mutex> range_lk(mux_);
         // Wake up all waiting threads since there could be multiple slices
         // waiting on the same range wait_cv_.
         wait_cv_.notify_all();

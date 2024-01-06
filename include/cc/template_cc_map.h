@@ -26,6 +26,7 @@
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
 #include "remote/remote_type.h"
+#include "scan.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "table_statistics.h"
@@ -3551,10 +3552,10 @@ public:
             }
             else
             {
-                if (!remote_scan_cache->cce_ptr_.empty())
+                if (remote_scan_cache->Size() > 0)
                 {
                     return reinterpret_cast<CcEntry<KeyT, ValueT> *>(
-                        remote_scan_cache->cce_ptr_.back());
+                        remote_scan_cache->LastCce());
                 }
                 else
                 {
@@ -3844,6 +3845,14 @@ public:
                                     is_locked);
                 }
             }
+            if (req.Direction() == ScanDirection::Forward)
+            {
+                scan_ccm_it++;
+            }
+            else
+            {
+                scan_ccm_it--;
+            }
         }
         else
         {
@@ -3853,49 +3862,25 @@ public:
                     : BackwardScanStart(*req_start_key, req.StartInclusive());
 
             scan_ccm_it = start_pair.first;
-            ScanType scan_type = start_pair.second;
             cce_key = scan_ccm_it->first;
             cce = scan_ccm_it->second;
-
-            // Adds the first tuple pointed by the iterator. If the request
-            // specifies the end key, checks if the first tuple is within the
-            // boundary specified by the end key.
-            bool within_boundary;
-            if (req_end_key == nullptr)
+            if (start_pair.second == ScanType::ScanGap)
             {
-                within_boundary = true;
-            }
-            else
-            {
-                within_boundary =
-                    (req.Direction() == ScanDirection::Forward &&
-                     *scan_ccm_it->first < *req_end_key) ||
-                    (req.Direction() == ScanDirection::Backward &&
-                     *req_end_key < *scan_ccm_it->first) ||
-                    (req.EndInclusive() && *req_end_key == *scan_ccm_it->first);
-            }
-
-            if (scan_type != ScanType::ScanGap && within_boundary)
-            {
-                ScanReturnType ret_type =
-                    scan_tuple_func(cce_key, cce, scan_type);
-
-                switch (ret_type)
+                if (req.Direction() == ScanDirection::Forward)
                 {
-                case ScanReturnType::Blocked:
-                    return false;
-                case ScanReturnType::Error:
-                    return true;
-                default:
-                    break;
+                    scan_ccm_it++;
+                }
+                else
+                {
+                    scan_ccm_it--;
                 }
             }
         }
 
         RangeScanSliceResult &slice_result = hd_res->Value();
+        auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
         if (req.Direction() == ScanDirection::Forward)
         {
-            ++scan_ccm_it;
             const StoreSlice *last_slice = req.LastPinnedSlice();
 
             // The scan at core 0 sets the scan's end key. By default, the
@@ -3947,7 +3932,6 @@ public:
                 return {end, inclusive};
             };
 
-            auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
             if (!end_finalized)
             {
                 // This scan batch's end key has not been set. Takes the smaller
@@ -3988,10 +3972,6 @@ public:
                                     req_end_key,
                                     req.EndInclusive());
             }
-
-            // Iterator pos_inf_it = End();
-            // cce_key = scan_ccm_it->first;
-            // cce = scan_ccm_it->second;
 
             auto scan_loop_func = [&, this](
                                       const KeyT *end_key,
@@ -4126,27 +4106,44 @@ public:
                                         req.EndInclusive());
                     size_t trailing_cnt = 0;
 
-                    if (req.IsLocal())
+                    // Excludes keys from the scan cache greater than the
+                    // batch's end.
+                    while ((req.IsLocal() && scan_cache->Size() > 0) ||
+                           (!req.IsLocal() && remote_scan_cache->Size() > 0))
                     {
-                        // Excludes keys from the scan cache greater than the
-                        // batch's end. Exclusion is only done when the scan
-                        // request comes from the local node. For remote
-                        // requests, since scan results are serialized into the
-                        // scan cache, exclusion is done at the request sending
-                        // node when the scan results are de-serialized.
-                        while (scan_cache->Size() > 0)
+                        const KeyT *last_key = nullptr;
+                        if (req.IsLocal())
                         {
-                            const KeyT &last_key = scan_cache->Last()->KeyObj();
-                            if (*end_key < last_key ||
-                                (*end_key == last_key && !end_inclusive))
+                            last_key = &scan_cache->Last()->KeyObj();
+                        }
+                        else
+                        {
+                            // Cc entry pointers here are always valid since
+                            // the slices are still pinned so the cce cannot
+                            // be kicked from memory regardless of the lock
+                            // type.
+                            CcEntry<KeyT, ValueT> *last_remote_cce =
+                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                                    remote_scan_cache->LastCce());
+                            last_key = static_cast<const KeyT *>(
+                                last_remote_cce->Key());
+                        }
+                        if (*end_key < *last_key ||
+                            (*end_key == *last_key && !end_inclusive))
+                        {
+                            ++trailing_cnt;
+                            if (req.IsLocal())
                             {
-                                ++trailing_cnt;
                                 scan_cache->RemoveLast();
                             }
                             else
                             {
-                                break;
+                                remote_scan_cache->RemoveLast();
                             }
+                        }
+                        else
+                        {
+                            break;
                         }
                     }
 
@@ -4174,7 +4171,6 @@ public:
         }
         else
         {
-            --scan_ccm_it;
             const StoreSlice *last_slice = req.LastPinnedSlice();
 
             const KeyT *initial_end = nullptr;
@@ -4214,7 +4210,6 @@ public:
                 return {end, inclusive};
             };
 
-            auto [final_end_key, end_finalized] = slice_result.PeekLastKey();
             if (!end_finalized)
             {
                 const KeyT *slice_begin =
@@ -4246,10 +4241,6 @@ public:
                                     req.EndInclusive());
             }
 
-            // Iterator neg_inf_it = Begin();
-            // cce_key = scan_ccm_it->first;
-            // cce = scan_ccm_it->second;
-
             auto scan_loop_func = [&, this](
                                       const KeyT *end_key,
                                       bool inclusive,
@@ -4270,9 +4261,6 @@ public:
                        (*end_key < *cce_key ||
                         (inclusive && *end_key == *cce_key)))
                 {
-                    // req.SetCcePtr(cce, core_id);
-                    // req.SetCceScanType(ScanType::ScanBoth, core_id);
-
                     ScanReturnType scan_ret =
                         scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
 
@@ -4387,27 +4375,44 @@ public:
                                         req.EndInclusive());
                     size_t trailing_cnt = 0;
 
-                    if (req.IsLocal())
+                    // Excludes keys from the scan cache smaller than the
+                    // batch's end.
+                    while ((req.IsLocal() && scan_cache->Size() > 0) ||
+                           (!req.IsLocal() && remote_scan_cache->Size() > 0))
                     {
-                        // Excludes keys from the scan cache smaller than the
-                        // batch's end. Exclusion is only done when the scan
-                        // request comes from the local node. For remote
-                        // requests, since scan results are serialized into the
-                        // scan cache, exclusion is done at the request sending
-                        // node when the scan results are de-serialized.
-                        while (scan_cache->Size() > 0)
+                        const KeyT *last_key = nullptr;
+                        if (req.IsLocal())
                         {
-                            const KeyT &last_key = scan_cache->Last()->KeyObj();
-                            if (last_key < *end_key ||
-                                (last_key == *end_key && !end_inclusive))
+                            last_key = &scan_cache->Last()->KeyObj();
+                        }
+                        else
+                        {
+                            // Cc entry pointers here are always valid since
+                            // the slices are still pinned so the cce cannot
+                            // be kicked from memory regardless of the lock
+                            // type.
+                            CcEntry<KeyT, ValueT> *last_remote_cce =
+                                reinterpret_cast<CcEntry<KeyT, ValueT> *>(
+                                    remote_scan_cache->LastCce());
+                            last_key = static_cast<const KeyT *>(
+                                last_remote_cce->Key());
+                        }
+                        if (*last_key < *end_key ||
+                            (*last_key == *end_key && !end_inclusive))
+                        {
+                            ++trailing_cnt;
+                            if (req.IsLocal())
                             {
-                                ++trailing_cnt;
                                 scan_cache->RemoveLast();
                             }
                             else
                             {
-                                break;
+                                remote_scan_cache->RemoveLast();
                             }
+                        }
+                        else
+                        {
+                            break;
                         }
                     }
 

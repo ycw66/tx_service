@@ -1047,7 +1047,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.iso_level_,
                             scanner.protocol_,
                             scanner.is_for_write_,
-                            scanner.is_ckpt_delta_);
+                            scanner.is_ckpt_delta_,
+                            scanner.is_covering_keys_);
     }
 }
 

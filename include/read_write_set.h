@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cc_entry.h"
 #include "read_write_entry.h"
 
 namespace txservice
@@ -236,6 +237,27 @@ public:
             }
 
             return read_ts;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+
+    uint16_t GetReadCnt(const TableName &tbl_name, const CcEntryAddr &cce_addr)
+    {
+        auto tbl_it = rset_.find(tbl_name);
+        if (tbl_it == rset_.end())
+        {
+            return 0;
+        }
+
+        std::unordered_map<CcEntryAddr, ReadSetEntry> &tbl_read_set =
+            tbl_it->second;
+        auto cce_it = tbl_read_set.find(cce_addr);
+        if (cce_it != tbl_read_set.end())
+        {
+            return cce_it->second.read_cnt_;
         }
         else
         {
