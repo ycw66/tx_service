@@ -123,7 +123,8 @@ public:
                   uint64_t gap_ts,
                   uint64_t commit_ts,
                   const CcEntryAddr &ccentry_addr,
-                  CcHandlerResult<PostProcessResult> &hres) override;
+                  CcHandlerResult<PostProcessResult> &hres,
+                  bool is_local = false) override;
 
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's

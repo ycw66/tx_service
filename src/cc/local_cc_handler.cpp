@@ -351,12 +351,13 @@ void txservice::LocalCcHandler::PostRead(
     uint64_t gap_ts,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    bool is_local)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
 
-    if (dest_node_id == cc_shards_.node_id_)
+    if (dest_node_id == cc_shards_.node_id_ || is_local)
     {
         if (!Sharder::Instance().CheckLeaderTerm(ng_id, cce_addr.Term()))
         {

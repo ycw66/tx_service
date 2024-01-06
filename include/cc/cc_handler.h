@@ -185,7 +185,8 @@ public:
                           uint64_t gap_ts,
                           uint64_t commit_ts,
                           const CcEntryAddr &ccentry_addr,
-                          CcHandlerResult<PostProcessResult> &hres) = 0;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          bool is_local = false) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts

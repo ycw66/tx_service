@@ -4379,7 +4379,8 @@ void TransactionExecution::ReleaseCatalogRangeLock(
                                   0,
                                   commit_ts_,
                                   cce_addr,
-                                  catalog_range_hd_result);
+                                  catalog_range_hd_result,
+                                  true);
         }
     }
     assert(ref_cnt == 0);
