@@ -36,6 +36,8 @@ thread_local CcRequestPool<RemoteCheckDeadLockCc> dead_lock_pool_;
 thread_local CcRequestPool<RemoteAbortTransactionCc> abort_tran_pool_;
 thread_local CcRequestPool<RemoteBlockReqCheckCc> blocked_req_check_pool_;
 thread_local CcRequestPool<RemoteKickoutCcEntry> kickout_cc_entry_pool_;
+thread_local CcRequestPool<ProcessRemoteScanRespCc>
+    process_remote_scan_resp_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -114,43 +116,29 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
         }
     }
 
-    // If there are too many messages coming from the long msg stream,
-    // send it to tx processor to process them to speed up the deserialization.
-    if (size > 10 && long_msg)
+    if (long_msg)
     {
-        std::mutex mux;
-        std::condition_variable cv;
-        std::atomic_uint32_t unfinished = size;
-        std::vector<std::unique_ptr<ProcessRemoteScanRespCc>> cc_reqs;
+        // Long message will be send to tx processor to speed up the
+        // deserialization.
         for (size_t i = 0; i < size; ++i)
         {
-            cc_reqs.emplace_back(std::make_unique<ProcessRemoteScanRespCc>(
-                stream_id, messages[i], unfinished, this, mux, cv));
-            local_shards_.EnqueueCcRequest(i, cc_reqs.back().get());
+            std::unique_ptr<remote::ScanSliceResponse> resp_msg =
+                GetScanSliceResp();
+            butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
+            resp_msg->ParseFromZeroCopyStream(&wrapper);
+            PreProcessScanResp(std::move(resp_msg));
         }
-        std::unique_lock<std::mutex> lk(mux);
-        cv.wait(lk, [&unfinished] { return unfinished.load() == 0; });
     }
     else
     {
+        assert(!long_msg);
+
         for (size_t i = 0; i < size; ++i)
         {
-            if (long_msg)
-            {
-                std::unique_ptr<ScanSliceResponse> resp_msg =
-                    GetScanSliceResp();
-                butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
-                resp_msg->ParseFromZeroCopyStream(&wrapper);
-                OnReceiveScanResp(std::move(resp_msg));
-            }
-            else
-            {
-                std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
-
-                butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
-                cc_msg->ParseFromZeroCopyStream(&wrapper);
-                OnReceiveCcMsg(std::move(cc_msg));
-            }
+            std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
+            butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
+            cc_msg->ParseFromZeroCopyStream(&wrapper);
+            OnReceiveCcMsg(std::move(cc_msg));
         }
     }
 
@@ -194,7 +182,14 @@ std::unique_ptr<ScanSliceResponse> CcStreamReceiver::GetScanSliceResp()
     }
 }
 
-void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
+void CcStreamReceiver::RecycleScanSliceResp(
+    std::unique_ptr<ScanSliceResponse> scan_resp)
+{
+    scan_resp_pool_.enqueue(std::move(scan_resp));
+}
+
+void CcStreamReceiver::PreProcessScanResp(
+    std::unique_ptr<ScanSliceResponse> msg)
 {
     CcHandlerResult<RangeScanSliceResult> *hd_res = nullptr;
     uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
@@ -234,6 +229,7 @@ void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
     {
         scan_slice_result.SetLastKey(nullptr);
     }
+
     scan_slice_result.slice_position_ =
         ToLocalType::ConvertSlicePosition(msg->slice_position());
 
@@ -241,94 +237,70 @@ void CcStreamReceiver::OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg)
     uint16_t remote_core_cnt = *((const uint16_t *) tuple_cnt_info);
     tuple_cnt_info += sizeof(uint16_t);
     range_scanner.ResetShards(remote_core_cnt);
-    int64_t cc_ng_term = -1;
-    size_t key_offset = 0;
-    size_t rec_offset = 0;
-    const uint64_t *key_ts_ptr = (const uint64_t *) msg->key_ts().data();
-    const uint64_t *gap_ts_ptr = (const uint64_t *) msg->gap_ts().data();
+
     const uint64_t *term_ptr = (const uint64_t *) msg->term().data();
-    const uint64_t *cce_ptr_ptr = (const uint64_t *) msg->cce_ptr().data();
-    const RecordStatusType *rec_status_ptr =
-        (const RecordStatusType *) msg->rec_status().data();
+
+    // The offset_table stores the start postition of meta data like `key_ts`
+    // for all remote cores
+    std::vector<size_t> offset_table;
+    size_t meta_offset = 0;
+
+    range_scanner.SetPartitionNgTerm(-1);
+
+    bool all_remote_core_no_more_data = true;
 
     for (uint16_t core_id = 0; core_id < remote_core_cnt; ++core_id)
     {
         size_t tuple_cnt = *((const size_t *) tuple_cnt_info);
         tuple_cnt_info += sizeof(size_t);
-        ScanCache *shard_cache = range_scanner.Cache(core_id);
 
-        for (size_t idx = 0; idx < tuple_cnt; ++idx)
+        all_remote_core_no_more_data =
+            all_remote_core_no_more_data && (tuple_cnt == 0);
+
+        // All term value are same. We only set `partition_ng_term` once.
+        if (range_scanner.PartitionNgTerm() == -1 && tuple_cnt != 0)
         {
-            cc_ng_term = term_ptr[idx];
-
-            RecordStatus rec_status =
-                ToLocalType::ConvertRecordStatusType(rec_status_ptr[idx]);
-
-            shard_cache->AddScanTuple(msg->keys(),
-                                      key_offset,
-                                      key_ts_ptr[idx],
-                                      msg->records(),
-                                      rec_offset,
-                                      rec_status,
-                                      gap_ts_ptr[idx],
-                                      cce_ptr_ptr[idx],
-                                      cc_ng_term,
-                                      core_id,
-                                      scan_slice_result.cc_ng_id_);
+            range_scanner.SetPartitionNgTerm(term_ptr[0]);
         }
 
-        // For remote scans, the scan result is a string representation of
-        // scanned key-value pairs. It may include keys beyond the scan's last
-        // key, due to parallel scans across multi cores at the remote node.
-        // Removes the keys from the scan cache beyond the scan's end.
-        if (range_scanner.Direction() == ScanDirection::Forward)
-        {
-            assert(scan_end == nullptr ||
-                   scan_slice_result.slice_position_ ==
-                       txservice::SlicePosition::Middle ||
-                   scan_slice_result.slice_position_ ==
-                       txservice::SlicePosition::LastSliceInRange);
+        offset_table.push_back(meta_offset);
+        meta_offset += tuple_cnt;
+        term_ptr += tuple_cnt;
+    }
 
-            while (scan_end != nullptr && shard_cache->Size() > 0 &&
-                   *scan_end < *shard_cache->LastTuple()->Key())
-            {
-                shard_cache->RemoveLast();
-            }
+    assert(offset_table.size() == remote_core_cnt);
+
+    // No more data.
+    if (all_remote_core_no_more_data)
+    {
+        if (msg->error_code() != 0)
+        {
+            hd_res->SetError(
+                ToLocalType::ConvertCcErrorCode(msg->error_code()));
         }
         else
         {
-            assert(scan_end == nullptr ||
-                   scan_slice_result.slice_position_ ==
-                       txservice::SlicePosition::Middle ||
-                   scan_slice_result.slice_position_ ==
-                       txservice::SlicePosition::FirstSliceInRange);
-
-            while (scan_end != nullptr && shard_cache->Size() > 0 &&
-                   *shard_cache->LastTuple()->Key() < *scan_end)
-            {
-                shard_cache->RemoveLast();
-            }
+            hd_res->SetFinished();
         }
-        range_scanner.CommitAtCore(core_id);
 
-        key_ts_ptr += tuple_cnt;
-        gap_ts_ptr += tuple_cnt;
-        term_ptr += tuple_cnt;
-        cce_ptr_ptr += tuple_cnt;
-        rec_status_ptr += tuple_cnt;
+        RecycleScanSliceResp(std::move(msg));
+        return;
     }
-    range_scanner.SetPartitionNgTerm(cc_ng_term);
 
-    if (msg->error_code() != 0)
+    // Worker count means how many tx processer to parallel deserialize msg.
+    // remote core count is not always equal to local core count
+    size_t worker_cnt = std::min((size_t) remote_core_cnt,
+                                 Sharder::Instance().GetLocalCcShardsCount());
+
+    ProcessRemoteScanRespCc *request =
+        process_remote_scan_resp_pool_.NextRequest();
+    request->Reset(
+        this, std::move(msg), std::move(offset_table), hd_res, worker_cnt);
+
+    for (size_t idx = 0; idx < worker_cnt; ++idx)
     {
-        hd_res->SetError(ToLocalType::ConvertCcErrorCode(msg->error_code()));
+        local_shards_.EnqueueCcRequest(idx, request);
     }
-    else
-    {
-        hd_res->SetFinished();
-    }
-
-    scan_resp_pool_.enqueue(std::move(msg));
 }
 
 void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)

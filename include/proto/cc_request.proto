@@ -484,6 +484,8 @@ message ScanSliceResponse {
 	bytes gap_ts = 13;
 	bytes cce_ptr = 14;
 	bytes term = 15;
+	bytes key_start_offsets = 16;
+	bytes record_start_offsets = 17;
 }
 
 message ReloadCacheRequest {

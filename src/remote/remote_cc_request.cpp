@@ -1038,7 +1038,16 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
             for (size_t idx = 0; idx < core_cnt; ++idx)
             {
                 RemoteScanSliceCache &cache = scan_cache_vec_[idx];
+
+                size_t keys_start_offset = output_msg_.keys().size();
+                output_msg_.mutable_key_start_offsets()->append(
+                    (const char *) &keys_start_offset, sizeof(size_t));
+                size_t record_start_offset = output_msg_.records().size();
+                output_msg_.mutable_record_start_offsets()->append(
+                    (const char *) &record_start_offset, sizeof(size_t));
+
                 output_msg_.mutable_keys()->append(cache.keys_);
+
                 output_msg_.mutable_records()->append(cache.records_);
                 output_msg_.mutable_key_ts()->append(
                     (const char *) cache.key_ts_.data(),

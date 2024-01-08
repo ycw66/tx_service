@@ -38,6 +38,7 @@
 #include "range_slice.h"
 #include "read_write_set.h"
 #include "remote/cc_stream_receiver.h"
+#include "remote/remote_type.h"
 #include "scan.h"
 #include "sharder.h"
 #include "statistics.h"
@@ -2227,56 +2228,260 @@ private:
 struct ProcessRemoteScanRespCc : public CcRequestBase
 {
 public:
-    ProcessRemoteScanRespCc(brpc::StreamId stream_id,
-                            butil::IOBuf *const msg,
-                            std::atomic_uint32_t &total_msg,
-                            remote::CcStreamReceiver *receiver,
-                            std::mutex &mux,
-                            std::condition_variable &cv)
-        : stream_id_(stream_id),
-          msg_(msg),
-          unfinished_msg_(total_msg),
-          receiver_(receiver),
-          mux_(mux),
-          cv_(cv)
+    static constexpr size_t SCAN_BATCH_SIZE = 256;
 
+    ProcessRemoteScanRespCc() = default;
+
+    void Reset(remote::CcStreamReceiver *receiver,
+               std::unique_ptr<remote::ScanSliceResponse> resp_msg,
+               std::vector<size_t> &&offset_tables,
+               CcHandlerResult<RangeScanSliceResult> *hd_res,
+               size_t worker_cnt)
     {
+        receiver_ = receiver;
+        resp_msg_ = std::move(resp_msg);
+        offset_tables_ = std::move(offset_tables);
+        hd_res_ = hd_res;
+
+        unfinished_cnt_ = worker_cnt;
+        next_remote_core_idx_ = worker_cnt;
+
+        assert(offset_tables_.size() == RemoteCoreCnt());
+        assert(worker_cnt <= RemoteCoreCnt());
+
+        cur_idxs_.clear();
+        key_offsets_.clear();
+        rec_offsets_.clear();
+
+        assert(cur_idxs_.empty());
+        assert(key_offsets_.empty());
+        assert(rec_offsets_.empty());
+
+        for (size_t worker_idx = 0; worker_idx < worker_cnt; ++worker_idx)
+        {
+            // worker idx must be less or equal than remote core count
+            cur_idxs_.push_back({worker_idx, 0});
+            key_offsets_.push_back(KeyStartOffset(worker_idx));
+            rec_offsets_.push_back(RecStartOffset(worker_idx));
+        }
     }
 
-    ProcessRemoteScanRespCc() = delete;
-
-    ProcessRemoteScanRespCc(ProcessRemoteScanRespCc &&other)
-        : stream_id_(other.stream_id_),
-          msg_(other.msg_),
-          unfinished_msg_(other.unfinished_msg_),
-          receiver_(other.receiver_),
-          mux_(other.mux_),
-          cv_(other.cv_)
-    {
-    }
+    ProcessRemoteScanRespCc(const ProcessRemoteScanRespCc &) = delete;
+    ProcessRemoteScanRespCc &operator=(const ProcessRemoteScanRespCc &) =
+        delete;
 
     bool Execute(CcShard &ccs) override
     {
-        std::unique_ptr<remote::ScanSliceResponse> resp_msg =
-            receiver_->GetScanSliceResp();
-        butil::IOBufAsZeroCopyInputStream wrapper(*msg_);
-        resp_msg->ParseFromZeroCopyStream(&wrapper);
-        receiver_->OnReceiveScanResp(std::move(resp_msg));
-        if (unfinished_msg_.fetch_sub(1) == 1)
+        size_t scan_cnt = 0;
+
+        do
         {
-            std::unique_lock<std::mutex> lk(mux_);
-            cv_.notify_all();
+            auto &[remote_core_idx, tuple_idx] = cur_idxs_.at(ccs.core_id_);
+
+            const uint64_t *key_ts_ptr =
+                (const uint64_t *) resp_msg_->key_ts().data();
+            key_ts_ptr += MetaOffset(remote_core_idx);
+
+            const uint64_t *gap_ts_ptr =
+                (const uint64_t *) resp_msg_->gap_ts().data();
+            gap_ts_ptr += MetaOffset(remote_core_idx);
+
+            const uint64_t *term_ptr =
+                (const uint64_t *) resp_msg_->term().data();
+            term_ptr += MetaOffset(remote_core_idx);
+
+            const uint64_t *cce_ptr_ptr =
+                (const uint64_t *) resp_msg_->cce_ptr().data();
+            cce_ptr_ptr += MetaOffset(remote_core_idx);
+
+            const remote::RecordStatusType *rec_status_ptr =
+                (const remote::RecordStatusType *) resp_msg_->rec_status()
+                    .data();
+            rec_status_ptr += MetaOffset(remote_core_idx);
+
+            RangeScanSliceResult &scan_slice_result = hd_res_->Value();
+            CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
+            ScanCache *shard_cache = range_scanner.Cache(remote_core_idx);
+
+            size_t &key_offset = key_offsets_[ccs.core_id_];
+            size_t &rec_offset = rec_offsets_[ccs.core_id_];
+            size_t tuple_cnt = TupleCnt(remote_core_idx);
+
+            for (; tuple_idx < tuple_cnt && scan_cnt < SCAN_BATCH_SIZE;
+                 ++tuple_idx, ++scan_cnt)
+            {
+                RecordStatus rec_status =
+                    remote::ToLocalType::ConvertRecordStatusType(
+                        rec_status_ptr[tuple_idx]);
+
+                shard_cache->AddScanTuple(resp_msg_->keys(),
+                                          key_offset,
+                                          key_ts_ptr[tuple_idx],
+                                          resp_msg_->records(),
+                                          rec_offset,
+                                          rec_status,
+                                          gap_ts_ptr[tuple_idx],
+                                          cce_ptr_ptr[tuple_idx],
+                                          term_ptr[tuple_idx],
+                                          remote_core_idx,
+                                          scan_slice_result.cc_ng_id_);
+            }
+
+            if (tuple_idx == tuple_cnt)
+            {
+                auto [scan_end, is_set] = scan_slice_result.PeekLastKey();
+                assert(is_set);
+
+                // For remote scans, the scan result is a string representation
+                // of scanned key-value pairs. It may include keys beyond the
+                // scan's last key, due to parallel scans across multi cores at
+                // the remote node. Removes the keys from the scan cache beyond
+                // the scan's end.
+                if (range_scanner.Direction() == ScanDirection::Forward)
+                {
+                    assert(scan_end == nullptr ||
+                           scan_slice_result.slice_position_ ==
+                               txservice::SlicePosition::Middle ||
+                           scan_slice_result.slice_position_ ==
+                               txservice::SlicePosition::LastSliceInRange);
+
+                    while (scan_end != nullptr && shard_cache->Size() > 0 &&
+                           *scan_end < *shard_cache->LastTuple()->Key())
+                    {
+                        shard_cache->RemoveLast();
+                    }
+                }
+                else
+                {
+                    assert(scan_end == nullptr ||
+                           scan_slice_result.slice_position_ ==
+                               txservice::SlicePosition::Middle ||
+                           scan_slice_result.slice_position_ ==
+                               txservice::SlicePosition::FirstSliceInRange);
+
+                    while (scan_end != nullptr && shard_cache->Size() > 0 &&
+                           *shard_cache->LastTuple()->Key() < *scan_end)
+                    {
+                        shard_cache->RemoveLast();
+                    }
+                }
+
+                range_scanner.CommitAtCore(remote_core_idx);
+
+                if (!MoveForward(ccs.core_id_))
+                {
+                    // No more data
+                    return SetFinished();
+                }
+            }
+
+            //  To avoid blocking other request for a long time, we only process
+            // ScanBatchSize number of data in each round.
+        } while (scan_cnt < SCAN_BATCH_SIZE);
+
+        // Put this request to CcQueue again.
+        ccs.Enqueue(this);
+        return false;
+    }
+
+    bool SetFinished()
+    {
+        // This core is last finished worker. We need to set handler result and
+        // recycle message.
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_release) == 1)
+        {
+            if (resp_msg_->error_code() != 0)
+            {
+                hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
+                    resp_msg_->error_code()));
+            }
+            else
+            {
+                hd_res_->SetFinished();
+            }
+
+            // Recycle message
+            receiver_->RecycleScanSliceResp(std::move(resp_msg_));
+
+            // Return true to recycle this request
+            return true;
         }
+
         return false;
     }
 
 private:
-    brpc::StreamId stream_id_;
-    butil::IOBuf *const msg_;
-    std::atomic_uint32_t &unfinished_msg_;
-    remote::CcStreamReceiver *receiver_;
-    std::mutex &mux_;
-    std::condition_variable &cv_;
+    bool MoveForward(size_t worker_idx)
+    {
+        size_t new_remote_core_idx = next_remote_core_idx_.fetch_add(1);
+        if (new_remote_core_idx < RemoteCoreCnt())
+        {
+            cur_idxs_.at(worker_idx) = {new_remote_core_idx, 0};
+            key_offsets_.at(worker_idx) = KeyStartOffset(new_remote_core_idx);
+            rec_offsets_.at(worker_idx) = RecStartOffset(new_remote_core_idx);
+
+            return true;
+        }
+
+        // No more data
+        return false;
+    }
+
+    size_t KeyStartOffset(size_t remote_core_idx) const
+    {
+        const size_t *ptr = reinterpret_cast<const size_t *>(
+            resp_msg_->key_start_offsets().data());
+        ptr += remote_core_idx;
+        return *ptr;
+    }
+
+    size_t RecStartOffset(size_t remote_core_idx) const
+    {
+        const size_t *ptr = reinterpret_cast<const size_t *>(
+            resp_msg_->record_start_offsets().data());
+        ptr += remote_core_idx;
+        return *ptr;
+    }
+
+    size_t MetaOffset(size_t remote_core_idx) const
+    {
+        return offset_tables_[remote_core_idx];
+    }
+
+    size_t TupleCnt(size_t remote_core_idx) const
+    {
+        const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
+        // remote core count
+        tuple_cnt_info += sizeof(uint16_t);
+        // tuple count
+        tuple_cnt_info += remote_core_idx * sizeof(size_t);
+        return *(reinterpret_cast<const size_t *>(tuple_cnt_info));
+    }
+
+    uint16_t RemoteCoreCnt() const
+    {
+        const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
+        return *reinterpret_cast<const uint16_t *>(tuple_cnt_info);
+    }
+
+    remote::CcStreamReceiver *receiver_{nullptr};
+    std::unique_ptr<remote::ScanSliceResponse> resp_msg_{nullptr};
+    // Store the start postition of meta data like `key_ts`.
+    std::vector<size_t> offset_tables_;
+    // The vector of {remote_core_idx, current_tuple_idx}.
+    std::vector<std::pair<size_t, size_t>> cur_idxs_;
+
+    // We need to store key/rec offset so that we could restart from pause
+    // point.
+    std::vector<size_t> key_offsets_;
+    std::vector<size_t> rec_offsets_;
+
+    // Unfinished worker count. std::min(this_node_core_count,
+    // remote_core_count)
+    std::atomic<size_t> unfinished_cnt_{0};
+    // Next remote core idx we need to process.
+    std::atomic<size_t> next_remote_core_idx_{0};
+    CcHandlerResult<RangeScanSliceResult> *hd_res_{nullptr};
 };
 
 struct DataSyncScanCc : public CcRequestBase

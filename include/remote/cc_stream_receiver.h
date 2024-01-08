@@ -47,9 +47,10 @@ public:
     std::unique_ptr<CcMessage> GetCcMsg();
 
     std::unique_ptr<ScanSliceResponse> GetScanSliceResp();
+    void RecycleScanSliceResp(std::unique_ptr<ScanSliceResponse> scan_resp);
 
     void OnReceiveCcMsg(std::unique_ptr<CcMessage> msg);
-    void OnReceiveScanResp(std::unique_ptr<ScanSliceResponse> msg);
+    void PreProcessScanResp(std::unique_ptr<ScanSliceResponse> msg);
 
 private:
     std::shared_mutex inbound_mux_;
