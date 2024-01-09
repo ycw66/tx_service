@@ -2780,20 +2780,14 @@ void TransactionExecution::ScanClose(
     // They were not added into read set. Check if they were put into read set
     // by other operations before, if not, release these locks.
     std::vector<const ScanTuple *> trailing_tuples;
-    for (size_t core = 0; core < scanner->CacheCount(); core++)
+    scanner->ShardCacheTrailingTuples(&trailing_tuples);
+    for (auto tuple : trailing_tuples)
     {
-        auto cache = scanner->Cache(core);
-        cache->TrailingTuples(trailing_tuples);
-        for (auto tuple : trailing_tuples)
+        LockType lk_type = scanner->DeduceScanTupleLockType(tuple->rec_status_);
+        if (lk_type != LockType::NoLock &&
+            rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
-            LockType lk_type =
-                scanner->DeduceScanTupleLockType(tuple->rec_status_);
-            if (lk_type != LockType::NoLock &&
-                rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
-            {
-                drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
-            }
-            trailing_tuples.clear();
+            drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
         }
     }
 
