@@ -198,7 +198,7 @@ void ReadOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the input key's range. The
                 // read operation is set to be errored.
-                hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+                hd_result_.SetError(lock_range_result_->ErrorCode());
                 hd_result_.ForceError();
 
                 txm->PostProcess(*this);
@@ -1191,7 +1191,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             {
                 // There is an error when getting the next range's lock and
                 // ID. The scan next operation is set to be errored.
-                slice_hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+                slice_hd_result_.SetError(lock_range_result_.ErrorCode());
                 unlock_range_result_.SetFinished();
             }
             else
@@ -4929,7 +4929,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         {
             // There is an error when getting the input key's range. The
             // read operation is set to be errored.
-            hd_result_.SetError(CcErrorCode::GET_RANGE_ID_ERR);
+            hd_result_.SetError(lock_range_result_.ErrorCode());
 
             bool force_error = hd_result_.ForceError();
             assert(force_error);
