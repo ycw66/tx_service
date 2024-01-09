@@ -733,6 +733,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
 
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     if (req.op_type_ == OperationType::CreateTable ||
+        req.op_type_ == OperationType::Update ||
         req.op_type_ == OperationType::DropTable)
     {
         std::unique_lock<std::mutex> lk(
@@ -1042,6 +1043,7 @@ void TransactionExecution::ProcessTxRequest(
         {
         case OperationType::CreateTable:
         case OperationType::DropTable:
+        case OperationType::Update:
         {
             std::unique_lock<std::mutex> lk(
                 local_shards->table_schema_op_pool_mux_);

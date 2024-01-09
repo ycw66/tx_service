@@ -1866,7 +1866,8 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       read_cluster_result_(txm)
 {
     assert(op_type_ == OperationType::CreateTable ||
-           op_type_ == OperationType::DropTable);
+           op_type_ == OperationType::DropTable ||
+           op_type_ == OperationType::Update);
 
     lock_cluster_config_op_.table_name_ =
         TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
@@ -1935,7 +1936,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (prepare_log_op_.hd_result_.IsFinished())
         {
-            assert(op_type_ == OperationType::CreateTable);
+            assert(op_type_ == OperationType::CreateTable ||
+                   op_type_ == OperationType::Update);
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -2132,7 +2134,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &unlock_cluster_config_op_)
     {
-        assert(op_type_ == OperationType::CreateTable);
+        assert(op_type_ == OperationType::CreateTable ||
+               op_type_ == OperationType::Update);
         if (unlock_cluster_config_op_.hd_result_.IsError())
         {
             if (txm->CheckLeaderTerm())
@@ -2634,6 +2637,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
                           TransactionExecution *txm)
 {
     assert(op_type_ == OperationType::CreateTable ||
+           op_type_ == OperationType::Update ||
            op_type_ == OperationType::DropTable);
 
     // reset TransactionOperation

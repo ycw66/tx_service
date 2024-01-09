@@ -481,6 +481,12 @@ public:
                     shard_->InitTableStatistics(
                         catalog_entry->dirty_schema_.get(), cc_ng_id_);
                 }
+                else if (req.OpType() == OperationType::Update)
+                {
+                    assert(catalog_entry->schema_->StatisticsObject());
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        catalog_entry->schema_->StatisticsObject());
+                }
 
                 schema_rec->Set(catalog_entry->dirty_schema_,
                                 nullptr,
