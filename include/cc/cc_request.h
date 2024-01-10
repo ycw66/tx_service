@@ -2014,12 +2014,14 @@ public:
         uint16_t remaining_cnt =
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
 
-        if (remaining_cnt == 1)
+        // remaining_cnt might be 0 if all cores have finished and the req is
+        // put back into the result sending core's queue.
+        if (remaining_cnt <= 1)
         {
             res_->SetError(err_);
         }
 
-        return remaining_cnt == 1;
+        return remaining_cnt <= 1;
     }
 
     /**

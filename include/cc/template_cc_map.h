@@ -3619,8 +3619,7 @@ public:
             {
                 if (slice_id.Range()->HasLock())
                 {
-                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    return req.SetError(CcErrorCode::OUT_OF_MEMORY);
                 }
                 else
                 {
@@ -3637,8 +3636,7 @@ public:
             {
                 // If the pin operation returns an error, the data store
                 // is inaccessible.
-                hd_res->SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                return true;
+                return req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
             }
 
             req.PinSlices(slice_id, last_pinned_slice);
@@ -3674,9 +3672,11 @@ public:
             Error,
         };
 
-        auto scan_tuple_func = [&, this](const KeyT *cce_key,
-                                         CcEntry<KeyT, ValueT> *cce,
-                                         ScanType scan_type) -> ScanReturnType
+        auto scan_tuple_func =
+            [&, this](
+                const KeyT *cce_key,
+                CcEntry<KeyT, ValueT> *cce,
+                ScanType scan_type) -> std::pair<ScanReturnType, CcErrorCode>
         {
             auto lock_pair = AcquireCceKeyLock(cce,
                                                cce->payload_status_,
@@ -3700,7 +3700,7 @@ public:
                     reinterpret_cast<uint64_t>(cce),
                     scan_type,
                     ScanSliceCc::ScanBlockingType::BlockOnFuture);
-                return ScanReturnType::Blocked;
+                return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
             }
             case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
             {
@@ -3711,13 +3711,12 @@ public:
                 req.SetRangeCcNgTerm(ng_term);
                 // Lock fail should stop the execution of current
                 // CC request since it's already in blocking queue.
-                return ScanReturnType::Blocked;
+                return {ScanReturnType::Blocked, CcErrorCode::NO_ERROR};
             }
             default:
             {
                 // lock confilct: back off and retry.
-                req.Result()->SetError(lock_pair.second);
-                return ScanReturnType::Error;
+                return {ScanReturnType::Error, lock_pair.second};
             }
             }  //-- end: switch
 
@@ -3746,7 +3745,7 @@ public:
                                 is_locked);
             }
 
-            return ScanReturnType::Success;
+            return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
         };
 
         uint64_t addr = req.CceAddr(core_id);
@@ -3814,8 +3813,15 @@ public:
                     {
                         assert(lock_pair.second ==
                                CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
-                        req.Result()->SetError(lock_pair.second);
-                        return true;
+                        if (req.SetError(lock_pair.second))
+                        {
+                            req.UnpinSlices();
+                            return true;
+                        }
+                        else
+                        {
+                            return false;
+                        }
                     }
 
                     is_locked = true;
@@ -3973,10 +3979,10 @@ public:
                                     req.EndInclusive());
             }
 
-            auto scan_loop_func = [&, this](
-                                      const KeyT *end_key,
-                                      bool inclusive,
-                                      bool end_finalized) -> ScanReturnType
+            auto scan_loop_func = [&, this](const KeyT *end_key,
+                                            bool inclusive,
+                                            bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
             {
                 Iterator pos_inf_it = End();
                 const KeyT *cce_key = scan_ccm_it->first;
@@ -3993,12 +3999,12 @@ public:
                        (*cce_key < *end_key ||
                         (inclusive && *cce_key == *end_key)))
                 {
-                    ScanReturnType scan_ret =
+                    auto [scan_ret, err_code] =
                         scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
 
                     if (scan_ret != ScanReturnType::Success)
                     {
-                        return scan_ret;
+                        return {scan_ret, err_code};
                     }
 
                     ++scan_ccm_it;
@@ -4006,17 +4012,25 @@ public:
                     cce = scan_ccm_it->second;
                 }
 
-                return ScanReturnType::Success;
+                return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
             };
 
-            ScanReturnType scan_ret =
+            auto [scan_ret, err] =
                 scan_loop_func(initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
-                return true;
+                if (req.SetError(err))
+                {
+                    req.UnpinSlices();
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
             case ScanReturnType::Yield:
                 shard_->Enqueue(shard_->core_id_, &req);
                 return false;
@@ -4152,13 +4166,22 @@ public:
                     // batch's end. Re-scans the cc map using the batch's end.
                     if (trailing_cnt == 0)
                     {
-                        scan_ret = scan_loop_func(end_key, end_inclusive, true);
+                        auto [scan_ret, err] =
+                            scan_loop_func(end_key, end_inclusive, true);
                         switch (scan_ret)
                         {
                         case ScanReturnType::Blocked:
                             return false;
                         case ScanReturnType::Error:
-                            return true;
+                            if (req.SetError(err))
+                            {
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else
+                            {
+                                return false;
+                            }
                         case ScanReturnType::Yield:
                             shard_->Enqueue(shard_->core_id_, &req);
                             return false;
@@ -4241,10 +4264,10 @@ public:
                                     req.EndInclusive());
             }
 
-            auto scan_loop_func = [&, this](
-                                      const KeyT *end_key,
-                                      bool inclusive,
-                                      bool end_finalized) -> ScanReturnType
+            auto scan_loop_func = [&, this](const KeyT *end_key,
+                                            bool inclusive,
+                                            bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
             {
                 Iterator neg_inf_it = Begin();
                 const KeyT *cce_key = scan_ccm_it->first;
@@ -4261,12 +4284,12 @@ public:
                        (*end_key < *cce_key ||
                         (inclusive && *end_key == *cce_key)))
                 {
-                    ScanReturnType scan_ret =
+                    auto [scan_ret, err_code] =
                         scan_tuple_func(cce_key, cce, ScanType::ScanBoth);
 
                     if (scan_ret != ScanReturnType::Success)
                     {
-                        return scan_ret;
+                        return {scan_ret, err_code};
                     }
 
                     --scan_ccm_it;
@@ -4274,17 +4297,25 @@ public:
                     cce = scan_ccm_it->second;
                 }
 
-                return ScanReturnType::Success;
+                return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
             };
 
-            ScanReturnType scan_ret =
+            auto [scan_ret, err] =
                 scan_loop_func(initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
-                return true;
+                if (req.SetError(err))
+                {
+                    req.UnpinSlices();
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
             case ScanReturnType::Yield:
                 shard_->Enqueue(shard_->core_id_, &req);
                 return false;
@@ -4421,13 +4452,22 @@ public:
                     // batch's end. Re-scans the cc map using the batch's end.
                     if (trailing_cnt == 0)
                     {
-                        scan_ret = scan_loop_func(end_key, end_inclusive, true);
+                        auto [scan_ret, err] =
+                            scan_loop_func(end_key, end_inclusive, true);
                         switch (scan_ret)
                         {
                         case ScanReturnType::Blocked:
                             return false;
                         case ScanReturnType::Error:
-                            return true;
+                            if (req.SetError(err))
+                            {
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else
+                            {
+                                return false;
+                            }
                         case ScanReturnType::Yield:
                             shard_->Enqueue(shard_->core_id_, &req);
                             return false;
