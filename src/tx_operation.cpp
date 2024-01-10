@@ -3334,8 +3334,23 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
             txm->TxTerm())
         {
-            // term is invalid
-            ForceToFinish(txm);
+            // Recovered term is invalid. Do not call ForceToFinish as it will
+            // cause infinite recursive call. Clean up tx state directly.
+            txm->bool_resp_->Finish(false);
+
+            ClearInfos();
+            ClearDataSyncVec();
+
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+
+            assert(this == txm->split_flush_op_.get());
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(
+                shards->split_flush_range_op_pool_mux_);
+            shards->split_flush_range_op_pool_.emplace_back(
+                std::move(txm->split_flush_op_));
+            assert(txm->split_flush_op_ == nullptr);
         }
         return;
     }
@@ -6007,8 +6022,21 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
             txm->TxTerm())
         {
-            // term is invalid
-            ForceToFinish(txm);
+            // Recovered term is invalid. Do not call ForceToFinish as it will
+            // cause infinite recursive call. Clean up tx state directly.
+            Clear();
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+
+            {
+                auto shards = Sharder::Instance().GetLocalCcShards();
+                std::lock_guard<std::mutex> lk(
+                    shards->data_migration_op_pool_mux_);
+                shards->migration_op_pool_.push_back(
+                    std::move(txm->migration_op_));
+            }
+            // Abort and recyle txm
+            txm->Abort();
         }
         return;
     }
@@ -6653,14 +6681,15 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        auto shards = Sharder::Instance().GetLocalCcShards();
-
         Clear();
         txm->state_stack_.pop_back();
         assert(txm->state_stack_.empty());
 
-        std::lock_guard<std::mutex> lk(shards->data_migration_op_pool_mux_);
-        shards->migration_op_pool_.push_back(std::move(txm->migration_op_));
+        {
+            auto shards = Sharder::Instance().GetLocalCcShards();
+            std::lock_guard<std::mutex> lk(shards->data_migration_op_pool_mux_);
+            shards->migration_op_pool_.push_back(std::move(txm->migration_op_));
+        }
         // Commit the tx and recyle txm
         txm->Commit();
     }
