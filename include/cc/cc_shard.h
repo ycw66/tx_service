@@ -664,6 +664,13 @@ private:
 
     size_t memory_usage_round_ = 1;
 
+    // all the lock acquire/release on this ccshard. It used to reduce the cost
+    // of allocation/dellocation of memory.
+    std::vector<NonBlockingLock::Uptr> lock_vec_;
+    // pointer to the next slot in lock array.
+    uint32_t next_lock_idx_;
+    uint32_t used_lock_count_;
+
     /**
      * @brief A collection of active tx's that have acquired locks/intentions in
      * this shard and the tx's information, including when the tx acquires the
@@ -693,13 +700,6 @@ private:
     std::vector<TEntry> tx_vec_;
     // pointer to the next slot in tx array.
     uint32_t next_tx_idx_;
-
-    // all the lock acquire/release on this ccshard. It used to reduce the cost
-    // of allocation/dellocation of memory.
-    std::vector<NonBlockingLock::Uptr> lock_vec_;
-    // pointer to the next slot in lock array.
-    uint32_t next_lock_idx_;
-    uint32_t used_lock_count_;
 
     // tx identifier inside a CPU core. It's a uint32 value and will become 0
     // after wraparound. Global tx_number is 64 bits: higher 32 bits are
