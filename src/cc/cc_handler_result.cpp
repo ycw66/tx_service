@@ -42,17 +42,36 @@ void CcHandlerResult<T>::SetFinished()
 
     if (ref_cnted_)
     {
-        auto r = ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);
+        auto r = ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         if (r == 1)
+        {
+            bool expect = false;
+            if (is_finished_.compare_exchange_strong(
+                    expect, true, std::memory_order_acq_rel))
+            {
+                if (post_lambda_)
+                {
+                    post_lambda_(this);
+                }
+#ifdef EXT_TX_PROC_ENABLED
+                if (txm_ != nullptr && is_blocking_)
+                {
+                    txm_->Enlist();
+                }
+#endif
+            }
+        }
+    }
+    else
+    {
+        bool expect = false;
+        if (is_finished_.compare_exchange_strong(
+                expect, true, std::memory_order_acq_rel))
         {
             if (post_lambda_)
             {
                 post_lambda_(this);
             }
-
-            bool expect = false;
-            is_finished_.compare_exchange_strong(
-                expect, true, std::memory_order_acq_rel);
 
 #ifdef EXT_TX_PROC_ENABLED
             if (txm_ != nullptr && is_blocking_)
@@ -61,24 +80,6 @@ void CcHandlerResult<T>::SetFinished()
             }
 #endif
         }
-    }
-    else
-    {
-        if (post_lambda_)
-        {
-            post_lambda_(this);
-        }
-
-        bool expect = false;
-        is_finished_.compare_exchange_strong(
-            expect, true, std::memory_order_acq_rel);
-
-#ifdef EXT_TX_PROC_ENABLED
-        if (txm_ != nullptr && is_blocking_)
-        {
-            txm_->Enlist();
-        }
-#endif
     }
 };
 
