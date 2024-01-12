@@ -3922,8 +3922,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                             slice_end_idx = std::distance(
                                 data_sync_vec->begin(), slice_end_it);
-                            int32_t slice_delta_size = 0;
-                            uint32_t slice_size = 0;
+                            int64_t slice_delta_size = 0;
+                            uint64_t slice_size = 0;
 
                             for (size_t offset = 0; batch_it != slice_end_it;
                                  ++batch_it, ++offset)
@@ -3971,11 +3971,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                                 }
                             }
 
-                            int32_t sum = curr_slice->Size();
-                            if (curr_slice->PostCkptSize() != UINT32_MAX)
+                            int64_t sum = curr_slice->Size();
+                            if (curr_slice->PostCkptSize() != UINT64_MAX)
                             {
                                 // If the post_ckpt_size of slice isn't
-                                // UINT32_MAX, it means we have already updated
+                                // UINT64_MAX, it means we have already updated
                                 // the post_ckpt_size with the data of previous
                                 // scan.
                                 assert(previous_scan_ts != 0);
@@ -3986,7 +3986,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             slice_size = sum >= 0 ? sum : 0;
                             curr_slice->SetPostCkptSize(slice_size);
 
-                            if (slice_size > StoreSlice::slice_upper_bound)
+                            // Skip performing the update slice spec operation
+                            // when the size of a single item exceeds the slice
+                            // upper bound.
+                            if (slice_delta_size > 0 &&
+                                slice_size > StoreSlice::slice_upper_bound)
                             {
                                 if (!store_range_->UpdateSliceSpec(
                                         curr_slice,

@@ -2712,18 +2712,20 @@ bool LocalCcShards::UpdateSliceAndCalculateRangeUpdate(
                                                    lower_bound_cmp);
 
         size_t slice_end_idx = std::distance(flush_batch.begin(), slice_end_it);
-        int32_t slice_delta_size = 0;
-        uint32_t slice_size = 0;
+        int64_t slice_delta_size = 0;
+        uint64_t slice_size = 0;
 
         for (; batch_it != slice_end_it; ++batch_it)
         {
             slice_delta_size += batch_it->delta_size_;
         }
 
-        int32_t sum = curr_slice->Size() + slice_delta_size;
+        int64_t sum = curr_slice->Size() + slice_delta_size;
         slice_size = sum >= 0 ? sum : 0;
         curr_slice->SetPostCkptSize(slice_size);
-        if (slice_size > StoreSlice::slice_upper_bound)
+        // Skip performing the update slice spec operation when the size of a
+        // single item exceeds the slice upper bound.
+        if (slice_delta_size > 0 && slice_size > StoreSlice::slice_upper_bound)
         {
             // Since update slice specs might need loading from
             // data store, hand it off to the worker and move on
@@ -3288,7 +3290,7 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
             }
             else
             {
-                curr_slice->SetPostCkptSize(UINT32_MAX);
+                curr_slice->SetPostCkptSize(UINT64_MAX);
             }
 
             // The next entry falls into a new slice.

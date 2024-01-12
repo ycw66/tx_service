@@ -294,33 +294,33 @@ public:
         }
     }
 
-    uint32_t Size() const
+    uint64_t Size() const
     {
         return size_;
     }
 
-    void UpdateSize(int32_t slice_size)
+    void UpdateSize(uint64_t slice_size)
     {
         size_ = slice_size;
     }
 
     bool UpdateSize()
     {
-        if (post_ckpt_size_ != UINT32_MAX)
+        if (post_ckpt_size_ != UINT64_MAX)
         {
             size_ = post_ckpt_size_;
-            post_ckpt_size_ = UINT32_MAX;
+            post_ckpt_size_ = UINT64_MAX;
             return true;
         }
         return false;
     }
 
-    uint32_t PostCkptSize() const
+    uint64_t PostCkptSize() const
     {
         return post_ckpt_size_;
     }
 
-    void SetPostCkptSize(int32_t size)
+    void SetPostCkptSize(uint64_t size)
     {
         post_ckpt_size_ = size;
     }
@@ -348,9 +348,9 @@ private:
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
 
-    uint32_t size_{0};
-    // Use UINT32_MAX to indicate invalid post checkpoint slice size
-    uint32_t post_ckpt_size_{UINT32_MAX};
+    uint64_t size_{0};
+    // Use UINT64_MAX to indicate invalid post checkpoint slice size
+    uint64_t post_ckpt_size_{UINT64_MAX};
 
     SliceStatus status_{SliceStatus::PartiallyCached};
 

@@ -689,9 +689,10 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
     // Split the slice based on post checkpoint item size, but do
     // not update the slice size with the post checkpoint yet since
     // the data is still not flushed into data store yet.
-    uint32_t post_flush_size = slice->PostCkptSize();
-    assert(post_flush_size != UINT32_MAX);
-    uint32_t subslice_cnt = post_flush_size / StoreSlice::slice_upper_bound + 1;
+    uint64_t post_flush_size = slice->PostCkptSize();
+    assert(post_flush_size != UINT64_MAX);
+    uint32_t subslice_cnt =
+        post_flush_size / (StoreSlice::slice_upper_bound * 0.8) + 1;
     uint32_t avg_subslice_size = post_flush_size / subslice_cnt;
     std::vector<SliceChangeInfo> split_keys;
     split_keys.reserve(subslice_cnt);
@@ -887,7 +888,7 @@ std::vector<const TxKey *> StoreRange::CalculateRangeSplitKeys(
                slice_idx < slices_.size();
              slice_idx++)
         {
-            if (slices_.at(slice_idx)->PostCkptSize() != UINT32_MAX)
+            if (slices_.at(slice_idx)->PostCkptSize() != UINT64_MAX)
             {
                 curr_subrange_size += slices_.at(slice_idx)->PostCkptSize();
             }
@@ -1110,7 +1111,7 @@ size_t StoreRange::PostCkptSize()
     size_t size = 0;
     for (size_t idx = 0; idx < slices_.size(); idx++)
     {
-        if (slices_.at(idx)->post_ckpt_size_ != UINT32_MAX)
+        if (slices_.at(idx)->post_ckpt_size_ != UINT64_MAX)
         {
             size += slices_.at(idx)->PostCkptSize();
         }
