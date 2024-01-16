@@ -655,8 +655,8 @@ public:
             reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr->CcePtr());
 
         // check that this txn is lock owner
-        if (cce->key_lock_ptr_ != nullptr &&
-            cce->key_lock_ptr_->HasWriteLock() &&
+        if (cce->key_lock_ptr_ == nullptr ||
+            !cce->key_lock_ptr_->HasWriteLock() ||
             cce->key_lock_ptr_->WriteLockTx() != txn)
         {
             req.Result()->SetFinished();

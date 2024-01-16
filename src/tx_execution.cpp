@@ -5262,6 +5262,25 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 commit_ts,
                 obj_cmd_op.key_,
                 cmd_success ? obj_cmd_op.command_ : nullptr);
+
+            uint64_t read_version = rw_set_.DedupRead(cce_addr);
+            if (read_version > 0 && read_version != cmd_result.commit_ts_)
+            {
+                // Each write-set key acquires a write lock and gets the
+                // key's last validation ts and commit ts. If the write
+                // key has been read before and the key's commit ts
+                // mismatches the prior version, this is not a
+                // repeatable read.
+
+                LOG(WARNING)
+                    << "set rset_has_expired_, txn: " << TxNumber()
+                    << "; read_version: " << read_version
+                    << "; cmd_result.commit_ts_: " << cmd_result.commit_ts_;
+                rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                rec_resp_ = nullptr;
+
+                return;
+            }
         }
         else if (lock_acquired != LockType::NoLock)
         {
@@ -5502,7 +5521,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                 if (lock_acquired == LockType::WriteLock)
                 {
-                    LOG(INFO) << "txm acquired writelock";
+                    DLOG(INFO) << "txm acquired writelock";
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
@@ -5511,6 +5530,28 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                                              cmd_res.commit_ts_,
                                              key,
                                              cmd_success ? cmd : nullptr);
+
+                    uint64_t read_version =
+                        rw_set_.DedupRead(cmd_res.cce_addr_);
+                    if (read_version > 0 && read_version != cmd_res.commit_ts_)
+                    {
+                        // Each write-set key acquires a write lock and gets the
+                        // key's last validation ts and commit ts. If the write
+                        // key has been read before and the key's commit ts
+                        // mismatches the prior version, this is not a
+                        // repeatable read.
+
+                        LOG(WARNING)
+                            << "set rset_has_expired_, txn: " << TxNumber()
+                            << "; read_version: " << read_version
+                            << "; cmd_result.commit_ts_: "
+                            << cmd_res.commit_ts_;
+                        vct_rec_resp_->FinishError(
+                            TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                        vct_rec_resp_ = nullptr;
+
+                        return;
+                    }
                 }
                 else if (lock_acquired != LockType::NoLock)
                 {
