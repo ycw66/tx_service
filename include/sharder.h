@@ -154,8 +154,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
         uint32_t node_group_id = hash_code >> 10;
 #else
-        auto cpy = cluster_config_;
-        uint32_t node_group_id = (hash_code >> 10) % cpy->ng_configs_.size();
+        uint32_t node_group_id = (hash_code >> 10) % NodeGroupCount();
 #endif
         return (node_group_id << 10) | residual;
     }
@@ -165,8 +164,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
         return sharding_code >> 10;
 #else
-        auto cpy = cluster_config_;
-        return (sharding_code >> 10) % cpy->ng_configs_.size();
+        return (sharding_code >> 10) % NodeGroupCount();
 #endif
     }
 
@@ -177,10 +175,14 @@ public:
         return hash_val % total_range_buckets;
     }
 
-    uint32_t NodeGroupCount()
+    uint32_t NodeGroupCount() const
     {
-        auto cpy = cluster_config_;
+#ifdef ON_KEY_OBJECT
+        return node_group_count_.load(std::memory_order_acquire);
+#else
+        auto cpy = std::atomic_load(&cluster_config_);
         return cpy->ng_configs_.size();
+#endif
     }
 
     /**
@@ -240,12 +242,6 @@ public:
     int64_t LeaderTerm(uint32_t ng_id) const;
 
     int64_t CandidateLeaderTerm(uint32_t ng_id) const;
-
-    uint64_t ClusterConfigVersion() const
-    {
-        auto cpy = cluster_config_;
-        return cpy->version_;
-    }
 
     /**
      * @brief Updates the leader cache of all cc node groups.
@@ -366,10 +362,14 @@ public:
         return cc_stream_sender_ != nullptr ? cc_stream_sender_.get() : nullptr;
     }
 
-    uint32_t GetNodeCount()
+    uint32_t GetNodeCount() const
     {
-        auto cpy = cluster_config_;
+#ifdef ON_KEY_OBJECT
+        return node_group_count_.load(std::memory_order_acquire);
+#else
+        auto cpy = std::atomic_load(&cluster_config_);
         return cpy->ng_configs_.size();
+#endif
     }
 
     uint32_t NodeId() const
@@ -452,9 +452,9 @@ public:
         CcRequestBase *cc_req,
         CcShard *cc_shard);
 
-    uint64_t ClusterConfigVersion()
+    uint64_t ClusterConfigVersion() const
     {
-        auto cluster_config = cluster_config_;
+        auto cluster_config = std::atomic_load(&cluster_config_);
         if (cluster_config)
         {
             return cluster_config->version_;
@@ -502,6 +502,9 @@ private:
     std::atomic<uint32_t> ng_leader_cache_[1000];
     std::atomic<int32_t> leader_term_cache_[1000];
     std::atomic<int32_t> candidate_leader_term_cache_[1000];
+#ifdef ON_KEY_OBJECT
+    std::atomic<uint32_t> node_group_count_{};
+#endif
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;
 

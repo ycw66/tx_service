@@ -1333,13 +1333,21 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
 
     const InitTxResult &init_result = init_txn.hd_result_.Value();
     txid_ = init_result.txid_;
-    tx_number_.store(txid_.TxNumber(), std::memory_order_release);
+    uint64_t tx_number = txid_.TxNumber();
+    tx_number_.store(tx_number, std::memory_order_release);
     start_ts_ = init_result.start_ts_;
     commit_ts_bound_ = init_result.start_ts_ + 1;
     tx_term_ = init_result.term_;
     state_stack_.pop_back();
 
-    uint64_resp_->Finish(tx_number_.load(std::memory_order_acquire));
+#ifdef ON_KEY_OBJECT
+    if (uint64_resp_ != &init_tx_req_->tx_result_)
+    {
+        uint64_resp_->Finish(tx_number);
+    }
+#else
+    uint64_resp_->Finish(tx_number);
+#endif
 }
 
 /**

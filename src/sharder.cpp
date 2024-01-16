@@ -37,7 +37,7 @@ void Sharder::Shutdown()
     log_replay_server_.Join();
 
     // shutdown braft node.
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     for (auto &cc_node : cluster_config->cc_nodes_)
     {
         cc_node.second->Shutdown();
@@ -57,7 +57,11 @@ void Sharder::Shutdown()
         std::make_shared<ClusterConfig>();
     dirty_cluster_config->version_ = cluster_config->version_;
     dirty_cluster_config->ng_configs_ = cluster_config->ng_configs_;
-    cluster_config_ = dirty_cluster_config;
+    std::atomic_store(&cluster_config_, dirty_cluster_config);
+#ifdef ON_KEY_OBJECT
+    node_group_count_.store(cluster_config_->ng_configs_.size(),
+                            std::memory_order_release);
+#endif
 
     // CcNode will access log_replay_service_ to replay log when becoming node
     // group leader, so log_replay_service_ should be destructed after all
@@ -83,7 +87,7 @@ void Sharder::CloseBraft()
     LOG(INFO) << "Close braft at node #" << node_id_;
 
     // shutdown braft node.
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     for (auto &cc_node : cluster_config->cc_nodes_)
     {
         cc_node.second->Shutdown();
@@ -95,7 +99,7 @@ void Sharder::CloseBraft()
 
 void Sharder::GetNodeAddress(uint32_t node_id, std::string &ip, uint16_t &port)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     if (node_id >= cluster_config->ng_configs_.size())
     {
         // Node is already removed from cluster
@@ -123,7 +127,7 @@ int Sharder::Init(
     log_agent_ = std::move(log_agent);
     raft_local_path_ = local_path;
 
-    cluster_config_ = std::make_shared<ClusterConfig>();
+    std::atomic_store(&cluster_config_, std::make_shared<ClusterConfig>());
     for (uint32_t nid = 0; nid < 1000; nid++)
     {
         ng_leader_cache_[nid].store(nid);
@@ -149,6 +153,10 @@ int Sharder::Init(
         cluster_config_->ng_configs_.try_emplace(0);
         cluster_config_->version_ = config_version;
     }
+#ifdef ON_KEY_OBJECT
+    node_group_count_.store(cluster_config_->ng_configs_.size(),
+                            std::memory_order_release);
+#endif
 
     if (txlog_ips != nullptr)
     {
@@ -337,7 +345,7 @@ int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
 
 void Sharder::UpdateLeaders()
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     for (const auto &ng_pair : cluster_config->ng_configs_)
     {
         UpdateLeader(ng_pair.first);
@@ -415,7 +423,7 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               uint32_t latest_txn_no,
                               uint64_t last_ckpt_ts)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
     if (find_it == cluster_config->cc_nodes_.end())
@@ -436,7 +444,7 @@ void Sharder::WaitClusterReady()
         std::unique_lock<std::mutex> lk(recovery_state_mux_);
         // cluster_config_ might be updated during replay. We need
         // to obtain the latest cluster_config_ before checking in every loop.
-        auto cluster_config = cluster_config_;
+        auto cluster_config = std::atomic_load(&cluster_config_);
         for (auto &pair : cluster_config->ng_configs_)
         {
             uint32_t ng_id = pair.first;
@@ -525,7 +533,7 @@ void Sharder::ConfigRouteTable(
 
 int Sharder::TransferLeader(uint32_t ng_id)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(ng_id);
     if (find_it == cluster_config->cc_nodes_.end())
@@ -554,7 +562,7 @@ void Sharder::NotifyCheckPointer()
 std::vector<uint32_t> Sharder::LocalNodeGroups()
 {
     std::vector<uint32_t> ngs;
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     for (auto &pair : cluster_config->cc_nodes_)
     {
         ngs.push_back(pair.first);
@@ -564,7 +572,7 @@ std::vector<uint32_t> Sharder::LocalNodeGroups()
 
 int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
     if (find_it != cluster_config->cc_nodes_.end())
@@ -576,7 +584,7 @@ int64_t Sharder::TryPinNodeGroupData(uint32_t cc_ng_id)
 
 void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
     if (find_it != cluster_config->cc_nodes_.end())
@@ -587,7 +595,7 @@ void Sharder::UnpinNodeGroupData(uint32_t cc_ng_id)
 
 uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
     if (find_it != cluster_config->cc_nodes_.end())
@@ -599,7 +607,7 @@ uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
 
 bool Sharder::UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts)
 {
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
 
     auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
     if (find_it != cluster_config->cc_nodes_.end())
@@ -627,7 +635,7 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
     std::vector<std::pair<std::string, uint16_t>> &new_nodes)
 {
     // Make a copy of the current ng configs.
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
         cluster_config->ng_configs_);
 
@@ -705,7 +713,7 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>>
 Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
 {
     // Make a copy of the current ng configs.
-    auto cluster_config = cluster_config_;
+    auto cluster_config = std::atomic_load(&cluster_config_);
     std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
         cluster_config->ng_configs_);
 
@@ -804,7 +812,7 @@ void Sharder::UpdateClusterConfig(
     sharder_worker_->SubmitWork(
         [this, new_ng_configs, cc_req, cc_shard, version]
         {
-            auto cluster_config = cluster_config_;
+            auto cluster_config = std::atomic_load(&cluster_config_);
             if (cluster_config->version_ >= version)
             {
                 // If the given version is older than current version, do
@@ -1009,7 +1017,11 @@ void Sharder::UpdateClusterConfig(
             }
 
             // Make the copy on write switch
-            cluster_config_ = dirty_cluster_config;
+            std::atomic_store(&cluster_config_, dirty_cluster_config);
+#ifdef ON_KEY_OBJECT
+            node_group_count_.store(cluster_config_->ng_configs_.size(),
+                                    std::memory_order_release);
+#endif
             cc_shard->Enqueue(cc_req);
         });
 }
