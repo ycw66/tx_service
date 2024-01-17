@@ -5239,17 +5239,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
 
-        // The command is directly executed and committed on the object if
-        // autocommit and skip wal are both set. In such case, there is no need
-        // to write log and do post write, and no need to add command into write
-        // set.
-        bool directly_commit =
-            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-
-        // For autocommit read-modify-write commands, the ObjectCommandTxRequest
-        // sender will be notified after auto commit succeeds, i.e. after
-        // PostProcess or WritLog.
-
         if (lock_acquired == LockType::WriteLock)
         {
             DLOG(INFO) << "txm acquired writelock";
@@ -5319,8 +5308,18 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             return;
         }
 
+        // The command is directly executed and committed on the object within
+        // ApplyCc if autocommit and skip wal are both set. In such case, there
+        // is no need to write log and do post write, and no need to add command
+        // into write set.
+        // For autocommit read-modify-write commands, the ObjectCommandTxRequest
+        // sender will be notified after auto commit succeeds, i.e. after
+        // PostProcess or WriteLog.
+        bool already_committed =
+            obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+
         // Whether we should notify the request sender.
-        if (!obj_cmd_op.auto_commit_ || directly_commit || cmd->IsReadOnly())
+        if (!obj_cmd_op.auto_commit_ || already_committed || cmd->IsReadOnly())
         {
             // Not autocommit, or autocommit and skip wal, or autocommit and
             // this is a read only command. Notify the ObjectCommandTxRequest

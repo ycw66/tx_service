@@ -420,7 +420,6 @@ public:
         }
 
         // Lock acquired, set the result.
-        LOG(INFO) << "acquired lock: " << int(acquired_lock);
         obj_result.lock_acquired_ = acquired_lock;
 
         if (cce->payload_status_ == RecordStatus::Unknown)
@@ -547,7 +546,7 @@ public:
             // the temporary object.
             ValueT &tmp_object = *cce->dirty_payload_;
             cmd_success = cmd->ExecuteOn(tmp_object);
-            LOG(INFO) << "execute and commit current command on dirty payload";
+            DLOG(INFO) << "execute and commit current command on dirty payload";
             if (cmd_success && !cmd->IsReadOnly())
             {
                 CommitCommandOnDirtyPayload(
@@ -596,12 +595,14 @@ public:
                     cce->payload_, cce->payload_status_, *cmd);
             }
 
-            // TODO(zkl): set commit ts
-
             // Reset the dirty status.
             cce->dirty_payload_ = nullptr;
             cce->dirty_payload_status_ = RecordStatus::NonExistent;
             cce->pending_cmd_ = nullptr;
+            // Set commit ts based on the TxTs since there is no PostWriteCc if
+            // apply_and_commit_.
+            cce->commit_ts_ =
+                std::max({cce->commit_ts_ + 1, req.TxTs(), shard_->Now()});
 
             shard_->mem_usage_ += cce->PayloadMemUsage();
 
@@ -771,12 +772,6 @@ public:
                 continue;
             }
 
-            DLOG(INFO) << "replay log key: " << key.ToString()
-                       << ", obj_ver: " << obj_version
-                       << ", commit ts: " << commit_ts
-                       << ", cmds len: " << cmds_len << ", cmds str: "
-                       << std::string_view(log_blob.data() + offset, cmds_len);
-
             auto it = FindEmplace(key);
             CcEntry<KeyT, ValueT> *cce = it->second;
 
@@ -789,7 +784,13 @@ public:
             bool has_del =
                 *reinterpret_cast<const uint8_t *>(log_blob.data() + offset);
             offset += sizeof(uint8_t);
-            LOG(INFO) << "this txn log has_del? " << has_del;
+
+            DLOG(INFO) << "replay log key: " << key.ToString()
+                       << ", obj_ver: " << obj_version
+                       << ", commit ts: " << commit_ts
+                       << ", cmds len: " << cmds_len << ", cmds str: "
+                       << std::string_view(log_blob.data() + offset, cmds_len)
+                       << " has_del: " << has_del;
 
             // load payload from kvstore before committing pending commands
             if (!has_del && cce->payload_status_ == RecordStatus::Unknown)
@@ -1052,7 +1053,7 @@ private:
     {
         assert(payload != nullptr);
         ValueT &object = *payload;
-        LOG(INFO) << "creating dirty payload from existing payload";
+        DLOG(INFO) << "creating dirty payload from existing payload";
         std::unique_ptr<TxRecord> tx_rec_uptr = object.Clone();
         auto *obj_ptr = static_cast<ValueT *>(tx_rec_uptr.release());
         return {std::unique_ptr<ValueT>(obj_ptr), RecordStatus::Normal};
@@ -1099,7 +1100,7 @@ private:
                dirty_payload_status == RecordStatus::Normal);
         TxObject *old_obj_ptr = dirty_payload.get();
         TxObject *new_obj_ptr = cmd.CommitOn(old_obj_ptr);
-        LOG(INFO) << "commit pending_cmd on dirty_payload";
+        DLOG(INFO) << "commit pending_cmd on dirty_payload";
         if (new_obj_ptr != old_obj_ptr)
         {
             if (new_obj_ptr == nullptr)

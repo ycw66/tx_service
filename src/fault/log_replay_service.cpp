@@ -545,7 +545,6 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
-                LOG(INFO) << "kv len: " << kv_len;
 #else
                 // 1-byte integer for the length of the table name
                 uint8_t table_name_len = *reinterpret_cast<const uint8_t *>(

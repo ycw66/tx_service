@@ -230,7 +230,7 @@ void EmplaceAndCommitReplayTxnCommand(
     if (txn_cmd.obj_version_ < cur_ver)
     {
         // discard the obsolete txn command
-        LOG(INFO) << "discard TxnCmd with a version smaller than cur_ver";
+        DLOG(INFO) << "discard TxnCmd with a version smaller than cur_ver";
         return;
     }
 
