@@ -492,9 +492,7 @@ public:
                      StoreSlice *slice,
                      StoreRange *range,
                      std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
-                     uint64_t ckpt_ts,
-                     size_t core_cnt,
-                     std::vector<bool> is_last_one_vec);
+                     size_t core_cnt);
 
     bool Execute(CcShard &ccs) override;
 
@@ -508,17 +506,12 @@ public:
         return slice_;
     }
 
-    uint64_t CkptTs() const
-    {
-        return ckpt_ts_;
-    }
-
-    uint32_t SliceFirstIdx(size_t core_idx) const
+    size_t SliceFirstIdx(size_t core_idx) const
     {
         return slice_first_idxs_[core_idx];
     }
 
-    void UpdateFirstIdx(size_t core_idx, uint32_t new_slice_first_idx)
+    void UpdateFirstIdx(size_t core_idx, size_t new_slice_first_idx)
     {
         slice_first_idxs_[core_idx] = new_slice_first_idx;
     }
@@ -534,11 +527,6 @@ public:
                pause_keys_[core_idx].second);
 
         return pause_keys_[core_idx].second;
-    }
-
-    bool IsLastOne(size_t core_idx) const
-    {
-        return is_last_one_vec_[core_idx];
     }
 
     std::pair<TxKey::Uptr, bool> &PauseKey(size_t core_idx)
@@ -575,32 +563,20 @@ public:
 
     CcErrorCode ErrorCode()
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::lock_guard<std::mutex> lk(mux_);
         return err_code_;
     }
 
     bool IsFinish()
     {
-        std::unique_lock<std::mutex> lk(mux_);
+        std::lock_guard<std::mutex> lk(mux_);
         return unfinished_cnt_ == 0;
     }
 
-    void SetOnLoad(bool on_load)
+    void Reset(std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs)
     {
-        on_load_ = on_load;
-    }
+        std::lock_guard<std::mutex> lk(mux_);
 
-    bool OnLoad() const
-    {
-        return on_load_;
-    }
-
-    void Reset(std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs,
-               std::vector<bool> is_last_one_vec)
-    {
-        std::unique_lock<std::mutex> lk(mux_);
-
-        is_last_one_vec_ = std::move(is_last_one_vec);
         unfinished_cnt_ = ckpt_cce_raw_ptr_vecs.size();
         ckpt_cce_raw_ptr_vecs_ = ckpt_cce_raw_ptr_vecs;
 
@@ -610,8 +586,6 @@ public:
         }
 
         err_code_ = CcErrorCode::NO_ERROR;
-
-        on_load_ = false;
     }
 
     std::chrono::time_point<std::chrono::steady_clock> load_start_;
@@ -624,11 +598,9 @@ private:
     StoreSlice *slice_;
     StoreRange *range_;
     std::vector<size_t> slice_first_idxs_;
-    uint64_t ckpt_ts_;
 
     std::vector<std::pair<TxKey::Uptr, bool>> pause_keys_;
     std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vecs_;
-    std::vector<bool> is_last_one_vec_;
 
     /**
      * @brief A collection of keys and their curr and post ckpt record sizes in
@@ -641,7 +613,5 @@ private:
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     std::mutex mux_;
     std::condition_variable cv_;
-
-    bool on_load_{false};
 };
 }  // namespace txservice

@@ -552,16 +552,12 @@ GetPostCkptSlice::GetPostCkptSlice(
     StoreSlice *slice,
     StoreRange *range,
     std::vector<std::vector<uintptr_t>> &ckpt_cce_raw_ptr_vec,
-    uint64_t ckpt_ts,
-    size_t core_cnt,
-    std::vector<bool> is_last_one_vec)
+    size_t core_cnt)
     : table_name_(table_name),
       cc_ng_id_(ng_id),
       slice_(slice),
       range_(range),
-      ckpt_ts_(ckpt_ts),
-      ckpt_cce_raw_ptr_vecs_(ckpt_cce_raw_ptr_vec),
-      is_last_one_vec_(std::move(is_last_one_vec))
+      ckpt_cce_raw_ptr_vecs_(ckpt_cce_raw_ptr_vec)
 {
     unfinished_cnt_ = core_cnt;
     for (size_t i = 0; i < core_cnt; ++i)

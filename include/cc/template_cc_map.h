@@ -5820,8 +5820,6 @@ public:
         size_t ckpt_idx = req.SliceFirstIdx(shard_->core_id_);
         size_t end_idx = ckpt_cce_raw_ptr_vec.size();
 
-        bool is_last_one = req.IsLastOne(shard_->core_id_);
-
         for (size_t scan_cnt = 0;
              scan_cnt < GetPostCkptSlice::ScanBatchSize && map_it != map_end_it;
              ++map_it, ++scan_cnt)
@@ -5836,13 +5834,6 @@ public:
                 continue;
             }
 
-            if (!is_last_one && ckpt_idx == end_idx)
-            {
-                // Need to aquire next batch flush vector
-                break;
-            }
-
-            assert(is_last_one || ckpt_idx < end_idx);
             if (ckpt_idx < end_idx && reinterpret_cast<uintptr_t>(cce) ==
                                           ckpt_cce_raw_ptr_vec[ckpt_idx])
             {

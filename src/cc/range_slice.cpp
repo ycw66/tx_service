@@ -622,16 +622,8 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             ckpt_size);
     }
 
-    std::vector<bool> is_last_one_vec(core_cnt, true);
-
-    GetPostCkptSlice post_ckpt_slice(table_name,
-                                     ng_id,
-                                     slice,
-                                     this,
-                                     ckpt_cce_raw_ptr_vecs_inmut,
-                                     flush_ts,
-                                     core_cnt,
-                                     is_last_one_vec);
+    GetPostCkptSlice post_ckpt_slice(
+        table_name, ng_id, slice, this, ckpt_cce_raw_ptr_vecs_inmut, core_cnt);
 
     while (!scan_data_drained)
     {
@@ -672,7 +664,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
             }
         }
 
-        post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut, is_last_one_vec);
+        post_ckpt_slice.Reset(ckpt_cce_raw_ptr_vecs_inmut);
     }
 
     auto key_greater =
