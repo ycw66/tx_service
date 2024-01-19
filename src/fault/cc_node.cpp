@@ -521,8 +521,22 @@ void CcNode::on_start_following(const ::braft::LeaderChangeContext &ctx)
     LOG(INFO) << "CC node " << ip_ << ":" << port_ << " starts following in ng#"
               << ng_id_ << ", term: " << ctx.term();
 
-    // notify replay service to request leader transfer immediately
-    replay_service_->NotifyLeaderTransfer();
+    if (node_idx_ == 0)
+    {
+        // notify replay service to request leader transfer immediately
+        replay_service_->NotifyLeaderTransfer();
+    }
+    else
+    {
+        /*
+         *Adjusting the election_timeout_ms on the non-preferred leader node
+         *to match the preferred leader node ensures that the non-preferred
+         *leader can quickly catch up with the leader election process. This
+         *prevents prolonged absence of the new leader from the log node
+         *group, improving system reliability.
+         */
+        node_->reset_election_timeout_ms(1000, 1000);
+    }
 }
 
 void ChangePeerClosure::Run()

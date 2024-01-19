@@ -5859,8 +5859,25 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
         Sharder::Instance().GetNodeAddress(dest_node_id, node_ip, node_port);
 
         brpc::Channel channel;
-        if (channel.Init(
-                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr) != 0)
+        int err;
+        butil::ip_t ip_t;
+        if (0 != butil::str2ip(node_ip.c_str(), &ip_t))
+        {
+            // for case `node_ip` is hostname format.
+            std::string naming_service_url;
+            braft::HostNameAddr hostname_addr(node_ip,
+                                              GET_CCNODE_RPC_PORT(node_port));
+            braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+            err = channel.Init(
+                naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, nullptr);
+        }
+        else
+        {
+            err = channel.Init(
+                node_ip.c_str(), GET_CCNODE_RPC_PORT(node_port), nullptr);
+        }
+
+        if (err != 0)
         {
             // Fail to establish the channel to the target node.
             LOG(ERROR) << "NotifyMigration RPC: Fail to init the channel to the"

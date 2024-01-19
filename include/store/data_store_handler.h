@@ -70,6 +70,7 @@ public:
     virtual bool InitializeClusterConfig(
         const std::vector<std::string> &ips,
         const std::vector<uint16_t> &ports,
+        const uint16_t ng_rep_cnt,
         std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
         int32_t &seed) = 0;
 

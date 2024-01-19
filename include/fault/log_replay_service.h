@@ -192,6 +192,7 @@ private:
     std::mutex queue_mux_;
     std::condition_variable queue_cv_;
     std::atomic<bool> finish_;
+    std::atomic<bool> request_transfer_;
 
     // ip and port of log replay server of this node
     std::string ip_;

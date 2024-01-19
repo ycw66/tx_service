@@ -1,5 +1,8 @@
 #include "remote/cc_stream_sender.h"
 
+#include <arpa/inet.h>
+#include <netdb.h>  // getaddrinfo
+
 #include <chrono>
 #include <string>
 #include <unordered_set>
@@ -16,7 +19,7 @@ CcStreamSender::~CcStreamSender()
 {
     {
         std::unique_lock<std::mutex> lk(to_connect_mux_);
-        terminate_ = true;
+        terminate_.store(true, std::memory_order_release);
     }
     to_connect_cv_.notify_one();
     connect_thd_.join();
@@ -24,7 +27,7 @@ CcStreamSender::~CcStreamSender()
 
 CcStreamSender::CcStreamSender(
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
-    : msg_pool_(msg_pool), terminate_(false)
+    : msg_pool_(msg_pool), terminate_(false), to_connect_flag_(false)
 {
     stream_write_options_.write_in_background = true;
     connect_thd_ = std::thread([this] { ConnectStreams(); });
@@ -33,6 +36,83 @@ CcStreamSender::CcStreamSender(
 void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
 {
     msg_pool_.enqueue(std::move(msg));
+}
+
+void CcStreamSender::ReConnectStream(uint32_t dest_node_id)
+{
+    std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
+    auto stream_it = outbound_streams_.find(dest_node_id);
+    if (stream_it == outbound_streams_.end())
+    {
+        return;
+    }
+
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
+    int64_t stream_ver = stream_version.load(std::memory_order_acquire);
+
+    std::lock_guard<std::mutex> lk(to_connect_mux_);
+    // If the stream version is -1, a separate thread has notified
+    // the connecting thread to reconnect the stream. If the stream
+    // version is greater than the previously-read one (stream_ver),
+    // a new stream has been connected. In either case, the current
+    // thread does not initiated a reconnection.
+    if (stream_version.compare_exchange_strong(
+            stream_ver, -1, std::memory_order_release))
+    {
+        to_connect_regular_streams_.try_emplace(dest_node_id, stream_ver + 1);
+    }
+}
+
+void CcStreamSender::ReConnectLongMsgStream(uint32_t dest_node_id)
+{
+    std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
+    auto stream_it = long_msg_outbound_streams_.find(dest_node_id);
+    if (stream_it == long_msg_outbound_streams_.end())
+    {
+        return;
+    }
+
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
+    int64_t stream_ver = stream_version.load(std::memory_order_acquire);
+
+    std::lock_guard<std::mutex> lk(to_connect_mux_);
+    // If the stream version is -1, a separate thread has notified
+    // the connecting thread to reconnect the stream. If the stream
+    // version is greater than the previously-read one (stream_ver),
+    // a new stream has been connected. In either case, the current
+    // thread does not initiated a reconnection.
+    if (stream_version.compare_exchange_strong(
+            stream_ver, -1, std::memory_order_release))
+    {
+        to_connect_long_msg_streams_.try_emplace(dest_node_id, stream_ver + 1);
+    }
+}
+
+bool CcStreamSender::UpdateStreamIP(uint32_t node_id,
+                                    const std::string &new_connection_ip)
+{
+    std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
+    auto stream_it = outbound_streams_.find(node_id);
+    if (stream_it == outbound_streams_.end())
+    {
+        return false;
+    }
+
+    std::string &stream_ip = std::get<2>(stream_it->second);
+    if (stream_ip.empty())
+    {
+        // set stream ip with the ip of the first connection.
+        std::get<2>(stream_it->second) = new_connection_ip;
+        return false;
+    }
+    else if (stream_ip != new_connection_ip)
+    {
+        // return true to indicate ip changed
+        std::get<2>(stream_it->second) = new_connection_ip;
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -50,7 +130,8 @@ void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
 bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                                        const CcMessage &msg,
                                        CcHandlerResultBase *res,
-                                       bool resend)
+                                       bool resend,
+                                       bool log_verbose)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -63,7 +144,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                     .append("}");
             }));
     TX_TRACE_DUMP(&msg);
-
+    if (log_verbose)
+    {
+        LOG(INFO) << "SendMessageToNode " << dest_node_id;
+    }
     std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
     auto stream_it = outbound_streams_.find(dest_node_id);
     if (stream_it == outbound_streams_.end())
@@ -79,13 +163,17 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         return false;
     }
 
-    std::atomic<int64_t> &stream_version = stream_it->second.second;
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
-        DLOG(INFO) << "CC stream is connecting, buffer the message for resend";
+        if (log_verbose)
+        {
+            LOG(INFO) << "CC stream is connecting, buffer the message for "
+                         "resend";
+        }
         auto resend_message_list = resend_message_list_.try_emplace(
             dest_node_id, moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
         resend_message_list.first->second.enqueue(
@@ -93,11 +181,12 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
         // always wake up connector thread to either reconnect streams or
         // resend messages.
+        to_connect_flag_.store(true, std::memory_order_release);
         to_connect_cv_.notify_one();
         return true;
     }
 
-    brpc::StreamId stream_id = stream_it->second.first;
+    brpc::StreamId stream_id = std::get<0>(stream_it->second);
 
     butil::IOBuf iobuf;
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
@@ -105,12 +194,25 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
     int error_code =
         brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+    if (log_verbose)
+    {
+        LOG(INFO) << "cc_stream_sender: do stream write with stream id: "
+                  << stream_id << " dest_node_id: " << dest_node_id
+                  << " print response error code: " << error_code;
+    }
     while (error_code != 0)
     {
         if (error_code == EAGAIN)
         {
             error_code =
                 brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+            if (log_verbose)
+            {
+                LOG(INFO) << "cc_stream_sender: do stream write again "
+                             "with stream id: "
+                          << stream_id
+                          << " print response error code: " << error_code;
+            }
         }
         else
         {
@@ -119,6 +221,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
             // remote node is dead. We should skip resend the message again.
             if (resend)
             {
+                if (log_verbose)
+                {
+                    LOG(INFO) << "cc_stream_sender: resend message and break";
+                }
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
                 if (res != nullptr)
@@ -127,7 +233,11 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 }
                 break;
             }
-
+            if (log_verbose)
+            {
+                LOG(INFO) << "cc_stream_sender: check stream version: "
+                          << stream_ver << " and need resend message";
+            }
             std::lock_guard<std::mutex> lk(to_connect_mux_);
             // If the stream version is -1, a separate thread has notified
             // the connecting thread to reconnect the stream. If the stream
@@ -149,6 +259,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
             // always wake up connector thread to either reconnect streams
             // or resend messages.
+            to_connect_flag_.store(true, std::memory_order_release);
             to_connect_cv_.notify_one();
             break;
         }
@@ -189,7 +300,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
         return false;
     }
 
-    std::atomic<int64_t> &stream_version = stream_it->second.second;
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
@@ -205,11 +316,12 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
 
         // always wake up connector thread to either reconnect streams or
         // resend messages.
+        to_connect_flag_.store(true, std::memory_order_release);
         to_connect_cv_.notify_one();
         return true;
     }
 
-    brpc::StreamId &stream_id = stream_it->second.first;
+    brpc::StreamId &stream_id = std::get<0>(stream_it->second);
 
     butil::IOBuf iobuf;
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
@@ -261,6 +373,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                 std::make_unique<ResendScanSliceResp>(msg, res));
 
             // wake up connector thread to reconnect streams
+            to_connect_flag_.store(true, std::memory_order_release);
             to_connect_cv_.notify_one();
 
             break;
@@ -306,10 +419,14 @@ void CcStreamSender::UpdateRemoteNodes(
             uint16_t port = config.front().port_;
             channel_it.first->second = ip + ":" + std::to_string(port);
             auto stream_it = outbound_streams_.try_emplace(node_id);
-            stream_it.first->second.second.store(-1, std::memory_order_release);
+            std::get<0>(stream_it.first->second) = brpc::INVALID_STREAM_ID;
+            std::get<1>(stream_it.first->second)
+                .store(-1, std::memory_order_release);
 
             stream_it = long_msg_outbound_streams_.try_emplace(node_id);
-            stream_it.first->second.second.store(-1, std::memory_order_release);
+            std::get<0>(stream_it.first->second) = brpc::INVALID_STREAM_ID;
+            std::get<1>(stream_it.first->second)
+                .store(-1, std::memory_order_release);
 
             {
                 // Add it to the reconnect lists, the connect_thd_ will connect
@@ -335,9 +452,10 @@ void CcStreamSender::UpdateRemoteNodes(
                 long_msg_resend_message_list_.erase(node_id);
             }
             LOG(INFO) << "Closed cc stream to node " << node_id;
-            brpc::StreamClose(outbound_streams_.at(node_id).first);
+            brpc::StreamClose(std::get<0>(outbound_streams_.at(node_id)));
             outbound_streams_.erase(node_id);
-            brpc::StreamClose(long_msg_outbound_streams_.at(node_id).first);
+            brpc::StreamClose(
+                std::get<0>(long_msg_outbound_streams_.at(node_id)));
             long_msg_outbound_streams_.erase(node_id);
             removed_nodes.insert(node_id);
         }
@@ -350,6 +468,7 @@ void CcStreamSender::UpdateRemoteNodes(
 
 void CcStreamSender::NotifyConnectStream()
 {
+    to_connect_flag_.store(true, std::memory_order_release);
     to_connect_cv_.notify_one();
 }
 
@@ -357,14 +476,23 @@ void CcStreamSender::ConnectStreams()
 {
     using namespace std::chrono_literals;
     std::unique_lock<std::mutex> lk(to_connect_mux_);
-    while (!terminate_)
+    while (!terminate_.load(std::memory_order_acquire))
     {
-        to_connect_cv_.wait_for(lk, 1s, [this] { return terminate_; });
+        to_connect_cv_.wait_for(
+            lk,
+            1s,
+            [this]
+            {
+                return terminate_.load(std::memory_order_acquire) ||
+                       to_connect_flag_.load(std::memory_order_acquire);
+            });
 
-        if (terminate_)
+        if (terminate_.load(std::memory_order_acquire))
         {
             break;
         }
+
+        to_connect_flag_.store(false, std::memory_order_release);
 
         if (to_connect_regular_streams_.size() == 0 &&
             to_connect_long_msg_streams_.size() == 0)
@@ -481,6 +609,7 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     uint16_t node_port = std::stoi(ip_addr.substr(comma_pos + 1));
     butil::ip_t ip_t;
     int err;
+    std::string node_ip;
     if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
     {
         // for case `node_ip_str` is hostname format.
@@ -493,6 +622,44 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
         {
             return err;
         }
+        // Get IP address.
+        char ip_str[INET_ADDRSTRLEN];
+        struct addrinfo hints, *addrs;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        err = getaddrinfo(node_ip_str.c_str(), NULL, &hints, &addrs);
+        if (err != 0)
+        {
+            LOG(ERROR) << "GetAddrInfo error: " << gai_strerror(err);
+            return err;
+        }
+        for (struct addrinfo *item = addrs; item != NULL; item = item->ai_next)
+        {
+            void *addr;
+            // get pointer to the address itself, different fields in IPv4 and
+            // IPv6
+            if (item->ai_family == AF_INET)
+            {
+                // address is IPv4
+                struct sockaddr_in *ipv4 = (struct sockaddr_in *) item->ai_addr;
+                addr = &(ipv4->sin_addr);
+            }
+            else
+            {
+                // address is IPv6
+                struct sockaddr_in6 *ipv6 =
+                    (struct sockaddr_in6 *) item->ai_addr;
+                addr = &(ipv6->sin6_addr);
+            }
+
+            // convert IP to a string
+            inet_ntop(item->ai_family, addr, ip_str, INET_ADDRSTRLEN);
+            break;
+        }
+        freeaddrinfo(addrs);
+        node_ip.append(ip_str);
     }
     else
     {
@@ -501,11 +668,16 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
         {
             return err;
         }
+        node_ip.append(node_ip_str);
     }
 
     auto stream_it = outbound_streams_.find(node_id);
-    brpc::StreamId &stream_id = stream_it->second.first;
-    std::atomic<int64_t> &stream_version = stream_it->second.second;
+    brpc::StreamId &stream_id = std::get<0>(stream_it->second);
+    if (stream_id != brpc::INVALID_STREAM_ID)
+    {
+        brpc::StreamClose(stream_id);
+    }
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     assert(stream_version.load() == -1);
 
     txservice::remote::CcStreamService_Stub stub(&channel);
@@ -520,6 +692,9 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
     txservice::remote::ConnectResponse response;
     request.set_message("Connect");
     request.set_type(remote::StreamType::RegularCcStream);
+
+    request.set_node_id(Sharder::Instance().NodeId());
+    request.set_node_ip(node_ip);
     stub.Connect(&cntl, &request, &response, nullptr);
     if (cntl.Failed())
     {
@@ -546,15 +721,38 @@ int CcStreamSender::ConnectLongMsgStream(uint32_t node_id, int64_t version)
     brpc::Channel channel;
     std::string ip_addr = channel_it->second;
     auto stream_it = long_msg_outbound_streams_.find(node_id);
-    brpc::StreamId &long_msg_stream_id = stream_it->second.first;
-    std::atomic<int64_t> &long_msg_stream_version = stream_it->second.second;
+    brpc::StreamId &long_msg_stream_id = std::get<0>(stream_it->second);
+    if (long_msg_stream_id != brpc::INVALID_STREAM_ID)
+    {
+        brpc::StreamClose(long_msg_stream_id);
+    }
+    std::atomic<int64_t> &long_msg_stream_version =
+        std::get<1>(stream_it->second);
     assert(long_msg_stream_version.load() == -1);
 
     brpc::ChannelOptions options;
     options.protocol = brpc::PROTOCOL_BAIDU_STD;
     options.timeout_ms = 100;
     options.max_retry = 3;
-    int err = channel.Init(ip_addr.c_str(), &options);
+    size_t comma_pos = ip_addr.find(':');
+    assert(comma_pos != std::string::npos);
+    std::string node_ip_str = ip_addr.substr(0, comma_pos);
+    uint16_t node_port = std::stoi(ip_addr.substr(comma_pos + 1));
+    butil::ip_t ip_t;
+    int err;
+    if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
+    {
+        // for case `node_ip_str` is hostname format.
+        std::string naming_service_url;
+        braft::HostNameAddr hostname_addr(node_ip_str, node_port);
+        braft::HostNameAddr2NSUrl(hostname_addr, naming_service_url);
+        err = channel.Init(
+            naming_service_url.c_str(), braft::LOAD_BALANCER_NAME, &options);
+    }
+    else
+    {
+        err = channel.Init(ip_addr.c_str(), &options);
+    }
     if (err != 0)
     {
         return err;

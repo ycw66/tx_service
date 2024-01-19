@@ -11,6 +11,8 @@ enum StreamType {
 message ConnectRequest {
   string message = 1;
   StreamType type = 2;
+  uint32 node_id = 3;
+  string node_ip = 4;
 };
 
 message ConnectResponse {

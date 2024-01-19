@@ -46,6 +46,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
     : local_shards_(local_shards),
       log_agent_(log_agent),
       finish_(false),
+      request_transfer_(false),
       ip_(std::move(ip)),
       port_(port)
 {
@@ -63,7 +64,9 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     {
                         return !replay_log_queue_.empty() ||
                                !recover_tx_queue_.empty() ||
-                               finish_.load(std::memory_order_acquire);
+                               finish_.load(std::memory_order_acquire) ||
+                               request_transfer_.load(
+                                   std::memory_order_acquire);
                     });
                 if (finish_.load(std::memory_order_acquire))
                 {
@@ -98,6 +101,7 @@ ReplayService::ReplayService(LocalCcShards &local_shards,
                     ProcessRecoverTxTask(task);
                     continue;
                 }
+                request_transfer_.store(false, std::memory_order_release);
                 if (!Sharder::Instance().IsPreferredGroupLeader())
                 {
                     lk.unlock();
@@ -285,6 +289,7 @@ void ReplayService::RecoverTx(uint64_t tx_number,
 
 void ReplayService::NotifyLeaderTransfer()
 {
+    request_transfer_.store(true, std::memory_order_release);
     queue_cv_.notify_one();
 }
 

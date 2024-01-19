@@ -120,12 +120,14 @@ int Sharder::Init(
     const std::vector<uint16_t> *txlog_ports,
     LocalCcShards *local_shards,
     std::unique_ptr<TxLog> log_agent,
-    const std::string &local_path)
+    const std::string &local_path,
+    const uint16_t rep_group_cnt)
 {
     node_id_ = node_id;
     local_shards_ = local_shards;
     log_agent_ = std::move(log_agent);
     raft_local_path_ = local_path;
+    rep_group_cnt_ = rep_group_cnt;
 
     std::atomic_store(&cluster_config_, std::make_shared<ClusterConfig>());
     for (uint32_t nid = 0; nid < 1000; nid++)
@@ -640,9 +642,8 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
         cluster_config->ng_configs_);
 
     uint32_t rep_group_cnt =
-        fault::CcNode::rep_group_cnt <
-                new_nodes.size() + cluster_config->ng_configs_.size()
-            ? fault::CcNode::rep_group_cnt
+        rep_group_cnt_ < new_nodes.size() + cluster_config->ng_configs_.size()
+            ? rep_group_cnt_
             : new_nodes.size() + cluster_config->ng_configs_.size();
     // Add a new node group for each new added node, and assign the nodes
     // that are in least number of node groups as the member of new node
@@ -718,9 +719,8 @@ Sharder::RemoveNodeFromCluster(uint16_t removed_node_count)
         cluster_config->ng_configs_);
 
     uint32_t rep_group_cnt =
-        fault::CcNode::rep_group_cnt <
-                cluster_config->ng_configs_.size() - removed_node_count
-            ? fault::CcNode::rep_group_cnt
+        rep_group_cnt_ < cluster_config->ng_configs_.size() - removed_node_count
+            ? rep_group_cnt_
             : cluster_config->ng_configs_.size() - removed_node_count;
     assert(rep_group_cnt > 0);
     // Remove the nodes with greatest node id.

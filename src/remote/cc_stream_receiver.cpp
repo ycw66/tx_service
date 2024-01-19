@@ -80,6 +80,7 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
     brpc::Controller *cntl = static_cast<brpc::Controller *>(controller);
 
     brpc::StreamOptions stream_options;
+    stream_options.idle_timeout_ms = 100000;
     stream_options.handler = this;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)
     {
@@ -87,7 +88,21 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
-    Sharder::Instance().GetCcStreamSender()->NotifyConnectStream();
+    // Reconnect stream if ip of source node has been changed. The
+    // connection to the old source node with the same hostname may not be
+    // closed due to node being killed forcely. In this case, StreamWrite will
+    // return succeed before tcp keep alive timeout. Hence we need to reconnect
+    // to the new source node when ip change.
+    if (request->type() == remote::StreamType::RegularCcStream &&
+        Sharder::Instance().GetCcStreamSender()->UpdateStreamIP(
+            request->node_id(), request->node_ip()))
+    {
+        Sharder::Instance().GetCcStreamSender()->ReConnectStream(
+            request->node_id());
+        Sharder::Instance().GetCcStreamSender()->ReConnectLongMsgStream(
+            request->node_id());
+        Sharder::Instance().GetCcStreamSender()->NotifyConnectStream();
+    }
 
     response->set_message("Accepted");
 

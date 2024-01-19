@@ -853,6 +853,7 @@ public:
             }
         }
 
+        uint16_t ng_rep_cnt = (uint16_t) conf.find("rep_group_cnt")->second;
         Sharder::Instance().Init(node_id,
                                  ng_configs,
                                  cluster_config_version,
@@ -860,7 +861,8 @@ public:
                                  txlog_ports,
                                  &local_cc_shards_,
                                  std::move(log_hd),
-                                 local_path);
+                                 local_path,
+                                 ng_rep_cnt);
         TxStartTsCollector::Instance().Init(
             &local_cc_shards_,
             conf.find("collect_active_tx_ts_interval_seconds")->second);

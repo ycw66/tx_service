@@ -67,7 +67,8 @@ public:
     bool SendMessageToNode(uint32_t dest_node_id,
                            const CcMessage &msg,
                            CcHandlerResultBase *res = nullptr,
-                           bool resend = false);
+                           bool resend = false,
+                           bool log_verbose = false);
     bool SendScanRespToNode(uint32_t dest_node_id,
                             const ScanSliceResponse &msg,
                             CcHandlerResultBase *res = nullptr,
@@ -81,6 +82,29 @@ public:
      * receiving peer's connect request.
      */
     void NotifyConnectStream();
+
+    /**
+     * @brief Reconnect stream give node_id. Add node_id to
+     * to_connect_regular_streams_.
+     *
+     * @param node_id
+     */
+    void ReConnectStream(uint32_t node_id);
+
+    /**
+     * @brief Reconnect long msg stream give node_id. Add node_id to
+     * to_connect_long_msg_streams_.
+     *
+     * @param node_id
+     */
+    void ReConnectLongMsgStream(uint32_t node_id);
+
+    /**
+     * @brief Update stream ip if the ip of the new connection is different from
+     * target stream ip. return true if ip changed.
+     *
+     */
+    bool UpdateStreamIP(uint32_t node_id, const std::string &new_connection_ip);
 
 private:
     void ConnectStreams();
@@ -102,14 +126,19 @@ private:
 
     // A map mapping the destination node ID to the stream connecting to it.
     // Each stream is associated with a version number, to prevent two users
-    // from re-connecting the stream simultaneously.
-    std::unordered_map<uint32_t,
-                       std::pair<brpc::StreamId, std::atomic<int64_t>>>
+    // from re-connecting the stream simultaneously. Each stream record the
+    // target IP address, which will trigger reconnect if IP changed.
+    std::unordered_map<
+        uint32_t,
+        std::tuple<brpc::StreamId, std::atomic<int64_t>, std::string>>
         outbound_streams_;
     // Dedicated streams for msgs that would take a long time to deserialize.
-    // This is to avoid these request from blocking other cc requests.
-    std::unordered_map<uint32_t,
-                       std::pair<brpc::StreamId, std::atomic<int64_t>>>
+    // This is to avoid these request from blocking other cc requests. Each
+    // stream record the target IP address, which will trigger reconnect if IP
+    // changed.
+    std::unordered_map<
+        uint32_t,
+        std::tuple<brpc::StreamId, std::atomic<int64_t>, std::string>>
         long_msg_outbound_streams_;
 
     // Protects to connect streams and resend message lists.
@@ -128,7 +157,10 @@ private:
 
     // The background thread that establishes cc streams to remote nodes.
     std::thread connect_thd_;
-    bool terminate_;
+    std::atomic<bool> terminate_;
+    // to_connect_flag_ is used to avoid to wait one second timeout in
+    // to_connect_cv_ wait_for.
+    std::atomic<bool> to_connect_flag_;
 };
 }  // namespace remote
 }  // namespace txservice

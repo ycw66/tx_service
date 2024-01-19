@@ -56,8 +56,13 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs", "[start-ts-collector]")
     std::cout << "txlog_path: " << txlog_path << std::endl;
 
     std::unique_ptr<::txlog::LogServer> txlog_server =
-        std::make_unique<::txlog::LogServer>(
-            node_id, log_server_port, ips, log_instance_ports, txlog_path, 0);
+        std::make_unique<::txlog::LogServer>(node_id,
+                                             log_server_port,
+                                             ips,
+                                             log_instance_ports,
+                                             txlog_path,
+                                             0,
+                                             1);
     int err = txlog_server->Start();
     if (err != 0)
     {

@@ -33,8 +33,6 @@ class LocalCcShards;
 class CcNode : public braft::StateMachine
 {
 public:
-    static const uint16_t rep_group_cnt = 3;
-
     CcNode(const uint32_t ng_id,
            const uint32_t node_id,
            const std::string &ip,

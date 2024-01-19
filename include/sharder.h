@@ -209,7 +209,8 @@ public:
              const std::vector<uint16_t> *txlog_ports,
              LocalCcShards *local_shards,
              std::unique_ptr<TxLog> log_agent,
-             const std::string &local_path);
+             const std::string &local_path,
+             const uint16_t rep_group_cnt);
 
     /**
      * @brief Checks if the current leader of the input cc node group is on the
@@ -496,6 +497,8 @@ private:
     // etc. We use copy on write to update cluster_config_ so that we don't need
     // mutex protection when reading it.
     std::shared_ptr<ClusterConfig> cluster_config_;
+    // The replicate number of node group.
+    uint16_t rep_group_cnt_;
 
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
