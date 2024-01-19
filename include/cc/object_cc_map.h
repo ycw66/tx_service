@@ -11,6 +11,10 @@
 #include "template_cc_map.h"
 #include "tx_record.h"
 
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(skip_kv);
+#endif
+
 namespace txservice
 {
 template <typename KeyT, typename ValueT>
@@ -424,7 +428,12 @@ public:
 
         if (cce->payload_status_ == RecordStatus::Unknown)
         {
-            if (req.read_type_ == ReadType::OutsideNormal)
+            if (FLAGS_skip_kv)
+            {
+                cce->payload_status_ = RecordStatus::Deleted;
+                cce->commit_ts_ = 1U;
+            }
+            else if (req.read_type_ == ReadType::OutsideNormal)
             {
                 // backfill
                 if (req.rec_ != nullptr)

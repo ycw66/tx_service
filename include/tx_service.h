@@ -295,6 +295,10 @@ public:
         size_t loop_cnt = 5;
 #endif
 
+#ifdef ON_KEY_OBJECT
+        loop_cnt = 1;
+#endif
+
         for (size_t loop = 0; loop < loop_cnt; ++loop)
         {
 #ifdef EXT_TX_PROC_ENABLED

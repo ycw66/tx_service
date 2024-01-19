@@ -16,8 +16,6 @@
 #include "tx_worker_pool.h"
 #include "type.h"
 
-DECLARE_bool(skip_wal);
-
 txservice::LocalCcHandler::LocalCcHandler(uint32_t thd_id,
                                           LocalCcShards &shards)
     : thd_id_(thd_id),
