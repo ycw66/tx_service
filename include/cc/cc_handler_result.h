@@ -41,6 +41,8 @@ public:
     virtual bool IsFinished() const = 0;
     virtual bool ForceError() = 0;
     virtual bool IsError() const = 0;
+    virtual bool SetResultByStreamThread() = 0;
+    virtual bool SetResultByTimeoutThread() = 0;
 
 #ifdef EXT_TX_PROC_ENABLED
     void SetToBlock()
@@ -72,6 +74,7 @@ public:
     CcHandlerResult(CcHandlerResult &&rhs) noexcept
         : result_(std::move(rhs.result_)),
           is_finished_(rhs.is_finished_.load(std::memory_order_acquire)),
+          result_status_(rhs.result_status_.load(std::memory_order_acquire)),
           error_code_(rhs.error_code_.load(std::memory_order_acquire)),
           txm_(rhs.txm_),
           post_lambda_(rhs.post_lambda_)
@@ -83,6 +86,38 @@ public:
     bool IsFinished() const override
     {
         return is_finished_.load(std::memory_order_acquire);
+    }
+
+    bool SetResultByStreamThread() override
+    {
+        int32_t expect = 0;
+        while (
+            !result_status_.compare_exchange_strong(expect,
+                                                    expect + 1,
+                                                    std::memory_order_acquire,
+                                                    std::memory_order_relaxed))
+        {
+            if (expect == -1)
+            {
+                // Txm being timeout, reject this response message.
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SetResultByTimeoutThread() override
+    {
+        int32_t expect = 0;
+        bool succeed = result_status_.compare_exchange_strong(
+            expect, -1, std::memory_order_acquire, std::memory_order_relaxed);
+        return succeed;
+    }
+
+    void DecreaseCurrentHandlingResponse()
+    {
+        uint32_t res = result_status_.fetch_sub(1, std::memory_order_acquire);
+        assert(res > 0);
     }
 
     bool IsError() const override
@@ -169,6 +204,7 @@ public:
     void SetRemoteFinished()
     {
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        result_status_.fetch_sub(1, std::memory_order_acquire);
         SetFinished();
     }
 
@@ -177,6 +213,7 @@ public:
     void SetRemoteError(CcErrorCode err_code)
     {
         remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        result_status_.fetch_sub(1, std::memory_order_acquire);
         SetError(err_code);
     }
 
@@ -211,6 +248,7 @@ public:
         is_blocking_ = false;
 #endif
         is_finished_.store(false, std::memory_order_release);
+        result_status_.store(0, std::memory_order_release);
     }
 
     void ResetTxm(TransactionExecution *txm)
@@ -227,6 +265,14 @@ public:
 private:
     T result_;
     std::atomic<bool> is_finished_{false};
+
+    // Use this variable to guarantee only one thread can set the
+    // CcHandlerResult once remote response is received. Positive
+    // numbers(1,2,3...) denotes how many responses are being handled by stream
+    // thread, and txm can not timeout when result_status_>0. Negative
+    // number(-1) denotes timeout thread is going to set CcHandlerResult.
+    std::atomic<int32_t> result_status_{0};
+
     // std::atomic<int8_t> error_code_{0};
     std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
     bool ref_cnted_{false};

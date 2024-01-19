@@ -56,7 +56,7 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
 
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut(30))
+    else if (txm->IsTimeOut(30) && hd_result_.SetResultByTimeoutThread())
     {
         LOG(WARNING) << "Kickout data all operation timeout 30s";
         if (txm->CheckLeaderTerm() && retry_num_ > 0)
@@ -1713,7 +1713,8 @@ bool UpsertTableIndexOp::AcquireLeaderTermsIfNecessary(
                                           { return acquire_terms_finished; });
             }
 
-            if (!acquire_terms_finished)
+            if (!acquire_terms_finished &&
+                acquire_terms_result_.SetResultByTimeoutThread())
             {
                 // Handle the timeout.
                 LOG(ERROR) << "Acquire node group leader terms timeout for 3s.";
@@ -1951,7 +1952,8 @@ void UpsertTableIndexOp::UploadSkData(TransactionExecution *txm,
                                    { return post_write_finished; });
         } while (post_write_result_.LocalRefCnt() > 0);
 
-        if (!post_write_finished)
+        if (!post_write_finished &&
+            post_write_result_.SetResultByTimeoutThread())
         {
             // Handle the timeout.
             LOG(ERROR) << "Write the packed sk into sk ccmap timeout for 3s. "

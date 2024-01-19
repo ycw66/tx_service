@@ -153,7 +153,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     if (stream_it == outbound_streams_.end())
     {
         // SendMessage error return -1 to indicate the request needs retry.
-        if (res != nullptr)
+        if (res != nullptr && res->SetResultByStreamThread())
         {
             res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
@@ -227,7 +227,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 }
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
-                if (res != nullptr)
+                if (res != nullptr && res->SetResultByStreamThread())
                 {
                     res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }
@@ -290,7 +290,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     if (stream_it == long_msg_outbound_streams_.end())
     {
         // SendMessage error return -1 to indicate the request needs retry.
-        if (res != nullptr)
+        if (res != nullptr && res->SetResultByStreamThread())
         {
             res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
@@ -345,7 +345,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
             {
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
-                if (res != nullptr)
+                if (res != nullptr && res->SetResultByStreamThread())
                 {
                     res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }

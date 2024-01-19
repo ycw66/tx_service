@@ -264,7 +264,12 @@ void ReadOperation::Forward(TransactionExecution *txm)
     }
     else if (!hd_result_.Value().is_local_)
     {
-        bool timeout = txm->IsTimeOut();
+        bool timeout = false;
+        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        {
+            timeout = true;
+        }
+
         CODE_FAULT_INJECTOR("read_operation_timeout", {
             LOG(INFO) << "FaultInject  read_operation_timeout";
             timeout = true;
@@ -559,7 +564,11 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     }
     else
     {
-        bool timeout = txm->IsTimeOut();
+        bool timeout = false;
+        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        {
+            timeout = true;
+        }
         CODE_FAULT_INJECTOR("acquire_operation_timeout", {
             LOG(INFO)
                 << "FaultInject  acquire_operation_timeout remote_ack_cnt_:"
@@ -758,7 +767,8 @@ void ValidateOperation::Forward(TransactionExecution *txm)
         // remote node, which contains read entries, is dead.
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
+             hd_result_.SetResultByTimeoutThread())
     {
         bool success = hd_result_.ForceError();
         if (success)
@@ -946,7 +956,8 @@ void PostProcessOp::Forward(TransactionExecution *txm)
             txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
         }
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
+             hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1000,7 +1011,8 @@ void ReloadCacheOperation::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
+             hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1052,7 +1064,7 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
-    else if (txm->IsTimeOut())
+    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
     {
         bool force_success = hd_result_.ForceError();
         if (force_success)
@@ -1102,7 +1114,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
-    else if (txm->IsTimeOut())
+    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1322,9 +1334,11 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut() && !slice_hd_result_.Value().is_local_)
+    else if (!slice_hd_result_.Value().is_local_ && txm->IsTimeOut() &&
+             slice_hd_result_.SetResultByTimeoutThread())
 #else
-    else if (txm->IsTimeOut() && !hd_result_.Value().is_local_)
+    else if (!hd_result_.Value().is_local_ && txm->IsTimeOut() &&
+             hd_result_.SetResultByTimeoutThread())
 #endif
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1450,9 +1464,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
 
     if (remote_ack_cnt_.load(std::memory_order_relaxed) > 0)
     {
-        bool time_out = txm->IsTimeOut();
-
-        if (time_out)
+        if (txm->IsTimeOut())
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
@@ -1472,6 +1484,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             for (size_t nid = 0; nid < upload_cnt_; ++nid)
             {
                 CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[nid];
+                if (!hd_result.SetResultByTimeoutThread())
+                {
+                    continue;
+                }
+
                 const AcquireAllResult &acquire_res = hd_result.Value();
 
                 uint64_t ts = std::max(acquire_res.commit_ts_ + 1,
@@ -2831,7 +2848,7 @@ void NoOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
+    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -2891,7 +2908,8 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
-    else if (handle_timeout_ && txm->IsTimeOut(wait_secs_))
+    else if (handle_timeout_ && txm->IsTimeOut(wait_secs_) &&
+             hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -4890,7 +4908,8 @@ void AnalyzeTableAllOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600))
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600) &&
+             hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -4971,7 +4990,8 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     }
 
     const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
-    if (cce_addr.Term() < 0 && txm->IsTimeOut())
+    if (cce_addr.Term() < 0 && txm->IsTimeOut() &&
+        hd_result_.SetResultByTimeoutThread())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -7011,7 +7031,7 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
     {
         for (CcHandlerResult<ReadKeyResult> &hd_result : hd_result_vec_)
         {
-            if (hd_result.IsFinished())
+            if (hd_result.IsFinished() || !hd_result.SetResultByTimeoutThread())
             {
                 continue;
             }
