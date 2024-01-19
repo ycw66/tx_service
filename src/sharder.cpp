@@ -281,6 +281,20 @@ int Sharder::Init(
     // Start the cc_stream_server_ after TxProcessor start using interface
     // StartCcStreamReceiver().
 
+#ifdef ON_KEY_OBJECT
+    brpc::Server server;
+    brpc::ServerOptions server_options;
+    // server_options.num_threads at least 4
+    server_options.num_threads = 4;
+    if (cc_node_server_.Start(
+            GET_CCNODE_RPC_PORT(
+                cluster_config_->ng_configs_.at(node_id_).front().port_),
+            &server_options) != 0)
+    {
+        LOG(FATAL) << "Fail to start the cc node server.";
+        return -1;
+    }
+#else
     if (cc_node_server_.Start(
             GET_CCNODE_RPC_PORT(
                 cluster_config_->ng_configs_.at(node_id_).front().port_),
@@ -289,6 +303,7 @@ int Sharder::Init(
         LOG(FATAL) << "Fail to start the cc node server.";
         return -1;
     }
+#endif
 
     // start braft state machine by initialize braft node.
     for (auto &pair : cluster_config_->cc_nodes_)
@@ -300,6 +315,17 @@ int Sharder::Init(
 
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
+
+#ifdef ON_KEY_OBJECT
+    if (log_replay_server_.Start(
+            GET_LOG_REPLAY_RPC_PORT(
+                cluster_config_->ng_configs_.at(node_id_).front().port_),
+            &server_options) != 0)
+    {
+        LOG(FATAL) << "Fail to start the log replay server.";
+        return -1;
+    }
+#else
     if (log_replay_server_.Start(
             GET_LOG_REPLAY_RPC_PORT(
                 cluster_config_->ng_configs_.at(node_id_).front().port_),
@@ -308,6 +334,7 @@ int Sharder::Init(
         LOG(FATAL) << "Fail to start the log replay server.";
         return -1;
     }
+#endif
 
     return 0;
 }
@@ -1046,10 +1073,23 @@ void Sharder::StartCcStreamReceiver()
 {
     // The cc_stream_receiver_ object has been add to this server during
     // Sharder::Init().
+#ifdef ON_KEY_OBJECT
+    brpc::Server server;
+    brpc::ServerOptions server_options;
+    // server_options.num_threads at least 4
+    server_options.num_threads = 4;
+    if (cc_stream_server_.Start(
+            cluster_config_->ng_configs_.at(node_id_).front().port_,
+            &server_options) != 0)
+    {
+        LOG(FATAL) << "Fail to start the cc stream server.";
+    }
+#else
     if (cc_stream_server_.Start(
             cluster_config_->ng_configs_.at(node_id_).front().port_, NULL) != 0)
     {
         LOG(FATAL) << "Fail to start the cc stream server.";
     }
+#endif
 }
 }  // namespace txservice
