@@ -64,6 +64,8 @@ public:
         std::filesystem::remove_all(std::filesystem::path(storage_path_));
     }
 
+    bool CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term);
+
     void FinishLogGroupReplay(uint32_t log_group_id,
                               int64_t ng_term,
                               uint32_t latest_committed_txn_no,

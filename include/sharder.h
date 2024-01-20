@@ -327,6 +327,10 @@ public:
                          uint32_t latest_txn_no,
                          uint64_t last_ckpt_ts);
 
+    bool CheckLogGroupReplayFinished(uint32_t cc_ng_id,
+                                     uint32_t log_group_id,
+                                     int64_t cc_ng_term);
+
     /**
      * @brief Wait for all the tx_service nodes to finish the log recovery
      * process and setup the cc_stream_sender.

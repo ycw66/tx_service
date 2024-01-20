@@ -438,6 +438,22 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
     local_shards_->UpdateTsBase(last_ckpt_ts);
 }
 
+bool Sharder::CheckLogGroupReplayFinished(uint32_t cc_ng_id,
+                                          uint32_t log_group_id,
+                                          int64_t cc_ng_term)
+{
+    auto cluster_config = std::atomic_load(&cluster_config_);
+
+    auto find_it = cluster_config->cc_nodes_.find(cc_ng_id);
+    if (find_it == cluster_config->cc_nodes_.end())
+    {
+        return false;
+    }
+
+    return find_it->second->CheckLogGroupReplayFinished(log_group_id,
+                                                        cc_ng_term);
+}
+
 void Sharder::WaitClusterReady()
 {
     bool recovery_all_finished = false;

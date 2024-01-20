@@ -2,6 +2,7 @@
 
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
+#include <butil/iobuf.h>
 
 #include <algorithm>  // std::min
 #include <atomic>
@@ -30,12 +31,14 @@
 #include "cc/ccm_scanner.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
+#include "cc_req_misc.h"
 #include "constants.h"
 #include "dead_lock_check.h"
 #include "error_messages.h"  // CcErrorCode
 #include "fault/fault_inject.h"
 #include "log_closure.h"
 #include "proto/cc_request.pb.h"
+#include "raft_log.pb.h"
 #include "random_pairing.h"
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
@@ -2965,7 +2968,9 @@ private:
 struct ReplayLogCc : public TemplatedCcRequest<ReplayLogCc, Void>
 {
 public:
-    ReplayLogCc(
+    ReplayLogCc() = default;
+
+    void Reset(
         uint32_t ng_id,
         std::string_view table_name_view,
         TableType table_type,
@@ -2974,25 +2979,27 @@ public:
         uint64_t txn,
         std::mutex &mux,
         std::condition_variable &cv,
-        uint32_t &finish_cnt,
+        uint64_t &finish_cnt,
         bool &recovery_error,
+        std::shared_ptr<std::vector<::txlog::ReplayMessage>> &msg_vec,
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
-        std::unordered_set<TableName> *range_splitting = nullptr)
-        : table_name_holder_(table_name_view, table_type),
-          log_blob_view_(blob),
-          commit_ts_(commit_ts),
-          result_(nullptr),
-          external_mux_(mux),
-          external_cv_(cv),
-          finish_cnt_(finish_cnt),
-          recovery_error_(recovery_error),
-          range_split_started_(range_split_started),
-          range_splitting_(range_splitting)
+        std::unordered_set<TableName> *range_splitting = nullptr,
+        uint16_t first_core = 0)
     {
-        table_name_ = &table_name_holder_;
-        node_group_id_ = ng_id;
-        tx_number_ = txn;
-        res_ = &result_;
+        table_name_holder_ = TableName(table_name_view, table_type);
+        TemplatedCcRequest<ReplayLogCc, Void>::Reset(
+            &table_name_holder_, &result_, ng_id, txn);
+        log_blob_view_ = blob;
+        commit_ts_ = commit_ts;
+        result_.Reset();
+        external_mux_ = &mux;
+        external_cv_ = &cv;
+        finish_cnt_ = &finish_cnt;
+        recovery_error_ = &recovery_error;
+        msg_vec_ = msg_vec;
+        first_core_ = first_core;
+        range_split_started_ = range_split_started;
+        range_splitting_ = range_splitting;
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -3009,7 +3016,7 @@ public:
         if (cc_ng_candid_term < 0 && cc_ng_term < 0)
         {
             SetFinish();
-            return false;
+            return true;
         }
         if (ccm_ == nullptr)
         {
@@ -3041,7 +3048,7 @@ public:
                     {
                         // table has been dropped
                         SetFinish();
-                        return false;
+                        return true;
                     }
 
                     table_schema_ = catalog_entry->schema_.get();
@@ -3098,7 +3105,7 @@ public:
                             // The table is dropped. Skips replaying the log for
                             // this cc map.
                             SetFinish();
-                            return false;
+                            return true;
                         }
                     }
                     else
@@ -3116,8 +3123,7 @@ public:
                 table_schema_ = ccm_->GetTableSchema();
             }
         }
-        ccm_->Execute(*this);
-        return false;
+        return ccm_->Execute(*this);
     }
 
     void SetFinish()
@@ -3126,19 +3132,21 @@ public:
         // specified log record has been replayed in all cores of this node.
         // HandlerResult is not used by external caller, hence we don't need to
         // call HandlerResult.SetFinished().
-        std::lock_guard<std::mutex> lk(external_mux_);
-        ++finish_cnt_;
-        external_cv_.notify_all();
+        msg_vec_ = nullptr;
+        std::lock_guard<std::mutex> lk(*external_mux_);
+        ++(*finish_cnt_);
+        external_cv_->notify_all();
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
 
-        std::lock_guard<std::mutex> lk(external_mux_);
-        ++finish_cnt_;
-        recovery_error_ = true;
-        external_cv_.notify_all();
+        msg_vec_ = nullptr;
+        std::lock_guard<std::mutex> lk(*external_mux_);
+        ++(*finish_cnt_);
+        *recovery_error_ = true;
+        external_cv_->notify_all();
     }
 
     const std::string_view &LogContentView() const
@@ -3182,18 +3190,30 @@ public:
                range_splitting_->find(table_name) != range_splitting_->end();
     }
 
+    uint16_t FirstCore() const
+    {
+        return first_core_;
+    }
+
 private:
-    TableName table_name_holder_;  //  not string owner, sv -> protobuf message.
+    TableName table_name_holder_{
+        "",
+        0,
+        TableType::Primary};  //  not string owner, sv -> protobuf message.
     std::string_view log_blob_view_;
     uint64_t commit_ts_;
-    CcHandlerResult<Void> result_;
-    std::mutex &external_mux_;
-    std::condition_variable &external_cv_;
-    uint32_t &finish_cnt_;
-    bool &recovery_error_;
+    CcHandlerResult<Void> result_{nullptr};
+    std::mutex *external_mux_;
+    std::condition_variable *external_cv_;
+    uint64_t *finish_cnt_;
+    bool *recovery_error_;
+    uint16_t first_core_;
     const struct TableSchema *table_schema_{nullptr};
     // Reserved for range split log replay
     std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
+    // Keep a reference of replay msg until replay is finished since
+    // log_blob_view_ and table_name_holder_ points to ReplayMessage.
+    std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec_;
 
     // Reserved for schema op log replay
     const std::unordered_set<TableName> *range_splitting_;

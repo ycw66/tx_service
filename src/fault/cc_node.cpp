@@ -197,6 +197,26 @@ int CcNode::TransferLeader()
     return -1;
 }
 
+bool CcNode::CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term)
+{
+    std::lock_guard<std::mutex> lk(recovery_mux_);
+    int64_t term = Sharder::Instance().LeaderTerm(ng_id_);
+    if (term >= ng_term)
+    {
+        return true;
+    }
+    int64_t candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
+    if (candidate_term > ng_term)
+    {
+        return true;
+    }
+    if (recovered_log_groups_.find(log_group_id) == recovered_log_groups_.end())
+    {
+        return false;
+    }
+    return true;
+}
+
 void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
                                   int64_t ng_term,
                                   uint32_t latest_committed_txn_no,

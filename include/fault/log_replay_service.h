@@ -6,14 +6,10 @@
 
 #include <condition_variable>
 #include <deque>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
 #include "txlog.h"
 
@@ -154,33 +150,41 @@ private:
             : log_group_id_(lg_id),
               cc_ng_id_(cc_ng_id),
               cc_ng_term_(cc_ng_term),
+              mux_(),
+              cv_(),
               recovering_(recovering)
         {
         }
+        ConnectionInfo(const ConnectionInfo &rhs) = delete;
 
         uint32_t log_group_id_;
         uint32_t cc_ng_id_;
         int64_t cc_ng_term_;
+        uint64_t total_log_msg_cnt_{0};
+        // protects finished_cnt_ and recovery_error_.
+        std::mutex mux_;
+        std::condition_variable cv_;
+        uint64_t finished_cnt_{0};
+        // Only true if this stream is for log replay.
         bool recovering_;
         bool recovery_error_{false};
     };
 
     LocalCcShards &local_shards_;
     // Each ConnectionInfo is uniquely identified by <cc_ng_id, log_group_id>
-    // pair. For each <cc_ng_id, log_group_id> pair, even if a stream is closed,
-    // the ConnectionInfo remains, until replaced by a new stream connection.
+    // pair.
     std::unordered_map<brpc::StreamId, ConnectionInfo> inbound_connections_;
     int active_stream_cnt_ = 0;
     std::mutex inbound_mux_;
     std::condition_variable inbound_cv_;
 
-    void WaitAndClearRequests(
-        brpc::StreamId stream_id,
-        std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
-        std::mutex &mux,
-        std::condition_variable &cv,
-        uint32_t &finish_log_cnt,
-        bool &recovery_error);
+    void WaitAndClearRequests(brpc::StreamId stream_id,
+                              uint64_t total_cnt,
+                              std::mutex &mux,
+                              std::condition_variable &cv,
+                              uint64_t &finish_log_cnt,
+                              bool &recovery_error,
+                              bool wait_for_all_finished = true);
     static const int timeout_ms_ = 2000;
     // to resend ReplayLogRequest on stream timeout
     TxLog *log_agent_;

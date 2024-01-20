@@ -5452,6 +5452,7 @@ public:
         // record that is not sharded to the core.
         ValueT rec;
         size_t offset = 0;
+        uint16_t next_core = UINT16_MAX;
         const std::string_view &log_blob = req.LogContentView();
 
         // If the log record's commit ts is smaller than that of the cc map,
@@ -5460,7 +5461,7 @@ public:
         if (req.CommitTs() < schema_ts_)
         {
             req.SetFinish();
-            return false;
+            return true;
         }
 
         while (offset < log_blob.size())
@@ -5484,6 +5485,11 @@ public:
                     op_type == OperationType::Update)
                 {
                     rec.Deserialize(log_blob.data(), offset);
+                }
+                if (shard_->core_id_ == req.FirstCore() ||
+                    (core_id != req.FirstCore() && core_id < shard_->core_id_))
+                {
+                    next_core = std::min(core_id, next_core);
                 }
                 continue;
             }
@@ -5513,7 +5519,10 @@ public:
                     if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
                         new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
                     {
-                        rec.Deserialize(log_blob.data(), offset);
+                        if (op_type != OperationType::Delete)
+                        {
+                            rec.Deserialize(log_blob.data(), offset);
+                        }
                         continue;
                     }
                 }
@@ -5524,13 +5533,11 @@ public:
 
             if (cce == nullptr)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                req.Result()->SetError(CcErrorCode::OUT_OF_MEMORY);
-                return true;
-#else
+                // Since we're not holding any range lock that would block
+                // data sync during replay, just keep retrying until we have
+                // free space in cc map.
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 return false;
-#endif
             }
 
             if (cce->commit_ts_ >= req.CommitTs())
@@ -5629,17 +5636,19 @@ public:
             }
         }
 
-        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        if (next_core != UINT16_MAX)
         {
             req.ResetCcm();
-            MoveRequest(&req, shard_->core_id_ + 1);
+            MoveRequest(&req, next_core);
+
+            return false;
         }
         else
         {
             req.SetFinish();
-        }
 
-        return false;
+            return true;
+        }
     }
 
     bool Execute(CleanCcEntryForTestCc &req) override

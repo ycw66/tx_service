@@ -1,8 +1,13 @@
 #include "log_replay_service.h"
 
+#include <brpc/stream.h>
+
+#include <memory>
+#include <mutex>
+#include <vector>
+
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
-#include "fault/cc_node.h"
 #include "proto/cc_request.pb.h"
 #include "raft_log.pb.h"
 #include "sharder.h"
@@ -39,6 +44,7 @@ namespace txservice
 {
 namespace fault
 {
+thread_local CcRequestPool<ReplayLogCc> replay_cc_pool_;
 ReplayService::ReplayService(LocalCcShards &local_shards,
                              TxLog *log_agent,
                              std::string ip,
@@ -178,41 +184,55 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
     // It will affect the stream option. If recovering is true, then
     // the stream will set idle_timeout and try to resend ReplayLogRequest if
     // timeout happens.
-    bool recovering = true;
-
-    for (const auto &[stream_id, info] : inbound_connections_)
+    bool recovering = false;
+    // First check if cc ng id has already finished replay.
+    if (!Sharder::Instance().CheckLeaderTerm(cc_ng_id, cc_ng_term))
     {
-        if (info.cc_ng_id_ == cc_ng_id && info.log_group_id_ == log_group_id)
+        if (Sharder::Instance().CandidateLeaderTerm(cc_ng_id) != cc_ng_term)
         {
-            if (cc_ng_term > info.cc_ng_term_)
+            // Invalid connection request.
+            return;
+        }
+        // node group is trying to recover cc_ng_term. Check if this log group
+        // has finished replay.
+        if (Sharder::Instance().CheckLogGroupReplayFinished(
+                cc_ng_id, log_group_id, cc_ng_term))
+        {
+            // This log group has already finished log replay, but cc node is
+            // not node group leader yet. So this connection cannot be orphan
+            // lock check. It must be an out dated log replay connection.
+            return;
+        }
+
+        recovering = true;
+        // Clean up old log group stream connection.
+        for (auto &[stream_id, info] : inbound_connections_)
+        {
+            if (info.cc_ng_id_ == cc_ng_id &&
+                info.log_group_id_ == log_group_id)
             {
-                // cc_ng_term > info.cc_ng_term_, the cc_ng has failed over
-                recovering = true;
+                if (cc_ng_term > info.cc_ng_term_)
+                {
+                    // cc_ng_term > info.cc_ng_term_, the cc_ng has failed over
+                }
+                else if (cc_ng_term == info.cc_ng_term_)
+                {
+                    // the cc_ng is still recovering, and this request is a
+                    // response for ReplayService's stream timeout and resend
+                    // ReplayLogRequest;
+                }
+                else
+                {
+                    // an outdated connect request, ignore
+                    return;
+                }
+                // close old stream and remove entry
+                brpc::StreamClose(stream_id);
+                break;
             }
-            else if (cc_ng_term == info.cc_ng_term_)
-            {
-                // cc_ng_term == info.cc_ng_term, there are two possibilities:
-                // 1) the cc_ng is still recovering, and this request is a
-                // response for ReplayService's stream timeout and resend
-                // ReplayLogRequest; or
-                // 2) the cc node has recovered, and LogShippingAgent reconnect
-                // to send RecoverTx results.
-                // In either case, the new stream to be created should reserve
-                // the recover status of old stream, and whether idle_timeout
-                // should be set for this new stream depends on it.
-                recovering = info.recovering_;
-            }
-            else
-            {
-                // an outdated connect request, ignore
-                return;
-            }
-            // close old stream and remove entry
-            brpc::StreamClose(stream_id);
-            inbound_connections_.erase(stream_id);
-            break;
         }
     }
+
     // either no old connection found for <cc_ng_id, lg_id> pair, or old
     // connection has been removed. accept connect request and insert
     // ConnectionInfo.
@@ -230,9 +250,8 @@ void ReplayService::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
-    inbound_connections_.insert_or_assign(
-        stream_socket,
-        ConnectionInfo(log_group_id, cc_ng_id, cc_ng_term, recovering));
+    inbound_connections_.try_emplace(
+        stream_socket, log_group_id, cc_ng_id, cc_ng_term, recovering);
     response->set_success(true);
     LOG(INFO) << "replay service accepting new stream: " << stream_socket
               << " from log group: " << log_group_id
@@ -297,21 +316,27 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                                         butil::IOBuf *const messages[],
                                         size_t size)
 {
-    std::vector<::txlog::ReplayMessage> msg_vec(size);
-    std::vector<std::unique_ptr<ReplayLogCc>> cc_req_vec;
-    std::vector<std::unique_ptr<ReadCc>> catalog_read_cc_req_vec;
+    std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec =
+        std::make_shared<std::vector<::txlog::ReplayMessage>>(size);
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
     std::unordered_set<TableName> range_split_tables;
 
-    std::mutex mux;
-    std::condition_variable cv;
-    uint32_t finish_log_cnt = 0;
-    bool recovery_error = false;
+    ConnectionInfo *info;
+    {
+        std::lock_guard<std::mutex> lk(inbound_mux_);
+        info = &inbound_connections_.find(stream_id)->second;
+    }
+    std::mutex &mux = info->mux_;
+    std::condition_variable &cv = info->cv_;
+    uint64_t &total_msg_cnt = info->total_log_msg_cnt_;
+    uint64_t &finish_log_cnt = info->finished_cnt_;
+    bool &recovery_error = info->recovery_error_;
+    uint16_t next_core = 0;
 
     for (size_t idx = 0; idx < size; ++idx)
     {
-        ::txlog::ReplayMessage &msg = msg_vec.at(idx);
+        ::txlog::ReplayMessage &msg = msg_vec->at(idx);
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
         msg.ParseFromZeroCopyStream(&wrapper);
         if (idx == 0)
@@ -356,49 +381,46 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
             // based on the cluster scale log.
 
             // Replay cluster topology first
-            ReplayLogCc *cc_req =
-                cc_req_vec
-                    .emplace_back(std::make_unique<ReplayLogCc>(
-                        cc_ng_id,
-                        cluster_config_ccm_name_sv,
-                        TableType::ClusterConfig,
-                        std::string_view(scale_op_blob.data(),
-                                         scale_op_blob.length()),
-                        msg.cluster_scale_op_msg().commit_ts(),
-                        msg.cluster_scale_op_msg().txn(),
-                        mux,
-                        cv,
-                        finish_log_cnt,
-                        recovery_error))
-                    .get();
+            ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+            cc_req->Reset(
+                cc_ng_id,
+                cluster_config_ccm_name_sv,
+                TableType::ClusterConfig,
+                std::string_view(scale_op_blob.data(), scale_op_blob.length()),
+                msg.cluster_scale_op_msg().commit_ts(),
+                msg.cluster_scale_op_msg().txn(),
+                mux,
+                cv,
+                finish_log_cnt,
+                recovery_error,
+                msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
             WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
             }
 
             // Recover bucket owner to correct state
-            cc_req = cc_req_vec
-                         .emplace_back(std::make_unique<ReplayLogCc>(
-                             cc_ng_id,
-                             range_bucket_ccm_name_sv,
-                             TableType::RangeBucket,
-                             std::string_view(scale_op_blob.data(),
-                                              scale_op_blob.length()),
-                             msg.cluster_scale_op_msg().commit_ts(),
-                             msg.cluster_scale_op_msg().txn(),
-                             mux,
-                             cv,
-                             finish_log_cnt,
-                             recovery_error))
-                         .get();
+            cc_req = replay_cc_pool_.NextRequest();
+            cc_req->Reset(
+                cc_ng_id,
+                range_bucket_ccm_name_sv,
+                TableType::RangeBucket,
+                std::string_view(scale_op_blob.data(), scale_op_blob.length()),
+                msg.cluster_scale_op_msg().commit_ts(),
+                msg.cluster_scale_op_msg().txn(),
+                mux,
+                cv,
+                finish_log_cnt,
+                recovery_error,
+                msg_vec);
 
             local_shards_.EnqueueCcRequest(0, cc_req);
             WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -411,28 +433,28 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         {
             const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
 
-            std::unique_ptr<ReplayLogCc> &cc_req =
-                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                    cc_ng_id,
-                    catalog_ccm_name_sv,
-                    TableType::Catalog,
-                    std::string_view(schema_op_blob.data(),
-                                     schema_op_blob.length()),
-                    schema_op_msg.commit_ts(),
-                    schema_op_msg.txn(),
-                    mux,
-                    cv,
-                    finish_log_cnt,
-                    recovery_error,
-                    nullptr,
-                    &range_split_tables));
+            ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+            cc_req->Reset(cc_ng_id,
+                          catalog_ccm_name_sv,
+                          TableType::Catalog,
+                          std::string_view(schema_op_blob.data(),
+                                           schema_op_blob.length()),
+                          schema_op_msg.commit_ts(),
+                          schema_op_msg.txn(),
+                          mux,
+                          cv,
+                          finish_log_cnt,
+                          recovery_error,
+                          msg_vec,
+                          nullptr,
+                          &range_split_tables);
 
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
+            local_shards_.EnqueueCcRequest(0, cc_req);
 
             // wait for this schema operation to be recovered at all shards
             // before processing next
             WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -467,27 +489,27 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
 
             // Replay Split
             blob_offset += table_name_len;
-            std::unique_ptr<ReplayLogCc> &cc_req =
-                cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                    cc_ng_id,
-                    table_name_view,
-                    TableType::RangePartition,
-                    std::string_view(
-                        split_range_op_blob.data() + blob_offset,
-                        split_range_op_blob.length() - blob_offset),
-                    ts,
-                    txn,
-                    mux,
-                    cv,
-                    finish_log_cnt,
-                    recovery_error,
-                    res_pair.first->second));
+            ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+            cc_req->Reset(
+                cc_ng_id,
+                table_name_view,
+                TableType::RangePartition,
+                std::string_view(split_range_op_blob.data() + blob_offset,
+                                 split_range_op_blob.length() - blob_offset),
+                ts,
+                txn,
+                mux,
+                cv,
+                finish_log_cnt,
+                recovery_error,
+                msg_vec,
+                res_pair.first->second);
 
-            local_shards_.EnqueueCcRequest(0, cc_req.get());
+            local_shards_.EnqueueCcRequest(0, cc_req);
             // wait for this range split operation to be recovered at all shards
             // before processing next
             WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+                stream_id, 1, mux, cv, finish_log_cnt, recovery_error);
             if (recovery_error)
             {
                 return 0;
@@ -564,25 +586,31 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 blob_offset += sizeof(uint32_t);
 #endif
 
-                std::unique_ptr<ReplayLogCc> &cc_req =
-                    cc_req_vec.emplace_back(std::make_unique<ReplayLogCc>(
-                        cc_ng_id,
-                        table_name_view,
-                        table_type,
-                        std::string_view(blob.data() + blob_offset, kv_len),
-                        commit_ts,
-                        0,
-                        mux,
-                        cv,
-                        finish_log_cnt,
-                        recovery_error));
+                ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+                cc_req->Reset(
+                    cc_ng_id,
+                    table_name_view,
+                    table_type,
+                    std::string_view(blob.data() + blob_offset, kv_len),
+                    commit_ts,
+                    0,
+                    mux,
+                    cv,
+                    finish_log_cnt,
+                    recovery_error,
+                    msg_vec,
+                    nullptr,
+                    nullptr,
+                    next_core);
+                total_msg_cnt++;
 
                 // Enqueues the replay request to the first local shard. The
                 // shard will deserialize the log record and only insert the
                 // records belonging to its cc map. The replay request is then
                 // moved to remaining shards one after another and is replayed
                 // at individual shards separately.
-                local_shards_.EnqueueCcRequest(0, cc_req.get());
+                local_shards_.EnqueueCcRequest(next_core, cc_req);
+                next_core = (next_core + 1) % local_shards_.Count();
 
                 blob_offset += kv_len;
             }
@@ -592,25 +620,22 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         {
             // finish log replay of this log group
             // wait for all preceding ReplayLogCc requests finish
-            WaitAndClearRequests(
-                stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
-            if (recovery_error)
-            {
-                return 0;
-            }
-
+            WaitAndClearRequests(stream_id,
+                                 total_msg_cnt,
+                                 mux,
+                                 cv,
+                                 finish_log_cnt,
+                                 recovery_error);
             // update recovering status and then close this stream,
             // log_shipping_agent has to create a new stream to send recoverTx
             // log records. when accepting that new stream, set no
             // idle_timeout_ms as that is a long-running connection.
-            std::unique_lock lk(inbound_mux_);
-            auto it = inbound_connections_.find(stream_id);
-            if (it != inbound_connections_.end())
             {
+                std::lock_guard<std::mutex> info_lk(info->mux_);
                 // ignore the old stream which is not in inbound_connections_.
                 // if error happens during replay, the current ng's leader term
                 // should not be updated.
-                if (it->second.recovery_error_)
+                if (info->recovery_error_)
                 {
                     LOG(ERROR)
                         << "monographdb failed to recovery on ccnode group:"
@@ -631,11 +656,9 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
                 }
 
                 LOG(INFO) << "replay connection: cc node group: "
-                          << it->second.cc_ng_id_
-                          << ", term: " << it->second.cc_ng_term_
-                          << ", log group: " << it->second.log_group_id_
+                          << info->cc_ng_id_ << ", term: " << info->cc_ng_term_
+                          << ", log group: " << info->log_group_id_
                           << ", set recovering status to finished";
-                it->second.recovering_ = false;
             }
             brpc::StreamClose(stream_id);
             // assumption: finish message must be the last message so return
@@ -643,8 +666,32 @@ int ReplayService::on_received_messages(brpc::StreamId stream_id,
         }
     }
 
-    WaitAndClearRequests(
-        stream_id, cc_req_vec, mux, cv, finish_log_cnt, recovery_error);
+    bool wait_for_on_the_fly = false;
+    bool recovery_failed = false;
+    {
+        std::lock_guard<std::mutex> lk(mux);
+        // If there are too many on the fly reqs, block until
+        // all of them are done. This will push log service back
+        // from sending too many log msgs that we cannot handle.
+        if (total_msg_cnt - finish_log_cnt > 200000)
+        {
+            wait_for_on_the_fly = true;
+        }
+        // If the recover has already errored out, terminate all
+        // replay connections of this node group.
+        recovery_failed = recovery_error;
+    }
+
+    if (wait_for_on_the_fly || recovery_failed)
+    {
+        WaitAndClearRequests(stream_id,
+                             total_msg_cnt,
+                             mux,
+                             cv,
+                             finish_log_cnt,
+                             recovery_error,
+                             false);
+    }
     return 0;
 }
 
@@ -655,7 +702,7 @@ void ReplayService::on_idle_timeout(brpc::StreamId id)
     // timeout_ms_ until ReplayLogRequest succeeds and a new stream on this
     // <cc_ng_id, log_group_id> pair is established, this stream will be closed
     // then.
-    ConnectionInfo info{};
+    ConnectionInfo *info;
     {
         std::unique_lock lk(inbound_mux_);
         auto it = inbound_connections_.find(id);
@@ -664,14 +711,15 @@ void ReplayService::on_idle_timeout(brpc::StreamId id)
             // this stream has been replaced by a newer one
             return;
         }
-        info = it->second;
+        info = &it->second;
     }
-    if (info.recovering_)
+    std::lock_guard<std::mutex> lk(info->mux_);
+    if (info->recovering_)
     {
         // still recovering, resend replay request to log group
-        uint32_t lg_id = info.log_group_id_;
-        uint32_t cc_ng_id = info.cc_ng_id_;
-        int64_t cc_ng_term = info.cc_ng_term_;
+        uint32_t lg_id = info->log_group_id_;
+        uint32_t cc_ng_id = info->cc_ng_id_;
+        int64_t cc_ng_term = info->cc_ng_term_;
         LOG(INFO) << "replay service stream: " << id
                   << " timeouts, cc_node group: " << cc_ng_id
                   << ", log group: " << lg_id
@@ -691,6 +739,7 @@ void ReplayService::on_closed(brpc::StreamId id)
 
     std::unique_lock<std::mutex> lk(inbound_mux_);
     active_stream_cnt_--;
+    inbound_connections_.erase(id);
     LOG(INFO) << "replay service stream: " << id
               << ", is closed, active stream cnt: " << active_stream_cnt_;
     if (active_stream_cnt_ == 0)
@@ -699,25 +748,35 @@ void ReplayService::on_closed(brpc::StreamId id)
     }
 }
 
-void ReplayService::WaitAndClearRequests(
-    brpc::StreamId stream_id,
-    std::vector<std::unique_ptr<ReplayLogCc>> &cc_req_vec,
-    std::mutex &mux,
-    std::condition_variable &cv,
-    uint32_t &finish_log_cnt,
-    bool &recovery_error)
+void ReplayService::WaitAndClearRequests(brpc::StreamId stream_id,
+                                         uint64_t total_cnt,
+                                         std::mutex &mux,
+                                         std::condition_variable &cv,
+                                         uint64_t &finish_log_cnt,
+                                         bool &recovery_error,
+                                         bool wait_for_all_finished)
 {
     std::unique_lock<std::mutex> lk(mux);
     cv.wait(lk,
-            [&finish_log_cnt, &cc_req_vec]
-            { return (finish_log_cnt == cc_req_vec.size()); });
-    if (finish_log_cnt == cc_req_vec.size())
+            [&finish_log_cnt, &total_cnt, &wait_for_all_finished]
+            {
+                if (!wait_for_all_finished)
+                {
+                    return total_cnt - finish_log_cnt < 200000;
+                }
+                else
+                {
+                    return (finish_log_cnt == total_cnt);
+                }
+            });
+    if (finish_log_cnt == total_cnt)
     {
-        cc_req_vec.clear();
         finish_log_cnt = 0;
+        total_cnt = 0;
     }
     if (recovery_error)
     {
+        lk.unlock();
         std::unique_lock lk(inbound_mux_);
         uint32_t error_node_group_id = 0;
         int64_t error_term = -1;
@@ -731,7 +790,6 @@ void ReplayService::WaitAndClearRequests(
 
         error_node_group_id = it->second.cc_ng_id_;
         error_term = it->second.cc_ng_term_;
-        it->second.recovery_error_ = true;
 
         // close all the streams belonging to the current node group and term.
         for (const auto &[stream_id, info] : inbound_connections_)
