@@ -5136,12 +5136,12 @@ void MultiObjectCommandOp::Reset(const TableName *table_name,
                 CcErrorCode err = res->ErrorCode();
                 if (err == CcErrorCode::NO_ERROR)
                 {
-                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                    atm_cnt_.fetch_sub(1, std::memory_order_release);
                 }
                 else
                 {
                     atm_err_code_.store(err, std::memory_order_relaxed);
-                    atm_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                    atm_cnt_.fetch_sub(1, std::memory_order_release);
                 }
             };
 
@@ -5223,9 +5223,9 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (atm_err_code_.load(std::memory_order_relaxed) !=
+    if (atm_err_code_.load(std::memory_order_acquire) !=
             CcErrorCode::NO_ERROR ||
-        atm_cnt_.load(std::memory_order_relaxed) == 0)
+        atm_cnt_.load(std::memory_order_acquire) == 0)
     {
         txm->PostProcess(*this);
     }
