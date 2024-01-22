@@ -4874,6 +4874,7 @@ void TransactionExecution::Process(PostReadOperation &post_read_operation)
 
 void TransactionExecution::PostProcess(PostReadOperation &post_read_operation)
 {
+    rw_set_.DedupRead(*post_read_operation.cce_addr_);
     state_stack_.pop_back();
 }
 
