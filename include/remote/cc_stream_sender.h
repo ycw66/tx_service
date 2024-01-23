@@ -109,6 +109,8 @@ public:
 private:
     void ConnectStreams();
 
+    void ResendMessageToNode();
+
     // Need to wrap these functions calls with lk on outbound_mux_ to prevent
     // other thread trying to delete node id from cluster while connect_thd_ is
     // still trying to connect to node id.
@@ -157,7 +159,32 @@ private:
 
     // The background thread that establishes cc streams to remote nodes.
     std::thread connect_thd_;
+
+    std::mutex resend_mux_;
+    std::condition_variable resend_cv_;
+
+    enum class ResendThreadStatus
+    {
+        Sleeping = 0,
+        Running
+    };
+
+    ResendThreadStatus resend_thread_status_{ResendThreadStatus::Running};
+
+    std::unordered_map<uint32_t,
+                       moodycamel::ConcurrentQueue<ResendMessage::Uptr>>
+        eagain_resend_message_list_;
+    std::unordered_map<uint32_t,
+                       moodycamel::ConcurrentQueue<ResendScanSliceResp::Uptr>>
+        eagain_resend_long_message_list_;
+
+    size_t eagain_resend_message_cnt_{0};
+    size_t eagain_resend_long_message_cnt_{0};
+
+    std::thread resend_thd_;
+
     std::atomic<bool> terminate_;
+
     // to_connect_flag_ is used to avoid to wait one second timeout in
     // to_connect_cv_ wait_for.
     std::atomic<bool> to_connect_flag_;

@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>  // getaddrinfo
 
+#include <atomic>
 #include <chrono>
 #include <string>
 #include <unordered_set>
@@ -17,12 +18,13 @@ namespace remote
 {
 CcStreamSender::~CcStreamSender()
 {
-    {
-        std::unique_lock<std::mutex> lk(to_connect_mux_);
-        terminate_.store(true, std::memory_order_release);
-    }
+    terminate_.store(true, std::memory_order_release);
+
     to_connect_cv_.notify_one();
+    resend_cv_.notify_one();
+
     connect_thd_.join();
+    resend_thd_.join();
 }
 
 CcStreamSender::CcStreamSender(
@@ -31,6 +33,7 @@ CcStreamSender::CcStreamSender(
 {
     stream_write_options_.write_in_background = true;
     connect_thd_ = std::thread([this] { ConnectStreams(); });
+    resend_thd_ = std::thread([this] { ResendMessageToNode(); });
 }
 
 void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
@@ -155,7 +158,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         // SendMessage error return -1 to indicate the request needs retry.
         if (res != nullptr && res->SetResultByStreamThread())
         {
-            res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            res->SetLocalOrRemoteError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
@@ -194,24 +197,59 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
     int error_code =
         brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+
     if (log_verbose)
     {
         LOG(INFO) << "cc_stream_sender: do stream write with stream id: "
                   << stream_id << " dest_node_id: " << dest_node_id
                   << " print response error code: " << error_code;
     }
-    while (error_code != 0)
+
+    if (error_code != 0)
     {
         if (error_code == EAGAIN)
         {
-            error_code =
-                brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
             if (log_verbose)
             {
-                LOG(INFO) << "cc_stream_sender: do stream write again "
-                             "with stream id: "
-                          << stream_id
-                          << " print response error code: " << error_code;
+                LOG(INFO)
+                    << "cc_stream_sender: retry stream write again on the "
+                       "backgroud thread"
+                       "with stream id: "
+                    << stream_id
+                    << " print response error code: " << error_code;
+            }
+
+            std::lock_guard<std::mutex> resend_lk(resend_mux_);
+
+            auto bg_resend_msg_list =
+                eagain_resend_message_list_.find(dest_node_id);
+            if (bg_resend_msg_list != eagain_resend_message_list_.end())
+            {
+                eagain_resend_message_cnt_ += 1;
+                bg_resend_msg_list->second.enqueue(
+                    std::make_unique<ResendMessage>(msg, res));
+
+                if (resend_thread_status_ == ResendThreadStatus::Sleeping)
+                {
+                    resend_thread_status_ = ResendThreadStatus::Running;
+                    resend_cv_.notify_one();
+                }
+            }
+            else
+            {
+                auto bg_resend_msg_list =
+                    eagain_resend_message_list_.try_emplace(
+                        dest_node_id,
+                        moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
+                eagain_resend_message_cnt_ += 1;
+                bg_resend_msg_list.first->second.enqueue(
+                    std::make_unique<ResendMessage>(msg, res));
+
+                if (resend_thread_status_ == ResendThreadStatus::Sleeping)
+                {
+                    resend_thread_status_ = ResendThreadStatus::Running;
+                    resend_cv_.notify_one();
+                }
             }
         }
         else
@@ -225,43 +263,47 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 {
                     LOG(INFO) << "cc_stream_sender: resend message and break";
                 }
+
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
                 if (res != nullptr && res->SetResultByStreamThread())
                 {
-                    res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    res->SetLocalOrRemoteError(
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }
-                break;
             }
-            if (log_verbose)
+            else
             {
-                LOG(INFO) << "cc_stream_sender: check stream version: "
-                          << stream_ver << " and need resend message";
-            }
-            std::lock_guard<std::mutex> lk(to_connect_mux_);
-            // If the stream version is -1, a separate thread has notified
-            // the connecting thread to reconnect the stream. If the stream
-            // version is greater than the previously-read one (stream_ver),
-            // a new stream has been connected. In either case, the current
-            // thread does not initiated a reconnection.
-            if (stream_version.compare_exchange_strong(
-                    stream_ver, -1, std::memory_order_release))
-            {
-                to_connect_regular_streams_.try_emplace(dest_node_id,
-                                                        stream_ver + 1);
-            }
-            // put the failed message into the resend_message_list.
-            auto resend_message_list = resend_message_list_.try_emplace(
-                dest_node_id,
-                moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
-            resend_message_list.first->second.enqueue(
-                std::make_unique<ResendMessage>(msg, res));
+                if (log_verbose)
+                {
+                    LOG(INFO) << "cc_stream_sender: check stream version: "
+                              << stream_ver << " and need resend message";
+                }
 
-            // always wake up connector thread to either reconnect streams
-            // or resend messages.
-            to_connect_flag_.store(true, std::memory_order_release);
-            to_connect_cv_.notify_one();
-            break;
+                std::lock_guard<std::mutex> lk(to_connect_mux_);
+                // If the stream version is -1, a separate thread has notified
+                // the connecting thread to reconnect the stream. If the stream
+                // version is greater than the previously-read one (stream_ver),
+                // a new stream has been connected. In either case, the current
+                // thread does not initiated a reconnection.
+                if (stream_version.compare_exchange_strong(
+                        stream_ver, -1, std::memory_order_release))
+                {
+                    to_connect_regular_streams_.try_emplace(dest_node_id,
+                                                            stream_ver + 1);
+                }
+                // put the failed message into the resend_message_list.
+                auto resend_message_list = resend_message_list_.try_emplace(
+                    dest_node_id,
+                    moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
+                resend_message_list.first->second.enqueue(
+                    std::make_unique<ResendMessage>(msg, res));
+
+                // always wake up connector thread to either reconnect streams
+                // or resend messages.
+                to_connect_flag_.store(true, std::memory_order_release);
+                to_connect_cv_.notify_one();
+            }
         }
     }
 
@@ -292,7 +334,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
         // SendMessage error return -1 to indicate the request needs retry.
         if (res != nullptr && res->SetResultByStreamThread())
         {
-            res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            res->SetLocalOrRemoteError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
@@ -329,12 +371,45 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
 
     int error_code =
         brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
-    while (error_code != 0)
+
+    if (error_code != 0)
+
     {
         if (error_code == EAGAIN)
         {
-            error_code =
-                brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+            std::lock_guard<std::mutex> resend_lk(resend_mux_);
+
+            auto bg_resend_long_msg_list =
+                eagain_resend_long_message_list_.find(dest_node_id);
+            if (bg_resend_long_msg_list !=
+                eagain_resend_long_message_list_.end())
+            {
+                eagain_resend_long_message_cnt_ += 1;
+                bg_resend_long_msg_list->second.enqueue(
+                    std::make_unique<ResendScanSliceResp>(msg, res));
+                if (resend_thread_status_ == ResendThreadStatus::Sleeping)
+                {
+                    resend_thread_status_ = ResendThreadStatus::Running;
+                    resend_cv_.notify_one();
+                }
+            }
+            else
+            {
+                auto bg_resend_long_msg_list =
+                    eagain_resend_long_message_list_.try_emplace(
+                        dest_node_id,
+                        moodycamel::ConcurrentQueue<
+                            ResendScanSliceResp::Uptr>());
+
+                eagain_resend_long_message_cnt_ += 1;
+                bg_resend_long_msg_list.first->second.enqueue(
+                    std::make_unique<ResendScanSliceResp>(msg, res));
+                if (resend_thread_status_ == ResendThreadStatus::Sleeping)
+                {
+                    resend_thread_status_ = ResendThreadStatus::Running;
+                    resend_cv_.notify_one();
+                }
+            }
         }
         else
         {
@@ -347,36 +422,37 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                 // retry.
                 if (res != nullptr && res->SetResultByStreamThread())
                 {
-                    res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    res->SetLocalOrRemoteError(
+                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 }
-                break;
             }
-
-            std::lock_guard<std::mutex> lk(to_connect_mux_);
-            // If the stream version is -1, a separate thread has notified
-            // the connecting thread to reconnect the stream. If the stream
-            // version is greater than the previously-read one (stream_ver),
-            // a new stream has been connected. In either case, the current
-            // thread does not initiated a reconnection.
-            if (stream_version.compare_exchange_strong(
-                    stream_ver, -1, std::memory_order_release))
+            else
             {
-                to_connect_long_msg_streams_.try_emplace(dest_node_id,
-                                                         stream_ver + 1);
+                std::lock_guard<std::mutex> lk(to_connect_mux_);
+                // If the stream version is -1, a separate thread has notified
+                // the connecting thread to reconnect the stream. If the stream
+                // version is greater than the previously-read one (stream_ver),
+                // a new stream has been connected. In either case, the current
+                // thread does not initiated a reconnection.
+                if (stream_version.compare_exchange_strong(
+                        stream_ver, -1, std::memory_order_release))
+                {
+                    to_connect_long_msg_streams_.try_emplace(dest_node_id,
+                                                             stream_ver + 1);
+                }
+                // put the failed message into the long_msg_resend_message_list.
+                auto resend_message_list =
+                    long_msg_resend_message_list_.try_emplace(
+                        dest_node_id,
+                        moodycamel::ConcurrentQueue<
+                            ResendScanSliceResp::Uptr>());
+                resend_message_list.first->second.enqueue(
+                    std::make_unique<ResendScanSliceResp>(msg, res));
+
+                // wake up connector thread to reconnect streams
+                to_connect_flag_.store(true, std::memory_order_release);
+                to_connect_cv_.notify_one();
             }
-            // put the failed message into the long_msg_resend_message_list.
-            auto resend_message_list =
-                long_msg_resend_message_list_.try_emplace(
-                    dest_node_id,
-                    moodycamel::ConcurrentQueue<ResendScanSliceResp::Uptr>());
-            resend_message_list.first->second.enqueue(
-                std::make_unique<ResendScanSliceResp>(msg, res));
-
-            // wake up connector thread to reconnect streams
-            to_connect_flag_.store(true, std::memory_order_release);
-            to_connect_cv_.notify_one();
-
-            break;
         }
     }
 
@@ -429,8 +505,8 @@ void CcStreamSender::UpdateRemoteNodes(
                 .store(-1, std::memory_order_release);
 
             {
-                // Add it to the reconnect lists, the connect_thd_ will connect
-                // to these nodes later.
+                // Add it to the reconnect lists, the connect_thd_ will
+                // connect to these nodes later.
                 std::unique_lock<std::mutex> to_connect_lk(to_connect_mux_);
                 to_connect_regular_streams_.try_emplace(node_id, 0);
                 to_connect_long_msg_streams_.try_emplace(node_id, 0);
@@ -451,6 +527,30 @@ void CcStreamSender::UpdateRemoteNodes(
                 resend_message_list_.erase(node_id);
                 long_msg_resend_message_list_.erase(node_id);
             }
+
+            {
+                std::lock_guard<std::mutex> resend_lk(resend_mux_);
+
+                auto message_list_it =
+                    eagain_resend_message_list_.find(node_id);
+                if (message_list_it != eagain_resend_message_list_.end())
+                {
+                    eagain_resend_message_cnt_ -=
+                        message_list_it->second.size_approx();
+                    eagain_resend_message_list_.erase(node_id);
+                }
+
+                auto long_message_list_it =
+                    eagain_resend_long_message_list_.find(node_id);
+                if (long_message_list_it !=
+                    eagain_resend_long_message_list_.end())
+                {
+                    eagain_resend_long_message_cnt_ -=
+                        long_message_list_it->second.size_approx();
+                    eagain_resend_long_message_list_.erase(node_id);
+                }
+            }
+
             LOG(INFO) << "Closed cc stream to node " << node_id;
             brpc::StreamClose(std::get<0>(outbound_streams_.at(node_id)));
             outbound_streams_.erase(node_id);
@@ -470,6 +570,156 @@ void CcStreamSender::NotifyConnectStream()
 {
     to_connect_flag_.store(true, std::memory_order_release);
     to_connect_cv_.notify_one();
+}
+
+void CcStreamSender::ResendMessageToNode()
+{
+    using namespace std::chrono_literals;
+
+    size_t no_message_round_cnt = 0;
+    std::unique_lock<std::mutex> lk(resend_mux_);
+    resend_thread_status_ = ResendThreadStatus::Running;
+
+    while (!terminate_.load(std::memory_order_acquire))
+    {
+        if (no_message_round_cnt == 50)
+        {
+            no_message_round_cnt = 0;
+            resend_thread_status_ = ResendThreadStatus::Sleeping;
+            resend_cv_.wait(
+                lk,
+                [this]
+                {
+                    return terminate_.load(std::memory_order_acquire) ||
+                           eagain_resend_message_cnt_ != 0 ||
+                           eagain_resend_long_message_cnt_ != 0;
+                });
+
+            assert(resend_thread_status_ = ResendThreadStatus::Running);
+        }
+        else
+        {
+            resend_cv_.wait_for(
+                lk,
+                20ms,
+                [this] { return terminate_.load(std::memory_order_acquire); });
+        }
+
+        if (terminate_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+
+        if (eagain_resend_message_cnt_ == 0 &&
+            eagain_resend_long_message_cnt_ == 0)
+        {
+            assert(resend_thread_status_ == ResendThreadStatus::Running);
+            no_message_round_cnt += 1;
+            continue;
+        }
+
+        auto node_cnt = Sharder::Instance().GetNodeCount();
+        no_message_round_cnt = 0;
+
+        for (size_t nid = 0; nid < node_cnt; ++nid)
+        {
+            if (eagain_resend_message_cnt_ == 0)
+            {
+                // No more resend message
+                break;
+            }
+
+            auto message_list_it = eagain_resend_message_list_.find(nid);
+            while (message_list_it != eagain_resend_message_list_.end() &&
+                   !message_list_it->second.is_empty())
+            {
+                size_t send_cnt = 0;
+                ResendMessage::Uptr messages[100];
+                size_t msg_cnt =
+                    message_list_it->second.try_dequeue_bulk(messages, 100);
+
+                // mutex has been locked.
+                assert(eagain_resend_message_cnt_ >= msg_cnt);
+                eagain_resend_message_cnt_ -= msg_cnt;
+
+                lk.unlock();
+
+                for (size_t idx = 0; idx < msg_cnt; ++idx)
+                {
+                    if (SendMessageToNode(nid,
+                                          messages[idx]->msg_,
+                                          messages[idx]->res_,
+                                          false))
+                    {
+                        send_cnt += 1;
+                    }
+                }
+
+                lk.lock();
+
+                if (send_cnt == 0)
+                {
+                    // Failed to resend message on this brpc stream. We
+                    // continue to process next brpc stream
+                    break;
+                }
+
+                message_list_it = eagain_resend_message_list_.find(nid);
+            }
+        }
+
+        for (size_t nid = 0; nid < node_cnt; ++nid)
+        {
+            if (eagain_resend_long_message_cnt_ == 0)
+            {
+                // No more resend message
+                break;
+            }
+
+            auto long_message_list_it =
+                eagain_resend_long_message_list_.find(nid);
+            while (long_message_list_it !=
+                       eagain_resend_long_message_list_.end() &&
+                   !long_message_list_it->second.is_empty())
+            {
+                size_t send_cnt = 0;
+                ResendScanSliceResp::Uptr messages[100];
+                size_t msg_cnt = long_message_list_it->second.try_dequeue_bulk(
+                    messages, 100);
+
+                // mutex has been locked.
+                assert(eagain_resend_long_message_cnt_ >= msg_cnt);
+                eagain_resend_long_message_cnt_ -= msg_cnt;
+
+                lk.unlock();
+
+                for (size_t idx = 0; idx < msg_cnt; ++idx)
+                {
+                    if (SendScanRespToNode(nid,
+                                           messages[idx]->msg_,
+                                           messages[idx]->res_,
+                                           false))
+                    {
+                        send_cnt += 1;
+                    }
+                }
+
+                lk.lock();
+
+                if (send_cnt == 0)
+                {
+                    // Failed to resend message on this brpc stream. We
+                    // continue to process next brpc stream
+                    break;
+                }
+
+                // Update the message list since the node might be
+                // removed when sending the mssages.
+                long_message_list_it =
+                    eagain_resend_long_message_list_.find(nid);
+            }
+        }
+    }
 }
 
 void CcStreamSender::ConnectStreams()
@@ -638,8 +888,8 @@ int CcStreamSender::ConnectStream(uint32_t node_id, int64_t version)
         for (struct addrinfo *item = addrs; item != NULL; item = item->ai_next)
         {
             void *addr;
-            // get pointer to the address itself, different fields in IPv4 and
-            // IPv6
+            // get pointer to the address itself, different fields in IPv4
+            // and IPv6
             if (item->ai_family == AF_INET)
             {
                 // address is IPv4

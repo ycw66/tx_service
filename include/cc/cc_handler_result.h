@@ -35,95 +35,69 @@ enum class HandlerResultErrorType
 class CcHandlerResultBase
 {
 public:
+    CcHandlerResultBase(TransactionExecution *txm) : txm_(txm)
+    {
+    }
+
+    CcHandlerResultBase(const CcHandlerResultBase &) = delete;
+    CcHandlerResultBase &operator=(const CcHandlerResultBase &) = delete;
+
+    CcHandlerResultBase(CcHandlerResultBase &&rhs)
+        : is_finished_(rhs.is_finished_.load(std::memory_order_acquire)),
+          error_code_(rhs.error_code_.load(std::memory_order_acquire)),
+          ref_cnted_(rhs.ref_cnted_),
+          ref_cnt_(rhs.ref_cnt_.load(std::memory_order_acquire)),
+          remote_ref_cnt_(rhs.remote_ref_cnt_.load(std::memory_order_acquire)),
+          txm_(rhs.txm_)
+#ifdef EXT_TX_PROC_ENABLED
+          ,
+          is_blocking_(rhs.is_blocking_)
+#endif
+    {
+    }
+
     virtual ~CcHandlerResultBase() = default;
     virtual void SetError(CcErrorCode err_code) = 0;
     virtual void SetFinished() = 0;
-    virtual bool IsFinished() const = 0;
+
     virtual bool ForceError() = 0;
-    virtual bool IsError() const = 0;
+
     virtual bool SetResultByStreamThread() = 0;
     virtual bool SetResultByTimeoutThread() = 0;
 
-#ifdef EXT_TX_PROC_ENABLED
-    void SetToBlock()
-    {
-        is_blocking_ = true;
-    }
-
-protected:
-    /**
-     * @brief True, if the tx is expecting this result and is blocked on it.
-     * Upon finishing, the cc handler result enlists blocked tx to resume
-     * execution.
-     *
-     */
-    bool is_blocking_{false};
-#endif
-};
-
-template <typename T>
-class CcHandlerResult : public CcHandlerResultBase
-{
-public:
-    CcHandlerResult(TransactionExecution *txm) : result_(), txm_(txm)
-    {
-    }
-
-    CcHandlerResult(const CcHandlerResult &rhs) = delete;
-
-    CcHandlerResult(CcHandlerResult &&rhs) noexcept
-        : result_(std::move(rhs.result_)),
-          is_finished_(rhs.is_finished_.load(std::memory_order_acquire)),
-          result_status_(rhs.result_status_.load(std::memory_order_acquire)),
-          error_code_(rhs.error_code_.load(std::memory_order_acquire)),
-          txm_(rhs.txm_),
-          post_lambda_(rhs.post_lambda_)
-    {
-    }
-
-    CcHandlerResult &operator=(const CcHandlerResult &rhs) = delete;
-
-    bool IsFinished() const override
+    bool IsFinished() const
     {
         return is_finished_.load(std::memory_order_acquire);
     }
 
-    bool SetResultByStreamThread() override
-    {
-        int32_t expect = 0;
-        while (
-            !result_status_.compare_exchange_strong(expect,
-                                                    expect + 1,
-                                                    std::memory_order_acquire,
-                                                    std::memory_order_relaxed))
-        {
-            if (expect == -1)
-            {
-                // Txm being timeout, reject this response message.
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool SetResultByTimeoutThread() override
-    {
-        int32_t expect = 0;
-        bool succeed = result_status_.compare_exchange_strong(
-            expect, -1, std::memory_order_acquire, std::memory_order_relaxed);
-        return succeed;
-    }
-
-    void DecreaseCurrentHandlingResponse()
-    {
-        uint32_t res = result_status_.fetch_sub(1, std::memory_order_acquire);
-        assert(res > 0);
-    }
-
-    bool IsError() const override
+    bool IsError() const
     {
         return error_code_.load(std::memory_order_relaxed) !=
                CcErrorCode::NO_ERROR;
+    }
+
+    void SetRemoteFinished()
+    {
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        SetFinished();
+    }
+
+    void SetRemoteError(CcErrorCode err_code)
+    {
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
+        SetError(err_code);
+    }
+
+    void SetLocalOrRemoteError(CcErrorCode err_code)
+    {
+        if (RemoteRefCnt() > 0)
+        {
+            SetRemoteError(err_code);
+        }
+        else
+        {
+            SetError(err_code);
+        }
     }
 
     CcErrorCode ErrorCode() const
@@ -182,6 +156,85 @@ public:
         return total - remote > 0 ? total - remote : 0;
     }
 
+    void Reset()
+    {
+        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        ClearRefCnt();
+#ifdef EXT_TX_PROC_ENABLED
+        is_blocking_ = false;
+#endif
+        is_finished_.store(false, std::memory_order_release);
+        result_status_.store(0, std::memory_order_release);
+    }
+
+    void ResetTxm(TransactionExecution *txm)
+    {
+        assert(txm != nullptr);
+        txm_ = txm;
+    }
+
+    TransactionExecution *Txm()
+    {
+        return txm_;
+    }
+
+#ifdef EXT_TX_PROC_ENABLED
+    void SetToBlock()
+    {
+        is_blocking_ = true;
+    }
+
+protected:
+    /**
+     * @brief True, if the tx is expecting this result and is blocked on it.
+     * Upon finishing, the cc handler result enlists blocked tx to resume
+     * execution.
+     *
+     */
+    bool is_blocking_{false};
+#endif
+
+protected:
+    std::atomic<bool> is_finished_{false};
+
+    // Use this variable to guarantee only one thread can set the
+    // CcHandlerResult once remote response is received. Positive
+    // numbers(1,2,3...) denotes how many responses are being handled by stream
+    // thread, and txm can not timeout when result_status_>0. Negative
+    // number(-1) denotes timeout thread is going to set CcHandlerResult.
+    std::atomic<int32_t> result_status_{0};
+
+    std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
+    bool ref_cnted_{false};
+    std::atomic<uint32_t> ref_cnt_{0};
+    std::atomic<uint32_t> remote_ref_cnt_{0};
+    // The parent tx state machine who sends a cc request and waits on this
+    // handler result. The handler result is bound to a fixed tx machine. The tx
+    // machine, however, may be re-used repeatedly for different user-level
+    // tx's.
+    TransactionExecution *txm_{nullptr};
+};
+
+template <typename T>
+class CcHandlerResult : public CcHandlerResultBase
+{
+public:
+    CcHandlerResult(TransactionExecution *txm)
+        : CcHandlerResultBase(txm), result_()
+    {
+    }
+
+    CcHandlerResult(const CcHandlerResult &rhs) = delete;
+
+    CcHandlerResult(CcHandlerResult &&rhs) noexcept
+        : CcHandlerResultBase(std::move(rhs)),
+          result_(std::move(rhs.result_)),
+          post_lambda_(std::move(rhs.post_lambda_))
+    {
+    }
+
+    CcHandlerResult &operator=(const CcHandlerResult &rhs) = delete;
+
     void SetValue(const T &val) = delete;
 
     void SetValue(T &&val)
@@ -201,20 +254,38 @@ public:
 
     void SetFinished() override;
 
-    void SetRemoteFinished()
-    {
-        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        result_status_.fetch_sub(1, std::memory_order_acquire);
-        SetFinished();
-    }
-
     void SetError(CcErrorCode err_code) override;
 
-    void SetRemoteError(CcErrorCode err_code)
+    bool SetResultByStreamThread() override
     {
-        remote_ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
-        result_status_.fetch_sub(1, std::memory_order_acquire);
-        SetError(err_code);
+        int32_t expect = 0;
+        while (
+            !result_status_.compare_exchange_strong(expect,
+                                                    expect + 1,
+                                                    std::memory_order_acquire,
+                                                    std::memory_order_relaxed))
+        {
+            if (expect == -1)
+            {
+                // Txm being timeout, reject this response message.
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SetResultByTimeoutThread() override
+    {
+        int32_t expect = 0;
+        bool succeed = result_status_.compare_exchange_strong(
+            expect, -1, std::memory_order_acquire, std::memory_order_relaxed);
+        return succeed;
+    }
+
+    void DecreaseCurrentHandlingResponse()
+    {
+        uint32_t res = result_status_.fetch_sub(1, std::memory_order_acquire);
+        assert(res > 0);
     }
 
     /**
@@ -240,49 +311,8 @@ public:
      */
     bool ForceError() override;
 
-    void Reset()
-    {
-        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        ClearRefCnt();
-#ifdef EXT_TX_PROC_ENABLED
-        is_blocking_ = false;
-#endif
-        is_finished_.store(false, std::memory_order_release);
-        result_status_.store(0, std::memory_order_release);
-    }
-
-    void ResetTxm(TransactionExecution *txm)
-    {
-        assert(txm != nullptr);
-        txm_ = txm;
-    }
-
-    TransactionExecution *Txm()
-    {
-        return txm_;
-    }
-
 private:
     T result_;
-    std::atomic<bool> is_finished_{false};
-
-    // Use this variable to guarantee only one thread can set the
-    // CcHandlerResult once remote response is received. Positive
-    // numbers(1,2,3...) denotes how many responses are being handled by stream
-    // thread, and txm can not timeout when result_status_>0. Negative
-    // number(-1) denotes timeout thread is going to set CcHandlerResult.
-    std::atomic<int32_t> result_status_{0};
-
-    // std::atomic<int8_t> error_code_{0};
-    std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
-    bool ref_cnted_{false};
-    std::atomic<uint32_t> ref_cnt_{0};
-    std::atomic<uint32_t> remote_ref_cnt_{0};
-    // The parent tx state machine who sends a cc request and waits on this
-    // handler result. The handler result is bound to a fixed tx machine. The tx
-    // machine, however, may be re-used repeatedly for different user-level
-    // tx's.
-    TransactionExecution *txm_{nullptr};
 
 public:
     std::function<void(CcHandlerResult<T> *)> post_lambda_;
