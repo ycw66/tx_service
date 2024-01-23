@@ -1734,6 +1734,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
 
 void TransactionExecution::Process(ReadLocalOperation &lock_local)
 {
+    lock_local.hd_result_->Reset();
     bool finished =
         cc_handler_->ReadLocal(lock_local.table_name_,
                                *lock_local.key_,
