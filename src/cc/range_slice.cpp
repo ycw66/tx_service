@@ -431,7 +431,7 @@ RangeSliceOpStatus StoreRange::PinSlice(const TableName &tbl_name,
     }
 }
 
-void StoreRange::UnpinSlice(StoreSlice *slice)
+void StoreRange::UnpinSlice(StoreSlice *slice, bool need_lock_range)
 {
     std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
     if (slice->pins_ > 0)
@@ -446,7 +446,16 @@ void StoreRange::UnpinSlice(StoreSlice *slice)
     {
         // Wake up all waiting threads since there could be multiple slices
         // waiting on the same range wait_cv_.
-        wait_cv_.notify_all();
+        if (need_lock_range)
+        {
+            slice_lk.unlock();
+            std::unique_lock<std::shared_mutex> range_lk(mux_);
+            wait_cv_.notify_all();
+        }
+        else
+        {
+            wait_cv_.notify_all();
+        }
     }
 }
 
@@ -468,7 +477,7 @@ void StoreRange::BatchUnpinSlices(StoreSlice *start_slice,
     StoreSlice *slice = start_slice;
     while (slice != end_slice)
     {
-        UnpinSlice(slice);
+        UnpinSlice(slice, false);
         if (forward_dir)
         {
             slice_idx++;
@@ -480,7 +489,7 @@ void StoreRange::BatchUnpinSlices(StoreSlice *start_slice,
         assert(slice_idx < slices_.size() && slice_idx >= 0);
         slice = slices_[slice_idx].get();
     }
-    UnpinSlice(slice);
+    UnpinSlice(slice, false);
 }
 
 bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
@@ -640,7 +649,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
                          << ng_id << " for table: " << table_name.Trace();
             assert(post_ckpt_slice.ErrorCode() ==
                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            UnpinSlice(slice);
+            UnpinSlice(slice, true);
             return false;
         }
 
@@ -850,7 +859,7 @@ bool StoreRange::UpdateSliceSpec(StoreSlice *slice,
         }
     }
 
-    UnpinSlice(slice);
+    UnpinSlice(slice, true);
 
     return true;
 }

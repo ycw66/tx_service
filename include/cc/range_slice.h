@@ -449,7 +449,7 @@ public:
                                 bool force_load = false,
                                 uint8_t prefetch_size = 0);
 
-    void UnpinSlice(StoreSlice *slice);
+    void UnpinSlice(StoreSlice *slice, bool need_lock_range);
 
     void BatchUnpinSlices(StoreSlice *start_slice,
                           const StoreSlice *end_slice,
@@ -766,7 +766,7 @@ public:
 
     void Unpin()
     {
-        range_ptr_->UnpinSlice(slice_ptr_);
+        range_ptr_->UnpinSlice(slice_ptr_, true);
     }
 
     StoreRange *Range()
