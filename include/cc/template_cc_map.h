@@ -5487,9 +5487,13 @@ public:
                     rec.Deserialize(log_blob.data(), offset);
                 }
                 if (shard_->core_id_ == req.FirstCore() ||
-                    (core_id != req.FirstCore() && core_id < shard_->core_id_))
+                    (core_id != req.FirstCore() && core_id > shard_->core_id_))
                 {
-                    next_core = std::min(core_id, next_core);
+                    // Move to the smallest unvisited core id
+                    if (core_id < req.NextCore())
+                    {
+                        req.SetNextCore(core_id);
+                    }
                 }
                 continue;
             }
@@ -6758,7 +6762,14 @@ protected:
 
             shard->DecrementMemory(cce->PayloadMemUsage());
 
-            cce->payload_ = std::static_pointer_cast<ValueT>(data_item.record_);
+            if (cce->payload_.use_count() == 1)
+            {
+                *(cce->payload_) = *record;
+            }
+            else
+            {
+                cce->payload_ = std::make_shared<ValueT>(*record);
+            }
 
             cce->commit_ts_ = data_item.version_ts_;
             cce->ckpt_ts_.store(data_item.version_ts_,

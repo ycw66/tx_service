@@ -778,6 +778,15 @@ public:
                 // Skips the key in the log record that is not sharded to this
                 // core.
                 offset += cmds_len;
+                if (shard_->core_id_ == req.FirstCore() ||
+                    (core_id != req.FirstCore() && core_id > shard_->core_id_))
+                {
+                    // Move to the smallest unvisited core id
+                    if (core_id < req.NextCore())
+                    {
+                        req.SetNextCore(core_id);
+                    }
+                }
                 continue;
             }
 
@@ -948,10 +957,10 @@ public:
             }
         }
 
-        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        if (req.NextCore() != UINT16_MAX)
         {
             req.ResetCcm();
-            MoveRequest(&req, shard_->core_id_ + 1);
+            MoveRequest(&req, req.NextCore());
         }
         else
         {

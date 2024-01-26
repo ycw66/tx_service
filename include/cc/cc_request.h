@@ -2995,6 +2995,7 @@ public:
         finish_cnt_ = &finish_cnt;
         recovery_error_ = &recovery_error;
         msg_vec_ = msg_vec;
+        next_core_ = UINT16_MAX;
         first_core_ = first_core;
         range_split_started_ = range_split_started;
         range_splitting_ = range_splitting;
@@ -3203,6 +3204,16 @@ public:
         return offset_;
     }
 
+    void SetNextCore(uint16_t next_core)
+    {
+        next_core_ = next_core;
+    }
+
+    uint16_t NextCore() const
+    {
+        return next_core_;
+    }
+
 private:
     TableName table_name_holder_{
         "",
@@ -3219,6 +3230,7 @@ private:
     uint64_t *finish_cnt_;
     bool *recovery_error_;
     uint16_t first_core_;
+    uint16_t next_core_{UINT16_MAX};
     const struct TableSchema *table_schema_{nullptr};
     // Reserved for range split log replay
     std::shared_ptr<std::atomic_uint32_t> range_split_started_{nullptr};
