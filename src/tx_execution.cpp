@@ -840,11 +840,8 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
 void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
 {
     vct_rec_resp_ = &req.tx_result_;
-    multi_obj_cmd_.Reset(req.table_name_,
-                         req.VctKey(),
-                         req.VctCommand(),
-                         &req,
-                         req.auto_commit_);
+    multi_obj_cmd_.Reset(
+        req.table_name_, req.VctKey(), req.VctCommand(), &req, false);
 
     PushOperation(&multi_obj_cmd_);
     Process(multi_obj_cmd_);

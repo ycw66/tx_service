@@ -849,7 +849,7 @@ struct MultiObjectCommandTxRequest
         return cmd->CommandPointers();
     }
 
-    const MultiObjectTxCommand *Command() const
+    MultiObjectTxCommand *Command() const
     {
         return is_cmd_owner_ ? multi_obj_cmd_ : multi_obj_cmd_uptr_.get();
     }

@@ -63,6 +63,18 @@ public:
     }
 
     virtual TxCommandResult *GetResult() = 0;
+
+    // To Judge if this command passed to execute, or failed
+    // The default result is true;
+    // If a transaction need to execute more than one command, and one of them
+    // failed, it need to set all command that has executed abort. So it need
+    // RedisServiceImpl::SimpleCommand and other methods call this methods to
+    // know if this command passed or failed, then decide if the transaction is
+    // continue or abort.
+    virtual bool IsPassed() const
+    {
+        return true;
+    }
 };
 
 /**
@@ -74,16 +86,57 @@ struct MultiObjectTxCommand
 
     std::vector<const TxKey *> *KeyPointers()
     {
-        return &key_ptrs_;
+        if (is_second_time_)
+        {
+            return &key_ptrs_two_;
+        }
+        else
+        {
+            return &key_ptrs_;
+        }
     }
 
     std::vector<TxCommand *> *CommandPointers()
     {
-        return &cmd_ptrs_;
+        if (is_second_time_)
+        {
+            return &cmd_ptrs_two_;
+        }
+        else
+        {
+            return &cmd_ptrs_;
+        }
+    }
+
+    // If it has two parts of commands and finished to run the first part, it
+    // should call below method to collect the result and fill the second part
+    // of commands, then run the second part.
+    //@return true: Need to run the second part of command; false: Not need to
+    // run
+    virtual bool HandleMiddleResult()
+    {
+        assert(false);
+        return false;
+    }
+
+    // To judge if all commands passed. If at least one command failed, return
+    // false, or return true. If is_two_parts_=true, it will according to
+    // is_second_time_ to judge the first part or the second part.
+    // The default return is true
+    virtual bool IsPassed() const
+    {
+        return true;
     }
 
     std::vector<const txservice::TxKey *> key_ptrs_;
     std::vector<txservice::TxCommand *> cmd_ptrs_;
+    // If the internal commands need to split two parts and one part need the
+    // result of first part before run.
+    bool is_two_parts_{false};
+    // If it is to run the second part of commands.
+    bool is_second_time_{false};
+    std::vector<const txservice::TxKey *> key_ptrs_two_;
+    std::vector<txservice::TxCommand *> cmd_ptrs_two_;
 };
 
 // commands and information of the same txn
