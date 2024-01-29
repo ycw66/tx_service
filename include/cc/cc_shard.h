@@ -552,6 +552,8 @@ public:
 
     void CleanCcm(const TableName &table_name);
 
+    void CleanCcm(const TableName &table_name, NodeGroupId ng_id);
+
     /**
      * @brief Drops all cc maps associated with a cc node group. The method is
      * called when this node steps down as the leader of the specified cc node

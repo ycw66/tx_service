@@ -1259,6 +1259,32 @@ void CcShard::CleanCcm(const TableName &table_name)
     }
 }
 
+void CcShard::CleanCcm(const TableName &table_name, NodeGroupId ng_id)
+{
+    if (ng_id == node_id_)
+    {
+        auto native_it = native_ccms_.find(table_name);
+        if (native_it != native_ccms_.end())
+        {
+            native_it->second->Clean();
+        }
+    }
+    else
+    {
+        auto fail_ccm_it = failover_ccms_.find(table_name);
+        if (fail_ccm_it != failover_ccms_.end())
+        {
+            std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
+                fail_ccm_it->second;
+            auto it = ccms.find(ng_id);
+            if (it != ccms.end())
+            {
+                it->second->Clean();
+            }
+        }
+    }
+}
+
 void CcShard::DropCcms(NodeGroupId ng_id)
 {
     if (node_id_ == ng_id)

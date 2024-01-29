@@ -1288,11 +1288,16 @@ public:
                     if (req.CommitType() != PostWriteType::PrepareCommit)
                     {
                         cce_ptr->commit_ts_ = commit_ts;
+#ifndef ON_KEY_OBJECT
                         cce_ptr->payload_status_ =
                             (req.OpType() == OperationType::Delete ||
                              req.OpType() == OperationType::DropTable)
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
+#else
+                        // no need to delete catalog
+                        cce_ptr->payload_status_ = RecordStatus::Normal;
+#endif
                     }
                 }
 

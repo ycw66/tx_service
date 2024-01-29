@@ -537,13 +537,22 @@ public:
 
                 // This is a DROP TABLE statement. Drops the cc maps
                 // associated with the table in the final commit step.
+#ifndef ON_KEY_OBJECT
                 shard_->DropCcm(table_key->Name(), req.NodeGroupId());
+#else
+                // No need to drop cc maps, just clean them.
+                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
+#endif
 
 #ifdef RANGE_PARTITION_ENABLED
                 // Drop range table if exist
                 TableName range_table_name{table_key->Name().StringView(),
                                            TableType::RangePartition};
+#ifndef ON_KEY_OBJECT
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
+#else
+                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
+#endif
 #endif
                 if (old_schema != nullptr)
                 {
