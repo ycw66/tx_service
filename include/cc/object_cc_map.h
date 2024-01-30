@@ -11,10 +11,6 @@
 #include "template_cc_map.h"
 #include "tx_record.h"
 
-#ifdef ON_KEY_OBJECT
-DECLARE_bool(skip_kv);
-#endif
-
 namespace txservice
 {
 template <typename KeyT, typename ValueT>

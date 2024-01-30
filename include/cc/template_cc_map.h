@@ -40,6 +40,10 @@
 #include "range_slice.h"
 #endif
 
+#ifdef ON_KEY_OBJECT
+DECLARE_bool(skip_kv);
+#endif
+
 namespace txservice
 {
 template <typename KeyT, typename ValueT>
@@ -2398,6 +2402,13 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+#ifdef ON_KEY_OBJECT
+                if (cce->payload_status_ == RecordStatus::Deleted &&
+                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                {
+                    continue;
+                }
+#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
@@ -2457,6 +2468,13 @@ public:
             {
                 key_ptr = scan_ccm_it->first;
                 cce = scan_ccm_it->second;
+#ifdef ON_KEY_OBJECT
+                if (cce->payload_status_ == RecordStatus::Deleted &&
+                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                {
+                    continue;
+                }
+#endif
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 
@@ -2638,6 +2656,13 @@ public:
                     // checkpoint, skips those that have been checkpointed.
                     continue;
                 }
+#ifdef ON_KEY_OBJECT
+                if (cce->payload_status_ == RecordStatus::Deleted &&
+                    (!cce->NeedCkpt() || FLAGS_skip_kv))
+                {
+                    continue;
+                }
+#endif
 
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
@@ -2718,6 +2743,13 @@ public:
                 {
                     req.SetCcePtr(cce);
                     req.SetCcePtrScanType(ScanType::ScanBoth);
+#ifdef ON_KEY_OBJECT
+                    if (cce->payload_status_ == RecordStatus::Deleted &&
+                        (!cce->NeedCkpt() || FLAGS_skip_kv))
+                    {
+                        continue;
+                    }
+#endif
 
                     auto lock_pair = AcquireCceKeyLock(cce,
                                                        cce->payload_status_,
