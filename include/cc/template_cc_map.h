@@ -485,12 +485,22 @@ public:
                 shard_->DecrementMemory(new_cce->PayloadMemUsage());
                 if (payload_str == nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     new_cce->payload_ = std::make_shared<ValueT>(*commit_val);
+#else
+                    assert(false);
+                    new_cce->payload_ = std::make_unique<ValueT>(*commit_val);
+#endif
                 }
                 else
                 {
                     size_t offset = 0;
+#ifndef ON_KEY_OBJECT
                     new_cce->payload_ = std::make_shared<ValueT>();
+#else
+                    assert(false);
+                    new_cce->payload_ = std::make_unique<ValueT>();
+#endif
                     new_cce->payload_->Deserialize(payload_str->data(), offset);
                 }
                 shard_->mem_usage_ += new_cce->PayloadMemUsage();
@@ -681,6 +691,7 @@ public:
                     }
                     else if (payload_str == nullptr)
                     {
+#ifndef ON_KEY_OBJECT
                         if (cce->payload_.use_count() == 1)
                         {
                             *(cce->payload_) = *commit_val;
@@ -690,14 +701,26 @@ public:
                             cce->payload_ =
                                 std::make_shared<ValueT>(*commit_val);
                         }
+#else
+                        assert(false);
+                        cce->payload_ = std::make_unique<ValueT>(*commit_val);
+#endif
                     }
                     else
                     {
                         size_t offset = 0;
+#ifndef ON_KEY_OBJECT
                         if (cce->payload_.use_count() != 1)
                         {
                             cce->payload_ = std::make_shared<ValueT>();
                         }
+#else
+                        assert(false);
+                        if (cce->payload_ == nullptr)
+                        {
+                            cce->payload_ = std::make_unique<ValueT>();
+                        }
+#endif
                         cce->payload_->Deserialize(payload_str->data(), offset);
                     }
                     shard_->mem_usage_ += cce->PayloadMemUsage();
@@ -1206,7 +1229,12 @@ public:
                     }
 
                     shard_->DecrementMemory(new_cce->PayloadMemUsage());
+#ifndef ON_KEY_OBJECT
                     new_cce->payload_ = std::make_shared<ValueT>(*payload);
+#else
+                    assert(false);
+                    new_cce->payload_ = std::make_unique<ValueT>(*payload);
+#endif
                     new_cce->payload_status_ = RecordStatus::Normal;
                     shard_->mem_usage_ += new_cce->PayloadMemUsage();
 
@@ -1284,7 +1312,12 @@ public:
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
                     shard_->DecrementMemory(cce_ptr->PayloadMemUsage());
+#ifndef ON_KEY_OBJECT
                     cce_ptr->payload_ = std::make_shared<ValueT>(*payload);
+#else
+                    assert(false);
+                    cce_ptr->payload_ = std::make_unique<ValueT>(*payload);
+#endif
                     shard_->mem_usage_ += cce_ptr->PayloadMemUsage();
 
                     // A prepare commit request only installs the dirty value,
@@ -2095,7 +2128,12 @@ public:
             {
                 size_t offset = 0;
                 shard_->DecrementMemory(cce->PayloadMemUsage());
+#ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<ValueT>();
+#else
+                assert(false);
+                cce->payload_ = std::make_unique<ValueT>();
+#endif
                 cce->payload_->Deserialize(req.rec_str_->data(), offset);
                 shard_->mem_usage_ += cce->PayloadMemUsage();
             }
@@ -5019,7 +5057,11 @@ public:
 
                         if (cce->payload_status_ == RecordStatus::Normal)
                         {
+#ifndef ON_KEY_OBJECT
                             ref.SetPayload(cce->payload_);
+#else
+                            ref.SetPayload(cce->payload_.get());
+#endif
                         }
 
                         // the size of record is not change.
@@ -5621,10 +5663,15 @@ public:
                     op_type == OperationType::Update)
                 {
                     shard_->DecrementMemory(cce->PayloadMemUsage());
+#ifndef ON_KEY_OBJECT
                     if (cce->payload_.use_count() != 1)
                     {
                         cce->payload_ = std::make_shared<ValueT>();
                     }
+#else
+                    assert(false);
+                    cce->payload_ = std::make_unique<ValueT>();
+#endif
                     cce->payload_->Deserialize(log_blob.data(), offset);
                     cce->payload_status_ = RecordStatus::Normal;
                     shard_->mem_usage_ += cce->PayloadMemUsage();
@@ -6784,11 +6831,21 @@ protected:
                 if (shard->EnableMvcc() && cce->ckpt_ts_ == 0)
                 {
                     cce->ckpt_ts_ = data_item.version_ts_;
+
+#ifndef ON_KEY_OBJECT
                     cce->AddArchiveRecord(
                         std::static_pointer_cast<ValueT>(data_item.record_),
                         data_item.is_deleted_ ? RecordStatus::Deleted
                                               : RecordStatus::Normal,
                         data_item.version_ts_);
+#else
+                    assert(false);
+                    cce->AddArchiveRecord(data_item.record_->Clone(),
+                                          data_item.is_deleted_
+                                              ? RecordStatus::Deleted
+                                              : RecordStatus::Normal,
+                                          data_item.version_ts_);
+#endif
                 }
 
                 // The cc entry's commit ts is 1 when it is initialized.
@@ -6799,6 +6856,7 @@ protected:
 
             shard->DecrementMemory(cce->PayloadMemUsage());
 
+#ifndef ON_KEY_OBJECT
             if (cce->payload_.use_count() == 1)
             {
                 *(cce->payload_) = *record;
@@ -6807,6 +6865,11 @@ protected:
             {
                 cce->payload_ = std::make_shared<ValueT>(*record);
             }
+#else
+            assert(false);
+            cce->payload_.reset(
+                static_cast<ValueT *>(record->Clone().release()));
+#endif
 
             cce->commit_ts_ = data_item.version_ts_;
             cce->ckpt_ts_.store(data_item.version_ts_,
@@ -7526,7 +7589,11 @@ protected:
             {
                 if (v_rec.payload_ptr_ != nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     tuple->SetRecord(v_rec.payload_ptr_);
+#else
+                    assert(false);
+#endif
                     // We're only copying the shared_ptr here so we exclude the
                     // actual payload size.
                 }
@@ -7558,7 +7625,11 @@ protected:
             {
                 if (cce->payload_ != nullptr)
                 {
+#ifndef ON_KEY_OBJECT
                     tuple->SetRecord(cce->payload_);
+#else
+                    assert(false);
+#endif
                     // We're only copying the shared_ptr here so we exclude the
                     // actual payload size.
                 }

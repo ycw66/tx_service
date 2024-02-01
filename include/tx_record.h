@@ -2,7 +2,9 @@
 
 #include <memory>
 #include <string>
+#include <utility>  //std::move
 #include <variant>
+#include <vector>  //std::vector
 
 #include "tx_key.h"
 #include "tx_serialize.h"
@@ -315,6 +317,70 @@ public:
     std::unique_ptr<TxRecord> record_;
     RecordStatus record_status_;
     uint64_t commit_ts_;
+};
+
+struct BlobTxRecord : public TxRecord
+{
+    BlobTxRecord() = default;
+
+    BlobTxRecord(const BlobTxRecord &rhs) : value_(rhs.value_)
+    {
+    }
+
+    BlobTxRecord(BlobTxRecord &&rhs) : value_(std::move(rhs.value_))
+    {
+    }
+
+    void Serialize(std::vector<char> &buf, size_t &offset) const override
+    {
+        assert(false);
+    }
+    void Serialize(std::string &str) const override
+    {
+        assert(false);
+    }
+    void Deserialize(const char *buf, size_t &offset) override
+    {
+        assert(false);
+    }
+    TxRecord::Uptr Clone() const override
+    {
+        assert(false);
+
+        return std::make_unique<BlobTxRecord>(*this);
+    }
+    void Copy(const TxRecord &rhs) override
+    {
+        assert(false);
+        const BlobTxRecord &typed_rhs = static_cast<const BlobTxRecord &>(rhs);
+        value_ = typed_rhs.value_;
+    }
+    std::string ToString() const override
+    {
+        assert(false);
+        return value_;
+    }
+
+    /**
+     * To estimate log length.
+     * @return
+     */
+    virtual size_t SerializedLength() const
+    {
+        return value_.size();
+    };
+
+    virtual size_t MemUsage() const
+    {
+        return sizeof(BlobTxRecord) + value_.size();
+    }
+
+    virtual size_t Size() const
+    {
+        return value_.size();
+    }
+
+    std::string value_;
 };
 
 }  // namespace txservice

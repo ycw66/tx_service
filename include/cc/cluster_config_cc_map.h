@@ -29,7 +29,11 @@ public:
     {
         // We only store one record in ClusterConfigCcMap as neg_inf_ key. It is
         // is only used for concurrency control purpose.
+#ifndef ON_KEY_OBJECT
         neg_inf_.payload_ = std::make_shared<ClusterConfigRecord>();
+#else
+        neg_inf_.payload_ = std::make_unique<ClusterConfigRecord>();
+#endif
         neg_inf_.commit_ts_ = Sharder::Instance().ClusterConfigVersion();
         neg_inf_.payload_status_ = RecordStatus::Normal;
     }

@@ -83,6 +83,7 @@ struct FlushRecord
 private:
     KeyPtr key_{nullptr};
     bool is_key_owner_{false};
+
     std::shared_ptr<TxRecord> payload_{nullptr};
 
 public:
@@ -104,7 +105,7 @@ public:
                 int32_t delta_size)
     {
         SetKey(std::move(uptr));
-        SetPayload(std::move(payload));
+        payload_ = payload;
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
         cce_ = cce;
@@ -136,7 +137,7 @@ public:
             SetKey(rhs.key_.ptr_);
         }
 
-        SetPayload(rhs.payload_);
+        payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         cce_ = rhs.cce_;
@@ -156,7 +157,7 @@ public:
             SetKey(rhs.key_.ptr_);
         }
 
-        payload_ = rhs.payload_;
+        payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         delta_size_ = rhs.delta_size_;
@@ -222,10 +223,19 @@ public:
         is_key_owner_ = true;
     }
 
+#ifndef ON_KEY_OBJECT
     void SetPayload(std::shared_ptr<TxRecord> sptr)
     {
         payload_ = sptr;
     }
+#else
+    void SetPayload(const TxRecord *ptr)
+    {
+        auto rec = std::make_shared<BlobTxRecord>();
+        ptr->Serialize(rec->value_);
+        payload_ = rec;
+    }
+#endif
 
     const TxRecord *Payload() const
     {
@@ -261,8 +271,7 @@ public:
         }
         else
         {
-            assert(Payload() != nullptr);
-            return Key()->Size() + Payload()->Size();
+            return Key()->Size() + PayloadSize();
         }
     }
 };
@@ -358,7 +367,11 @@ template <typename ValueT>
 struct VersionResultRecord
 {
 public:
+#ifdef ON_KEY_OBJECT
+    const ValueT *payload_ptr_;
+#else
     std::shared_ptr<ValueT> payload_ptr_;
+#endif
     RecordStatus payload_status_;
     uint64_t commit_ts_;
 
@@ -374,7 +387,11 @@ template <typename ValueT>
 struct VersionRecord
 {
 public:
+#ifdef ON_KEY_OBJECT
+    std::unique_ptr<ValueT> payload_;
+#else
     std::shared_ptr<ValueT> payload_;
+#endif
     uint64_t commit_ts_;
     RecordStatus payload_status_;
 
@@ -385,9 +402,15 @@ public:
     {
     }
 
-    VersionRecord(std::shared_ptr<ValueT> payload,
-                  uint64_t commit_ts,
-                  RecordStatus status)
+    VersionRecord(
+
+#ifdef ON_KEY_OBJECT
+        std::unique_ptr<ValueT> payload,
+#else
+        std::shared_ptr<ValueT> payload,
+#endif
+        uint64_t commit_ts,
+        RecordStatus status)
         : payload_(std::move(payload)),
           commit_ts_(commit_ts),
           payload_status_(status)
@@ -396,13 +419,13 @@ public:
 
     VersionRecord(const VersionRecord<ValueT> &rhs)
     {
-        payload_ = rhs.payload_;
+        payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
     }
     VersionRecord &operator=(const VersionRecord<ValueT> &rhs)
     {
-        payload_ = rhs.payload_;
+        payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
         commit_ts_ = rhs.commit_ts_;
         return *this;
@@ -453,16 +476,16 @@ public:
      */
     CcEntry(CcMap *parent)
         : LruEntry(parent),
-          payload_(nullptr),
           payload_status_(RecordStatus::Unknown),
+          payload_(nullptr),
           archives_()
     {
     }
 
     CcEntry(CcMap *parent_map, CcPage<KeyT, ValueT> *parent_page)
         : LruEntry(parent_map),
-          payload_(nullptr),
           payload_status_(RecordStatus::Unknown),
+          payload_(nullptr),
           archives_(),
           parent_page_(parent_page)
     {
@@ -502,9 +525,11 @@ public:
         return payload_ == nullptr ? 0 : payload_->SerializedLength();
     }
 
-    std::shared_ptr<ValueT> payload_;
     RecordStatus payload_status_;
-#ifdef ON_KEY_OBJECT
+#ifndef ON_KEY_OBJECT
+    std::shared_ptr<ValueT> payload_;
+#else
+    std::unique_ptr<ValueT> payload_;
     std::unique_ptr<TxCommand> pending_cmd_;
     std::unique_ptr<ReplayTxnCmdList> replay_cmd_list_;
     // temporary object to process subsequent commands in the same txn
@@ -613,9 +638,14 @@ public:
         return mem_usage;
     }
 
-    size_t AddArchiveRecord(std::shared_ptr<ValueT> payload_ptr,
-                            RecordStatus payload_status,
-                            uint64_t commit_ts)
+    size_t AddArchiveRecord(
+#ifdef ON_KEY_OBJECT
+        std::unique_ptr<TxRecord> payload_uptr,
+#else
+        std::shared_ptr<ValueT> payload_ptr,
+#endif
+        RecordStatus payload_status,
+        uint64_t commit_ts)
     {
         if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
         {
@@ -641,7 +671,11 @@ public:
             it = archives_->emplace(it);
             it->commit_ts_ = commit_ts;
             it->payload_status_ = payload_status;
+#ifdef ON_KEY_OBJECT
+            it->payload_.reset(static_cast<ValueT *>(payload_uptr.release()));
+#else
             it->payload_ = payload_ptr;
+#endif
             mem_usage += it->MemUsage();
         }
 
@@ -739,7 +773,11 @@ public:
             last_read_ts_ = std::max(ts, last_read_ts_);
             if (payload_status_ == RecordStatus::Normal)
             {
+#ifdef ON_KEY_OBJECT
+                rec.payload_ptr_ = payload_.get();
+#else
                 rec.payload_ptr_ = payload_;
+#endif
             }
             rec.commit_ts_ = commit_ts_;
             rec.payload_status_ = payload_status_;
@@ -757,11 +795,19 @@ public:
                     {
                         if (tbl_type == TableType::Secondary)
                         {
+#ifdef ON_KEY_OBJECT
+                            rec.payload_ptr_ = payload_.get();
+#else
                             rec.payload_ptr_ = payload_;
+#endif
                         }
                         else
                         {
+#ifdef ON_KEY_OBJECT
+                            rec.payload_ptr_ = it->payload_.get();
+#else
                             rec.payload_ptr_ = it->payload_;
+#endif
                         }
                     }
                     rec.commit_ts_ = it->commit_ts_;
@@ -851,7 +897,11 @@ public:
 
             if (payload_status_ == RecordStatus::Normal)
             {
+#ifndef ON_KEY_OBJECT
                 ref.SetPayload(payload_);
+#else
+                ref.SetPayload(payload_.get());
+#endif
             }
 
             ref.payload_status_ = payload_status_;
@@ -914,12 +964,20 @@ public:
                                 {
                                     if (tbl_type != TableType::Secondary)
                                     {
+#ifndef ON_KEY_OBJECT
                                         ref.SetPayload(
                                             it->payload_);  // pk, unique_sk
+#else
+                                        ref.SetPayload(it->payload_.get());
+#endif
                                     }
                                     else
                                     {
+#ifndef ON_KEY_OBJECT
                                         ref.SetPayload(payload_);  // sk
+#else
+                                        ref.SetPayload(payload_.get());
+#endif
                                     }
                                 }
                                 ref.payload_status_ = it->payload_status_;
@@ -944,12 +1002,20 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
+#else
+                                    ref.SetPayload(it->payload_.get());
+#endif
                                 }
                                 else
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
+#else
+                                    ref.SetPayload(payload_.get());
+#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -986,12 +1052,20 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
+#else
+                                    ref.SetPayload(it->payload_.get());
+#endif
                                 }
                                 else
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
+#else
+                                    ref.SetPayload(payload_.get());
+#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;
@@ -1026,12 +1100,20 @@ public:
                             {
                                 if (tbl_type != TableType::Secondary)
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(
                                         it->payload_);  // pk, unique_sk
+#else
+                                    ref.SetPayload(it->payload_.get());
+#endif
                                 }
                                 else
                                 {
+#ifndef ON_KEY_OBJECT
                                     ref.SetPayload(payload_);  // sk
+#else
+                                    ref.SetPayload(payload_.get());
+#endif
                                 }
                             }
                             ref.payload_status_ = it->payload_status_;

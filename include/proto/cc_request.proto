@@ -699,19 +699,6 @@ message ApplyResponse {
     bool is_ack = 9;
 }
 
-message ApplyOutsideRequest {
-    uint32 node_group_id = 1;
-    bytes record = 2;
-    RecordStatusType rec_status = 3;
-    uint64 rec_ts = 4;
-    CceAddr_msg cce_addr = 5;
-    bytes cmd = 6;
-    uint64 tx_ts =7;
-    IsolationType iso_level = 8;
-    CcProtocolType protocol = 9;
-    bool apply_and_commit = 10;
-}
-
 message CcMessage {
     enum MessageType {
         AcquireRequest = 0;
@@ -753,7 +740,6 @@ message CcMessage {
         ReloadCacheResponse = 49;
         ApplyRequest = 50;
         ApplyResponse = 51;
-        ApplyOutsideRequest = 52;
     }
 
     MessageType type = 1;
@@ -802,6 +788,5 @@ message CcMessage {
         ReloadCacheResponse reload_cache_resp = 57;
         ApplyRequest apply_cc_req = 58;
         ApplyResponse apply_cc_resp = 59;
-        ApplyOutsideRequest apply_outside_req = 60;
     }
 }

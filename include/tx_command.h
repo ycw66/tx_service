@@ -207,7 +207,7 @@ struct ReplayTxnCmdList
  * @param cur_ver
  */
 template <class T>
-void TryCommitReplayCommands(std::shared_ptr<T> &payload,
+void TryCommitReplayCommands(std::unique_ptr<T> &payload,
                              std::unique_ptr<ReplayTxnCmdList> &replay_cmd_list,
                              uint64_t &cur_ver)
 {
@@ -235,15 +235,15 @@ void TryCommitReplayCommands(std::shared_ptr<T> &payload,
         {
             if (payload == nullptr)
             {
-                std::shared_ptr<TxRecord> obj_ptr = cmd->CreateObject(nullptr);
-                payload = std::dynamic_pointer_cast<T>(obj_ptr);
+                std::unique_ptr<TxRecord> obj_ptr = cmd->CreateObject(nullptr);
+                payload.reset(static_cast<T *>(obj_ptr.release()));
             }
             TxObject *obj_ptr = payload.get();
             TxObject *new_obj_ptr = cmd->CommitOn(obj_ptr);
             if (new_obj_ptr != obj_ptr)
             {
                 // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
-                payload = std::shared_ptr<T>(static_cast<T *>(new_obj_ptr));
+                payload.reset(static_cast<T *>(new_obj_ptr));
             }
         }
         cur_ver = it->new_version_;
@@ -269,7 +269,7 @@ void TryCommitReplayCommands(std::shared_ptr<T> &payload,
  */
 template <class T>
 void EmplaceAndCommitReplayTxnCommand(
-    std::shared_ptr<T> &payload,
+    std::unique_ptr<T> &payload,
     std::unique_ptr<ReplayTxnCmdList> &replay_cmd_list,
     TxnCmd &txn_cmd,
     uint64_t &cur_ver)

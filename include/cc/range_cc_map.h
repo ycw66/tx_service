@@ -78,8 +78,14 @@ public:
         auto ranges =
             CcMap::shard_->GetTableRangesForATable(range_table_name, ng_id);
         assert(ranges != nullptr);
+#ifndef ON_KEY_OBJECT
         neg_inf_.payload_ = std::make_shared<RangeRecord>();
         pos_inf_.payload_ = std::make_shared<RangeRecord>();
+#else
+        assert(false);
+        neg_inf_.payload_ = std::make_unique<RangeRecord>();
+        pos_inf_.payload_ = std::make_unique<RangeRecord>();
+#endif
         auto bucket_map = static_cast<RangeBucketCcMap *>(
             shard->GetCcm(range_bucket_ccm_name, ng_id));
 
@@ -102,7 +108,12 @@ public:
                     TemplateCcMap<KeyT, RangeRecord>::FindEmplace(*start_key);
                 CcEntry<KeyT, RangeRecord> *cce = it->second;
                 cce->commit_ts_ = range_info->version_ts_;
+#ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
+#else
+                assert(false);
+                cce->payload_ = std::make_unique<RangeRecord>();
+#endif
                 cce->payload_->range_info_ = range_info;
                 cce->payload_->range_owner_rec_ = bucket_map->GetBucketRecord(
                     Sharder::MapRangeIdToBucketId(range_info->PartitionId()));
@@ -718,7 +729,12 @@ public:
                     continue;
                 }
                 cce->commit_ts_ = new_range_info->version_ts_;
+#ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
+#else
+                assert(false);
+                cce->payload_ = std::make_unique<RangeRecord>();
+#endif
                 cce->payload_->range_info_ = new_range_info;
                 cce->payload_->range_owner_rec_ = new_range_owner_rec.at(idx);
 
@@ -1093,7 +1109,12 @@ public:
                     continue;
                 }
                 cce->commit_ts_ = new_range_info->version_ts_;
+#ifndef ON_KEY_OBJECT
                 cce->payload_ = std::make_shared<RangeRecord>();
+#else
+                assert(false);
+                cce->payload_ = std::make_unique<RangeRecord>();
+#endif
                 cce->payload_->range_info_ = new_range_info;
                 // Link bucket owner record
                 cce->payload_->range_owner_rec_ =

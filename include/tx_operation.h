@@ -1005,14 +1005,12 @@ struct ObjectCommandOp : TransactionOperation
     void Reset(const TableName *table_name,
                const TxKey *key,
                TxCommand *command,
-               ObjectCommandTxRequest *req,
                bool auto_commit = false);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{};
     const TxKey *key_{};
     TxCommand *command_{};
-    ObjectCommandTxRequest *cmd_tx_req_{};
 
     CcHandlerResult<ObjectCommandResult> hd_result_;
 
@@ -1031,7 +1029,6 @@ struct MultiObjectCommandOp : TransactionOperation
     void Reset(const TableName *table_name,
                const std::vector<const TxKey *> *vct_key,
                const std::vector<TxCommand *> *vct_cmd,
-               MultiObjectCommandTxRequest *tx_req,
                bool auto_commit = false);
 
     void Forward(TransactionExecution *txm) override;
@@ -1040,7 +1037,6 @@ struct MultiObjectCommandOp : TransactionOperation
     const TableName *table_name_{};
     const std::vector<const TxKey *> *vct_key_{};
     const std::vector<TxCommand *> *vct_cmd_{};
-    MultiObjectCommandTxRequest *tx_req_;
 
     std::vector<CcHandlerResult<ObjectCommandResult>> vct_hd_result_;
     std::atomic_int32_t atm_cnt_{0};

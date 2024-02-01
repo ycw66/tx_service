@@ -39,7 +39,6 @@ thread_local CcRequestPool<RemoteKickoutCcEntry> kickout_cc_entry_pool_;
 thread_local CcRequestPool<ProcessRemoteScanRespCc>
     process_remote_scan_resp_pool_;
 thread_local CcRequestPool<RemoteApplyCc> apply_pool_;
-thread_local CcRequestPool<RemoteApplyOutside> apply_outside_pool_;
 
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
@@ -1585,18 +1584,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         TX_TRACE_ASSOCIATE(msg.get(), apply);
         apply->Reset(std::move(msg));
         local_shards_.EnqueueCcRequest(apply->key_shard_code_, apply);
-        break;
-    }
-    case CcMessage::MessageType::CcMessage_MessageType_ApplyOutsideRequest:
-    {
-        RemoteApplyOutside *apply_outside = apply_outside_pool_.NextRequest();
-
-        TX_TRACE_ASSOCIATE(msg.get(), apply_outside);
-        apply_outside->Reset(std::move(msg));
-
-        const CcEntryAddr &cce_addr = apply_outside->CceAddr();
-        local_shards_.EnqueueCcRequest(cce_addr.CoreId(), apply_outside);
-
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ApplyResponse:

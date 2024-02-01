@@ -831,7 +831,7 @@ void TransactionExecution::ProcessTxRequest(ObjectCommandTxRequest &req)
     rec_resp_ = &req.tx_result_;
     TxCommand *command = req.Command();
     const TxKey *key = req.Key();
-    obj_cmd_.Reset(req.table_name_, key, command, &req, req.auto_commit_);
+    obj_cmd_.Reset(req.table_name_, key, command, req.auto_commit_);
 
     PushOperation(&obj_cmd_);
     Process(obj_cmd_);
@@ -841,7 +841,7 @@ void TransactionExecution::ProcessTxRequest(MultiObjectCommandTxRequest &req)
 {
     vct_rec_resp_ = &req.tx_result_;
     multi_obj_cmd_.Reset(
-        req.table_name_, req.VctKey(), req.VctCommand(), &req, false);
+        req.table_name_, req.VctKey(), req.VctCommand(), false);
 
     PushOperation(&multi_obj_cmd_);
     Process(multi_obj_cmd_);
@@ -5157,45 +5157,19 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
     // are both set, on contrary to acquiring lock and committing the command in
     // postprocess.
     bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
+    cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                               *obj_cmd_op.key_,
+                               key_shard_code,
+                               *obj_cmd_op.command_,
+                               TxNumber(),
+                               tx_term_,
+                               command_id_.load(std::memory_order_relaxed),
+                               current_ts,
+                               hd_res,
+                               iso_level_,
+                               protocol_,
+                               commit);
 
-    if (obj_cmd_op.cmd_tx_req_->read_type_ != ReadType::Inside)
-    {
-        assert(cache_miss_read_cce_addr_.CcePtr() != 0);
-        assert(obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideDeleted ||
-               obj_cmd_op.cmd_tx_req_->read_type_ == ReadType::OutsideNormal);
-        // backfill
-        cc_handler_->ObjectCommandOutside(
-            cache_miss_read_cce_addr_,
-            *obj_cmd_op.command_,
-            TxNumber(),
-            tx_term_,
-            command_id_.load(std::memory_order_relaxed),
-            current_ts,
-            hd_res,
-            iso_level_,
-            protocol_,
-            commit,
-            obj_cmd_op.cmd_tx_req_->rec_,
-            obj_cmd_op.cmd_tx_req_->version_,
-            obj_cmd_op.cmd_tx_req_->read_type_);
-    }
-    else
-    {
-        cache_miss_read_cce_addr_.SetCce(0, -1, 0, 0);
-
-        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
-                                   *obj_cmd_op.key_,
-                                   key_shard_code,
-                                   *obj_cmd_op.command_,
-                                   TxNumber(),
-                                   tx_term_,
-                                   command_id_.load(std::memory_order_relaxed),
-                                   current_ts,
-                                   hd_res,
-                                   iso_level_,
-                                   protocol_,
-                                   commit);
-    }
     StartTiming();
 }
 
@@ -5360,76 +5334,34 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
     uint64_t current_ts =
         dynamic_cast<LocalCcHandler *>(cc_handler_)->GetTsBaseValue();
     bool commit = obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
-    auto &vct_backfill = obj_cmd_op.tx_req_->vct_backfill_;
 
-    if (!vct_backfill.empty())
+    for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
     {
-        for (size_t i = 0; i < vct_backfill.size(); i++)
-        {
-            BackfillRec &refill_rec = vct_backfill[i];
-            CcHandlerResult<ObjectCommandResult> &hd_res =
-                obj_cmd_op.vct_hd_result_[i];
+        auto &hd_res = obj_cmd_op.vct_hd_result_[i];
 
-            const TxKey &key = *obj_cmd_op.vct_key_->at(refill_rec.pos_);
-            uint32_t key_shard_code = 0;
+        const TxKey &key = *obj_cmd_op.vct_key_->at(i);
+        uint32_t key_shard_code = 0;
 
 #ifdef RANGE_PARTITION_ENABLED
-            uint32_t residual = key.Hash() & 0x3FF;
-            key_shard_code = obj_cmd_op.vct_key_shard_code_[refill_rec.pos_]
-                                 << 10 |
-                             residual;
+        uint32_t residual = key.Hash() & 0x3FF;
+        key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
 #else
-            key_shard_code = Sharder::Instance().ShardCode(key.Hash());
-#endif
-            hd_res.Reset();
-
-            cc_handler_->ObjectCommandOutside(
-                refill_rec.ety_addr_,
-                *obj_cmd_op.vct_cmd_->at(refill_rec.pos_),
-                TxNumber(),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                current_ts,
-                hd_res,
-                iso_level_,
-                protocol_,
-                commit,
-                &refill_rec.rec_,
-                refill_rec.version_,
-                refill_rec.read_type_);
-        }
-    }
-    else
-    {
-        for (size_t i = 0; i < obj_cmd_op.vct_key_->size(); i++)
-        {
-            auto &hd_res = obj_cmd_op.vct_hd_result_[i];
-
-            const TxKey &key = *obj_cmd_op.vct_key_->at(i);
-            uint32_t key_shard_code = 0;
-
-#ifdef RANGE_PARTITION_ENABLED
-            uint32_t residual = key.Hash() & 0x3FF;
-            key_shard_code = obj_cmd_op.vct_key_shard_code_[i] << 10 | residual;
-#else
-            key_shard_code = Sharder::Instance().ShardCode(key.Hash());
+        key_shard_code = Sharder::Instance().ShardCode(key.Hash());
 #endif
 
-            hd_res.Reset();
-            cc_handler_->ObjectCommand(
-                *obj_cmd_op.table_name_,
-                key,
-                key_shard_code,
-                *obj_cmd_op.vct_cmd_->at(i),
-                TxNumber(),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                current_ts,
-                hd_res,
-                iso_level_,
-                protocol_,
-                commit);
-        }
+        hd_res.Reset();
+        cc_handler_->ObjectCommand(*obj_cmd_op.table_name_,
+                                   key,
+                                   key_shard_code,
+                                   *obj_cmd_op.vct_cmd_->at(i),
+                                   TxNumber(),
+                                   tx_term_,
+                                   command_id_.load(std::memory_order_relaxed),
+                                   current_ts,
+                                   hd_res,
+                                   iso_level_,
+                                   protocol_,
+                                   commit);
     }
 
     StartTiming();
@@ -5483,23 +5415,9 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             obj_cmd_op.auto_commit_ && txservice_skip_redo_log;
         bool readonly = obj_cmd_op.vct_cmd_->at(0)->IsReadOnly();
         std::vector<RecordStatus> vct_rec;
-        auto &vct_backfill = obj_cmd_op.tx_req_->vct_backfill_;
-        bool need_backfill = false;
 
-        if (!vct_backfill.empty())
-        {
-            vct_rec = obj_cmd_op.tx_req_->Result();
-            for (size_t i = 0; i < vct_backfill.size(); i++)
-            {
-                BackfillRec &refill_rec = vct_backfill[i];
-                const auto &cmd_res = obj_cmd_op.vct_hd_result_[i].Value();
-                vct_rec[refill_rec.pos_] = cmd_res.rec_status_;
-            }
-        }
-        else
         {
             vct_rec.reserve(obj_cmd_op.vct_hd_result_.size());
-            vct_backfill.reserve(obj_cmd_op.vct_hd_result_.size());
 
             for (size_t i = 0; i < obj_cmd_op.vct_hd_result_.size(); i++)
             {
@@ -5560,22 +5478,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                                     obj_cmd_op.table_name_);
                 }
 
-                if (obj_status == RecordStatus::Unknown)
-                {
-                    vct_backfill.emplace_back(i, cmd_res.cce_addr_);
-                    need_backfill = true;
-                }
+                assert(obj_status != RecordStatus::Unknown);
             }
-        }
-
-        if (need_backfill)
-        {
-            // If this request has the objects that are not in memory, it will
-            // finish soon, then it will be refill data read from cassandra and
-            // reload again.
-            vct_rec_resp_->Finish(std::move(vct_rec));
-            vct_rec_resp_ = nullptr;
-            return;
         }
 
         if (!obj_cmd_op.auto_commit_ || directly_commit || readonly)

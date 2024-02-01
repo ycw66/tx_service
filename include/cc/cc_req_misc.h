@@ -636,7 +636,7 @@ public:
     LruEntry *cce_{nullptr};
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
-    std::shared_ptr<TxRecord> rec_{nullptr};
+    std::unique_ptr<TxRecord> rec_{nullptr};
     int error_code_{0};
 };
 

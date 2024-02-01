@@ -151,7 +151,7 @@ public:
     virtual void BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
-                          std::shared_ptr<TxRecord> &&rec_sptr)
+                          std::unique_ptr<TxRecord> rec_uptr)
     {
         assert(false);
     }

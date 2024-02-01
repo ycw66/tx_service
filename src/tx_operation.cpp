@@ -4948,7 +4948,6 @@ ObjectCommandOp::ObjectCommandOp(
 void ObjectCommandOp::Reset(const TableName *table_name,
                             const TxKey *key,
                             TxCommand *command,
-                            ObjectCommandTxRequest *req,
                             bool auto_commit)
 {
     table_name_ = table_name;
@@ -4957,7 +4956,6 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Reset();
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
-    cmd_tx_req_ = req;
 #ifdef RANGE_PARTITION_ENABLED
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
@@ -5099,15 +5097,12 @@ MultiObjectCommandOp::MultiObjectCommandOp(
 void MultiObjectCommandOp::Reset(const TableName *table_name,
                                  const std::vector<const TxKey *> *vct_key,
                                  const std::vector<TxCommand *> *vct_cmd,
-                                 MultiObjectCommandTxRequest *tx_req,
                                  bool auto_commit)
 {
     table_name_ = table_name;
     vct_key_ = vct_key;
     vct_cmd_ = vct_cmd;
-    tx_req_ = tx_req;
-    auto &vct_refill = tx_req_->vct_backfill_;
-    size_t len = (vct_refill.size() == 0 ? vct_key->size() : vct_refill.size());
+    size_t len = vct_key->size();
     size_t min_len = std::min(len, vct_hd_result_.size());
 
     for (size_t i = 0; i < min_len; i++)

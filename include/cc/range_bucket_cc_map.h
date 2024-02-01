@@ -35,8 +35,13 @@ public:
             auto cce_it = FindEmplace(bucket_key);
             CcEntry<RangeBucketKey, RangeBucketRecord> *cce = cce_it->second;
             cce->commit_ts_ = bucket.second->Version();
+#ifndef ON_KEY_OBJECT
             cce->payload_ =
                 std::make_shared<RangeBucketRecord>(bucket.second.get());
+#else
+            cce->payload_ =
+                std::make_unique<RangeBucketRecord>(bucket.second.get());
+#endif
             shard_->mem_usage_ += cce->PayloadMemUsage();
         }
     }

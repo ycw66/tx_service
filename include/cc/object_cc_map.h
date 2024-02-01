@@ -355,39 +355,8 @@ public:
         }
         else
         {
-            // backfill
-            assert(ng_id == cce_addr.NodeGroupId());
-            cce = reinterpret_cast<CcEntry<KeyT, ValueT> *>(cce_addr.CcePtr());
-
-            // For ON_KEY_OBJECT, we add lock regardless of whether the record
-            // is deleted, so just pass RecordStatus::Normal.
-            std::tie(acquired_lock, err_code) =
-                AcquireCceKeyLock(cce,
-                                  RecordStatus::Normal,
-                                  &req,
-                                  req.NodeGroupId(),
-                                  ng_term,
-                                  req.TxTerm(),
-                                  cc_op,
-                                  req.Isolation(),
-                                  req.Protocol(),
-                                  0,
-                                  false);
-
-            assert(err_code == CcErrorCode::NO_ERROR);
-
-            // This is the first backfill request or the payload has already
-            // been backfilled by another concurrent request. Either they are
-            // trying to backfill the same rec, or the rec has been backfilled
-            // and then changed by another txn. In the latter case, since the
-            // lock is acquired before backfilling, it's only possible that
-            // another txn acquired write lock and current txn acquired read
-            // intent or no lock (in read committed isolation level).
-            assert(cce->payload_status_ == RecordStatus::Unknown ||
-                   cce->commit_ts_ == req.rec_commit_ts_ ||
-                   cce->commit_ts_ > req.rec_commit_ts_ &&
-                       (acquired_lock == LockType::ReadIntent ||
-                        acquired_lock == LockType::NoLock));
+            assert(false);
+            LOG(ERROR) << "!!!! Must not enter here !!!!";
         }
 
         // check locking result
@@ -429,43 +398,10 @@ public:
                 cce->payload_status_ = RecordStatus::Deleted;
                 cce->commit_ts_ = 1U;
             }
-            else if (req.read_type_ == ReadType::OutsideNormal)
-            {
-                // backfill
-                if (req.rec_ != nullptr)
-                {
-                    assert(*req.rec_ != nullptr);
-                    // Because cc request is cached in pool, we must use
-                    // std::move to let record release if not used.
-                    cce->payload_ = std::static_pointer_cast<ValueT>(*req.rec_);
-                }
-                else if (req.rec_str_ != nullptr)
-                {
-                    TxRecord::Uptr tmp_rec = cmd->CreateObject(req.rec_str_);
-                    cce->payload_.reset(
-                        static_cast<ValueT *>(tmp_rec.release()));
-                }
-
-                cce->payload_status_ = RecordStatus::Normal;
-                cce->commit_ts_ = req.rec_commit_ts_;
-                cce->ckpt_ts_.store(req.rec_commit_ts_,
-                                    std::memory_order_relaxed);
-            }
-            else if (req.read_type_ == ReadType::OutsideDeleted)
-            {
-                // backfill
-                cce->payload_status_ = RecordStatus::Deleted;
-                cce->commit_ts_ = req.rec_commit_ts_;
-                cce->ckpt_ts_.store(req.rec_commit_ts_,
-                                    std::memory_order_relaxed);
-            }
             else
             {
-                assert(req.read_type_ == ReadType::Inside);
-                obj_result.commit_ts_ = cce->commit_ts_;
-                obj_result.rec_status_ = cce->payload_status_;
-                hd_res->SetFinished();
-                return true;
+                shard_->FetchRecord(table_name_, cce, cc_ng_id_, ng_term, &req);
+                return false;
             }
         }
 
@@ -608,6 +544,15 @@ public:
             // apply_and_commit_.
             cce->commit_ts_ =
                 std::max({cce->commit_ts_ + 1, req.TxTs(), shard_->Now()});
+
+            if (last_dirty_commit_ts_ < cce->commit_ts_)
+            {
+                last_dirty_commit_ts_ = cce->commit_ts_;
+            }
+            if (cce->commit_ts_ > cce->parent_page_->last_dirty_commit_ts_)
+            {
+                cce->parent_page_->last_dirty_commit_ts_ = cce->commit_ts_;
+            }
 
             shard_->mem_usage_ += cce->PayloadMemUsage();
 
@@ -966,77 +911,10 @@ public:
         return false;
     }
 
-    bool Execute(FillStoreSliceCc &req) override
-    {
-        const std::vector<SliceDataItem> &slice_vec =
-            req.SliceData(shard_->core_id_);
-
-        for (const SliceDataItem &data_item : slice_vec)
-        {
-            const KeyT *key = static_cast<const KeyT *>(data_item.key_.get());
-            const ValueT *record =
-                static_cast<const ValueT *>(data_item.record_.get());
-
-            typename TemplateCcMap<KeyT, ValueT>::Iterator it =
-                FindEmplace(*key, req.ForceLoad());
-            const KeyT *cce_key = it->first;
-            CcEntry<KeyT, ValueT> *cce = it->second;
-            if (cce == nullptr)
-            {
-                // Memory reaches capacity while bringing a range slice into
-                // memory.
-                req.SetError(CcErrorCode::OUT_OF_MEMORY);
-                return true;
-            }
-
-            uint32_t rec_store_size =
-                data_item.is_deleted_ ? 0 : cce_key->Size() + record->Size();
-
-            // If the in-memory version is from a upload request (i.e. generated
-            // sk record from pk), the data store version might be newer. Only
-            // overwrite if in memory version is newer.
-            if (cce->commit_ts_ > 1 && data_item.version_ts_ <= cce->commit_ts_)
-            {
-                // Initialize the data store size if it is unspecified before
-                if (cce->data_store_size_.load(std::memory_order_acquire) ==
-                    INT32_MAX)
-                {
-                    cce->data_store_size_.store(rec_store_size,
-                                                std::memory_order_relaxed);
-                }
-
-                // The cc entry's commit ts is 1 when it is initialized.
-                // Commit ts greater than 1 means that the key is already
-                // cached in memory.
-                continue;
-            }
-
-            shard_->DecrementMemory(cce->PayloadMemUsage());
-            if (cce->payload_ == nullptr)
-            {
-                // cce->payload_ = std::make_shared<ValueT>(*record);
-                cce->payload_.reset(
-                    static_cast<ValueT *>(record->Clone().release()));
-            }
-            cce->commit_ts_ = data_item.version_ts_;
-            cce->ckpt_ts_.store(data_item.version_ts_,
-                                std::memory_order_relaxed);
-            cce->payload_status_ = data_item.is_deleted_ ? RecordStatus::Deleted
-                                                         : RecordStatus::Normal;
-            cce->data_store_size_.store(rec_store_size,
-                                        std::memory_order_relaxed);
-
-            shard_->mem_usage_ += cce->PayloadMemUsage();
-        }
-
-        req.SetFinish();
-        return false;
-    }
-
     void BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
-                  std::shared_ptr<TxRecord> &&rec_sptr) override
+                  std::unique_ptr<TxRecord> rec_uptr) override
     {
         assert(status != RecordStatus::Unknown);
         CcEntry<KeyT, ValueT> *cce =
@@ -1048,8 +926,7 @@ public:
             cce->ckpt_ts_ = commit_ts;
             cce->commit_ts_ = commit_ts;
             cce->payload_status_ = status;
-            cce->payload_ =
-                std::static_pointer_cast<ValueT>(std::move(rec_sptr));
+            cce->payload_.reset(static_cast<ValueT *>(rec_uptr.release()));
         }
     }
 
@@ -1081,7 +958,7 @@ private:
         return {std::unique_ptr<ValueT>(obj_ptr), RecordStatus::Normal};
     }
 
-    void CommitCommandOnPayload(std::shared_ptr<ValueT> &payload,
+    void CommitCommandOnPayload(std::unique_ptr<ValueT> &payload,
                                 RecordStatus &payload_status,
                                 TxCommand &cmd)
     {
@@ -1101,7 +978,7 @@ private:
                 // The object has been changed by cmd.
                 payload_status = RecordStatus::Normal;
                 payload =
-                    std::shared_ptr<ValueT>(static_cast<ValueT *>(new_obj_ptr));
+                    std::unique_ptr<ValueT>(static_cast<ValueT *>(new_obj_ptr));
             }
         }
     }

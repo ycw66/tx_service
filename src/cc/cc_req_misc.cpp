@@ -590,9 +590,9 @@ FetchRecordCc::FetchRecordCc(LruEntry *cce,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
-      cce_(cce),
       table_name_(&(cce->parent_map_->table_name_)),
-      table_schema_(cce->parent_map_->GetTableSchema())
+      table_schema_(cce->parent_map_->GetTableSchema()),
+      cce_(cce)
 {
 }
 
